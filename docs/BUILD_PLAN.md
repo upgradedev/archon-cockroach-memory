@@ -21,7 +21,7 @@ Archon is already an agentic multi-agent financial-intelligence app. CockroachDB
 |---|---|
 | Agentic Memory Design | Production-grade: durable, distributed VECTOR index, prefix-partitioned recall, metadata-rich memories. |
 | Technical Implementation | Injectable embedder, pg-wire reuse of a real schema, typed, tested. |
-| Real-World Impact | The ~28% hidden employer-payroll-cost finding for SMBs — a genuine problem. |
+| Real-World Impact | Consolidated P&L/EBITDA/cash for SMBs, plus completeness checks that catch missing or inconsistent records (e.g. a bank payment with no matching invoice) — and, as one worked example, the ~28% understatement of true workforce cost. Genuine problems. |
 | Production Readiness | CockroachDB survivability/consistency; TLS Cloud path; observability probes (memoryCount). |
 | Creativity & Originality | "Financial-close agent with long-term semantic memory of every fused event." |
 
@@ -51,7 +51,7 @@ CockroachDB vector indexes accelerate a query only when it matches the index sha
 ## Status (session 2 — DONE)
 - ✅ **Bedrock Claude narrator** (`src/agents/narrator.ts`): `Narrator` interface + `BedrockNarrator` (real RAG via `converse()` → Claude Sonnet `us.anthropic.claude-sonnet-4-6`, grounds + cites recalled memories) + deterministic offline `FakeNarrator` (mirrors `FakeEmbedder`; auto-selected when no AWS creds). Short-circuits to a no-memory answer without a model call on empty recall.
 - ✅ **Agentic path wired end-to-end:** `MemoryAgent(embedder, narrator)` — `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrate). `recallAnswer` now returns `{ answer, hits, citations, modelId }`.
-- ✅ Demo (`npm run memory:demo`) ingests fused events → asks *"What was our real employer payroll cost last month?"* → grounded answer citing the stored events + the €22,800 hidden-cost wedge. Works offline (FakeEmbedder+FakeNarrator) and with real Bedrock (creds swap).
+- ✅ Demo (`npm run memory:demo`) ingests fused events + a completeness finding → asks e.g. *"What was our real cost of employing the team last month?"* and *"Are there any payments without a matching invoice?"* → grounded answers citing the stored events (the €22,800 workforce-cost wedge) and the flagged missing-invoice inconsistency. Works offline (FakeEmbedder+FakeNarrator) and with real Bedrock (creds swap).
 - ✅ Tests: `tests/narrator.test.ts` (offline — FakeNarrator grounding/citations, BedrockNarrator w/ canned Converse client, empty-recall short-circuit, offline auto-select) + `tests/pipeline.test.ts` (DATABASE_URL-gated recall→narrate integration over the live vector index, offline fakes). `npm test` = 12 tests: 10 pass / 2 skip offline, **12/12 with a DB (as in CI)**; typecheck clean.
 - ⏳ Real Titan + real Claude Sonnet smoke test still needs AWS creds (Bedrock account 308857099262; confirm Titan-embed-v2 + Sonnet enabled in `BEDROCK_REGION`).
 

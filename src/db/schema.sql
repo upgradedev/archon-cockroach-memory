@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS documents (
     detected_lang    TEXT,
     issue_date       DATE,
     vendor_name      TEXT,
-    vendor_tax_id    TEXT,                   -- Greek ΑΦΜ
+    vendor_tax_id    TEXT,                   -- vendor tax ID
     recipient_name   TEXT,
     currency         CHAR(3) DEFAULT 'EUR',
     subtotal         DECIMAL(14,2),
