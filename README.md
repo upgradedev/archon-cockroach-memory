@@ -26,7 +26,7 @@ Archon reads a small business's raw financial documents — bank confirmations, 
 | Service | How it's used |
 |---|---|
 | **Amazon Bedrock — Titan Text Embeddings V2** | Embeds every memory (`content` → 1024-dim vector) for storage + recall. |
-| **Amazon Bedrock — Claude Sonnet (Converse)** | Multimodal document extraction + executive-summary narration (reused from the Archon AWS build). |
+| **Amazon Bedrock — Claude Sonnet (Converse)** | The RAG **narrator** (`src/agents/narrator.ts`): writes a CFO-level answer grounded in and citing the memories recalled from the CockroachDB vector index. Also does multimodal document extraction (reused from the Archon AWS build). Offline `FakeNarrator` fallback keeps CI AWS-free. |
 | **AWS Lambda / ECS** | (roadmap) hosts the agent API; the memory layer is deployment-agnostic. |
 
 ## Architecture
@@ -41,7 +41,8 @@ Archon reads a small business's raw financial documents — bank confirmations, 
 │     │  facts by meaning, through the MemoryAgent                       │
 │     ▼             ▼             ▼            ▼                         │
 │                MemoryAgent  (src/agents/memory-agent.ts)              │
-│                 remember() / recallAnswer()                           │
+│         ingestEvent() → remember()  ·  recallAnswer() → recall()      │
+│                     → Narrator (Claude Sonnet, cites memories)        │
 └───────────────┬────────────────────────────────┬─────────────────────┘
                 │ embed(content)                  │ SQL (pg-wire)
                 ▼                                  ▼
@@ -59,8 +60,8 @@ Archon reads a small business's raw financial documents — bank confirmations, 
 ### Write path (`remember`)
 An agent states a fact in natural language (`"Hidden payroll cost at Acme for 2026-03: the bank transfer of €41,000 understates true employer cost by €22,800 (28.8%)…"`) → Bedrock Titan embeds it → the text, structured metadata, and the vector are stored in `agent_memory`.
 
-### Read path (`recall`)
-A question is embedded and run as an approximate-nearest-neighbor search over the distributed vector index (`ORDER BY embedding <=> $query`). Unscoped semantic recall is index-accelerated (EXPLAIN plans a `vector search` node); a scoped recall additionally constrains `kind` / `company` via their btree indexes. The top-k memories ground the agent's answer.
+### Read path (`recall` → `narrate`)
+A question is embedded and run as an approximate-nearest-neighbor search over the distributed vector index (`ORDER BY embedding <=> $query`). Unscoped semantic recall is index-accelerated (EXPLAIN plans a `vector search` node); a scoped recall additionally constrains `kind` / `company` via their btree indexes. The top-k memories are then handed to the **narrator** (`MemoryAgent.recallAnswer`), which calls **Claude Sonnet on Bedrock** to write a grounded, CFO-level answer that cites the exact memories it used — RAG over the agent's own memory. Without AWS creds a deterministic `FakeNarrator` composes the same cited answer, so the full recall→narrate loop runs offline in CI.
 
 ## Repository layout
 
@@ -77,15 +78,18 @@ repos/cockroachdb/
 │   │   ├── embeddings.ts        # Bedrock Titan V2 embedder (+ injectable offline FakeEmbedder)
 │   │   └── memory.ts            # remember() / recall() — the memory layer
 │   ├── agents/
-│   │   └── memory-agent.ts      # minimal agentic read/write-memory loop
+│   │   ├── memory-agent.ts      # agentic read/write-memory loop (ingestEvent → recallAnswer)
+│   │   └── narrator.ts          # Bedrock Claude RAG narrator (+ offline FakeNarrator)
 │   └── extraction/
 │       ├── bedrock.ts           # AWS Bedrock Converse wrapper (reused from Archon AWS build)
 │       └── types.ts             # domain types (reused from Archon AWS build)
 ├── scripts/
 │   ├── apply-schema.ts          # apply schema.sql to DATABASE_URL
-│   └── demo-memory.ts           # end-to-end write + recall round trip
+│   └── demo-memory.ts           # end-to-end ingest → recall → narrate round trip
 └── tests/
-    └── memory.test.ts           # no-infra unit tests (embedder + vector literal)
+    ├── memory.test.ts           # no-infra unit tests (embedder + vector literal)
+    ├── narrator.test.ts         # no-infra narrator tests (FakeNarrator + BedrockNarrator w/ canned client)
+    └── pipeline.test.ts         # recall→narrate integration (live CockroachDB, DATABASE_URL-gated, offline fakes)
 ```
 
 ## Quickstart
@@ -135,8 +139,8 @@ Archon is our own product; this entry reuses the public Archon challenge build f
 
 ## Roadmap (multi-session)
 
-- [ ] Bedrock Claude narrator over recalled memories (RAG answer, not just citations).
-- [ ] Wire `MemoryAgent` into the full extract → fuse → validate → narrate pipeline.
+- [x] Bedrock Claude narrator over recalled memories (RAG answer that cites the memories, not just lists them) — `src/agents/narrator.ts`, offline `FakeNarrator` fallback.
+- [x] Wire `MemoryAgent` end-to-end: `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrator). Demo + tests cover the offline path; real Bedrock is a creds swap.
 - [ ] Deploy the agent API on AWS Lambda/ECS + a public demo URL.
 - [ ] `provision-cluster.sh` (ccloud) + CockroachDB Cloud MCP Server as memory-recall tool.
 - [ ] Sub-3-minute demo video.

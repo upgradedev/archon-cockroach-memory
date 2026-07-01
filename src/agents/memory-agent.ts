@@ -14,10 +14,17 @@
 
 import type { Embedder } from "../memory/embeddings.js";
 import { remember, recall, type MemoryKind, type RecallHit } from "../memory/memory.js";
+import { defaultNarrator, type Narrator, type Citation } from "./narrator.js";
 import type { PayrollEvent } from "../extraction/types.js";
 
 export class MemoryAgent {
-  constructor(private embedder: Embedder) {}
+  private narrator: Narrator;
+  // The narrator is injectable (real Bedrock Claude / offline FakeNarrator) and
+  // defaults to environment auto-detection, exactly like the embedder. Passing
+  // it in keeps the whole agent testable offline.
+  constructor(private embedder: Embedder, narrator: Narrator = defaultNarrator()) {
+    this.narrator = narrator;
+  }
 
   // ── WRITE ────────────────────────────────────────────────────────────────
   // Commit a fused PayrollEvent to memory as several recallable facts. Returns
@@ -93,29 +100,23 @@ export class MemoryAgent {
     return remember(this.embedder, { kind, content, ...opts });
   }
 
-  // ── READ ─────────────────────────────────────────────────────────────────
-  // Recall the memories most relevant to a question, then compose a grounded,
-  // citation-style answer. Narration is intentionally deterministic here (no LLM
-  // call) so the recall path is verifiable offline; a Bedrock narrator can be
-  // layered on top using the same hits (see README → roadmap).
+  // ── READ (RAG over agent memory) ───────────────────────────────────────────
+  // Recall the memories most relevant to a question via the distributed vector
+  // index, then have the narrator write a grounded, CITING answer from them.
+  // With real AWS creds this calls Claude Sonnet on Bedrock (real RAG); offline
+  // it uses the deterministic FakeNarrator — same recall path either way, so the
+  // full memory→narrate loop is verifiable in CI without AWS.
   async recallAnswer(
     question: string,
     opts: { company?: string; kind?: MemoryKind; limit?: number } = {}
-  ): Promise<{ answer: string; hits: RecallHit[] }> {
+  ): Promise<{ answer: string; hits: RecallHit[]; citations: Citation[]; modelId: string }> {
     const hits = await recall(this.embedder, question, {
       company: opts.company,
       kind: opts.kind,
       limit: opts.limit ?? 5,
     });
-    if (hits.length === 0) {
-      return { answer: "No relevant memories found.", hits };
-    }
-    const cited = hits
-      .map((h, i) => `  [${i + 1}] (${h.kind}, sim ${h.score.toFixed(3)}) ${h.content}`)
-      .join("\n");
-    const answer =
-      `Recalled ${hits.length} memory item(s) relevant to "${question}":\n${cited}`;
-    return { answer, hits };
+    const { answer, citations, modelId } = await this.narrator.narrate(question, hits);
+    return { answer, hits, citations, modelId };
   }
 }
 
