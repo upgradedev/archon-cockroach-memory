@@ -1,0 +1,28 @@
+{
+  "name": "archon-cockroach-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Archon Memory — an agentic financial-intelligence app using CockroachDB (distributed vector indexing) as the agents' persistent memory layer, on AWS Bedrock.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:schema": "tsx scripts/apply-schema.ts",
+    "memory:demo": "tsx scripts/demo-memory.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1075.0",
+    "@aws-sdk/credential-provider-node": "^3.972.58",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}

@@ -1,0 +1,28 @@
+# Local CockroachDB single node for development.
+#
+# Vector indexing requires CockroachDB v25.2+. The `latest` tag tracks the
+# current stable; pin to a v25.2+ tag if you need reproducibility.
+#
+#   docker compose up -d
+#   npm run db:schema      # applies src/db/schema.sql (enables + creates vector index)
+#   npm run memory:demo    # write-memory + vector-recall round trip
+#
+# DB Console: http://localhost:8080
+# SQL:        postgresql://root@localhost:26257/archon_memory?sslmode=disable
+services:
+  cockroach:
+    image: cockroachdb/cockroach:latest
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257" # SQL (pg-wire)
+      - "8080:8080" # DB Console
+    volumes:
+      - cockroach-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "-e", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  cockroach-data:
