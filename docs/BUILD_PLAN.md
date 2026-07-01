@@ -48,9 +48,15 @@ CockroachDB vector indexes accelerate a query only when it matches the index sha
 - ✅ `npm run db:schema` + `npm run memory:demo` run end-to-end against live CockroachDB; recall ranks correctly.
 - ✅ `npm test` green (5 tests, no infra); typecheck clean.
 
+## Status (session 2 — DONE)
+- ✅ **Bedrock Claude narrator** (`src/agents/narrator.ts`): `Narrator` interface + `BedrockNarrator` (real RAG via `converse()` → Claude Sonnet `us.anthropic.claude-sonnet-4-6`, grounds + cites recalled memories) + deterministic offline `FakeNarrator` (mirrors `FakeEmbedder`; auto-selected when no AWS creds). Short-circuits to a no-memory answer without a model call on empty recall.
+- ✅ **Agentic path wired end-to-end:** `MemoryAgent(embedder, narrator)` — `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrate). `recallAnswer` now returns `{ answer, hits, citations, modelId }`.
+- ✅ Demo (`npm run memory:demo`) ingests fused events → asks *"What was our real employer payroll cost last month?"* → grounded answer citing the stored events + the €22,800 hidden-cost wedge. Works offline (FakeEmbedder+FakeNarrator) and with real Bedrock (creds swap).
+- ✅ Tests: `tests/narrator.test.ts` (offline — FakeNarrator grounding/citations, BedrockNarrator w/ canned Converse client, empty-recall short-circuit, offline auto-select) + `tests/pipeline.test.ts` (DATABASE_URL-gated recall→narrate integration over the live vector index, offline fakes). `npm test` = 12 tests: 10 pass / 2 skip offline, **12/12 with a DB (as in CI)**; typecheck clean.
+- ⏳ Real Titan + real Claude Sonnet smoke test still needs AWS creds (Bedrock account 308857099262; confirm Titan-embed-v2 + Sonnet enabled in `BEDROCK_REGION`).
+
 ## Timeline to Aug 18
-- **Session 2:** Bedrock Claude narrator over recalled memories (real RAG answer). Wire MemoryAgent into extract→fuse→validate→narrate. Real Titan embeddings smoke test (needs AWS creds).
-- **Session 3:** Deploy agent API on AWS (Lambda or ECS) + CockroachDB Cloud Serverless (ccloud) → public demo URL. `provision-cluster.sh` live run.
+- **Session 3:** Deploy agent API on AWS (Lambda or ECS) + CockroachDB Cloud Serverless (ccloud) → public demo URL. `provision-cluster.sh` live run. Real-Bedrock smoke test.
 - **Session 4:** Cloud MCP Server as a memory-recall tool (stretch 3rd feature). Observability/security hardening (connection TLS verify-full, secrets).
 - **Session 5:** Record < 3-min video, tool-identification doc, Devpost submission form.
 

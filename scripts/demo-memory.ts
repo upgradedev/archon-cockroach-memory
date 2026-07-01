@@ -3,14 +3,16 @@
 //   npm run db:schema      # once, to create tables + vector index
 //   npm run memory:demo
 //
-// Uses real Bedrock Titan embeddings when AWS creds are present, otherwise the
-// deterministic FakeEmbedder — either way it exercises the SAME write + vector
-// recall path against a live CockroachDB. Shows an agent (a) ingesting fused
-// financial events into memory, then (b) recalling relevant facts by meaning to
-// answer questions it was never given the keys for.
+// Uses real Bedrock (Titan embeddings + Claude Sonnet narration) when AWS creds
+// are present, otherwise the deterministic FakeEmbedder + FakeNarrator — either
+// way it exercises the SAME write + vector recall + narrate path against a live
+// CockroachDB. Shows an agent (a) ingesting fused financial events into memory,
+// then (b) recalling relevant facts by meaning and (c) writing a grounded,
+// citing answer to a question it was never given the keys for.
 
 import { defaultEmbedder } from "../src/memory/embeddings.js";
 import { memoryCount } from "../src/memory/memory.js";
+import { defaultNarrator } from "../src/agents/narrator.js";
 import { MemoryAgent } from "../src/agents/memory-agent.js";
 import { closePool, query } from "../src/db/client.js";
 import type { PayrollEvent } from "../src/extraction/types.js";
@@ -62,8 +64,10 @@ const EVENTS: PayrollEvent[] = [
 
 async function main() {
   const embedder = defaultEmbedder();
-  console.log(`Embedder: ${embedder.modelId} (${embedder.dim} dims)\n`);
-  const agent = new MemoryAgent(embedder);
+  const narrator = defaultNarrator();
+  console.log(`Embedder: ${embedder.modelId} (${embedder.dim} dims)`);
+  console.log(`Narrator: ${narrator.modelId}\n`);
+  const agent = new MemoryAgent(embedder, narrator);
 
   // Clean slate for a repeatable demo.
   await query(`DELETE FROM agent_memory`);
@@ -75,16 +79,18 @@ async function main() {
   }
   console.log(`Total memories in CockroachDB: ${await memoryCount()}\n`);
 
-  // ── READ: agent recalls by MEANING (no keys given) ───────────────────────
+  // ── READ: agent recalls by MEANING, then NARRATES a grounded, cited answer ─
   const questions: { q: string; company?: string }[] = [
+    { q: "What was our real employer payroll cost last month?", company: "Acme Foods AE" },
     { q: "How much payroll cost is hidden from the bank statement?", company: "Acme Foods AE" },
-    { q: "What did we pay Maria and what was her take-home?", company: "Acme Foods AE" },
     { q: "Which social-security contributions does the employer pay?" }, // cross-company
   ];
   for (const { q, company } of questions) {
-    const { answer } = await agent.recallAnswer(q, { company, limit: 3 });
+    const { answer, citations, modelId } = await agent.recallAnswer(q, { company, limit: 3 });
     console.log(`Q: ${q}${company ? `  [company=${company}]` : "  [all companies]"}`);
-    console.log(answer + "\n");
+    console.log(`A (${modelId}): ${answer}`);
+    console.log(`Grounded in ${citations.length} recalled memory item(s): ` +
+      citations.map((c) => `${c.marker} ${c.kind}`).join(", ") + "\n");
   }
 
   await closePool();
