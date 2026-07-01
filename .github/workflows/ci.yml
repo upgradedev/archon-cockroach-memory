@@ -1,0 +1,74 @@
+name: CI
+
+# Archon Memory CI — mirrors the Archon convention (ADR-001 PR gate, ADR-005 gitleaks-first).
+# The pipeline stands up CockroachDB + runs the schema, unit tests, and a real
+# vector-recall smoke IN CI (the runner does the docker, never a dev laptop).
+# Runs fully offline: no AWS creds → the embedder auto-falls back to FakeEmbedder
+# (src/memory/embeddings.ts), so the vector index is exercised end-to-end with no secrets.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1 — fail fast on any committed secret (ADR-005).
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks detect (pinned v8.18.4, redacted)
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --no-banner
+
+  build-test:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Start CockroachDB (v25.2+ for native vector indexing)
+        run: |
+          docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
+            cockroachdb/cockroach:latest start-single-node --insecure
+          echo "Waiting for CockroachDB to accept SQL..."
+          for i in $(seq 1 30); do
+            if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
+              echo "ready"; break
+            fi
+            sleep 2
+          done
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+          # Fail loudly if it never came up.
+          docker exec crdb cockroach sql --insecure -e "SELECT 1"
+
+      - name: Apply schema (creates the VECTOR(1024) memory table + vector index)
+        run: npm run db:schema
+
+      - name: Unit + integration tests
+        run: npm test
+
+      - name: Vector-recall smoke (offline FakeEmbedder — no AWS creds)
+        run: npm run memory:demo
+
+      - name: Dump CockroachDB logs on failure
+        if: failure()
+        run: docker logs crdb || true
