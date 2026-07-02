@@ -1,0 +1,75 @@
+name: Benchmark (full + distribution)
+
+# Manual, non-gating. Runs the FULL vector-index benchmark (representative + worst
+# case) and the 3-node distribution capture on a clean GitHub runner (cloud, not a
+# laptop — keeps heavy work off local machines). Headline numbers are committed to
+# docs/BENCHMARK.md; this workflow re-generates them on demand and as a build artifact.
+# The fast recall floor smoke that gates every push lives in ci.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus_n:
+        description: "Corpus size for the representative run"
+        default: "10000"
+      queries:
+        description: "Number of probe queries"
+        default: "200"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: Start single-node CockroachDB
+        run: |
+          docker run -d --name crdb -p 26257:26257 cockroachdb/cockroach:latest start-single-node --insecure
+          for i in $(seq 1 30); do docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+      - run: npm run db:schema
+
+      - name: Representative recall@k + latency (clustered) + beam sweep
+        run: |
+          BENCH_N=${{ github.event.inputs.corpus_n }} BENCH_QUERIES=${{ github.event.inputs.queries }} \
+          BENCH_K=10 BENCH_BEAMS=100,200,400 BENCH_SETTLE_MS=8000 npm run benchmark | tee bench-clustered.txt
+
+      - name: Worst-case recall/latency knob (uniform) beam sweep
+        run: |
+          BENCH_CORPUS=uniform BENCH_N=5000 BENCH_QUERIES=150 BENCH_K=10 \
+          BENCH_BEAMS=10,50,100,300,600 BENCH_SETTLE_MS=5000 npm run benchmark | tee bench-uniform.txt
+
+      - name: Tear down single node
+        run: docker rm -f crdb
+
+      - name: Start 3-node cluster + apply schema
+        run: |
+          docker compose -f docker-compose.cluster.yml up -d
+          sleep 15
+          docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach init --insecure || true
+          for i in $(seq 1 30); do docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+          docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+          npm run db:schema
+
+      - name: Distribution + survivability capture (3 nodes)
+        run: DIST_N=6000 bash scripts/show-distribution.sh | tee distribution.txt
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench-clustered.txt
+            bench-uniform.txt
+            distribution.txt
