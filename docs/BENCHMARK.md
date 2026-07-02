@@ -33,21 +33,34 @@ of the true top-k nearest memories, how many does the index actually return?
 > `benchmark.yml` workflow (`workflow_dispatch`, available once merged to the default
 > branch).
 
-## Result 1 — recall@k on a representative (clustered) corpus
+## Result 1 — recall@k across the data-hardness spectrum
 
-`BENCH_N=10000 BENCH_QUERIES=200 BENCH_K=10` · CockroachDB v26.2.2 · dim 1024
+Recall depends on how separable the true neighbours are, so we bracket the spectrum
+rather than quote one number. CockroachDB v26.2.2 · dim 1024 · top-10.
 
-| metric | value |
-|---|---|
-| corpus | 10,000 memories, `VECTOR(1024)`, clustered |
-| **recall@10** | **99.6%** (min 80% over 200 queries) |
-| latency p50 / p95 / p99 | 68 ms / 106 ms / 167 ms |
-| write throughput | 117 rows/s (batched, **index-maintained** — every write updates the ANN tree) |
+| corpus | recall@10 | notes |
+|---|---|---|
+| **uniform** (no structure — worst case for any ANN) | **96.5%** at beam ≥100 | the structure-free floor |
+| **clustered** (structured embeddings) | **~99%** | `N=10k`: 99.6%; robust across noise (below) |
 
-At a representative embedding distribution the distributed ANN index returns **99.6%
-of the exact top-10** — effectively exact recall — while the query is index-accelerated
-(`EXPLAIN` → `vector search`, never a full scan). Recall is already saturated at the
-default beam because clustered neighbourhoods are well separated.
+At a representative *structured* distribution the index returns **~99% of the exact
+top-10**; even on the pathological *structure-free* corpus it holds **96.5%**. Both are
+index-accelerated (`EXPLAIN` → `vector search`, never a full scan).
+
+**Honesty note on the clustered number.** The clustered corpus is generated as
+`centroid + noise`, and queries share the same centroids, so a same-cluster signal is
+present by construction — which is *why* recall stays high. We verified it is not a
+single lucky setting by sweeping the noise level (`N=5000`, default beam):
+
+| noise | 0.35 | 0.7 | 1.2 | 2.0 |
+|---|---|---|---|---|
+| recall@10 | 99.1% | 99.2% | 99.1% | 99.1% |
+
+Recall is robust to noise *given cluster structure*. The number that isolates **index
+quality** (independent of how easy the data is) is the **beam sweep** in Result 2 —
+recall responding to the index's search effort — not the headline recall on any one
+corpus. Treat **96.5%–99.6%** as the honest range and the beam curve + RF=3 as the
+load-bearing evidence.
 
 ## Result 2 — the recall/latency knob (`vector_search_beam_size`)
 

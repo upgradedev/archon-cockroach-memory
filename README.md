@@ -74,15 +74,20 @@ exact top-k computed by brute force in JS over the same seeded vectors, so recal
 
 | | result |
 |---|---|
-| **recall@10** (10k memories, representative clustered embeddings) | **99.6%** (p50 68 ms) |
-| **recall@10 tunable via `vector_search_beam_size`** (uniform worst case) | 29% → **96.5%** as beam grows |
+| **recall@10** across the data-hardness spectrum | **96.5%** (uniform, worst case) → **~99%** (structured) |
+| **index quality — recall vs `vector_search_beam_size`** (uniform) | **29% → 96.5%** as the search visits more partitions |
 | **distribution** (3-node cluster) | 11 ranges, **RF=3 on all nodes**, leaseholders across all 3 |
 | **live Cloud** (v25.4.10, eu-west-1) | recall + `vector search` EXPLAIN verified |
 
-The claim is **architectural**, and honest: a tuned single-node pgvector may be faster on
-one box, but it has **one copy on one machine** — no replication, no node-loss survival, no
-scale-out. CockroachDB gives the agent a memory that is durable, distributed, and
-survivable, with the vector index **native in the same database** as the relational data.
+Recall depends on data separability, so we report the range, not a single lucky number;
+the evidence that isolates **index quality** is the beam curve (recall responds to search
+effort). The differentiator is **architectural** and demonstrated: a tuned single-node
+pgvector may be faster on one box, but it has **one copy on one machine** — no replication,
+no node-loss survival, no scale-out. CockroachDB gives the agent a memory that is durable,
+distributed, and survivable, with the vector index **native in the same database** as the
+relational data. (At this corpus size the vector index is a single RF=3 range; multi-range
+ANN fan-out is CockroachDB's documented auto-split behaviour at scale, asserted not
+demonstrated here — the demonstrated differentiator is RF=3 survivability + leaseholder spread.)
 
 ## Repository layout
 

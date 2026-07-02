@@ -60,8 +60,10 @@ CockroachDB vector indexes accelerate a query only when it matches the index sha
   write throughput, p50/p95/p99 latency, and a `vector_search_beam_size` sweep. Representative
   **clustered** corpus + **uniform** worst case; dense unit vectors via `RandomEmbedder`/
   `unitGaussianVector` (deterministic, offline). Destructive-guard refuses non-ephemeral DBs.
-- ✅ **Numbers** (`docs/BENCHMARK.md`): 99.6% recall@10 @ 10k (clustered, p50 68 ms); uniform
-  worst case 29%→96.5% across beam; all EXPLAIN-verified `vector search`.
+- ✅ **Numbers** (`docs/BENCHMARK.md`): recall@10 bracket **96.5% (uniform, worst case) → ~99%
+  (structured)**; beam sweep 29%→96.5% is the index-quality evidence (recall vs search effort);
+  clustered recall robust across a noise sweep (0.35–2.0). All EXPLAIN-verified `vector search`.
+  Honest framing: report the range + beam curve, don't anchor on the single 99.6%.
 - ✅ **Distribution + survivability** (`docker-compose.cluster.yml` + `scripts/show-distribution.sh`):
   3-node cluster, 11 ranges RF=3 across all nodes, 3 distinct leaseholders, vector index range
   replicated {1,2,3}, `vector search` plan on the cluster.
