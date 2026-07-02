@@ -1,0 +1,42 @@
+# Local 3-node CockroachDB cluster — proves the "distributed" in "distributed
+# vector index". A single-node pgvector cannot do this: here the agent_memory
+# VECTOR index is a set of ranges, each REPLICATED across three nodes (RF=3) with
+# leaseholders spread over the cluster, so recall survives a node loss and scales
+# out with the cluster.
+#
+#   docker compose -f docker-compose.cluster.yml up -d
+#   docker compose -f docker-compose.cluster.yml exec roach1 cockroach init --insecure
+#   bash scripts/show-distribution.sh          # load a corpus + print index ranges per node
+#
+# Node 1 SQL is published on localhost:26257 (same as the single-node compose), so
+# DATABASE_URL=postgresql://root@localhost:26257/archon_memory?sslmode=disable works.
+# DB Console: http://localhost:8080
+services:
+  roach1:
+    image: cockroachdb/cockroach:latest
+    hostname: roach1
+    command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach1
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - roach1-data:/cockroach/cockroach-data
+
+  roach2:
+    image: cockroachdb/cockroach:latest
+    hostname: roach2
+    command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach2
+    volumes:
+      - roach2-data:/cockroach/cockroach-data
+
+  roach3:
+    image: cockroachdb/cockroach:latest
+    hostname: roach3
+    command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach3
+    volumes:
+      - roach3-data:/cockroach/cockroach-data
+
+volumes:
+  roach1-data:
+  roach2-data:
+  roach3-data:

@@ -55,6 +55,24 @@ CockroachDB vector indexes accelerate a query only when it matches the index sha
 - ✅ Tests: `tests/narrator.test.ts` (offline — FakeNarrator grounding/citations, BedrockNarrator w/ canned Converse client, empty-recall short-circuit, offline auto-select) + `tests/pipeline.test.ts` (DATABASE_URL-gated recall→narrate integration over the live vector index, offline fakes). `npm test` = 12 tests: 10 pass / 2 skip offline, **12/12 with a DB (as in CI)**; typecheck clean.
 - ⏳ Real Titan + real Claude Sonnet smoke test still needs AWS creds (Bedrock account 308857099262; confirm Titan-embed-v2 + Sonnet enabled in `BEDROCK_REGION`).
 
+## Status (session 3 — DONE)
+- ✅ **Benchmark harness** (`scripts/benchmark.ts`): recall@k vs JS brute-force ground truth,
+  write throughput, p50/p95/p99 latency, and a `vector_search_beam_size` sweep. Representative
+  **clustered** corpus + **uniform** worst case; dense unit vectors via `RandomEmbedder`/
+  `unitGaussianVector` (deterministic, offline). Destructive-guard refuses non-ephemeral DBs.
+- ✅ **Numbers** (`docs/BENCHMARK.md`): 99.6% recall@10 @ 10k (clustered, p50 68 ms); uniform
+  worst case 29%→96.5% across beam; all EXPLAIN-verified `vector search`.
+- ✅ **Distribution + survivability** (`docker-compose.cluster.yml` + `scripts/show-distribution.sh`):
+  3-node cluster, 11 ranges RF=3 across all nodes, 3 distinct leaseholders, vector index range
+  replicated {1,2,3}, `vector search` plan on the cluster.
+- ✅ **Live Cloud verified** — recall + `vector search` EXPLAIN on the Serverless cluster (v25.4.10,
+  eu-west-1) via the console connection string.
+- ✅ **CI**: benchmark recall-floor smoke added to `ci.yml`; full benchmark + 3-node distribution
+  in `benchmark.yml` (workflow_dispatch, non-gating, artifacts). Unit tests 5→8; suite 12→15.
+- ✅ **Tool-identification doc** (`docs/TOOLS.md`) — required submission deliverable.
+- Honest framing: no latency/recall win claimed vs single-node pgvector; the claim is
+  architectural (native distributed index + RF=3 survivability + scale-out).
+
 ## Timeline to Aug 18
 - **Session 3:** Deploy agent API on AWS (Lambda or ECS) + CockroachDB Cloud Serverless (ccloud) → public demo URL. `provision-cluster.sh` live run. Real-Bedrock smoke test.
 - **Session 4:** Cloud MCP Server as a memory-recall tool (stretch 3rd feature). Observability/security hardening (connection TLS verify-full, secrets).

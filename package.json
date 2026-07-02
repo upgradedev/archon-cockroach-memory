@@ -11,6 +11,8 @@
   "scripts": {
     "db:schema": "tsx scripts/apply-schema.ts",
     "memory:demo": "tsx scripts/demo-memory.ts",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "load:corpus": "tsx scripts/load-corpus.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/pipeline.test.ts"
   },

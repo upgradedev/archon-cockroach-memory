@@ -16,8 +16,8 @@ Archon is a **unified financial-intelligence platform**: it ingests *all* of a s
 
 | Feature | How it's used | Status |
 |---|---|---|
-| **Distributed Vector Indexing** | `agent_memory.embedding VECTOR(1024)` + a global cosine `CREATE VECTOR INDEX`. Unscoped semantic recall plans a `vector search` node (EXPLAIN-verified on v26.2.2); scoped recall pre-filters via btree indexes. | ✅ built + verified on v26.2.2 |
-| **ccloud CLI (Agent-Ready)** | Provisions/manages the CockroachDB Cloud Serverless cluster the deployed app uses (`scripts/provision-cluster.sh`). | ◻ scripted, runs at deploy time |
+| **Distributed Vector Indexing** | `agent_memory.embedding VECTOR(1024)` + a native cosine `CREATE VECTOR INDEX` (CockroachDB C-SPANN, **not** pgvector). Semantic recall plans a `vector search` node (EXPLAIN-verified on v26.2.2, the 3-node cluster, and live Cloud v25.4.10). **Benchmarked: 99.6% recall@10 @ 10k memories; replicated RF=3 + leaseholders spread across 3 nodes.** | ✅ built + **benchmarked** + distribution-proven |
+| **ccloud CLI (Agent-Ready)** | Provisions/manages the CockroachDB Cloud Serverless cluster the deployed app uses (`scripts/provision-cluster.sh`); live cluster in AWS eu-west-1. | ✅ scripted + live cluster reachable |
 | Cloud Managed MCP Server | (stretch) expose memory recall as an MCP tool | ◻ roadmap |
 | Agent Skills Repo | (stretch) | ◻ roadmap |
 
@@ -63,6 +63,27 @@ An agent states a fact in natural language (`"Hidden payroll cost at Acme for 20
 ### Read path (`recall` → `narrate`)
 A question is embedded and run as an approximate-nearest-neighbor search over the distributed vector index (`ORDER BY embedding <=> $query`). Unscoped semantic recall is index-accelerated (EXPLAIN plans a `vector search` node); a scoped recall additionally constrains `kind` / `company` via their btree indexes. The top-k memories are then handed to the **narrator** (`MemoryAgent.recallAnswer`), which calls **Claude Sonnet on Bedrock** to write a grounded, CFO-level answer that cites the exact memories it used — RAG over the agent's own memory. Without AWS creds a deterministic `FakeNarrator` composes the same cited answer, so the full recall→narrate loop runs offline in CI.
 
+## Benchmark & distribution — why this is a real memory layer, not a demo
+
+Full methodology + numbers: **[docs/BENCHMARK.md](./docs/BENCHMARK.md)**. Reproduce with
+`npm run benchmark` and `bash scripts/show-distribution.sh` (harness: `scripts/benchmark.ts`).
+
+The vector index is **approximate** (C-SPANN), so the metric that matters is **recall@k**:
+of the true top-k nearest memories, how many does the index return? Ground truth is the
+exact top-k computed by brute force in JS over the same seeded vectors, so recall is exact.
+
+| | result |
+|---|---|
+| **recall@10** (10k memories, representative clustered embeddings) | **99.6%** (p50 68 ms) |
+| **recall@10 tunable via `vector_search_beam_size`** (uniform worst case) | 29% → **96.5%** as beam grows |
+| **distribution** (3-node cluster) | 11 ranges, **RF=3 on all nodes**, leaseholders across all 3 |
+| **live Cloud** (v25.4.10, eu-west-1) | recall + `vector search` EXPLAIN verified |
+
+The claim is **architectural**, and honest: a tuned single-node pgvector may be faster on
+one box, but it has **one copy on one machine** — no replication, no node-loss survival, no
+scale-out. CockroachDB gives the agent a memory that is durable, distributed, and
+survivable, with the vector index **native in the same database** as the relational data.
+
 ## Repository layout
 
 ```
@@ -83,9 +104,18 @@ repos/cockroachdb/
 │   └── extraction/
 │       ├── bedrock.ts           # AWS Bedrock Converse wrapper (reused from Archon AWS build)
 │       └── types.ts             # domain types (reused from Archon AWS build)
+├── docker-compose.cluster.yml  # local 3-node cluster (distribution demo)
 ├── scripts/
 │   ├── apply-schema.ts          # apply schema.sql to DATABASE_URL
-│   └── demo-memory.ts           # end-to-end ingest → recall → narrate round trip
+│   ├── demo-memory.ts           # end-to-end ingest → recall → narrate round trip
+│   ├── benchmark.ts             # recall@k + latency + vector_search_beam_size sweep
+│   ├── load-corpus.ts           # load clustered vectors (feeds the distribution demo)
+│   ├── show-distribution.sh     # per-node range distribution + survivability proof
+│   └── provision-cluster.sh     # ccloud CLI — provision the Cloud Serverless cluster
+├── docs/
+│   ├── BENCHMARK.md             # recall/latency/distribution results + methodology
+│   ├── TOOLS.md                 # tool-identification doc (CockroachDB features + AWS)
+│   └── BUILD_PLAN.md
 └── tests/
     ├── memory.test.ts           # no-infra unit tests (embedder + vector literal)
     ├── narrator.test.ts         # no-infra narrator tests (FakeNarrator + BedrockNarrator w/ canned client)
@@ -141,6 +171,9 @@ Archon is our own product; this entry reuses the public Archon challenge build f
 
 - [x] Bedrock Claude narrator over recalled memories (RAG answer that cites the memories, not just lists them) — `src/agents/narrator.ts`, offline `FakeNarrator` fallback.
 - [x] Wire `MemoryAgent` end-to-end: `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrator). Demo + tests cover the offline path; real Bedrock is a creds swap.
+- [x] Benchmark the vector index (recall@k, latency, `vector_search_beam_size` sweep) — `scripts/benchmark.ts`, results in `docs/BENCHMARK.md`; recall floor smoke gates CI.
+- [x] Prove distribution + survivability on a multi-node cluster — `docker-compose.cluster.yml` + `scripts/show-distribution.sh`.
+- [x] Verify the live CockroachDB Cloud recall path (v25.4.10, eu-west-1) — `vector search` EXPLAIN confirmed.
 - [ ] Deploy the agent API on AWS Lambda/ECS + a public demo URL.
 - [ ] `provision-cluster.sh` (ccloud) + CockroachDB Cloud MCP Server as memory-recall tool.
 - [ ] Sub-3-minute demo video.

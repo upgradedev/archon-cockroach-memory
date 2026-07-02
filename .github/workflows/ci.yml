@@ -87,6 +87,13 @@ jobs:
       - name: Vector-recall smoke (offline FakeEmbedder — no AWS creds)
         run: npm run memory:demo
 
+      # Fast benchmark smoke — proves the recall@k harness runs end-to-end and the
+      # distributed vector index tracks exact NN above a floor (fails loudly if the
+      # index silently degrades). The FULL benchmark + 3-node distribution capture
+      # run in benchmark.yml (workflow_dispatch); numbers are committed to docs/BENCHMARK.md.
+      - name: Vector-index benchmark smoke (offline, recall floor)
+        run: BENCH_N=1500 BENCH_QUERIES=50 BENCH_K=10 BENCH_BATCH=500 BENCH_RECALL_FLOOR=0.80 npm run benchmark
+
       - name: Dump CockroachDB logs on failure
         if: failure()
         run: docker logs crdb || true
