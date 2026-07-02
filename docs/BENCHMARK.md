@@ -24,8 +24,14 @@ of the true top-k nearest memories, how many does the index actually return?
 
 > Latency figures below are from a **single local Docker node on a laptop**, not a
 > tuned datacenter cluster — read them as *relative* (recall/latency tradeoff, effect
-> of beam size), not as an absolute SLA. The load-bearing, environment-independent
-> result is **recall@k** (index quality) and the **distribution** proof.
+> of beam size), not as an absolute SLA. How environment-bound latency is: the CI
+> recall-floor smoke (`ci.yml`, N=1500, clustered) on a clean GitHub Linux runner
+> reports **p50 5.6 ms / p95 6.4 ms at 99.2% recall@10 and 860 rows/s writes** — ~10×
+> the laptop's numbers at the same size. The load-bearing, environment-independent
+> results are **recall@k** (index quality) and the **distribution** proof; treat the
+> laptop latency as a conservative floor. Regenerate clean full-scale numbers with the
+> `benchmark.yml` workflow (`workflow_dispatch`, available once merged to the default
+> branch).
 
 ## Result 1 — recall@k on a representative (clustered) corpus
 
