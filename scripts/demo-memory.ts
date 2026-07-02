@@ -21,7 +21,7 @@ import type { PayrollEvent } from "../src/extraction/types.js";
 const EVENTS: PayrollEvent[] = [
   {
     event_id: "evt-acme-2026-03",
-    company: "Acme Foods AE",
+    company: "Acme Foods",
     period: "2026-03",
     employee_count: 3,
     bank_net_total: 41000,
@@ -34,15 +34,15 @@ const EVENTS: PayrollEvent[] = [
     cost_gap_pct: 28.8,
     hidden_total: 22800,
     employees: [
-      { employee_id: "E-01", name: "Maria Papadopoulou", gross: 22000, employee_ika: 1800, tax: 3000, net: 17200, employer_ika: 5000, employer_cost: 27000 },
-      { employee_id: "E-02", name: "Nikos Georgiou", gross: 18000, employee_ika: 1500, tax: 2400, net: 14100, employer_ika: 4100, employer_cost: 22100 },
-      { employee_id: "E-03", name: "Elena Dimitriou", gross: 12000, employee_ika: 900, tax: 1400, net: 9700, employer_ika: 2700, employer_cost: 14700 },
+      { employee_id: "E-01", name: "Alex Morgan", gross: 22000, employee_ika: 1800, tax: 3000, net: 17200, employer_ika: 5000, employer_cost: 27000 },
+      { employee_id: "E-02", name: "Sam Rivera", gross: 18000, employee_ika: 1500, tax: 2400, net: 14100, employer_ika: 4100, employer_cost: 22100 },
+      { employee_id: "E-03", name: "Priya Nair", gross: 12000, employee_ika: 900, tax: 1400, net: 9700, employer_ika: 2700, employer_cost: 14700 },
     ],
     linked_docs: ["doc-bank-1", "doc-reg-1"],
   },
   {
     event_id: "evt-helios-2026-02",
-    company: "Helios Retail EPE",
+    company: "Helios Retail",
     period: "2026-02",
     employee_count: 2,
     bank_net_total: 22000,
@@ -55,8 +55,8 @@ const EVENTS: PayrollEvent[] = [
     cost_gap_pct: 28.6,
     hidden_total: 12300,
     employees: [
-      { employee_id: "H-01", name: "Georgios Alexiou", gross: 16000, employee_ika: 1300, tax: 2200, net: 12500, employer_ika: 3600, employer_cost: 19600 },
-      { employee_id: "H-02", name: "Sofia Ioannou", gross: 12000, employee_ika: 900, tax: 1600, net: 9500, employer_ika: 2700, employer_cost: 14700 },
+      { employee_id: "H-01", name: "Jordan Lee", gross: 16000, employee_ika: 1300, tax: 2200, net: 12500, employer_ika: 3600, employer_cost: 19600 },
+      { employee_id: "H-02", name: "Emma Rossi", gross: 12000, employee_ika: 900, tax: 1600, net: 9500, employer_ika: 2700, employer_cost: 14700 },
     ],
     linked_docs: ["doc-bank-2", "doc-reg-2"],
   },
@@ -77,12 +77,23 @@ async function main() {
     const ids = await agent.ingestEvent(ev);
     console.log(`WROTE ${ids.length} memories for ${ev.company} ${ev.period}`);
   }
+
+  // Beyond the numbers, Archon also cross-checks the whole picture for missing or
+  // inconsistent information. Here it remembers a completeness finding — a bank
+  // payment with no matching invoice — a co-equal example alongside workforce cost.
+  await agent.remember(
+    "validation",
+    `Completeness check for Acme Foods 2026-03: a bank payment of €4,500 to vendor ` +
+      `"Nomad Supplies" has no matching purchase invoice on file — either the invoice ` +
+      `was never registered or the payment is misattributed. Flagged for review.`,
+    { company: "Acme Foods", period: "2026-03", sourceRef: "chk-acme-2026-03" }
+  );
   console.log(`Total memories in CockroachDB: ${await memoryCount()}\n`);
 
   // ── READ: agent recalls by MEANING, then NARRATES a grounded, cited answer ─
   const questions: { q: string; company?: string }[] = [
-    { q: "What was our real employer payroll cost last month?", company: "Acme Foods AE" },
-    { q: "How much payroll cost is hidden from the bank statement?", company: "Acme Foods AE" },
+    { q: "What was our real cost of employing the team last month?", company: "Acme Foods" },
+    { q: "Are there any payments without a matching invoice?", company: "Acme Foods" },
     { q: "Which social-security contributions does the employer pay?" }, // cross-company
   ];
   for (const { q, company } of questions) {

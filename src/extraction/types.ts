@@ -2,11 +2,11 @@
 // The current H0 demo exposes full SMB finance intelligence, while the typed
 // payroll event remains the evidence-backed control finding inside that close:
 //   - bank_confirmation : the net salary cash that left the company account
-//   - payroll_register  : the full employer payroll cost (gross + employer IKA)
+//   - payroll_register  : the full employer payroll cost (gross + employer social-security)
 //   - payslip           : the per-employee payroll breakdown
 //
 // The bank confirmation alone *understates* the true employer payroll cost,
-// because it never sees employer social-security (IKA) contributions or the
+// because it never sees employer social-security contributions or the
 // tax withheld and remitted to the State. Archon fuses the three into one
 // accurate PayrollEvent and surfaces that gap.
 
@@ -39,7 +39,7 @@ export interface ExtractedDocument {
   period: string; // YYYY-MM
   // Numeric payloads differ per doc type; all optional, all null-safe.
   bank_net_total?: number | null; // bank_confirmation: total net transfer out
-  employer_cost_total?: number | null; // payroll_register: gross + employer IKA
+  employer_cost_total?: number | null; // payroll_register: gross + employer social-security
   gross_total?: number | null; // payroll_register
   employer_ika_total?: number | null; // payroll_register
   employee_ika_total?: number | null; // payroll_register
@@ -83,10 +83,10 @@ export interface PayrollEvent {
   employer_ika_total: number;
   employee_ika_total: number;
   tax_withheld_total: number;
-  employer_cost_total: number; // THE accurate number (gross + employer IKA)
-  // The headline insight: employer social-security contributions are completely
-  // invisible on the bank salary-transfer confirmation, yet are ~28% of the net
-  // figure the bank shows.
+  employer_cost_total: number; // THE accurate number (gross + employer social-security)
+  // One insight the platform surfaces: employer social-security contributions are
+  // completely invisible on the bank salary-transfer confirmation, yet are ~28% of
+  // the net figure the bank shows.
   cost_gap_amount: number; // employer_ika_total — the hidden employer-contribution wedge
   cost_gap_pct: number; // cost_gap_amount / bank_net_total * 100  (~28%)
   // Full reconciliation: everything the bank salary confirmation misses vs true cost.
