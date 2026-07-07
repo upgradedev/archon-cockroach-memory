@@ -21,14 +21,14 @@ function cosine(a: number[], b: number[]): number {
 
 test("FakeEmbedder produces vectors of the configured dimension", async () => {
   const e = new FakeEmbedder();
-  const v = await e.embed("employer social security IKA");
+  const v = await e.embed("employer social-security contribution");
   assert.equal(v.length, EMBED_DIM);
 });
 
 test("FakeEmbedder is deterministic", async () => {
   const e = new FakeEmbedder();
-  const a = await e.embed("hidden payroll cost");
-  const b = await e.embed("hidden payroll cost");
+  const a = await e.embed("off-bank employment cost");
+  const b = await e.embed("off-bank employment cost");
   assert.deepEqual(a, b);
 });
 
@@ -41,8 +41,8 @@ test("FakeEmbedder output is L2-normalized (unit length)", async () => {
 
 test("overlapping text is more similar than disjoint text", async () => {
   const e = new FakeEmbedder();
-  const q = await e.embed("hidden employer payroll cost social security");
-  const near = await e.embed("the hidden employer cost from social security");
+  const q = await e.embed("off-bank employer payroll cost social security");
+  const near = await e.embed("the off-bank employer cost from social security");
   const far = await e.embed("quarterly sales invoice for office furniture");
   assert.ok(
     cosine(q, near) > cosine(q, far),

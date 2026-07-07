@@ -19,11 +19,11 @@ const HITS: RecallHit[] = [
   {
     id: "m1",
     kind: "insight",
-    company: "Acme Foods AE",
+    company: "Acme Foods",
     period: "2026-03",
     sourceRef: "evt-acme-2026-03",
     content:
-      "Hidden payroll cost at Acme Foods AE for 2026-03: the bank salary transfer of " +
+      "Off-bank employment cost at Acme Foods for 2026-03: the bank salary transfer of " +
       "€41,000 understates the true employer cost by €22,800 (28.8%).",
     metadata: null,
     createdAt: "2026-03-31T00:00:00Z",
@@ -33,11 +33,11 @@ const HITS: RecallHit[] = [
   {
     id: "m2",
     kind: "payroll_event",
-    company: "Acme Foods AE",
+    company: "Acme Foods",
     period: "2026-03",
     sourceRef: "evt-acme-2026-03",
     content:
-      "Payroll for Acme Foods AE in 2026-03: 3 employees, true employer cost €63,800, " +
+      "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost €63,800, " +
       "net paid from bank €41,000.",
     metadata: null,
     createdAt: "2026-03-31T00:00:00Z",
@@ -60,7 +60,7 @@ test("FakeNarrator grounds the answer in every recalled memory and cites each", 
   }
   // The load-bearing euro figures from the memory are grounded in the answer.
   assert.ok(answer.includes("€63,800"), "answer must cite the true employer cost");
-  assert.ok(answer.includes("€22,800"), "answer must surface the hidden-cost wedge");
+  assert.ok(answer.includes("€22,800"), "answer must surface the off-bank-cost wedge");
 });
 
 test("FakeNarrator returns the no-memory answer (no citations) on empty recall", async () => {
@@ -93,7 +93,7 @@ test("BedrockNarrator sends recalled memories to Converse and cites them", async
         .map((b: any) => b.text ?? "")
         .join("");
       return {
-        output: { message: { content: [{ text: "True employer cost was €63,800 [2], of which €22,800 is hidden from the bank transfer [1]." }] } },
+        output: { message: { content: [{ text: "True employer cost was €63,800 [2], of which €22,800 is off the bank transfer [1]." }] } },
         usage: { inputTokens: 100, outputTokens: 30 },
       } as any;
     },

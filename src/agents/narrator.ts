@@ -66,7 +66,7 @@ const SYSTEM_PROMPT =
   "the item(s) you used with their bracketed markers, e.g. [1] or [2]. Quote the " +
   "exact euro figures from the memory. If the memory does not contain the answer, " +
   "say so plainly. Be concise (2-4 sentences), in plain English, no bullet lists. " +
-  "Highlight the hidden employer-cost wedge (the gap between the bank salary " +
+  "Highlight the off-bank employer-cost wedge (the gap between the bank salary " +
   "transfer and the true employer cost) whenever the memory reveals it.";
 
 // Real RAG narrator: retrieved memories → Claude Sonnet on Bedrock → cited answer.

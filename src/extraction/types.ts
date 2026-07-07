@@ -41,8 +41,8 @@ export interface ExtractedDocument {
   bank_net_total?: number | null; // bank_confirmation: total net transfer out
   employer_cost_total?: number | null; // payroll_register: gross + employer social-security
   gross_total?: number | null; // payroll_register
-  employer_ika_total?: number | null; // payroll_register
-  employee_ika_total?: number | null; // payroll_register
+  employer_social_security_total?: number | null; // payroll_register
+  employee_social_security_total?: number | null; // payroll_register
   tax_withheld_total?: number | null; // payroll_register
   register_employee_count?: number | null; // payroll_register: headcount the register itself reports
   employee?: EmployeePayslip | null; // payslip
@@ -66,11 +66,11 @@ export interface EmployeePayslip {
   employee_id: string;
   name: string;
   gross: number;
-  employee_ika: number; // employee social-security contribution
+  employee_social_security: number; // employee social-security contribution
   tax: number; // income tax withheld
   net: number; // what lands in the employee's bank account
-  employer_ika: number; // employer-side social-security contribution
-  employer_cost: number; // gross + employer_ika (true cost to the company)
+  employer_social_security: number; // employer-side social-security contribution
+  employer_cost: number; // gross + employer_social_security (true cost to the company)
 }
 
 export interface PayrollEvent {
@@ -80,23 +80,23 @@ export interface PayrollEvent {
   employee_count: number;
   bank_net_total: number; // from bank_confirmation
   gross_total: number; // from payroll_register
-  employer_ika_total: number;
-  employee_ika_total: number;
+  employer_social_security_total: number;
+  employee_social_security_total: number;
   tax_withheld_total: number;
   employer_cost_total: number; // THE accurate number (gross + employer social-security)
   // One insight the platform surfaces: employer social-security contributions are
   // completely invisible on the bank salary-transfer confirmation, yet are ~28% of
   // the net figure the bank shows.
-  cost_gap_amount: number; // employer_ika_total — the hidden employer-contribution wedge
+  cost_gap_amount: number; // employer_social_security_total — the off-bank employer-contribution wedge
   cost_gap_pct: number; // cost_gap_amount / bank_net_total * 100  (~28%)
   // Full reconciliation: everything the bank salary confirmation misses vs true cost.
-  hidden_total: number; // employer_cost_total - bank_net_total
+  off_bank_cost: number; // employer_cost_total - bank_net_total
   // Register-reported figures, surfaced from the payroll_register document so the
   // validator can cross-check the payslips against the register (not derive both
   // sides from the same payslip set). Null when no register is present.
   register_employee_count?: number | null;
   register_gross_total?: number | null;
-  register_employer_ika_total?: number | null;
+  register_employer_social_security_total?: number | null;
   register_employer_cost_total?: number | null;
   employees: EmployeePayslip[];
   linked_docs: string[]; // doc_ids fused into this event

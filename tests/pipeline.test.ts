@@ -18,21 +18,21 @@ const HAS_DB = Boolean(process.env.DATABASE_URL);
 
 const EVENT: PayrollEvent = {
   event_id: "evt-acme-2026-03",
-  company: "Acme Foods AE",
+  company: "Acme Foods",
   period: "2026-03",
   employee_count: 3,
   bank_net_total: 41000,
   gross_total: 52000,
-  employer_ika_total: 11800,
-  employee_ika_total: 4200,
+  employer_social_security_total: 11800,
+  employee_social_security_total: 4200,
   tax_withheld_total: 6800,
   employer_cost_total: 63800,
   cost_gap_amount: 11800,
   cost_gap_pct: 28.8,
-  hidden_total: 22800,
+  off_bank_cost: 22800,
   employees: [
-    { employee_id: "E-01", name: "Maria Papadopoulou", gross: 22000, employee_ika: 1800, tax: 3000, net: 17200, employer_ika: 5000, employer_cost: 27000 },
-    { employee_id: "E-02", name: "Nikos Georgiou", gross: 18000, employee_ika: 1500, tax: 2400, net: 14100, employer_ika: 4100, employer_cost: 22100 },
+    { employee_id: "E-01", name: "Maria Silva", gross: 22000, employee_social_security: 1800, tax: 3000, net: 17200, employer_social_security: 5000, employer_cost: 27000 },
+    { employee_id: "E-02", name: "David Chen", gross: 18000, employee_social_security: 1500, tax: 2400, net: 14100, employer_social_security: 4100, employer_cost: 22100 },
   ],
   linked_docs: ["doc-bank-1", "doc-reg-1"],
 };
@@ -52,7 +52,7 @@ test("ingestEvent writes recallable memories to CockroachDB", { skip: !HAS_DB },
   const ids = await agent.ingestEvent(EVENT);
   // event summary + insight + 2 per-employee lines = 4 memories.
   assert.equal(ids.length, 4);
-  assert.equal(await memoryCount("Acme Foods AE"), 4);
+  assert.equal(await memoryCount("Acme Foods"), 4);
 });
 
 test("recallAnswer recalls by meaning over the vector index and narrates a grounded, cited answer", { skip: !HAS_DB }, async () => {
@@ -61,7 +61,7 @@ test("recallAnswer recalls by meaning over the vector index and narrates a groun
 
   const { answer, hits, citations, modelId } = await agent.recallAnswer(
     "What was our real employer payroll cost last month?",
-    { company: "Acme Foods AE", limit: 3 }
+    { company: "Acme Foods", limit: 3 }
   );
 
   // Recall returned evidence from the distributed vector index.
