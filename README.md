@@ -4,13 +4,14 @@
 
 An agentic financial-intelligence application that uses **CockroachDB as the agents' persistent memory layer**, running on **AWS Bedrock**.
 
-Archon is a **unified financial-intelligence platform**: it ingests *all* of a small business's financial documents and data — sales and purchase invoices, orders, receipts, payments, bank transfers and statements, payroll, expenses — into one environment and produces a consolidated, period-over-period picture: P&L, EBITDA, cash, workforce cost, and the metrics behind them. Crucially, it also **cross-checks the whole picture for missing or inconsistent information** — for example, a vendor payment on the bank statement with no matching invoice (did the vendor never send it? did the accountant never register it? is the payment wrong?), or the fact that a bank salary transfer understates the *true* cost of employing a team by ~28% because it never shows employer social-security contributions. This entry gives Archon's agents a **memory**: every extracted document, fused financial event, validation finding, and narrated insight is embedded and stored in CockroachDB, then **recalled by meaning** on later runs — so the agents reason with continuity instead of starting cold on every upload.
+Archon is a **unified financial-intelligence platform**: it ingests *all* of a small business's financial documents and data — sales and purchase invoices, orders, receipts, payments, bank transfers and statements, payroll, expenses — into one environment and produces a consolidated, period-over-period picture: P&L, EBITDA, cash, workforce cost, and the metrics behind them. Crucially, it also **cross-checks the whole picture for missing or inconsistent information** — for example, a vendor payment on the bank statement with no matching invoice (did the vendor never send it? did the accountant never register it? is the payment wrong?), or the fact that a bank salary transfer understates the *true* cost of employing a team by ~28% because it never shows employer social-security contributions. This entry gives Archon's agents a **memory**: every extracted document, fused financial event, validation finding, and narrated insight is embedded and stored in CockroachDB, then **recalled by meaning** on later runs — so the agents reason with continuity instead of starting cold on every upload. And because that memory accumulates across many independent sessions, the agent also **audits its own memory**: it scans everything it has stored for cross-session *contradictions* (two sessions that remembered one record differently) and *dangling references* (a memory pointing at a record it never stored), and **recommends which value to trust** — read-only, at distributed-vector scale.
 
 ## Why CockroachDB as the memory layer
 
 - **Postgres-wire compatible** — Archon's existing PostgreSQL schema ports in nearly unchanged (the `documents` / `employees` / `payroll_events` / `validation_results` tables here are a 1:1 port from the production Archon schema).
 - **Native distributed vector indexing** (v25.2+) — semantic recall (`CREATE VECTOR INDEX ... vector_cosine_ops`) runs *inside* the database, distributed across the cluster, with no separate vector store to operate.
 - **Survivable, scalable memory** — agent memory is durable, multi-region-capable, and consistent by default; a memory the agents can trust.
+- **A memory that audits itself** — because every write is a distinct, timestamped event in one consistent store, the agent can scan *all* of its stored memory for cross-session contradictions and dangling references and recommend a resolution — turning "vector recall on CockroachDB" into an agentic memory that keeps itself honest (see [Self-auditing memory](#self-auditing-memory-the-agentic-differentiator)).
 
 ## CockroachDB features used (2 of 4 required)
 
@@ -58,10 +59,42 @@ Archon is a **unified financial-intelligence platform**: it ingests *all* of a s
 ```
 
 ### Write path (`remember`)
-An agent states a fact in natural language (`"Hidden payroll cost at Acme for 2026-03: the bank transfer of €41,000 understates true employer cost by €22,800 (28.8%)…"`) → Bedrock Titan embeds it → the text, structured metadata, and the vector are stored in `agent_memory`.
+An agent states a fact in natural language (`"Off-bank employment cost at Acme for 2026-03: the bank transfer of €41,000 understates true employer cost by €22,800 (28.8%)…"`) → Bedrock Titan embeds it → the text, structured metadata, and the vector are stored in `agent_memory`.
 
 ### Read path (`recall` → `narrate`)
 A question is embedded and run as an approximate-nearest-neighbor search over the distributed vector index (`ORDER BY embedding <=> $query`). Unscoped semantic recall is index-accelerated (EXPLAIN plans a `vector search` node); a scoped recall additionally constrains `kind` / `company` via their btree indexes. The top-k memories are then handed to the **narrator** (`MemoryAgent.recallAnswer`), which calls **Claude Sonnet on Bedrock** to write a grounded, CFO-level answer that cites the exact memories it used — RAG over the agent's own memory. Without AWS creds a deterministic `FakeNarrator` composes the same cited answer, so the full recall→narrate loop runs offline in CI.
+
+## Self-auditing memory (the agentic differentiator)
+
+Semantic recall answers *"what do I know about X?"*. A memory that accumulates across
+many independent sessions faces a second, agent-native problem: **nothing stops two of
+those writes from disagreeing.** Session A stores *"invoice INV-2043 total €18,400"*; a
+later session B stores *"€18,900"* for the same invoice. Plain recall hands back whichever
+ranks higher and stays silent about the conflict.
+
+`MemoryAgent.audit()` (`src/memory/consistency.ts`) is the agent inspecting its **own**
+memory. It reads every stored memory in scope (`listForAudit` — a plain `SELECT`, never a
+top-k slice, so it sees *both* sides of a conflict) and flags two memory-native problems:
+
+- **Contradiction** — two write events assign *different* values to the *same* attribute of
+  the *same* record (e.g. two stored totals for one invoice).
+- **Absence** — a memory explicitly references another record (`metadata.refs`) that **no**
+  memory in the store actually holds — a dangling reference.
+
+For every contradiction it also returns a **resolution recommendation** over a fixed,
+domain-neutral priority ladder — **importance → source-authority → recency** — picking which
+stored value to trust and explaining why (e.g. an explicitly-important insight outranks a
+later casual write; a structured `document` record outranks a derived `insight`; otherwise the
+later write wins). It is a **recommender, not ground truth**, and — the load-bearing property —
+it is strictly **read-only**: the audit never mutates, supersedes, or deletes a memory. The
+`recallAnswer` hot path also runs a best-effort audit over the memories it just recalled, so a
+conflict surfaces inline; the exhaustive guarantee is `audit()`.
+
+Measured offline (`tests/consistency.test.ts`, no DB / no AWS): on a labelled fixture it
+detects **every** injected contradiction and dangling reference with **zero false positives**,
+and recommends the labelled winner + rule on **every** resolution case. The read-only guarantee
+is proven end-to-end against a live CockroachDB in `tests/consistency.e2e.test.ts` (memory count
+identical before/after the audit). Run the live self-audit in the demo: `npm run memory:demo`.
 
 ## Benchmark & distribution — why this is a real memory layer, not a demo
 
@@ -102,7 +135,8 @@ repos/cockroachdb/
 │   │   └── client.ts           # pg pool over CockroachDB (pg-wire) + vector literal helper
 │   ├── memory/
 │   │   ├── embeddings.ts        # Bedrock Titan V2 embedder (+ injectable offline FakeEmbedder)
-│   │   └── memory.ts            # remember() / recall() — the memory layer
+│   │   ├── memory.ts            # remember() / recall() / listForAudit() — the memory layer
+│   │   └── consistency.ts       # self-auditing memory — pure contradiction/absence audit + resolver
 │   ├── agents/
 │   │   ├── memory-agent.ts      # agentic read/write-memory loop (ingestEvent → recallAnswer)
 │   │   └── narrator.ts          # Bedrock Claude RAG narrator (+ offline FakeNarrator)
@@ -124,7 +158,9 @@ repos/cockroachdb/
 └── tests/
     ├── memory.test.ts           # no-infra unit tests (embedder + vector literal)
     ├── narrator.test.ts         # no-infra narrator tests (FakeNarrator + BedrockNarrator w/ canned client)
-    └── pipeline.test.ts         # recall→narrate integration (live CockroachDB, DATABASE_URL-gated, offline fakes)
+    ├── consistency.test.ts      # no-infra self-audit tests (detection + precision + resolution, labelled)
+    ├── pipeline.test.ts         # recall→narrate integration (live CockroachDB, DATABASE_URL-gated, offline fakes)
+    └── consistency.e2e.test.ts  # self-audit over live CockroachDB — flags + recommends, read-only (DATABASE_URL-gated)
 ```
 
 ## Quickstart

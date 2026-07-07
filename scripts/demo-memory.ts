@@ -26,17 +26,17 @@ const EVENTS: PayrollEvent[] = [
     employee_count: 3,
     bank_net_total: 41000,
     gross_total: 52000,
-    employer_ika_total: 11800,
-    employee_ika_total: 4200,
+    employer_social_security_total: 11800,
+    employee_social_security_total: 4200,
     tax_withheld_total: 6800,
     employer_cost_total: 63800,
     cost_gap_amount: 11800,
     cost_gap_pct: 28.8,
-    hidden_total: 22800,
+    off_bank_cost: 22800,
     employees: [
-      { employee_id: "E-01", name: "Alex Morgan", gross: 22000, employee_ika: 1800, tax: 3000, net: 17200, employer_ika: 5000, employer_cost: 27000 },
-      { employee_id: "E-02", name: "Sam Rivera", gross: 18000, employee_ika: 1500, tax: 2400, net: 14100, employer_ika: 4100, employer_cost: 22100 },
-      { employee_id: "E-03", name: "Priya Nair", gross: 12000, employee_ika: 900, tax: 1400, net: 9700, employer_ika: 2700, employer_cost: 14700 },
+      { employee_id: "E-01", name: "Alex Morgan", gross: 22000, employee_social_security: 1800, tax: 3000, net: 17200, employer_social_security: 5000, employer_cost: 27000 },
+      { employee_id: "E-02", name: "Sam Rivera", gross: 18000, employee_social_security: 1500, tax: 2400, net: 14100, employer_social_security: 4100, employer_cost: 22100 },
+      { employee_id: "E-03", name: "Priya Nair", gross: 12000, employee_social_security: 900, tax: 1400, net: 9700, employer_social_security: 2700, employer_cost: 14700 },
     ],
     linked_docs: ["doc-bank-1", "doc-reg-1"],
   },
@@ -47,16 +47,16 @@ const EVENTS: PayrollEvent[] = [
     employee_count: 2,
     bank_net_total: 22000,
     gross_total: 28000,
-    employer_ika_total: 6300,
-    employee_ika_total: 2200,
+    employer_social_security_total: 6300,
+    employee_social_security_total: 2200,
     tax_withheld_total: 3800,
     employer_cost_total: 34300,
     cost_gap_amount: 6300,
     cost_gap_pct: 28.6,
-    hidden_total: 12300,
+    off_bank_cost: 12300,
     employees: [
-      { employee_id: "H-01", name: "Jordan Lee", gross: 16000, employee_ika: 1300, tax: 2200, net: 12500, employer_ika: 3600, employer_cost: 19600 },
-      { employee_id: "H-02", name: "Emma Rossi", gross: 12000, employee_ika: 900, tax: 1600, net: 9500, employer_ika: 2700, employer_cost: 14700 },
+      { employee_id: "H-01", name: "Jordan Lee", gross: 16000, employee_social_security: 1300, tax: 2200, net: 12500, employer_social_security: 3600, employer_cost: 19600 },
+      { employee_id: "H-02", name: "Emma Rossi", gross: 12000, employee_social_security: 900, tax: 1600, net: 9500, employer_social_security: 2700, employer_cost: 14700 },
     ],
     linked_docs: ["doc-bank-2", "doc-reg-2"],
   },
@@ -103,6 +103,53 @@ async function main() {
     console.log(`Grounded in ${citations.length} recalled memory item(s): ` +
       citations.map((c) => `${c.marker} ${c.kind}`).join(", ") + "\n");
   }
+
+  // ── SELF-AUDIT: the agent checks its OWN memory for cross-session conflicts ─
+  // Across many separate write events, two sessions can remember the same record
+  // differently. Here two sessions stored different totals for one invoice (the
+  // earlier write flagged important), and a reconciliation memory references a
+  // payment record no session ever stored. The agent audits everything it has
+  // remembered and RECOMMENDS which value to trust — read-only, it never rewrites
+  // or deletes a memory.
+  await agent.remember(
+    "document",
+    `Invoice INV-2043 for Acme Foods totalled €18,400 (confirmed by finance).`,
+    { company: "Acme Foods", period: "2026-03", sourceRef: "INV-2043",
+      metadata: { record: "INV-2043", total: 18400, importance: 0.9 } }
+  );
+  await agent.remember(
+    "document",
+    `Invoice INV-2043 for Acme Foods totalled €18,900 (later casual note).`,
+    { company: "Acme Foods", period: "2026-03", sourceRef: "INV-2043",
+      metadata: { record: "INV-2043", total: 18900 } }
+  );
+  await agent.remember(
+    "validation",
+    `Three-way match for INV-2043 references purchase order PO-5590 and payment PAY-118.`,
+    { company: "Acme Foods", period: "2026-03", sourceRef: "RECON-2043",
+      metadata: { record: "RECON-2043", refs: ["INV-2043", "PAY-118"] } }
+  );
+
+  const countBefore = await memoryCount();
+  const report = await agent.audit({ company: "Acme Foods" });
+  const countAfter = await memoryCount();
+  console.log(
+    `SELF-AUDIT over ${report.audited} stored memories: ` +
+      `${report.contradictions.length} contradiction(s), ${report.absences.length} dangling reference(s).`
+  );
+  for (const c of report.contradictions) {
+    console.log(
+      ` • ${c.subject}.${c.attribute}: ${c.values.map((v) => v.value).join(" vs ")} ` +
+        `→ trust ${c.resolution.recommendedValue} ` +
+        `(${c.resolution.rule}, confidence ${c.resolution.confidence})`
+    );
+    console.log(`   ${c.resolution.rationale}`);
+  }
+  for (const a of report.absences) {
+    console.log(` • dangling reference: ${a.subject} is referenced but never stored ` +
+      `(by ${a.referencedBy.map((r) => r.memoryId).join(", ")})`);
+  }
+  console.log(`Read-only: memory count unchanged (${countBefore} → ${countAfter}).\n`);
 
   await closePool();
 }
