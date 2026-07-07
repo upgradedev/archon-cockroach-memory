@@ -12,6 +12,7 @@
 
 import { query, toVectorLiteral } from "../db/client.js";
 import type { Embedder } from "./embeddings.js";
+import type { AuditMemory } from "./consistency.js";
 
 export type MemoryKind = "document" | "payroll_event" | "validation" | "insight";
 
@@ -130,6 +131,69 @@ export async function recall(
       score: 1 - distance,
     };
   });
+}
+
+// ── self-audit (consistency) read ─────────────────────────────────────────────
+// Read-only projection of the stored memories a consistency audit needs, scoped
+// by company / period / kind. This is a plain SELECT — no vector search — so the
+// audit sees EVERY memory in scope (both sides of a cross-session contradiction),
+// not just a top-k recall neighbourhood. It NEVER writes: the audit is a
+// recommender that only reads what the agent already stored.
+//
+// The CockroachDB `agent_memory` table has no soft-delete/`superseded_at` column,
+// so every row in scope is active by construction. `importance` is not a column
+// here either; when a memory carries explicit salience it lives in `metadata`
+// (e.g. the off-bank-cost insight's `importance: 0.9`), and the audit's resolver
+// reads it from there — so no schema change is needed to make the importance rule
+// fire on real ingested memories.
+export async function listForAudit(scope: {
+  company?: string;
+  period?: string;
+  kind?: MemoryKind;
+} = {}): Promise<AuditMemory[]> {
+  const filters: string[] = [];
+  const params: unknown[] = [];
+  if (scope.company) {
+    params.push(scope.company);
+    filters.push(`company = $${params.length}`);
+  }
+  if (scope.period) {
+    params.push(scope.period);
+    filters.push(`period = $${params.length}`);
+  }
+  if (scope.kind) {
+    params.push(scope.kind);
+    filters.push(`kind = $${params.length}`);
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  const rows = await query<{
+    id: string;
+    kind: MemoryKind;
+    company: string;
+    period: string | null;
+    source_ref: string | null;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    created_at: string | Date;
+  }>(
+    `SELECT id, kind, company, period, source_ref, content, metadata, created_at
+       FROM agent_memory
+       ${where}`,
+    params
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    company: r.company,
+    period: r.period,
+    sourceRef: r.source_ref,
+    content: r.content,
+    metadata: r.metadata,
+    createdAt:
+      r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  }));
 }
 
 // Count stored memories, optionally by company — a cheap observability probe.
