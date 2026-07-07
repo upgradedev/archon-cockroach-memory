@@ -13,7 +13,18 @@
 // with the FakeEmbedder and against real Bedrock Titan in production unchanged.
 
 import type { Embedder } from "../memory/embeddings.js";
-import { remember, recall, type MemoryKind, type RecallHit } from "../memory/memory.js";
+import {
+  remember,
+  recall,
+  listForAudit,
+  type MemoryKind,
+  type RecallHit,
+} from "../memory/memory.js";
+import {
+  auditConsistency,
+  type AuditMemory,
+  type ConsistencyReport,
+} from "../memory/consistency.js";
 import { defaultNarrator, type Narrator, type Citation } from "./narrator.js";
 import type { PayrollEvent } from "../extraction/types.js";
 
@@ -53,22 +64,27 @@ export class MemoryAgent {
       })
     );
 
-    // 2. An insight — the hidden workforce-cost gap (one of several the agents remember).
+    // 2. An insight — the off-bank workforce-cost gap (one of several the agents remember).
+    //    This is the highest-salience memory the agent keeps, so it carries an
+    //    explicit `importance` in metadata. The self-audit's resolver reads that
+    //    salience: if a later, casual write ever contradicts this figure, importance
+    //    (not recency) decides which value to recommend trusting.
     ids.push(
       await remember(this.embedder, {
         ...base,
         kind: "insight",
         sourceRef: event.event_id,
         content:
-          `Hidden payroll cost at ${event.company} for ${event.period}: the bank ` +
+          `Off-bank employment cost at ${event.company} for ${event.period}: the bank ` +
           `salary transfer of ${money(event.bank_net_total)} understates the true ` +
-          `employer cost by ${money(event.hidden_total)} ` +
+          `cost of employing the team by ${money(event.off_bank_cost)} ` +
           `(${event.cost_gap_pct.toFixed(1)}%), mostly employer social-security ` +
-          `contributions of ${money(event.employer_ika_total)}.`,
+          `contributions of ${money(event.employer_social_security_total)}.`,
         metadata: {
-          hidden_total: event.hidden_total,
+          off_bank_cost: event.off_bank_cost,
           cost_gap_pct: event.cost_gap_pct,
-          employer_ika_total: event.employer_ika_total,
+          employer_social_security_total: event.employer_social_security_total,
+          importance: 0.9,
         },
       })
     );
@@ -109,15 +125,55 @@ export class MemoryAgent {
   async recallAnswer(
     question: string,
     opts: { company?: string; kind?: MemoryKind; limit?: number } = {}
-  ): Promise<{ answer: string; hits: RecallHit[]; citations: Citation[]; modelId: string }> {
+  ): Promise<{
+    answer: string;
+    hits: RecallHit[];
+    citations: Citation[];
+    modelId: string;
+    consistency: ConsistencyReport;
+  }> {
     const hits = await recall(this.embedder, question, {
       company: opts.company,
       kind: opts.kind,
       limit: opts.limit ?? 5,
     });
     const { answer, citations, modelId } = await this.narrator.narrate(question, hits);
-    return { answer, hits, citations, modelId };
+    // Best-effort self-audit over the memories JUST recalled — no extra DB round
+    // trip, so the live /recall hot path is unchanged. It surfaces a conflict when
+    // both sides of a contradiction happen to land in the top-k. The exhaustive,
+    // guaranteed audit is `audit()` below, which scans the full scope.
+    const consistency = auditConsistency(hits.map(hitToAuditMemory));
+    return { answer, hits, citations, modelId, consistency };
   }
+
+  // ── SELF-AUDIT (memory-consistency) ─────────────────────────────────────────
+  // Exhaustively audit the agent's OWN memory for cross-session contradictions
+  // (two write events stored different values for one record) and dangling
+  // references (a memory points at a record the agent never stored). Read-only:
+  // it scans the stored memories in scope via `listForAudit` (a plain SELECT) and
+  // returns findings plus a resolution RECOMMENDATION for each contradiction. It
+  // never mutates or deletes memory — the caller decides what to trust.
+  async audit(
+    scope: { company?: string; period?: string; kind?: MemoryKind } = {}
+  ): Promise<ConsistencyReport> {
+    const memories = await listForAudit(scope);
+    return auditConsistency(memories);
+  }
+}
+
+// A RecallHit already carries every field the audit needs (it is a MemoryRecord
+// plus scores), so the audit view over recalled hits is just a projection.
+function hitToAuditMemory(h: RecallHit): AuditMemory {
+  return {
+    id: h.id,
+    kind: h.kind,
+    company: h.company,
+    period: h.period,
+    sourceRef: h.sourceRef,
+    content: h.content,
+    metadata: h.metadata,
+    createdAt: h.createdAt,
+  };
 }
 
 function money(n: number | null | undefined): string {
