@@ -14,7 +14,8 @@
     "benchmark": "tsx scripts/benchmark.ts",
     "load:corpus": "tsx scripts/load-corpus.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1075.0",

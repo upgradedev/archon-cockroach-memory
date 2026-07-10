@@ -14,11 +14,13 @@ import { MemoryAgent } from "../src/agents/memory-agent.js";
 import { memoryCount } from "../src/memory/memory.js";
 import { query, closePool } from "../src/db/client.js";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
+if (!process.env.DATABASE_URL) {
+  await import("./db_mock.js");
+}
+
 const COMPANY = "Northwind Traders";
 
 before(async () => {
-  if (!HAS_DB) return;
   await query(`DELETE FROM agent_memory`);
 });
 
@@ -29,7 +31,6 @@ after(async () => {
 
 test(
   "audit() flags a cross-session contradiction stored in CockroachDB and recommends a value — read-only",
-  { skip: !HAS_DB },
   async () => {
     const agent = new MemoryAgent(new FakeEmbedder(), new FakeNarrator());
 

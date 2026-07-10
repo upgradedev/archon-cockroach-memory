@@ -14,7 +14,9 @@ import { memoryCount } from "../src/memory/memory.js";
 import { query, closePool } from "../src/db/client.js";
 import type { PayrollEvent } from "../src/extraction/types.js";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
+if (!process.env.DATABASE_URL) {
+  await import("./db_mock.js");
+}
 
 const EVENT: PayrollEvent = {
   event_id: "evt-acme-2026-03",
@@ -38,7 +40,6 @@ const EVENT: PayrollEvent = {
 };
 
 before(async () => {
-  if (!HAS_DB) return;
   await query(`DELETE FROM agent_memory`);
 });
 
@@ -47,7 +48,7 @@ after(async () => {
   await closePool();
 });
 
-test("ingestEvent writes recallable memories to CockroachDB", { skip: !HAS_DB }, async () => {
+test("ingestEvent writes recallable memories to CockroachDB", async () => {
   const agent = new MemoryAgent(new FakeEmbedder(), new FakeNarrator());
   const ids = await agent.ingestEvent(EVENT);
   // event summary + insight + 2 per-employee lines = 4 memories.
@@ -55,7 +56,7 @@ test("ingestEvent writes recallable memories to CockroachDB", { skip: !HAS_DB },
   assert.equal(await memoryCount("Acme Foods"), 4);
 });
 
-test("recallAnswer recalls by meaning over the vector index and narrates a grounded, cited answer", { skip: !HAS_DB }, async () => {
+test("recallAnswer recalls by meaning over the vector index and narrates a grounded, cited answer", async () => {
   const agent = new MemoryAgent(new FakeEmbedder(), new FakeNarrator());
   await agent.ingestEvent(EVENT);
 
