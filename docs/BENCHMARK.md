@@ -106,10 +106,52 @@ EXPLAIN SELECT id FROM agent_memory ORDER BY embedding <=> $q LIMIT 10:
   data loss. A single-node pgvector has one copy on one machine.
 - **Leaseholders are spread across all 3 nodes** — read/write load distributes across
   the cluster instead of hitting one box.
-- The quantized vector index is compact, so it is a single range at this size; past the
-  ~64 MiB range threshold CockroachDB **auto-splits the vector index into more ranges
-  and rebalances them across nodes** — the same mechanism, at scale (this is what runs
-  on the managed multi-node Cloud cluster).
+- As the data grows, CockroachDB **auto-splits and rebalances those ranges across the cluster**,
+  each still replicated RF=3 — the same mechanism at scale, exactly what runs on the managed
+  multi-node Cloud cluster. Result 3b below demonstrates one recall query fanning out across a
+  multi-range memory.
+
+## Result 3b — multi-range ANN fan-out (demonstrated, not asserted)
+
+Result 3 proves ranges replicate across nodes; this proves that ONE ANN recall query genuinely
+**fans out across multiple KV ranges** of the memory and still returns the correct top-k — the
+thing previously asserted but not shown. Rather than load tens of GB to hit a natural split, we
+demonstrate it **deterministically on a small dataset**: `npm run fanout:demo`
+([`scripts/fanout-demo.ts`](../scripts/fanout-demo.ts)) forces the `agent_memory` table into
+several KV ranges with **enforced primary-key `SPLIT AT`** (CockroachDB splits a table into N
+ranges regardless of size; the split is enforced so it won't merge back), then runs one
+**unscoped** ANN recall — served by the global vector index. CI, single node, v26.2.3, N=3000:
+
+```
+Memory table spans 14 KV range(s) (vector index: 1 range(s) at this scale):
+  range_id | lease_holder | replicas
+  ---------+--------------+----------
+   … 14 ranges (4 primary + secondary/vector index spans) …
+
+recall@10: mean 99.5% · min 90% · top-k neighbours drawn from 4 distinct primary range(s)
+
+EXPLAIN … ORDER BY embedding <=> q LIMIT 10:
+  • top-k └── • render └── • lookup join └── • vector search
+→ plan uses a 'vector search' node: true
+```
+
+- The memory table is split across **14 KV ranges** (the 3 enforced `SPLIT AT` points give 4
+  primary ranges; the rest are the secondary + vector-index spans). The rows' random-UUID PKs
+  scatter across the four primary ranges.
+- The **unscoped** recall (`ORDER BY embedding <=> q LIMIT k`, no company filter) is served by
+  the **global vector index** — `EXPLAIN` plans `vector search → lookup join`. The lookup
+  **fans out** across the primary ranges: the returned top-k semantic neighbours came from **4
+  distinct ranges**, so the query genuinely spans the cluster's ranges, not one.
+- It stays **correct** under that distributed execution: **recall@10 = 99.5%** against
+  brute-force ground truth (min 90%), and the plan is a `vector search` node (ANN, not a scan).
+- Gated in CI by [`tests/fanout.test.ts`](../tests/fanout.test.ts) (hard asserts: ≥2 table
+  ranges, top-k drawn from ≥2 ranges, recall ≥90%, `vector search` — against the real
+  CockroachDB CI stands up); offline, the same file runs the recall-correctness half under the
+  mock and skips the range assertions.
+- **At production scale the vector index itself also auto-splits** into KV ranges (CockroachDB's
+  minimum `range_max_bytes` is 64 MiB, so this needs a large corpus, not zone tuning) and each
+  range is replicated RF=3 (Result 3). We report the index's range count above transparently
+  (1 at this small scale) rather than gate CI on loading enough data to force that split.
 
 ## Result 4 — verified on the live CockroachDB Cloud cluster
 
@@ -144,6 +186,9 @@ BENCH_N=10000 BENCH_QUERIES=200 BENCH_BEAMS=100,200 npm run benchmark
 
 # the beam knob on the worst case
 BENCH_CORPUS=uniform BENCH_N=5000 BENCH_BEAMS=10,50,100,300 npm run benchmark
+
+# multi-range ANN fan-out (SPLIT AT forces >=2 ranges; one unscoped recall fans out across them)
+npm run fanout:demo
 
 # distribution + survivability (3 nodes)
 docker compose -f docker-compose.cluster.yml up -d && sleep 12

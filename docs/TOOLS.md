@@ -15,12 +15,19 @@ the AWS side.
   the `pgvector` extension.
 - **Where:** `src/db/schema.sql` (the index), `src/memory/memory.ts`
   (`recall()` = `ORDER BY embedding <=> $q LIMIT k`), `scripts/benchmark.ts`
-  (recall@k + latency + `vector_search_beam_size` sweep), `docs/BENCHMARK.md`
-  (measured results), `scripts/show-distribution.sh` (per-node range distribution).
+  (recall@k + latency + `vector_search_beam_size` sweep), `scripts/fanout-demo.ts` +
+  `tests/fanout.test.ts` (multi-range fan-out), `docs/BENCHMARK.md` (measured results),
+  `scripts/show-distribution.sh` (per-node range distribution).
 - **Proof it is used, not just present:** `EXPLAIN` plans a **`vector search`** node
   (index-accelerated ANN, not a full scan) — verified on the local single node
   (v26.2.2) **and on the live CockroachDB Cloud cluster** (v25.4.10, eu-west-1).
   See `docs/BENCHMARK.md` for the plan and the recall/latency numbers.
+- **Distributed, not just present:** one unscoped ANN recall genuinely **fans out across
+  multiple KV ranges** of the memory and stays correct. Demonstrated deterministically (CI
+  v26.2.3): enforced `SPLIT AT` puts the table in 14 ranges, and one recall's top-k neighbours
+  come from **4 distinct ranges** at **99.5% recall@10** with a `vector search` plan. Run
+  `npm run fanout:demo`; gated by `tests/fanout.test.ts`; see `docs/BENCHMARK.md` Result 3b. At
+  scale the vector index itself auto-splits into RF=3 ranges too (Result 3, 3-node cluster).
 
 ### 2. ccloud CLI (Agent-Ready)
 - **What:** provisions / reuses the CockroachDB Cloud Serverless cluster the deployed
