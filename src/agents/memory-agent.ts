@@ -77,9 +77,9 @@ export class MemoryAgent {
         content:
           `Off-bank employment cost at ${event.company} for ${event.period}: the bank ` +
           `salary transfer of ${money(event.bank_net_total)} understates the true ` +
-          `cost of employing the team by ${money(event.off_bank_cost)} ` +
-          `(${event.cost_gap_pct.toFixed(1)}%), mostly employer social-security ` +
-          `contributions of ${money(event.employer_social_security_total)}.`,
+          `cost of employing the team by ${money(event.off_bank_cost)} — mostly employer ` +
+          `social-security contributions of ${money(event.employer_social_security_total)}, ` +
+          `~${event.cost_gap_pct.toFixed(1)}% of the bank transfer on its own.`,
         metadata: {
           off_bank_cost: event.off_bank_cost,
           cost_gap_pct: event.cost_gap_pct,

@@ -18,6 +18,8 @@
 #   • leaseholders spread across the cluster (load distribution)
 #   • the vector-index range(s) replicated across the nodes
 #   • the live EXPLAIN proving the ANN query plans a `vector search` node on the cluster
+#   • a live NODE-KILL: it stops roach3, re-runs the ANN recall through the surviving
+#     roach1, shows it still serves (RF=3 quorum → zero data loss), then restarts roach3
 set -euo pipefail
 
 COMPOSE="docker compose -f docker-compose.cluster.yml"
@@ -64,6 +66,47 @@ echo "════════════════════════�
 QVEC=$(SQL --format=raw -e "SELECT embedding::string FROM agent_memory WHERE company='_dist' LIMIT 1;" 2>/dev/null | grep -E '^\[' | head -1)
 if [ -n "${QVEC:-}" ]; then
   SQL -e "EXPLAIN SELECT id FROM agent_memory ORDER BY embedding <=> '${QVEC}'::VECTOR LIMIT 10;"
+fi
+
+echo
+echo "════════════════════════════════════════════════════════════════════════"
+echo "  NODE-LOSS SURVIVAL — kill one node, recall keeps serving (RF=3 quorum)"
+echo "  We stop roach3 (a node we are NOT connected through) and re-run the ANN"
+echo "  recall through the surviving roach1. With every range replicated RF=3, the"
+echo "  two remaining nodes hold a quorum, so recall answers with zero data loss."
+echo "════════════════════════════════════════════════════════════════════════"
+# Recall helper: run one ANN recall through roach1 and print how many rows it served.
+# Wrapped so a transient error during leaseholder failover does not abort (pipefail).
+recall_served() {
+  SQL --format=raw -e \
+    "SELECT id FROM agent_memory ORDER BY embedding <=> '${QVEC}'::VECTOR LIMIT 5;" 2>/dev/null \
+    | grep -cE '^[0-9a-f-]{36}$' || true
+}
+
+if [ -n "${QVEC:-}" ]; then
+  echo "→ Before kill: recall through roach1 served $(recall_served) memories."
+  echo "→ Stopping roach3 (docker stop) — simulating a node loss…"
+  $COMPOSE stop roach3 >/dev/null 2>&1 || true
+  # Give the cluster a moment to shift leaseholders off the downed node.
+  SERVED=0
+  for attempt in 1 2 3 4 5 6; do
+    sleep 5
+    SERVED=$(recall_served)
+    if [ "${SERVED:-0}" -gt 0 ]; then
+      echo "→ Node down (roach3 stopped): recall through roach1 STILL served ${SERVED} memories" \
+           "(attempt ${attempt}) — survived the loss with zero data loss."
+      break
+    fi
+    echo "  …leaseholders still failing over (attempt ${attempt}); retrying"
+  done
+  if [ "${SERVED:-0}" -eq 0 ]; then
+    echo "  ⚠ recall did not return within the retry window — inspect the cluster manually."
+  fi
+  echo "→ Restarting roach3 to restore RF=3 (script stays rerunnable)…"
+  $COMPOSE start roach3 >/dev/null 2>&1 || true
+  sleep 5
+else
+  echo "  (no corpus loaded — skipping the node-kill recall)"
 fi
 
 echo

@@ -31,3 +31,7 @@ Thumbs.db
 # Test / coverage
 coverage/
 .nyc_output/
+
+# Demo video build — regenerable intermediates (keep the mp4, frames, fixtures + build inputs)
+demo/assets/audio/
+demo/assets/clips/

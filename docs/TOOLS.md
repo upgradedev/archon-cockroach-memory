@@ -52,14 +52,20 @@ the AWS side.
 - **Where:** `src/memory/embeddings.ts` (`BedrockEmbedder`). Offline `FakeEmbedder` /
   `RandomEmbedder` implement the same `Embedder` interface so dev, CI, and the
   benchmark run with no AWS credentials.
+- **Proof it runs against real AWS:** a verbatim real-run capture (real 1024-dim
+  unit-length Titan vector) is in [`docs/BEDROCK_SMOKE.md`](./BEDROCK_SMOKE.md);
+  re-runnable via the gated `tests/bedrock.integration.test.ts` (`RUN_BEDROCK_IT=1`).
 
 ### Amazon Bedrock — Claude Sonnet (Converse)
 - **What:** the RAG **narrator** — writes a CFO-level answer grounded in and citing
-  the memories recalled from the vector index. Also multimodal document extraction
-  (reused from the Archon AWS build).
+  the memories recalled from the vector index. The Converse wrapper also supports
+  multimodal document extraction (reused from the Archon AWS build).
 - **Where:** `src/agents/narrator.ts` (`BedrockNarrator`) over `src/extraction/bedrock.ts`
   (`converse()`). Offline `FakeNarrator` keeps the full recall→narrate loop testable
   without AWS.
+- **Proof it runs against real AWS:** a verbatim real Claude Sonnet Converse answer —
+  grounded and citing `[1]`/`[2]` — is captured in
+  [`docs/BEDROCK_SMOKE.md`](./BEDROCK_SMOKE.md) (same gated integration test).
 
 ### AWS deploy target (roadmap)
 - The agent API is deployment-agnostic (pg-wire + Bedrock SDK); the planned host is

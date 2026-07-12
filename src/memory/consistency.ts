@@ -39,9 +39,11 @@ export interface AuditMemory {
   content: string;
   metadata: Record<string, unknown> | null;
   createdAt: string; // ISO — the write-event timestamp (our "session" signal)
-  // Explicit 0..1 salience — the top-level `importance` column the store persists
-  // (0.5 default). Surfaced here so the resolver's importance rule fires on REAL
-  // ingested memories, not only on ones with importance hand-placed in metadata.
+  // OPTIONAL explicit 0..1 salience a caller may attach directly. The CockroachDB
+  // `agent_memory` table has NO `importance` column (see schema.sql); the production
+  // store carries salience in `metadata.importance` (e.g. the 0.9 off-bank-cost
+  // insight), which `importanceOf` reads. This field is just a convenience override
+  // for callers/tests that hold salience out-of-band — never populated by the store.
   importance?: number | null;
 }
 
@@ -183,10 +185,12 @@ function authorityOf(kind: string, map: Record<string, number>): number {
   return typeof v === "number" ? v : STRUCTURED_AUTHORITY;
 }
 
-// The explicit salience a memory carries. Prefers the top-level `importance`
-// COLUMN the store persists (so the rule fires on real ingested memories — the
-// production path writes salience there, e.g. the 0.9 off-bank-cost insight), and
-// falls back to a caller-placed `metadata.importance` for backward-compat.
+// The explicit salience a memory carries. On this store salience lives in
+// `metadata.importance` (there is NO dedicated `importance` column — see schema.sql
+// and memory.ts::listForAudit), so that is the signal the rule actually fires on for
+// real ingested memories (e.g. the 0.9 off-bank-cost insight). The optional top-level
+// `m.importance` is only an out-of-band override a caller/test may set directly; it is
+// checked first for that case, then we fall back to `metadata.importance`.
 // Returns null when absent/non-numeric (→ "no signal").
 function importanceOf(m: AuditMemory): number | null {
   if (typeof m.importance === "number" && Number.isFinite(m.importance)) return m.importance;

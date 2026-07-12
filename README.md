@@ -44,7 +44,7 @@ and demonstrated**, with the vector index native in the *same* database as the r
 | Service | How it's used |
 |---|---|
 | **Amazon Bedrock — Titan Text Embeddings V2** | Embeds every memory (`content` → 1024-dim vector) for storage + recall. |
-| **Amazon Bedrock — Claude Sonnet (Converse)** | The RAG **narrator** (`src/agents/narrator.ts`): writes a CFO-level answer grounded in and citing the memories recalled from the CockroachDB vector index. Also does multimodal document extraction (reused from the Archon AWS build). Offline `FakeNarrator` fallback keeps CI AWS-free. |
+| **Amazon Bedrock — Claude Sonnet (Converse)** | The RAG **narrator** (`src/agents/narrator.ts`): writes a CFO-level answer grounded in and citing the memories recalled from the CockroachDB vector index. The Converse wrapper also supports multimodal document extraction (reused from the Archon AWS build). Offline `FakeNarrator` fallback keeps CI AWS-free. Real-run capture: [docs/BEDROCK_SMOKE.md](./docs/BEDROCK_SMOKE.md). |
 | **AWS Lambda / ECS** | (roadmap) hosts the agent API; the memory layer is deployment-agnostic. |
 
 ## Architecture
@@ -129,7 +129,7 @@ exact top-k computed by brute force in JS over the same seeded vectors, so recal
 | **index quality — recall vs `vector_search_beam_size`** (uniform) | **29% → 96.5%** as the search visits more partitions |
 | **multi-range fan-out** (`npm run fanout:demo`, single node) | memory forced into **≥2 KV ranges** (enforced `SPLIT AT`); one unscoped ANN recall **fans out across them** — top-k drawn from ≥2 ranges — and stays correct (recall@10 ~99%) with a `vector search` plan |
 | **distribution** (3-node cluster) | 11 ranges, **RF=3 on all nodes**, leaseholders across all 3 |
-| **live Cloud** (v25.4.10, eu-west-1) | recall + `vector search` EXPLAIN verified |
+| **live Cloud** (v25.4.10, eu-west-1) | recall + `vector search` EXPLAIN + RF=3 ranges — verbatim capture in [docs/CLOUD_SMOKE.md](./docs/CLOUD_SMOKE.md) |
 
 Recall depends on data separability, so we report the range, not a single lucky number;
 the evidence that isolates **index quality** is the beam curve (recall responds to search
@@ -200,6 +200,8 @@ repos/cockroachdb/
 ├── docs/
 │   ├── BENCHMARK.md             # recall/latency/distribution results + methodology
 │   ├── TOOLS.md                 # tool-identification doc (CockroachDB features + AWS)
+│   ├── BEDROCK_SMOKE.md         # verbatim real-AWS-Bedrock run (Titan embed + Claude Converse)
+│   ├── CLOUD_SMOKE.md           # verbatim live CockroachDB Cloud capture (EXPLAIN + RF=3 ranges)
 │   └── BUILD_PLAN.md
 └── tests/
     ├── memory.test.ts           # no-infra unit tests (embedder + vector literal)
@@ -246,7 +248,7 @@ Provision a free Serverless cluster with the ccloud CLI, then point `DATABASE_UR
 
 ```bash
 ccloud auth login
-ccloud cluster create serverless archon-memory --cloud aws --region us-east-1
+ccloud cluster create serverless archon-memory --cloud aws --region eu-west-1
 ccloud cluster sql archon-memory   # copy the connection string → DATABASE_URL
 npm run db:schema
 ```
