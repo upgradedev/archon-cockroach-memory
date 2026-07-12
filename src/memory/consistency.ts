@@ -21,7 +21,7 @@
 //
 // This is a PURE function over generic memory rows (no DB, no domain rules — it
 // is NOT the financial R1–R4 validator). It runs identically over InMemoryStore
-// rows in tests and over the pgvector rows the production store returns, so the
+// rows in tests and over the CockroachDB vector rows the production store returns, so the
 // "self-auditing memory" claim is measured on the same engine that ships.
 //
 // It examines ACTIVE memories only (the caller passes non-superseded rows), so a

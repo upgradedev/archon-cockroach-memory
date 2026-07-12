@@ -19,7 +19,9 @@ interface MockRecord {
   content: string;
   metadata: any | null;
   embedding: number[];
-  created_at: string;
+  // The pg driver returns a TIMESTAMP column as a JS Date, not a string — mirror
+  // that here so the mock exercises the same createdAt normalization as prod.
+  created_at: Date;
 }
 
 const db: MockRecord[] = [];
@@ -65,7 +67,7 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
       content,
       metadata,
       embedding,
-      created_at: new Date().toISOString(),
+      created_at: new Date(),
     };
     db.push(record);
     return { rows: [{ id: record.id }] };

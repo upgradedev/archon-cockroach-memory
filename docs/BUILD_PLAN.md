@@ -21,7 +21,7 @@ Archon is already an agentic multi-agent financial-intelligence app. CockroachDB
 |---|---|
 | Agentic Memory Design | Production-grade: durable, distributed VECTOR index, prefix-partitioned recall, metadata-rich memories. |
 | Technical Implementation | Injectable embedder, pg-wire reuse of a real schema, typed, tested. |
-| Real-World Impact | Consolidated P&L/EBITDA/cash for SMBs, plus completeness checks that catch missing or inconsistent records (e.g. a bank payment with no matching invoice) — and, as one worked example, the ~28% understatement of true workforce cost. Genuine problems. |
+| Real-World Impact | Consolidated P&L/EBITDA/cash for SMBs, plus completeness checks that catch missing or inconsistent records (e.g. a bank payment with no matching invoice) — and, as one worked example, the ~72% understatement of true workforce cost (of which the employer social-security wedge alone is ~35%). Genuine problems. |
 | Production Readiness | CockroachDB survivability/consistency; TLS Cloud path; observability probes (memoryCount). |
 | Creativity & Originality | "Financial-close agent with long-term semantic memory of every fused event." |
 

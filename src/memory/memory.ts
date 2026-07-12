@@ -104,7 +104,7 @@ export async function recall(
     source_ref: string | null;
     content: string;
     metadata: Record<string, unknown> | null;
-    created_at: string;
+    created_at: string | Date;
     distance: string;
   }>(
     `SELECT id, kind, company, period, source_ref, content, metadata, created_at,
@@ -126,7 +126,11 @@ export async function recall(
       sourceRef: r.source_ref,
       content: r.content,
       metadata: r.metadata,
-      createdAt: r.created_at,
+      // pg returns a TIMESTAMP column as a Date; normalize to an ISO string so
+      // downstream consumers (the consistency resolver's date arithmetic /
+      // createdAt.slice) get the string they expect — mirrors listForAudit.
+      createdAt:
+        r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
       distance,
       score: 1 - distance,
     };
