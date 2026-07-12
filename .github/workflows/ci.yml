@@ -87,6 +87,9 @@ jobs:
       # ANN recall query fans out across those ranges and returns the correct top-k. Turns
       # docs/BENCHMARK.md Result 3 from asserted into tested. Offline it runs recall
       # correctness under the mock and skips the range assertions.
+      - name: TEMP size probe
+        run: npx tsx scripts/_sizeprobe.ts
+
       - name: Unit + integration tests (incl. multi-range fan-out)
         run: npm test
 
