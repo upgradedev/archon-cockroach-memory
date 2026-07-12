@@ -1,24 +1,27 @@
-// TEMPORARY probe (to be removed before PR). Answers, in ONE CI run:
-//   1. the real range_max_bytes floor CockroachDB accepts,
-//   2. whether we can force the VECTOR INDEX into >1 KV range at CI corpus scale,
-//   3. the exact output shape of SHOW RANGES FROM INDEX ... WITH DETAILS + EXPLAIN.
-// Never fails the build — every step is wrapped so all findings print.
+// TEMPORARY probe round 2 (to be removed before PR). Goal: find a DETERMINISTIC
+// way to force the vector index into >=2 KV ranges at CI scale, and confirm timing.
 
 import { unitGaussianVector, normalize, EMBED_DIM } from "../src/memory/embeddings.js";
 import { query, closePool, toVectorLiteral } from "../src/db/client.js";
 
 const DIM = EMBED_DIM;
 
-async function tryQ(label: string, sql: string, params: unknown[] = []) {
+async function tryQ(label: string, sql: string) {
   try {
-    const rows = await query(sql, params);
-    console.log(`\n### ${label} OK — ${rows.length} row(s)`);
-    console.log(JSON.stringify(rows, null, 2).slice(0, 4000));
+    const rows = await query(sql);
+    console.log(`### ${label} OK — ${rows.length} row(s) :: ${JSON.stringify(rows).slice(0, 300)}`);
     return rows;
   } catch (e) {
-    console.log(`\n### ${label} FAILED: ${(e as Error).message}`);
+    console.log(`### ${label} FAILED: ${(e as Error).message}`);
     return null;
   }
+}
+
+async function idxRanges(): Promise<number> {
+  const rows = await query<{ n: string }>(
+    `SELECT count(*) AS n FROM [SHOW RANGES FROM INDEX agent_memory@idx_agent_memory_embedding]`
+  );
+  return Number(rows[0].n);
 }
 
 async function loadN(n: number, tag: string) {
@@ -46,77 +49,48 @@ async function loadN(n: number, tag: string) {
   }
 }
 
-async function rangeCounts() {
-  await tryQ(
-    "SHOW RANGES FROM TABLE agent_memory (count)",
-    `SELECT count(*) AS n FROM [SHOW RANGES FROM TABLE agent_memory]`
-  );
-  await tryQ(
-    "SHOW RANGES FROM INDEX @idx_agent_memory_embedding (count)",
-    `SELECT count(*) AS n FROM [SHOW RANGES FROM INDEX agent_memory@idx_agent_memory_embedding]`
-  );
-  await tryQ(
-    "SHOW RANGES FROM INDEX @idx (WITH DETAILS, shape sample)",
-    `SELECT range_id, lease_holder, replicas FROM [SHOW RANGES FROM INDEX agent_memory@idx_agent_memory_embedding WITH DETAILS] ORDER BY range_id LIMIT 20`
-  );
-}
-
 async function main() {
-  await tryQ("version", `SELECT version() AS v`);
   await query(`DELETE FROM agent_memory`);
 
-  // Baseline: how many ranges at CI benchmark scale, default zone.
-  console.log("\n===== PHASE 1: 3000 rows, DEFAULT zone =====");
-  await loadN(3000, "_probe");
-  await rangeCounts();
+  // A) Manual vector SPLIT AT on an EMPTY index — the deterministic lever.
+  console.log("\n===== A: manual vector SPLIT AT (deterministic forcing) =====");
+  const splitVec1 = toVectorLiteral(normalize(unitGaussianVector(111, DIM)));
+  const splitVec2 = toVectorLiteral(normalize(unitGaussianVector(222, DIM)));
+  await tryQ(
+    "SPLIT AT single vector",
+    `ALTER INDEX agent_memory@idx_agent_memory_embedding SPLIT AT VALUES ('${splitVec1}'::VECTOR)`
+  );
+  console.log(`idx ranges after 1 split (empty table): ${await idxRanges().catch(() => -1)}`);
+  await tryQ(
+    "SPLIT AT second vector",
+    `ALTER INDEX agent_memory@idx_agent_memory_embedding SPLIT AT VALUES ('${splitVec2}'::VECTOR)`
+  );
+  console.log(`idx ranges after 2 splits (empty table): ${await idxRanges().catch(() => -1)}`);
 
-  // Try to lower range_max_bytes. Sweep candidate floors to find the minimum accepted.
-  console.log("\n===== PHASE 2: sweep range_max_bytes floor =====");
-  for (const [minB, maxB] of [
-    [1 << 20, 8 << 20],   // 1MiB / 8MiB
-    [1 << 20, 2 << 20],   // 1MiB / 2MiB
-    [65536, 1 << 20],     // 64KiB / 1MiB
-    [65536, 131072],      // 64KiB / 128KiB
-  ] as const) {
-    await tryQ(
-      `CONFIGURE ZONE range_min_bytes=${minB} range_max_bytes=${maxB}`,
-      `ALTER TABLE agent_memory CONFIGURE ZONE USING range_min_bytes = ${minB}, range_max_bytes = ${maxB}`
-    );
+  // B) Does the split survive after we load data + does recall still work?
+  console.log("\n===== B: load 2000 rows over the split index, recheck =====");
+  await loadN(2000, "_probe");
+  console.log(`idx ranges after load: ${await idxRanges().catch(() => -1)}`);
+
+  // C) Fallback path — natural split by data volume. Poll timing.
+  console.log("\n===== C: reset, load 10000, POLL idx ranges over 30s =====");
+  await query(`DELETE FROM agent_memory`);
+  // reset any manual splits
+  await tryQ("UNSPLIT ALL", `ALTER INDEX agent_memory@idx_agent_memory_embedding UNSPLIT ALL`);
+  await loadN(10000, "_probe");
+  for (let t = 0; t < 16; t++) {
+    const n = await idxRanges().catch(() => -1);
+    console.log(`  t=${t * 2}s idx_ranges=${n}`);
+    if (n >= 2 && t >= 2) break;
+    await new Promise((r) => setTimeout(r, 2000));
   }
 
-  // With the smallest accepted zone applied, add more data + nudge a split, re-check.
-  console.log("\n===== PHASE 3: reload 8000 rows under small zone, wait, re-check ranges =====");
   await query(`DELETE FROM agent_memory`);
-  await loadN(8000, "_probe");
-  await tryQ("ALTER TABLE ... SCATTER", `ALTER TABLE agent_memory SCATTER`);
-  await new Promise((r) => setTimeout(r, 8000));
-  await rangeCounts();
-
-  // Does manual SPLIT AT work on the vector index? (size-independent forcing)
-  console.log("\n===== PHASE 4: manual SPLIT AT on table + vector index =====");
-  await tryQ(
-    "ALTER TABLE agent_memory SPLIT AT (uuid)",
-    `ALTER TABLE agent_memory SPLIT AT VALUES ('80000000-0000-0000-0000-000000000000'::UUID)`
-  );
-  await tryQ(
-    "ALTER INDEX @idx SPLIT AT (probe if supported)",
-    `ALTER INDEX agent_memory@idx_agent_memory_embedding SPLIT AT VALUES (1)`
-  );
-  await rangeCounts();
-
-  // EXPLAIN shape (plain — used by the real test to string-match `vector search`).
-  console.log("\n===== PHASE 5: EXPLAIN shape =====");
-  const q = toVectorLiteral(normalize(unitGaussianVector(42, DIM)));
-  await tryQ(
-    "EXPLAIN recall",
-    `EXPLAIN SELECT id FROM agent_memory ORDER BY embedding <=> '${q}'::VECTOR LIMIT 10`
-  );
-
-  await query(`DELETE FROM agent_memory`);
+  await tryQ("UNSPLIT ALL (cleanup)", `ALTER INDEX agent_memory@idx_agent_memory_embedding UNSPLIT ALL`);
   await closePool();
 }
 
 main().catch((e) => {
   console.error("probe crashed:", e);
-  process.exit(0); // never fail the build
+  process.exit(0);
 });
