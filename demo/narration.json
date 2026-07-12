@@ -117,7 +117,7 @@
     {
       "id": "07-distribution",
       "title": "RF=3 survivability + live CockroachDB Cloud",
-      "narration": "Every range is replicated three times across the cluster. Kill any one node and recall keeps serving with zero data loss, something a single-node pgvector cannot do. And it is verified on the live CockroachDB Cloud cluster in A-W-S eu-west-one: EXPLAIN plans a vector search and the replicas span three distinct nodes.",
+      "narration": "Every range is replicated three times across the cluster, so recall survives any single-node loss with zero data loss, the R-F-three quorum a single-node pgvector cannot give. The show-distribution script demonstrates it live, stopping a node and re-running the recall through a survivor. And it is verified on the live CockroachDB Cloud cluster in A-W-S eu-west-one: EXPLAIN plans a vector search and the replicas span three distinct nodes.",
       "frame": [
         "3-node cluster (docs/BENCHMARK.md Result 3):",
         "  range_id | lease_holder | replicas",
@@ -125,7 +125,8 @@
         "     107   |      3       | {1,2,3}   <- vector index range, RF=3",
         "  total_ranges = 11 · distinct_leaseholders = 3",
         "",
-        "  -> stop roach3: recall through roach1 STILL served (quorum) ",
+        "  RF=3 -> survives ANY single-node loss (zero data loss)",
+        "     run scripts/show-distribution.sh for the live node-kill",
         "",
         "LIVE CLOUD  (v25.4.10, AWS eu-west-1, sslmode=verify-full):",
         "  EXPLAIN -> vector search   ·   replicas [\"43\",\"45\",\"85\"]  (RF=3)"
