@@ -6,6 +6,23 @@ An agentic financial-intelligence application that uses **CockroachDB as the age
 
 Archon is a **unified financial-intelligence platform**: it ingests *all* of a small business's financial documents and data — sales and purchase invoices, orders, receipts, payments, bank transfers and statements, payroll, expenses — into one environment and produces a consolidated, period-over-period picture: P&L, EBITDA, cash, workforce cost, and the metrics behind them. Crucially, it also **cross-checks the whole picture for missing or inconsistent information** — for example, a vendor payment on the bank statement with no matching invoice (did the vendor never send it? did the accountant never register it? is the payment wrong?), or the fact that a bank salary transfer understates the *true* cost of employing a team by ~72% (measured) — the employer social-security contributions it never shows are alone ~35% of that true cost. This entry gives Archon's agents a **memory**: every extracted document, fused financial event, validation finding, and narrated insight is embedded and stored in CockroachDB, then **recalled by meaning** on later runs — so the agents reason with continuity instead of starting cold on every upload. And because that memory accumulates across many independent sessions, the agent also **audits its own memory**: it scans everything it has stored for cross-session *contradictions* (two sessions that remembered one record differently) and *dangling references* (a memory pointing at a record it never stored), and **recommends which value to trust** — read-only, at distributed-vector scale.
 
+## Why this is real CockroachDB depth, not vanilla Postgres
+
+The load-bearing question for this entry is whether it exercises the features that make
+CockroachDB *distinct* — not just Postgres-over-the-wire. Every claim below is **demonstrated**
+in the repo, not asserted:
+
+| CockroachDB-distinguishing capability | Where it's demonstrated |
+|---|---|
+| **Native distributed vector index — C-SPANN, not pgvector.** Semantic recall runs *inside* the database engine; no separate vector store, no `pgvector` extension. | `CREATE VECTOR INDEX … (embedding vector_cosine_ops)` in [`src/db/schema.sql`](./src/db/schema.sql) (C-SPANN k-means partition tree — [docs/BENCHMARK.md](./docs/BENCHMARK.md)). |
+| **The index is actually used — `EXPLAIN` plans a `vector search` node**, not a table scan, so recall is ANN (not brute force). | Verified on v26.2.2, the 3-node cluster, and live Cloud v25.4.10 — [docs/BENCHMARK.md](./docs/BENCHMARK.md) Results 3–4. |
+| **Recall@k measured against brute-force ground truth: 96.5% (uniform, worst case) → 99.6% (structured, 10k memories).** Ground truth = exact top-k by brute-force cosine over the same seeded vectors, so recall is exact. | `npm run benchmark` ([`scripts/benchmark.ts`](./scripts/benchmark.ts)); numbers + methodology in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Results 1–2. |
+| **Survivability a single box can't give: RF=3 on every range + leaseholders spread across all 3 nodes.** Kill any one node and recall keeps serving with zero data loss. | `bash scripts/show-distribution.sh` on `docker-compose.cluster.yml`; per-node range proof in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 3. |
+
+A tuned single-node pgvector may be faster on one box, but it has one copy on one machine — no
+replication, no node-loss survival, no scale-out. The differentiator here is **architectural
+and demonstrated**, with the vector index native in the *same* database as the relational data.
+
 ## Why CockroachDB as the memory layer
 
 - **Postgres-wire compatible** — Archon's existing PostgreSQL schema ports in nearly unchanged (the `documents` / `employees` / `payroll_events` / `validation_results` tables here are a 1:1 port from the production Archon schema).
@@ -121,6 +138,21 @@ distributed, and survivable, with the vector index **native in the same database
 relational data. (At this corpus size the vector index is a single RF=3 range; multi-range
 ANN fan-out is CockroachDB's documented auto-split behaviour at scale, asserted not
 demonstrated here — the demonstrated differentiator is RF=3 survivability + leaseholder spread.)
+
+## Quality & testing — the tests are held to the same self-auditing bar
+
+The memory layer's philosophy is to keep itself honest; we hold its *tests* to the same bar,
+and committing the integration suite paid off by surfacing a genuine production bug the earlier
+unit tests had masked. `recall()` ([`src/memory/memory.ts`](./src/memory/memory.ts)) passed the
+raw `created_at` column straight through, while `listForAudit()` normalized it — but the `pg`
+driver returns a `TIMESTAMP` as a JS `Date`, not an ISO string, so on the **real CockroachDB**
+path a recalled memory carried a `Date`; when a no-importance contradiction landed in the
+recalled top-k, the consistency resolver's recency branch called `createdAt.slice(0,10)` and
+threw `slice is not a function` (the offline mock returned strings, so it was invisible until
+the suite ran against a live cluster). It was root-fixed — normalize in `recall()`, mirroring
+`listForAudit()` — **and** the mock ([`tests/db_mock.ts`](./tests/db_mock.ts)) was made faithful,
+now returning a `Date` like the real driver, so this class of bug is caught offline (reverting
+the fix fails an integration test with the exact CI error).
 
 ## Repository layout
 
