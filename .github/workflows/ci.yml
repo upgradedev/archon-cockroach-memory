@@ -81,6 +81,9 @@ jobs:
       - name: Apply schema (creates the VECTOR(1024) memory table + vector index)
         run: npm run db:schema
 
+      - name: TEMP range probe
+        run: npx tsx scripts/_probe-ranges.ts
+
       - name: Unit + integration tests
         run: npm test
 
