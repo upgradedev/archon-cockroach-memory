@@ -85,12 +85,13 @@ export interface PayrollEvent {
   tax_withheld_total: number;
   employer_cost_total: number; // THE accurate number (gross + employer social-security)
   // One insight the platform surfaces: employer social-security contributions are
-  // completely invisible on the bank salary-transfer confirmation, yet are ~28% of
-  // the net figure the bank shows.
+  // completely invisible on the bank salary-transfer confirmation, yet are ~35% of
+  // the net figure the bank shows — roughly HALF of the full ~72% understatement of
+  // the true employer cost (see `off_bank_cost`). Both measured from ground truth.
   cost_gap_amount: number; // employer_social_security_total — the off-bank employer-contribution wedge
-  cost_gap_pct: number; // cost_gap_amount / bank_net_total * 100  (~28%)
+  cost_gap_pct: number; // cost_gap_amount / bank_net_total * 100  (the ~35% wedge)
   // Full reconciliation: everything the bank salary confirmation misses vs true cost.
-  off_bank_cost: number; // employer_cost_total - bank_net_total
+  off_bank_cost: number; // employer_cost_total - bank_net_total (the full ~72% understatement)
   // Register-reported figures, surfaced from the payroll_register document so the
   // validator can cross-check the payslips against the register (not derive both
   // sides from the same payslip set). Null when no register is present.

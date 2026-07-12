@@ -25,7 +25,9 @@ after(async () => {
 });
 
 // Define 15 explicit integration test cases
-test("1. Integration: toVectorLiteral formats array correctly for pgvector", () => {
+// "pgvector-style" = the `[a,b,c]` VECTOR text literal encoding CockroachDB accepts,
+// not the pgvector extension (this entry uses CockroachDB-native C-SPANN vector indexing).
+test("1. Integration: toVectorLiteral formats array correctly for the pgvector-style VECTOR literal", () => {
   const literal = toVectorLiteral([0.1, -0.2, 0.9]);
   assert.equal(literal, "[0.1,-0.2,0.9]");
 });

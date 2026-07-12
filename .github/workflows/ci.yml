@@ -82,10 +82,11 @@ jobs:
         run: npm run db:schema
 
       # Unit + integration tests, INCLUDING the multi-range vector fan-out test
-      # (tests/fanout.test.ts): against the real CockroachDB in CI it loads a corpus large
-      # enough that the native vector index auto-splits into >=2 KV ranges, then proves one
-      # ANN recall query fans out across those ranges and returns the correct top-k. Turns
-      # docs/BENCHMARK.md Result 3 from asserted into tested. Offline it runs recall
+      # (tests/fanout.test.ts): against the real CockroachDB in CI it forces the memory
+      # table into >=2 KV ranges with enforced primary-key `SPLIT AT` (deterministic,
+      # size-independent — not a natural size-driven auto-split), then proves one ANN
+      # recall query fans out across those ranges and returns the correct top-k. Turns
+      # docs/BENCHMARK.md Result 3b from asserted into tested. Offline it runs recall
       # correctness under the mock and skips the range assertions.
       - name: Unit + integration tests (incl. multi-range fan-out)
         run: npm test

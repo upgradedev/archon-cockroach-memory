@@ -50,7 +50,9 @@ test("overlapping text is more similar than disjoint text", async () => {
   );
 });
 
-test("toVectorLiteral renders the pgvector text form", () => {
+// "pgvector text form" = the `[a,b,c]` VECTOR text literal (the wire/text encoding),
+// NOT the pgvector extension — this entry's index is CockroachDB-native C-SPANN.
+test("toVectorLiteral renders the pgvector-style VECTOR text literal", () => {
   assert.equal(toVectorLiteral([0.1, 0.2, 0.3]), "[0.1,0.2,0.3]");
 });
 

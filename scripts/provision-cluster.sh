@@ -13,7 +13,7 @@ set -euo pipefail
 
 CLUSTER="${COCKROACH_CLUSTER_NAME:-archon-memory}"
 CLOUD="${CCLOUD_CLOUD:-aws}"
-REGION="${CCLOUD_REGION:-us-east-1}"
+REGION="${CCLOUD_REGION:-eu-west-1}"  # matches the live cluster (archon-cockroachdb-cluster-27534, AWS eu-west-1)
 
 if ! command -v ccloud >/dev/null 2>&1; then
   echo "ccloud CLI not found. Install: https://www.cockroachlabs.com/docs/cockroachcloud/ccloud-get-started" >&2

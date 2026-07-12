@@ -1,0 +1,153 @@
+{
+  "title": "Archon Memory — CockroachDB x AWS Bedrock",
+  "voice": "en-US-GuyNeural",
+  "rate": "+6%",
+  "beats": [
+    {
+      "id": "01-title",
+      "title": "Archon Memory",
+      "narration": "Archon Memory turns CockroachDB into an A-I agent's persistent, semantic memory, on A-W-S Bedrock. Every financial fact an agent learns is embedded and stored in CockroachDB's native distributed vector index, then recalled by meaning on later runs, so the agents reason with continuity instead of starting cold.",
+      "frame": [
+        "  ARCHON  MEMORY",
+        "  ==============================================",
+        "",
+        "  CockroachDB as an AI agent's persistent memory",
+        "  on AWS Bedrock.",
+        "",
+        "    - remember(fact)  -> Titan embed -> agent_memory VECTOR(1024)",
+        "    - recall(question)-> ANN over distributed vector index",
+        "    - narrate         -> Claude Sonnet, grounded + cited",
+        "    - audit()         -> the agent checks its OWN memory",
+        "",
+        "  CockroachDB x AWS AI Hackathon  ·  MIT"
+      ]
+    },
+    {
+      "id": "02-architecture",
+      "title": "How it works",
+      "narration": "The write path: an agent states a fact, Bedrock Titan embeds it to a one-thousand-twenty-four dimension vector, and it lands in CockroachDB next to the relational data. The read path embeds a question, runs approximate nearest neighbor search over the distributed vector index, and Claude Sonnet narrates a grounded, cited answer.",
+      "frame": [
+        "  Extractor -> EventLinker -> Validator -> Narrator",
+        "      |            |            |          |",
+        "      v            v            v          v",
+        "             MemoryAgent  (remember / recall / audit)",
+        "        |                              |",
+        "        v  embed(content)              v  SQL (pg-wire)",
+        "  +--------------------+   +------------------------------+",
+        "  |  AWS Bedrock       |   |  CockroachDB (memory layer)  |",
+        "  |  Titan Embeddings  |   |  agent_memory(embedding      |",
+        "  |    -> 1024-dim vec |   |    VECTOR(1024))             |",
+        "  |  Claude Sonnet     |   |  + CREATE VECTOR INDEX       |",
+        "  |    (narrate/cite)  |   |  recall = ORDER BY <=> q     |",
+        "  +--------------------+   +------------------------------+"
+      ]
+    },
+    {
+      "id": "03-memory-demo",
+      "title": "npm run memory:demo  (live CockroachDB)",
+      "narration": "Here is the real round trip against a live CockroachDB. The agent writes nine fused financial memories, then answers, what was our real cost of employing the team? It recalls by meaning and cites the exact memories, surfacing the twenty-two thousand eight hundred euro off-bank employer cost the bank transfer never shows.",
+      "frame": [
+        "$ npm run memory:demo",
+        "Embedder: fake-hash-embedder (1024 dims)   Narrator: fake-narrator",
+        "",
+        "WROTE 5 memories for Acme Foods 2026-03",
+        "WROTE 4 memories for Helios Retail 2026-02",
+        "Total memories in CockroachDB: 10",
+        "",
+        "Q: What was our real cost of employing the team last month? [Acme Foods]",
+        "A (fake-narrator): ... [1] Off-bank employment cost at Acme Foods for",
+        "  2026-03: the bank salary transfer of EUR 41,000 understates the true",
+        "  cost of employing the team by EUR 22,800 - mostly employer social-",
+        "  security contributions of EUR 11,800, ~28.8% of the bank transfer.",
+        "Grounded in 3 recalled memory item(s): [1] insight [2] validation [3] payroll_event"
+      ]
+    },
+    {
+      "id": "04-self-audit",
+      "title": "Self-auditing memory (the agentic differentiator)",
+      "narration": "Because memory accumulates across many independent sessions, the agent also audits its own memory. Two sessions stored different totals for one invoice, a cross-session contradiction. The audit flags it, recommends which value to trust by importance, and finds a dangling reference to a record no session ever stored. It is strictly read-only, the memory count is unchanged.",
+      "frame": [
+        "SELF-AUDIT over 9 stored memories:",
+        "   1 contradiction(s), 1 dangling reference(s).",
+        "",
+        " - INV-2043.total: 18400 vs 18900",
+        "     -> trust 18400  (importance, confidence 0.9)",
+        "     higher importance (0.9 vs none); explicit salience",
+        "     outranks a later write.",
+        "",
+        " - dangling reference: PAY-118 is referenced but never stored",
+        "",
+        " Read-only: memory count unchanged (13 -> 13)."
+      ]
+    },
+    {
+      "id": "05-bedrock",
+      "title": "Real AWS Bedrock (docs/BEDROCK_SMOKE.md)",
+      "narration": "Swap in A-W-S credentials and the same code runs against real Bedrock. Titan returns a genuine one-thousand-twenty-four dimension unit vector, and Claude Sonnet writes a cited answer that quotes the exact euro figures from the recalled memories.",
+      "frame": [
+        "Titan V2:  EMBED_DIMS_RETURNED: 1024   EMBED_L2NORM: 1.000000",
+        "Claude Sonnet (us.anthropic.claude-sonnet-4-6), Converse, 2 citations:",
+        "",
+        "> Based on the memory, your true employer payroll cost for March",
+        "> 2026 was EUR 63,800 across 3 employees [1]. The bank salary",
+        "> transfer was only EUR 41,000, meaning EUR 22,800 never appeared",
+        "> as a direct bank outflow - the off-bank employer-cost wedge",
+        "> covering social charges and statutory obligations [1][2].",
+        "",
+        "  grounded + cited answer over the agent's OWN memory (RAG)"
+      ]
+    },
+    {
+      "id": "06-fanout",
+      "title": "Distributed vector index — real depth, not pgvector",
+      "narration": "This is real CockroachDB depth, not vanilla Postgres. The memory is split across fourteen key-value ranges; one unscoped recall fans out, its top-ten neighbors come from four distinct ranges at ninety-nine point five percent recall against brute-force ground truth, and EXPLAIN plans a native vector-search node, not a table scan.",
+      "frame": [
+        "$ npm run fanout:demo                 (BENCHMARK Result 3b, CI)",
+        "",
+        "Memory table spans 14 KV range(s) (vector index: 1 range at this scale)",
+        "",
+        "recall@10: mean 99.5% · min 90% ·",
+        "  top-k neighbours drawn from 4 distinct primary range(s)",
+        "",
+        "EXPLAIN ... ORDER BY embedding <=> q LIMIT 10:",
+        "  top-k -> render -> lookup join -> vector search",
+        "  -> plan uses a 'vector search' node: true"
+      ]
+    },
+    {
+      "id": "07-distribution",
+      "title": "RF=3 survivability + live CockroachDB Cloud",
+      "narration": "Every range is replicated three times across the cluster. Kill any one node and recall keeps serving with zero data loss, something a single-node pgvector cannot do. And it is verified on the live CockroachDB Cloud cluster in A-W-S eu-west-one: EXPLAIN plans a vector search and the replicas span three distinct nodes.",
+      "frame": [
+        "3-node cluster (docs/BENCHMARK.md Result 3):",
+        "  range_id | lease_holder | replicas",
+        "  ---------+--------------+---------",
+        "     107   |      3       | {1,2,3}   <- vector index range, RF=3",
+        "  total_ranges = 11 · distinct_leaseholders = 3",
+        "",
+        "  -> stop roach3: recall through roach1 STILL served (quorum) ",
+        "",
+        "LIVE CLOUD  (v25.4.10, AWS eu-west-1, sslmode=verify-full):",
+        "  EXPLAIN -> vector search   ·   replicas [\"43\",\"45\",\"85\"]  (RF=3)"
+      ]
+    },
+    {
+      "id": "08-close",
+      "title": "Tests held to the same bar",
+      "narration": "We hold the tests to the same self-auditing bar, and it paid off: the integration suite caught a real production bug the unit tests had masked, a timestamp returned as a Date where the code expected a string. Archon Memory: durable, distributed, survivable agent memory, native on CockroachDB and A-W-S Bedrock.",
+      "frame": [
+        "  The tests audit themselves too:",
+        "  committing the integration suite surfaced a real bug -",
+        "  recall() passed pg's Date straight through where the",
+        "  resolver expected an ISO string -> 'slice is not a function'.",
+        "  Root-fixed + the mock made faithful (returns a Date now).",
+        "",
+        "  ==============================================",
+        "  ARCHON MEMORY",
+        "  durable · distributed · survivable agent memory",
+        "  CockroachDB  x  AWS Bedrock",
+        "  github.com/upgradedev/archon-cockroach-memory  ·  MIT"
+      ]
+    }
+  ]
+}

@@ -161,6 +161,11 @@ semantic recall returns correctly-ranked memories and `EXPLAIN` plans a **`vecto
 search`** node — the distributed index is used (ANN), not a scan. TLS is
 `sslmode=verify-full` against the public CA.
 
+**Verbatim live-Cloud capture — [docs/CLOUD_SMOKE.md](./CLOUD_SMOKE.md):** the actual
+`EXPLAIN` plan (`vector search → lookup join → top-k`), a real top-k recall with cosine
+distances, and `SHOW RANGES` proving the range is replicated **RF=3** (`["43","45","85"]`)
+across the Cloud cluster.
+
 ## Honest comparison to single-node pgvector
 
 We do **not** claim lower latency or higher recall than pgvector — on one node a tuned

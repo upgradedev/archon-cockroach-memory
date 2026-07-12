@@ -4,12 +4,13 @@
 // (the same DATABASE_URL-gated pattern the rest of the suite uses):
 //   • Test 1 (both paths)  — an ANN recall query returns the correct top-k vs brute-force
 //     ground truth. Runs under the in-memory mock (exact) and real CockroachDB (ANN).
-//   • Test 2 (real DB only) — loads a corpus large enough that the native vector index
-//     auto-splits into >=2 KV ranges, then proves ONE recall query fans out across those
-//     ranges and still returns the correct top-k, and that EXPLAIN plans a `vector search`
-//     node. Skipped under the mock (SHOW RANGES / EXPLAIN are not modelled there).
+//   • Test 2 (real DB only) — forces the memory table into >=2 KV ranges with enforced
+//     primary-key `SPLIT AT` (deterministic, size-independent — not a natural size-driven
+//     auto-split), then proves ONE recall query fans out across those ranges and still
+//     returns the correct top-k, and that EXPLAIN plans a `vector search` node. Skipped
+//     under the mock (SHOW RANGES / EXPLAIN are not modelled there).
 //
-// This turns docs/BENCHMARK.md Result 3 (multi-range distribution) from asserted into
+// This turns docs/BENCHMARK.md Result 3b (multi-range fan-out) from asserted into
 // tested. The heavy path shares one code path + one corpus load with scripts/fanout-demo.ts.
 
 import { test, before, after } from "node:test";
