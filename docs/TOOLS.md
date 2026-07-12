@@ -1,8 +1,9 @@
 # Tool identification — CockroachDB features + AWS services used
 
 Required by the hackathon rules: which CockroachDB tools and which AWS services this
-entry uses, and exactly how. Archon Memory uses **3 of the 4** CockroachDB required
-features (2 are required) and **Amazon Bedrock** on the AWS side.
+entry uses, and exactly how. Archon Memory uses **2 of the 4** CockroachDB required
+features fully (2 are required; a third is partial/stretch) and **Amazon Bedrock** on
+the AWS side.
 
 ## CockroachDB features
 
