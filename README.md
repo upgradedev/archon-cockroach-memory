@@ -116,7 +116,8 @@ identical before/after the audit). Run the live self-audit in the demo: `npm run
 ## Benchmark & distribution — why this is a real memory layer, not a demo
 
 Full methodology + numbers: **[docs/BENCHMARK.md](./docs/BENCHMARK.md)**. Reproduce with
-`npm run benchmark` and `bash scripts/show-distribution.sh` (harness: `scripts/benchmark.ts`).
+`npm run benchmark`, `npm run fanout:demo`, and `bash scripts/show-distribution.sh`
+(harnesses: `scripts/benchmark.ts`, `scripts/fanout-demo.ts`).
 
 The vector index is **approximate** (C-SPANN), so the metric that matters is **recall@k**:
 of the true top-k nearest memories, how many does the index return? Ground truth is the
@@ -126,6 +127,7 @@ exact top-k computed by brute force in JS over the same seeded vectors, so recal
 |---|---|
 | **recall@10** across the data-hardness spectrum | **96.5%** (uniform, worst case) → **~99%** (structured) |
 | **index quality — recall vs `vector_search_beam_size`** (uniform) | **29% → 96.5%** as the search visits more partitions |
+| **multi-range fan-out** (`npm run fanout:demo`, single node) | memory forced into **≥2 KV ranges** (enforced `SPLIT AT`); one unscoped ANN recall **fans out across them** — top-k drawn from ≥2 ranges — and stays correct (recall@10 ~99%) with a `vector search` plan |
 | **distribution** (3-node cluster) | 11 ranges, **RF=3 on all nodes**, leaseholders across all 3 |
 | **live Cloud** (v25.4.10, eu-west-1) | recall + `vector search` EXPLAIN verified |
 
@@ -135,9 +137,20 @@ effort). The differentiator is **architectural** and demonstrated: a tuned singl
 pgvector may be faster on one box, but it has **one copy on one machine** — no replication,
 no node-loss survival, no scale-out. CockroachDB gives the agent a memory that is durable,
 distributed, and survivable, with the vector index **native in the same database** as the
-relational data. (At this corpus size the vector index is a single RF=3 range; multi-range
-ANN fan-out is CockroachDB's documented auto-split behaviour at scale, asserted not
-demonstrated here — the demonstrated differentiator is RF=3 survivability + leaseholder spread.)
+relational data.
+
+**Multi-range ANN fan-out — now demonstrated, not just asserted.** A single ANN recall query
+has to fan out across every KV range the memory spans and merge the results correctly.
+`npm run fanout:demo` ([`scripts/fanout-demo.ts`](./scripts/fanout-demo.ts)) proves it
+deterministically on a tiny dataset: it forces the `agent_memory` table into multiple KV ranges
+with **enforced primary-key `SPLIT AT`** (CockroachDB splits a table into N ranges regardless of
+size), then runs one **unscoped** ANN recall — served by the global vector index (`EXPLAIN` →
+`vector search → lookup join`). It shows the query **fans out**: the returned top-k neighbours come
+from **≥2 distinct ranges**, recall@k stays at the brute-force ground-truth floor (~99%), and the
+plan is a `vector search` node (not a scan). Gated in CI by [`tests/fanout.test.ts`](./tests/fanout.test.ts).
+(At production scale the vector index *itself* also auto-splits into ranges — the 3-node proof in
+Result 3, [docs/BENCHMARK.md](./docs/BENCHMARK.md), shows those ranges replicated **RF=3 across
+nodes**; we don't gate CI on loading enough data to force that natural split.)
 
 ## Quality & testing — the tests are held to the same self-auditing bar
 
@@ -180,6 +193,7 @@ repos/cockroachdb/
 │   ├── apply-schema.ts          # apply schema.sql to DATABASE_URL
 │   ├── demo-memory.ts           # end-to-end ingest → recall → narrate round trip
 │   ├── benchmark.ts             # recall@k + latency + vector_search_beam_size sweep
+│   ├── fanout-demo.ts           # multi-range ANN fan-out demo (SPLIT AT → recall fans out across ranges)
 │   ├── load-corpus.ts           # load clustered vectors (feeds the distribution demo)
 │   ├── show-distribution.sh     # per-node range distribution + survivability proof
 │   └── provision-cluster.sh     # ccloud CLI — provision the Cloud Serverless cluster
@@ -192,7 +206,11 @@ repos/cockroachdb/
     ├── narrator.test.ts         # no-infra narrator tests (FakeNarrator + BedrockNarrator w/ canned client)
     ├── consistency.test.ts      # no-infra self-audit tests (detection + precision + resolution, labelled)
     ├── pipeline.test.ts         # recall→narrate integration (live CockroachDB, DATABASE_URL-gated, offline fakes)
-    └── consistency.e2e.test.ts  # self-audit over live CockroachDB — flags + recommends, read-only (DATABASE_URL-gated)
+    ├── consistency.e2e.test.ts  # self-audit over live CockroachDB — flags + recommends, read-only (DATABASE_URL-gated)
+    ├── integration.test.ts      # DB-client ↔ memory ↔ consistency integration (mock offline / live CRDB)
+    ├── load.test.ts             # concurrent pool + remember/recall load exercise (mock offline / live CRDB)
+    ├── fanout.test.ts           # multi-range ANN fan-out — recall correctness (both) + >=2-range gate (live CRDB)
+    └── db_mock.ts               # in-memory pg mock (vector cosine + Date semantics) for the offline path
 ```
 
 ## Quickstart
@@ -246,9 +264,10 @@ Archon is our own product; this entry reuses the public Archon challenge build f
 - [x] Wire `MemoryAgent` end-to-end: `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrator). Demo + tests cover the offline path; real Bedrock is a creds swap.
 - [x] Benchmark the vector index (recall@k, latency, `vector_search_beam_size` sweep) — `scripts/benchmark.ts`, results in `docs/BENCHMARK.md`; recall floor smoke gates CI.
 - [x] Prove distribution + survivability on a multi-node cluster — `docker-compose.cluster.yml` + `scripts/show-distribution.sh`.
+- [x] Demonstrate multi-range ANN fan-out (memory forced into ≥2 KV ranges via `SPLIT AT`; one unscoped recall fans out — top-k from ≥2 ranges — with correct top-k) — `scripts/fanout-demo.ts` + `tests/fanout.test.ts`, CI-gated.
 - [x] Verify the live CockroachDB Cloud recall path (v25.4.10, eu-west-1) — `vector search` EXPLAIN confirmed.
 - [ ] Deploy the agent API on AWS Lambda/ECS + a public demo URL.
-- [ ] `provision-cluster.sh` (ccloud) + CockroachDB Cloud MCP Server as memory-recall tool.
+- [ ] Expose memory recall through the CockroachDB Cloud Managed MCP Server as an agent tool.
 - [ ] Sub-3-minute demo video.
 
 ## License
