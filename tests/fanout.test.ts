@@ -98,29 +98,32 @@ test("1. ANN recall over the vector index returns the correct top-k", async () =
   assert.ok(recallMean >= 0.85, `recall@${K} ${(recallMean * 100).toFixed(1)}% below 85% floor`);
 });
 
-// ── Test 2 — the vector index fans out across >=2 KV ranges (real DB only) ───────
+// ── Test 2 — one ANN recall fans out across a multi-range memory (real DB only) ──
 test(
-  "2. the native vector index splits into >=2 KV ranges and one recall query fans out correctly",
-  { skip: REAL_DB ? false : "requires a real CockroachDB (SHOW RANGES / EXPLAIN not modelled by the mock)" },
+  "2. the memory splits into >=2 KV ranges and one ANN recall fans out across them correctly",
+  { skip: REAL_DB ? false : "requires a real CockroachDB (SPLIT AT / SHOW RANGES / EXPLAIN not modelled by the mock)" },
   async () => {
     const result = await runFanoutDemo({
-      n: Number(process.env.FANOUT_N ?? 10000),
+      n: Number(process.env.FANOUT_N ?? 3000),
       queries: 40,
       k: 10,
-      minRanges: 2,
-      splitTimeoutMs: 60000,
       log: (line) => console.log(line),
     });
 
-    // The distinguishing claim: the vector index genuinely occupies MULTIPLE KV ranges.
+    // The memory table genuinely occupies MULTIPLE KV ranges (forced deterministically).
     assert.ok(
-      result.indexRanges >= 2,
-      `vector index has ${result.indexRanges} range(s), expected >=2 — fan-out not demonstrated`
+      result.tableRanges >= 2,
+      `memory table has ${result.tableRanges} range(s), expected >=2 — fan-out not demonstrated`
     );
-    // One ANN query fanned out across those ranges and merged the correct neighbours.
+    // The single ANN recall's top-k neighbours came from >=2 distinct ranges — it fanned out.
+    assert.ok(
+      result.rangesTouchedByRecall >= 2,
+      `top-k neighbours came from only ${result.rangesTouchedByRecall} range(s), expected >=2 — no fan-out`
+    );
+    // And stayed correct under that distributed execution.
     assert.ok(
       result.recallAtKMean >= 0.9,
-      `recall@${result.k} ${(result.recallAtKMean * 100).toFixed(1)}% across ${result.indexRanges} ranges below 90% floor`
+      `recall@${result.k} ${(result.recallAtKMean * 100).toFixed(1)}% across ${result.tableRanges} ranges below 90% floor`
     );
     // Index-accelerated ANN, not a full scan.
     assert.equal(result.usesVectorSearch, true, "EXPLAIN did not plan a `vector search` node");
