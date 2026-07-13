@@ -274,7 +274,7 @@ const CHECKS: CheckSpec[] = [
     kind: "user-gated",
     run: () => ({
       status: "user-gated",
-      detail: "LIVE AWS Function URL reachability is verified by the operator against real infra (repo alone cannot prove a live URL). Build+deploy is one command — `DATABASE_URL=… bash aws/deploy-lambda.sh`; the deployed URL is recorded in docs/DEMO_URL.md.",
+      detail: "LIVE AWS Function URL reachability is verified by the operator against real infra (repo alone cannot prove a live URL). DEPLOYED + verified 2026-07-13: a SigV4-signed request to the us-west-2 Function URL returned HTTP 200 with a real Claude Sonnet answer over CockroachDB Cloud — recorded in docs/DEMO_URL.md. Redeploy: `DATABASE_URL=… bash aws/deploy-lambda.sh`.",
     }),
   },
 

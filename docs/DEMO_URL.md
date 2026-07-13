@@ -7,26 +7,49 @@ Function URL**. It runs **real** AWS Bedrock Titan embeddings + Claude Sonnet na
 
 ## Live URL
 
-<!-- LIVE_URL -->
-_Deploy with `DATABASE_URL='postgresql://…' bash aws/deploy-lambda.sh`; the script prints
-and this doc records the Function URL._
+**`https://g5ocwu4w33tkcnmfmbh3nstbxy0hqdxa.lambda-url.us-west-2.on.aws/`**
 
-## Usage
+- **Region:** us-west-2 · **Runtime:** nodejs20.x (zip) · **Auth:** `AWS_IAM` (SigV4-signed).
+- **Why IAM, not anonymous:** this AWS account blocks anonymous (`AuthType NONE`) Function
+  URLs with an account/org guardrail — an unauthenticated request returns `403 Forbidden`
+  even with a correct config + public resource policy. IAM auth is explicitly allowed by the
+  challenge rules, so the URL is deployed with `AWS_IAM` and invoked with a signed request.
+  (To deploy anonymously on an account without that guardrail: `FURL_AUTH_TYPE=NONE bash
+  aws/deploy-lambda.sh`.)
+
+Deploy / redeploy: `DATABASE_URL='postgresql://…' bash aws/deploy-lambda.sh` (idempotent).
+
+## Usage (SigV4-signed)
 
 ```bash
-# health / usage
-curl "$URL"
+URL="https://g5ocwu4w33tkcnmfmbh3nstbxy0hqdxa.lambda-url.us-west-2.on.aws/"
+AKID="$(aws configure get aws_access_key_id)"; SECRET="$(aws configure get aws_secret_access_key)"
 
-# ask the agent's memory a question (GET)
-curl "$URL?q=What+was+the+true+employer+cost+and+the+off-bank+wedge%3F"
-
-# or POST JSON
-curl -X POST "$URL" -H 'content-type: application/json' \
+# ask the agent's memory a question
+curl --aws-sigv4 "aws:amz:us-west-2:lambda" --user "$AKID:$SECRET" \
+  -X POST "$URL" -H 'content-type: application/json' \
   -d '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}'
 ```
 
-The response contains the grounded `answer`, the Bedrock `modelId`, the number of memories
-`recalled`, and the `citations` (the exact memories the answer is grounded in).
+The response carries the grounded `answer`, the Bedrock `modelId`, the number of memories
+`recalled`, the `citations` (the exact memories the answer is grounded in), and
+`consistencyOk` (the self-audit over the recalled top-k).
+
+## Verified live response (2026-07-13)
+
+A signed request returned **HTTP 200** with a real **Claude Sonnet** answer
+(`modelId: us.anthropic.claude-sonnet-4-6`) grounded in real **CockroachDB Cloud** memories
+recalled via real **Titan** embeddings — the model even flagged a stored contradiction:
+
+> "…a discrepancy worth flagging: the two invoice totals conflict, with one record showing
+> €18,900 and a 'confirmed' record showing €18,400, which warrants reconciliation…"
+
+```json
+{ "modelId": "us.anthropic.claude-sonnet-4-6", "recalled": 3,
+  "citations": [ { "marker": "[1]", "kind": "document",
+                   "content": "Invoice INV-2043 for Northwind Traders totalled €18,900 (later note)." }, … ],
+  "consistencyOk": false }
+```
 
 ## How it is deployed
 
