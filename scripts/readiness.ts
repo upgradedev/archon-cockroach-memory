@@ -248,14 +248,90 @@ const CHECKS: CheckSpec[] = [
     }),
   },
   {
+    id: "aws.demo-url-artifacts",
+    criterion: "AWS integration",
+    weight: 2,
+    kind: "automatable",
+    run: () => {
+      // The buildable, reproducible demo-URL artifacts: a ~thin HTTP handler wrapping
+      // MemoryAgent.recallAnswer, the Lambda Function URL adapter, a container image,
+      // and a one-command deploy script (docker→ECR container, or docker-free esbuild zip).
+      const core = has("src/http/handler.ts") && contains("src/http/handler.ts", /recallAnswer/);
+      const lambda = has("src/lambda.ts") && contains("src/lambda.ts", /handleRecall/);
+      const dockerfile = has("aws/Dockerfile") && contains("aws/Dockerfile", /lambda\.handler/);
+      const deploy = has("aws/deploy-lambda.sh") && contains("aws/deploy-lambda.sh", /create-function-url-config/) && contains("aws/deploy-lambda.sh", /bedrock:InvokeModel/);
+      return autobool(
+        core && lambda && dockerfile && deploy,
+        "demo-URL artifacts present: recall HTTP handler + Lambda Function URL adapter + container Dockerfile + one-command deploy script (ECR container or esbuild zip, IAM bedrock:InvokeModel).",
+        `demo-URL artifacts incomplete (core=${core}, lambda=${lambda}, dockerfile=${dockerfile}, deploy=${deploy}).`
+      );
+    },
+  },
+  {
     id: "aws.demo-url",
     criterion: "AWS integration",
     weight: 2,
     kind: "user-gated",
     run: () => ({
       status: "user-gated",
-      detail: "AWS-hosted demo URL (Lambda/ECS recall API) — build-then-deploy, user-gated (no handler in src/ yet; README roadmap item).",
+      detail: "LIVE AWS Function URL reachability is verified by the operator against real infra (repo alone cannot prove a live URL). Build+deploy is one command — `DATABASE_URL=… bash aws/deploy-lambda.sh`; the deployed URL is recorded in docs/DEMO_URL.md.",
     }),
+  },
+
+  // ═══════════ Application security (pen-test) ═══════════
+  {
+    id: "security.pentest-suite",
+    criterion: "Application security",
+    weight: 3,
+    kind: "automatable",
+    run: () => {
+      const suite = has("tests/security.test.ts");
+      // AuthZ (MCP write/read tool boundary), injection (parameterized-query safety
+      // asserted against real CockroachDB), tenant/scope isolation, sensitive-data
+      // exposure, and input-abuse bounds — the real threat model, not a token file.
+      const covers = ["AuthZ", "Injection", "Isolation", "Exposure", "Abuse"].every((m) => contains("tests/security.test.ts", new RegExp(m)));
+      const wiredTest = contains("package.json", /tests\/security\.test\.ts/);
+      // A dedicated pen-test CI job stands up its own CockroachDB and runs the suite
+      // (so the parameterized-query assertion executes against a real engine).
+      const ciJob = ciHas(/pen-test:/) && ciHas(/tests\/security\.test\.ts|test:security/);
+      return autobool(
+        suite && covers && wiredTest && ciJob,
+        "security.test.ts covers AuthZ + injection (real-CRDB parameterization) + tenant isolation + data-exposure + abuse bounds; wired into `npm test` AND a dedicated pen-test CI job (own CockroachDB).",
+        `pen-test suite incomplete (suite=${suite}, covers=${covers}, wired=${wiredTest}, ci-job=${ciJob}).`
+      );
+    },
+  },
+  {
+    id: "security.dep-cve-gate",
+    criterion: "Application security",
+    weight: 1,
+    kind: "automatable",
+    run: () =>
+      autobool(
+        ciHas(/dep-audit:/) && ciHas(/npm audit/),
+        "dependency-CVE gate wired in CI (npm audit, fails on high/critical).",
+        "dependency-CVE gate (npm audit) not wired in CI."
+      ),
+  },
+
+  // ═══════════ Performance / load ═══════════
+  {
+    id: "load.k6-recall",
+    criterion: "Performance & load",
+    weight: 2,
+    kind: "automatable",
+    run: () => {
+      const script = has("load/recall.js") && has("load/seed.ts");
+      // p95 latency SLO + recall@1 correctness threshold under concurrency.
+      const slo = contains("load/recall.js", /p\(95\)</) && contains("load/recall.js", /recall_correct/);
+      const wired = ciHas(/load:/) && ciHas(/k6 run/);
+      const referenced = contains("README.md", /p95|SLO/i) || contains("docs/BENCHMARK.md", /p95|SLO/i);
+      return autobool(
+        script && slo && wired && referenced,
+        "k6 load script (load/recall.js) drives the recall/vector-search path with a p95 SLO + recall@1 threshold under concurrency; run by a dedicated `load` CI job; SLO referenced in README/BENCHMARK.",
+        `load test incomplete (script=${script}, slo=${slo}, ci-wired=${wired}, referenced=${referenced}).`
+      );
+    },
   },
 
   // ═══════════ Technical / reproducibility ═══════════
@@ -273,6 +349,24 @@ const CHECKS: CheckSpec[] = [
         wired && suiteFiles,
         "full offline test suite wired into CI build-test (`npm test`); readiness runs only after it is green (ci.yml `needs`).",
         `offline suite wiring incomplete (ci-wired=${wired}, files=${suiteFiles}).`
+      );
+    },
+  },
+  {
+    id: "tech.e2e-journeys",
+    criterion: "Technical & reproducibility",
+    weight: 2,
+    kind: "automatable",
+    run: () => {
+      const suite = has("tests/e2e.test.ts");
+      // Meaningful journey count (8+): ingest→recall→cited→audit→MCP→fan-out→edges→resilience.
+      const journeys = (read("tests/e2e.test.ts").match(/^test\(/gm) ?? []).length;
+      const enough = journeys >= 8;
+      const wired = contains("package.json", /tests\/e2e\.test\.ts/) && ciHas(/npm test/);
+      return autobool(
+        suite && enough && wired,
+        `end-to-end journey suite (tests/e2e.test.ts, ${journeys} journeys) wired into CI \`npm test\` — runs against the mock offline and the real CockroachDB in CI.`,
+        `e2e journeys incomplete (suite=${suite}, journeys=${journeys}/8, wired=${wired}).`
       );
     },
   },
