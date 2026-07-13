@@ -197,6 +197,26 @@ the suite ran against a live cluster). It was root-fixed — normalize in `recal
 now returning a `Date` like the real driver, so this class of bug is caught offline (reverting
 the fix fails an integration test with the exact CI error).
 
+**Testing layers.** Beyond the unit + integration suites, the entry ships four defence-in-depth
+layers, each wired into CI (the mock runs offline; the real CockroachDB runs in CI):
+
+- **Pen-test** ([`tests/security.test.ts`](./tests/security.test.ts), CI `pen-test` job with its own
+  CockroachDB): AuthZ over the MCP tool boundary (the `remember` write tool is separated from the
+  read-only `recall`/`audit` tools, and the read tools mutate nothing), injection safety proven
+  against a **real** engine (a `'; DROP TABLE …` payload round-trips as data via parameterized
+  queries — the table survives), tenant/scope isolation (one company's recall can't read another's),
+  sensitive-data-exposure (no DSN/creds/embedding vectors in responses or error paths), input-abuse
+  bounds, plus a dependency-CVE gate (`npm audit`).
+- **Load** ([`load/recall.js`](./load/recall.js), CI `load` job): a k6 test drives the recall /
+  vector-search path at 20 concurrent VUs and enforces a **p95 latency SLO + recall@1 correctness**
+  threshold (see [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 5).
+- **Extensive E2E** ([`tests/e2e.test.ts`](./tests/e2e.test.ts)): 10 full journeys —
+  ingest→recall→cited answer→self-audit→MCP round-trip→multi-tenant fan-out→dangling-reference→
+  pool-reconnect resilience→edge cases (+ a gated real-Bedrock journey).
+- **Demo Function URL** ([`aws/deploy-lambda.sh`](./aws/deploy-lambda.sh)): the recall path deployed
+  as a public AWS Lambda + Function URL (real Titan + Claude over CockroachDB Cloud). See
+  [docs/DEMO_URL.md](./docs/DEMO_URL.md).
+
 ## Readiness gate
 
 The entry ships a **machine-checkable readiness gate** — the same self-auditing philosophy

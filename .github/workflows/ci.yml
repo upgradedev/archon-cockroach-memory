@@ -163,12 +163,101 @@ jobs:
         if: failure()
         run: docker compose -f docker-compose.cluster.yml logs || true
 
-  # Stage 3 — the READINESS GATE. Runs ONLY after the offline suite (build-test) and
-  # the node-kill survival job (cluster-survival) are green, so its "offline suite green"
-  # and "node-kill CI-proven" checks reflect real CI state, not just committed files.
+  # Stage 2d — PEN-TEST. Stands up its OWN CockroachDB and runs the application-security
+  # suite (tests/security.test.ts) with DATABASE_URL set, so the injection /
+  # parameterized-query assertions execute against a REAL engine (the in-memory mock
+  # cannot prove SQL parameterization). Covers AuthZ (MCP write/read tool boundary),
+  # injection, tenant/scope isolation, sensitive-data exposure, and input-abuse bounds.
+  pen-test:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Start CockroachDB (v25.2+ native vector indexing)
+        run: |
+          docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
+            cockroachdb/cockroach:latest start-single-node --insecure
+          for i in $(seq 1 30); do
+            if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
+            sleep 2
+          done
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+          docker exec crdb cockroach sql --insecure -e "SELECT 1"
+      - name: Apply schema
+        run: npm run db:schema
+      - name: Application-security suite (real-CRDB parameterization proof)
+        run: npm run test:security
+      - name: Dump CockroachDB logs on failure
+        if: failure()
+        run: docker logs crdb || true
+
+  # Stage 2e — LOAD. Drives the recall / vector-search path under concurrency with k6
+  # against a real CockroachDB (offline of AWS → FakeEmbedder/FakeNarrator, same recall
+  # path). k6 thresholds enforce the p95 latency SLO + recall@1 correctness; a regression
+  # that breaches either FAILS this job. Bounded (20 VUs, 20s).
+  load:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+      LOAD_N: "2000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Install k6 (pinned)
+        run: |
+          curl -sSL https://github.com/grafana/k6/releases/download/v0.52.0/k6-v0.52.0-linux-amd64.tar.gz | tar -xz
+          sudo mv k6-v0.52.0-linux-amd64/k6 /usr/local/bin/k6
+          k6 version
+      - name: Start CockroachDB
+        run: |
+          docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
+            cockroachdb/cockroach:latest start-single-node --insecure
+          for i in $(seq 1 30); do
+            if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
+            sleep 2
+          done
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+      - name: Apply schema
+        run: npm run db:schema
+      - name: Seed the load corpus
+        run: npm run load:seed
+      - name: Start the recall server
+        run: |
+          PORT=8787 npm run serve &
+          echo $! > server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8787/health >/dev/null 2>&1; then echo "server up"; break; fi
+            sleep 1
+          done
+      - name: k6 load test (p95 SLO + recall@1 under concurrency)
+        run: k6 run -e BASE_URL=http://localhost:8787 -e LOAD_N=2000 load/recall.js
+      - name: Stop server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
+      - name: Dump CockroachDB logs on failure
+        if: failure()
+        run: docker logs crdb || true
+
+  # Stage 3 — the READINESS GATE. Runs ONLY after the offline suite (build-test), the
+  # node-kill survival job (cluster-survival), the pen-test job, and the load job are
+  # green, so its checks reflect real CI state, not just committed files.
   # Fails the build if automatable completeness < 95%. Publishes readiness.json.
   readiness:
-    needs: [build-test, cluster-survival]
+    needs: [build-test, cluster-survival, pen-test, load]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

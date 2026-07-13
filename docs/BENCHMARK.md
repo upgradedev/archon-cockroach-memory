@@ -166,6 +166,33 @@ search`** node — the distributed index is used (ANN), not a scan. TLS is
 distances, and `SHOW RANGES` proving the range is replicated **RF=3** (`["43","45","85"]`)
 across the Cloud cluster.
 
+## Result 5 — concurrent recall under load (k6 SLO)
+
+A [k6](https://k6.io) load test (`load/recall.js`) drives the **recall / vector-search
+path** — the same `MemoryAgent.recallAnswer` the demo Function URL uses — through the
+HTTP server (`src/http/server.ts`) against a real CockroachDB, at **20 concurrent virtual
+users for 20 s** over a **2,000-memory** corpus. Each request poses the *exact text* of a
+seeded memory, so recall is deterministic and correctness is measurable under concurrency.
+
+**Reference SLO (enforced as k6 thresholds — the `load` CI job fails on a breach):**
+
+| Metric | SLO threshold |
+|---|---|
+| Recall latency **p95** | **< 1500 ms** |
+| **recall@1** correctness under concurrency | **≥ 0.99** |
+| Request error rate | **< 1%** |
+
+The thresholds live in `load/recall.js`; the CI `load` job installs k6, seeds the corpus
+(`npm run load:seed`), starts the server, and runs `k6 run load/recall.js`. A regression
+that breaches the p95 SLO or drops recall@1 fails the build.
+
+```bash
+# concurrent recall load test (needs a running DB + server)
+npm run db:schema && LOAD_N=2000 npm run load:seed
+PORT=8787 npm run serve &                       # start the recall server
+k6 run -e BASE_URL=http://localhost:8787 -e LOAD_N=2000 load/recall.js
+```
+
 ## Honest comparison to single-node pgvector
 
 We do **not** claim lower latency or higher recall than pgvector — on one node a tuned

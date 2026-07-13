@@ -16,12 +16,17 @@
     "load:corpus": "tsx scripts/load-corpus.ts",
     "mcp:server": "tsx scripts/mcp-server.ts",
     "readiness": "tsx scripts/readiness.ts",
+    "serve": "tsx src/http/server.ts",
+    "demo:seed": "tsx scripts/seed-demo.ts",
+    "load:seed": "tsx load/seed.ts",
     "typecheck": "tsc --noEmit",
     "video:build": "python scripts/build_video.py",
     "video:frames": "python scripts/build_video.py --frames",
-    "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts tests/load.test.ts tests/integration.test.ts tests/fanout.test.ts tests/mcp.test.ts tests/readiness.test.ts tests/bedrock.integration.test.ts",
-    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts tests/load.test.ts tests/integration.test.ts tests/fanout.test.ts tests/mcp.test.ts tests/readiness.test.ts tests/bedrock.integration.test.ts",
-    "test:bedrock": "node --import tsx --test --test-concurrency=1 tests/bedrock.integration.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts tests/load.test.ts tests/integration.test.ts tests/fanout.test.ts tests/mcp.test.ts tests/security.test.ts tests/e2e.test.ts tests/readiness.test.ts tests/bedrock.integration.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-concurrency=1 tests/memory.test.ts tests/narrator.test.ts tests/consistency.test.ts tests/pipeline.test.ts tests/consistency.e2e.test.ts tests/load.test.ts tests/integration.test.ts tests/fanout.test.ts tests/mcp.test.ts tests/security.test.ts tests/e2e.test.ts tests/readiness.test.ts tests/bedrock.integration.test.ts",
+    "test:bedrock": "node --import tsx --test --test-concurrency=1 tests/bedrock.integration.test.ts",
+    "test:security": "node --import tsx --test --test-concurrency=1 tests/security.test.ts",
+    "test:e2e": "node --import tsx --test --test-concurrency=1 tests/e2e.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1075.0",
