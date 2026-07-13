@@ -17,6 +17,7 @@
     "mcp:server": "tsx scripts/mcp-server.ts",
     "readiness": "tsx scripts/readiness.ts",
     "serve": "tsx src/http/server.ts",
+    "demo:seed": "tsx scripts/seed-demo.ts",
     "load:seed": "tsx load/seed.ts",
     "typecheck": "tsc --noEmit",
     "video:build": "python scripts/build_video.py",

@@ -35,20 +35,34 @@ The response carries the grounded `answer`, the Bedrock `modelId`, the number of
 `recalled`, the `citations` (the exact memories the answer is grounded in), and
 `consistencyOk` (the self-audit over the recalled top-k).
 
+## Seeding the demo data
+
+The Cloud store is seeded with a representative fused payroll event (real Titan embeddings)
+so the headline question answers substantively:
+
+```bash
+AWS_PROFILE=default DATABASE_URL='postgresql://…' DEMO_RESET=1 npm run demo:seed
+```
+
 ## Verified live response (2026-07-13)
 
-A signed request returned **HTTP 200** with a real **Claude Sonnet** answer
-(`modelId: us.anthropic.claude-sonnet-4-6`) grounded in real **CockroachDB Cloud** memories
-recalled via real **Titan** embeddings — the model even flagged a stored contradiction:
+A signed request to the live URL with the headline question returned **HTTP 200** with a real
+**Claude Sonnet** answer (`modelId: us.anthropic.claude-sonnet-4-6`) grounded in real
+**CockroachDB Cloud** memories recalled via real **Titan** embeddings:
 
-> "…a discrepancy worth flagging: the two invoice totals conflict, with one record showing
-> €18,900 and a 'confirmed' record showing €18,400, which warrants reconciliation…"
+> "In April 2026, Helios SA had **4 employees** with a true employer cost of **€15,375** [2].
+> The bank salary transfer was only **€8,600**, creating an off-bank employer-cost wedge of
+> **€6,775** — driven primarily by employer social-security contributions of **€3,075**
+> (approximately 35.8% of the bank transfer alone) [1][2]."
 
 ```json
-{ "modelId": "us.anthropic.claude-sonnet-4-6", "recalled": 3,
-  "citations": [ { "marker": "[1]", "kind": "document",
-                   "content": "Invoice INV-2043 for Northwind Traders totalled €18,900 (later note)." }, … ],
-  "consistencyOk": false }
+{ "modelId": "us.anthropic.claude-sonnet-4-6", "recalled": 5,
+  "citations": [
+    { "marker": "[1]", "kind": "insight",
+      "content": "Off-bank employment cost at Helios SA for 2026-04: the bank salary transfer of €8,600 understates the true cost of employing the team by €6,775 …" },
+    { "marker": "[2]", "kind": "payroll_event",
+      "content": "Payroll for Helios SA in 2026-04: 4 employees, gross €12,300, true employer cost €15,375, net paid from bank €8,600." } ],
+  "consistencyOk": true }
 ```
 
 ## How it is deployed
