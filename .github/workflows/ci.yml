@@ -104,3 +104,85 @@ jobs:
       - name: Dump CockroachDB logs on failure
         if: failure()
         run: docker logs crdb || true
+
+  # Stage 2c — node-loss survival, DEMONSTRATED in CI (not just asserted).
+  # Stands up the real 3-node cluster (docker-compose.cluster.yml), applies the
+  # schema, loads a small corpus, then runs show-distribution.sh in STRICT mode:
+  # it kills roach3 (docker stop) and asserts recall STILL serves through roach1
+  # (RF=3 quorum). STRICT=1 makes the script exit non-zero if recall stops serving,
+  # so a regression that breaks node-loss survival FAILS this job. This is what makes
+  # the README "kill any one node → recall keeps serving" claim CI-proven.
+  cluster-survival:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Start the 3-node CockroachDB cluster (RF=3 across roach1/2/3)
+        run: |
+          set -euo pipefail
+          COMPOSE="docker compose -f docker-compose.cluster.yml"
+          $COMPOSE up -d
+          echo "Waiting for the roach1 process to accept exec…"
+          for i in $(seq 1 20); do
+            if $COMPOSE exec -T roach1 cockroach node status --insecure >/dev/null 2>&1; then break; fi
+            # `node status` errors until init, but a non-"cannot exec" error means the process is up.
+            if $COMPOSE exec -T roach1 true >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+          echo "Initializing the cluster (retry until it takes)…"
+          READY=0
+          for i in $(seq 1 30); do
+            $COMPOSE exec -T roach1 cockroach init --insecure >/dev/null 2>&1 || true
+            if $COMPOSE exec -T roach1 cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
+              READY=1; echo "cluster ready after ${i} attempt(s)"; break
+            fi
+            sleep 3
+          done
+          if [ "$READY" -ne 1 ]; then echo "cluster never became ready"; $COMPOSE logs || true; exit 1; fi
+          $COMPOSE exec -T roach1 cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+          $COMPOSE exec -T roach1 cockroach sql --insecure -e "SELECT 1"
+
+      - name: Apply schema to the cluster (VECTOR table + vector index)
+        run: npm run db:schema
+
+      - name: Node-kill survival — STRICT (fails the build if recall stops serving)
+        run: STRICT=1 DIST_N=800 bash scripts/show-distribution.sh
+
+      - name: Dump cluster logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.cluster.yml logs || true
+
+  # Stage 3 — the READINESS GATE. Runs ONLY after the offline suite (build-test) and
+  # the node-kill survival job (cluster-survival) are green, so its "offline suite green"
+  # and "node-kill CI-proven" checks reflect real CI state, not just committed files.
+  # Fails the build if automatable completeness < 95%. Publishes readiness.json.
+  readiness:
+    needs: [build-test, cluster-survival]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Readiness gate (fail if automatable completeness < 95%)
+        run: npm run readiness
+      - name: Upload readiness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readiness-report
+          path: readiness.json

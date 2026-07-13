@@ -84,7 +84,12 @@ verify, tool-identification doc, real-Bedrock smoke). Remaining:
   (`archon-cockroachdb-cluster-27534`, AWS eu-west-1); `provision-cluster.sh` reuses it.
 - **Video:** < 3-min demo of the CockroachDB memory layer (a reproducible terminal-cast build
   lives in `demo/`).
-- **Stretch:** Cloud Managed MCP Server exposing memory recall as an agent tool (3rd feature).
+- **Built (self-hosted MCP surface):** the memory is exposed as a self-hosted MCP server
+  (`src/mcp/server.ts`, `recall`/`audit`/`remember` tools, CI round-trip in `tests/mcp.test.ts`).
+  This is an honest agentic surface, **not** the hosted *Cloud Managed MCP Server* required-feature
+  box — so we still count 2 of the 4 required CockroachDB features.
+- **Stretch:** wire the hosted CockroachDB Cloud Managed MCP Server (console-generated creds) as
+  the hosted counterpart to the self-hosted surface.
 - **Submit:** Devpost form + public repo + demo URL + video.
 
 ## User inputs required (blockers for later sessions)

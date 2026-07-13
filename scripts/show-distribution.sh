@@ -25,6 +25,17 @@ set -euo pipefail
 COMPOSE="docker compose -f docker-compose.cluster.yml"
 SQL() { $COMPOSE exec -T roach1 cockroach sql --insecure -d archon_memory "$@"; }
 LOAD_N="${DIST_N:-6000}"
+# STRICT=1 turns the node-kill survival demo into an ASSERTION: the script exits
+# non-zero if recall does not keep serving after roach3 is stopped (or if it never
+# served before the kill). CI runs it with STRICT=1 so a regression that breaks
+# node-loss survival FAILS the build instead of printing a warning and passing.
+STRICT="${STRICT:-0}"
+strict_fail() {
+  echo "✗ STRICT: $1" >&2
+  # Best-effort restore so a failed strict run still leaves the cluster rerunnable.
+  $COMPOSE start roach3 >/dev/null 2>&1 || true
+  exit 1
+}
 
 echo "→ Loading ${LOAD_N} clustered memories into the distributed vector index"
 LOAD_N="$LOAD_N" npm run load:corpus
@@ -84,7 +95,11 @@ recall_served() {
 }
 
 if [ -n "${QVEC:-}" ]; then
-  echo "→ Before kill: recall through roach1 served $(recall_served) memories."
+  BEFORE=$(recall_served)
+  echo "→ Before kill: recall through roach1 served ${BEFORE} memories."
+  if [ "${STRICT}" = "1" ] && [ "${BEFORE:-0}" -eq 0 ]; then
+    strict_fail "recall served 0 memories BEFORE the node-kill — the corpus/index is not serving; cannot prove survival."
+  fi
   echo "→ Stopping roach3 (docker stop) — simulating a node loss…"
   $COMPOSE stop roach3 >/dev/null 2>&1 || true
   # Give the cluster a moment to shift leaseholders off the downed node.
@@ -99,13 +114,21 @@ if [ -n "${QVEC:-}" ]; then
     fi
     echo "  …leaseholders still failing over (attempt ${attempt}); retrying"
   done
-  if [ "${SERVED:-0}" -eq 0 ]; then
-    echo "  ⚠ recall did not return within the retry window — inspect the cluster manually."
-  fi
   echo "→ Restarting roach3 to restore RF=3 (script stays rerunnable)…"
   $COMPOSE start roach3 >/dev/null 2>&1 || true
   sleep 5
+  if [ "${SERVED:-0}" -eq 0 ]; then
+    if [ "${STRICT}" = "1" ]; then
+      strict_fail "recall did NOT keep serving after roach3 was stopped — node-loss survival not demonstrated."
+    fi
+    echo "  ⚠ recall did not return within the retry window — inspect the cluster manually."
+  else
+    echo "✓ NODE-KILL SURVIVAL DEMONSTRATED: recall kept serving with one node down (RF=3 quorum)."
+  fi
 else
+  if [ "${STRICT}" = "1" ]; then
+    strict_fail "no corpus/query vector loaded — cannot run the node-kill survival demo."
+  fi
   echo "  (no corpus loaded — skipping the node-kill recall)"
 fi
 

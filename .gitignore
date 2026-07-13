@@ -32,6 +32,9 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Readiness gate — generated report (produced by `npm run readiness` / CI)
+readiness.json
+
 # Demo video build — regenerable intermediates (keep the mp4, frames, fixtures + build inputs)
 demo/assets/audio/
 demo/assets/clips/
