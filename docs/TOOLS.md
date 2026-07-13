@@ -38,10 +38,21 @@ the AWS side.
   provisioned and reachable; the schema + vector index are applied and the ANN recall
   path is verified against it.
 
-### 3. Cloud connection / operational surface (stretch, partial)
-- The Cloud cluster is operated through the CockroachDB Cloud console + connection
-  string; exposing recall as a Cloud **Managed MCP Server** tool is the remaining
-  stretch item (roadmap in the README).
+### 3. Agentic MCP surface (self-hosted) + Cloud connection
+- **Self-hosted MCP server (built):** the CockroachDB-backed memory is exposed as an
+  MCP server (`src/mcp/server.ts`, stdio entrypoint `scripts/mcp-server.ts`) with three
+  tools — `recall_memory` (ANN recall over the vector index, read-only), `audit_memory`
+  (self-audit for contradictions/absences, read-only), `remember_memory` (write). A real
+  MCP `Client` drives a full `remember → recall → audit` round trip in CI
+  (`tests/mcp.test.ts`, offline). Any MCP-speaking agent (Claude Code, Cursor, VS Code)
+  can connect to it.
+- **Honest scope:** this is a *self-hosted* MCP surface we run over our own store. It is
+  **not** the hosted CockroachDB Cloud **Managed MCP Server** required-feature box (that
+  product needs console-generated Cloud creds and cannot be self-hosted or exercised
+  reproducibly in CI). Wiring the hosted variant is the remaining stretch item (README
+  roadmap). We therefore still count **2 of the 4** required CockroachDB features.
+- The Cloud cluster itself is operated through the CockroachDB Cloud console + connection
+  string (`scripts/provision-cluster.sh`).
 
 ## AWS services
 

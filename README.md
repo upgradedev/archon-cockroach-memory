@@ -17,7 +17,7 @@ in the repo, not asserted:
 | **Native distributed vector index — C-SPANN, not pgvector.** Semantic recall runs *inside* the database engine; no separate vector store, no `pgvector` extension. | `CREATE VECTOR INDEX … (embedding vector_cosine_ops)` in [`src/db/schema.sql`](./src/db/schema.sql) (C-SPANN k-means partition tree — [docs/BENCHMARK.md](./docs/BENCHMARK.md)). |
 | **The index is actually used — `EXPLAIN` plans a `vector search` node**, not a table scan, so recall is ANN (not brute force). | Verified on v26.2.2, the 3-node cluster, and live Cloud v25.4.10 — [docs/BENCHMARK.md](./docs/BENCHMARK.md) Results 3–4. |
 | **Recall@k measured against brute-force ground truth: 96.5% (uniform, worst case) → 99.6% (structured, 10k memories).** Ground truth = exact top-k by brute-force cosine over the same seeded vectors, so recall is exact. | `npm run benchmark` ([`scripts/benchmark.ts`](./scripts/benchmark.ts)); numbers + methodology in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Results 1–2. |
-| **Survivability a single box can't give: RF=3 on every range + leaseholders spread across all 3 nodes.** Kill any one node and recall keeps serving with zero data loss. | `bash scripts/show-distribution.sh` on `docker-compose.cluster.yml`; per-node range proof in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 3. |
+| **Survivability a single box can't give: RF=3 on every range + leaseholders spread across all 3 nodes.** Kill any one node and recall keeps serving with zero data loss — **demonstrated in CI** (the `cluster-survival` job stops `roach3` and asserts recall still serves, in `STRICT` mode). | `bash scripts/show-distribution.sh` on `docker-compose.cluster.yml` (CI runs it `STRICT=1`); per-node range proof in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 3. |
 
 A tuned single-node pgvector may be faster on one box, but it has one copy on one machine — no
 replication, no node-loss survival, no scale-out. The differentiator here is **architectural
@@ -36,8 +36,13 @@ and demonstrated**, with the vector index native in the *same* database as the r
 |---|---|---|
 | **Distributed Vector Indexing** | `agent_memory.embedding VECTOR(1024)` + a native cosine `CREATE VECTOR INDEX` (CockroachDB C-SPANN, **not** pgvector). Semantic recall plans a `vector search` node (EXPLAIN-verified on v26.2.2, the 3-node cluster, and live Cloud v25.4.10). **Benchmarked: 99.6% recall@10 @ 10k memories; replicated RF=3 + leaseholders spread across 3 nodes.** | ✅ built + **benchmarked** + distribution-proven |
 | **ccloud CLI (Agent-Ready)** | Provisions/manages the CockroachDB Cloud Serverless cluster the deployed app uses (`scripts/provision-cluster.sh`); live cluster in AWS eu-west-1. | ✅ scripted + live cluster reachable |
-| Cloud Managed MCP Server | (stretch) expose memory recall as an MCP tool | ◻ roadmap |
+| Cloud Managed MCP Server | The **hosted** CockroachDB Cloud Managed MCP Server (console-generated creds, not self-hostable/CI-reproducible) is a roadmap item. We instead built a **self-hosted** MCP surface over this same store — see [Agentic MCP surface](#agentic-mcp-surface). | ◻ hosted variant roadmap · self-hosted surface ✅ built |
 | Agent Skills Repo | (stretch) | ◻ roadmap |
+
+> **Honest count:** we use **2 of the 4** required CockroachDB features (Distributed Vector
+> Indexing + ccloud CLI). The self-hosted MCP surface below is a genuine agentic tool surface
+> over the CockroachDB memory, but it is **not** the hosted *Cloud Managed MCP Server* product,
+> so we do not claim that required-feature box (the rules require ≥2; we meet that).
 
 ## AWS services used (1+ required)
 
@@ -113,6 +118,29 @@ and recommends the labelled winner + rule on **every** resolution case. The read
 is proven end-to-end against a live CockroachDB in `tests/consistency.e2e.test.ts` (memory count
 identical before/after the audit). Run the live self-audit in the demo: `npm run memory:demo`.
 
+## Agentic MCP surface
+
+The memory is exposed as a **self-hosted [MCP](https://modelcontextprotocol.io) server**
+([`src/mcp/server.ts`](./src/mcp/server.ts)), so any MCP-speaking agent (Claude Code, Cursor,
+VS Code, a custom orchestrator) can call the CockroachDB-backed memory as tools:
+
+| MCP tool | What it does | Mode |
+|---|---|---|
+| `recall_memory` | ANN recall over the distributed vector index (top-k by meaning, scoped by company/kind) | read-only |
+| `audit_memory` | self-audit for cross-session contradictions + dangling references, with a resolution recommendation | read-only |
+| `remember_memory` | embed and store a new fact | write |
+
+Run it over stdio with `npm run mcp:server` (offline `FakeEmbedder` without AWS creds; real
+Bedrock Titan with them — same tools, same store). A full **round-trip is tested in CI**
+([`tests/mcp.test.ts`](./tests/mcp.test.ts)): a real MCP `Client` connects over an in-process
+transport, lists the tools, and drives `remember → recall → audit` against the CockroachDB
+memory layer — offline, no DB or AWS required.
+
+This is an **honest** agentic surface we run ourselves; it is **not** the hosted CockroachDB
+*Cloud Managed MCP Server* product (which needs console-generated Cloud creds and cannot be
+self-hosted or exercised reproducibly in CI). That hosted variant remains a roadmap item — we
+do not claim its required-feature box.
+
 ## Benchmark & distribution — why this is a real memory layer, not a demo
 
 Full methodology + numbers: **[docs/BENCHMARK.md](./docs/BENCHMARK.md)**. Reproduce with
@@ -167,6 +195,30 @@ the suite ran against a live cluster). It was root-fixed — normalize in `recal
 now returning a `Date` like the real driver, so this class of bug is caught offline (reverting
 the fix fails an integration test with the exact CI error).
 
+## Readiness gate
+
+The entry ships a **machine-checkable readiness gate** — the same self-auditing philosophy
+applied to the *submission* itself. [`scripts/readiness.ts`](./scripts/readiness.ts) encodes the
+judging bar as concrete, evidence-backed checks (run `npm run readiness`; it writes
+`readiness.json` and, in CI, **fails the build if automatable completeness drops below 95%**).
+
+Each check is one of:
+
+- **automatable** — verifiable from the repo alone, and the gate verifies **CI wiring, not just
+  file existence**: e.g. `node-kill CI-proven` is only counted when `show-distribution.sh` kills a
+  node under a `STRICT` assertion **and** ci.yml runs it with `STRICT=1`; `offline suite green`
+  because the `readiness` job `needs:` the green `build-test` + `cluster-survival` jobs. This is
+  what makes the gate reflect **truth** rather than a checklist of touched files.
+- **user-gated** — needs a live cluster / live AWS creds / a hosted URL / a filed form that only
+  the operator can provide (live-cluster `EXPLAIN`, a real Bedrock invocation, the AWS-hosted demo
+  URL, the Devpost form). Reported and listed, never blocking the automatable gate.
+
+The report groups checks by judging criterion (CockroachDB-depth is weighted highest, as the
+load-bearing axis), prints a per-criterion + overall completeness %, and enumerates the
+outstanding user-gated items so the remaining human actions are unambiguous. It is exercised in CI
+two ways: the `readiness` job runs the CLI, and [`tests/readiness.test.ts`](./tests/readiness.test.ts)
+asserts the ≥95% floor offline.
+
 ## Repository layout
 
 ```
@@ -185,6 +237,8 @@ repos/cockroachdb/
 │   ├── agents/
 │   │   ├── memory-agent.ts      # agentic read/write-memory loop (ingestEvent → recallAnswer)
 │   │   └── narrator.ts          # Bedrock Claude RAG narrator (+ offline FakeNarrator)
+│   ├── mcp/
+│   │   └── server.ts           # self-hosted MCP server exposing memory as recall/audit/remember tools
 │   └── extraction/
 │       ├── bedrock.ts           # AWS Bedrock Converse wrapper (reused from Archon AWS build)
 │       └── types.ts             # domain types (reused from Archon AWS build)
@@ -195,7 +249,9 @@ repos/cockroachdb/
 │   ├── benchmark.ts             # recall@k + latency + vector_search_beam_size sweep
 │   ├── fanout-demo.ts           # multi-range ANN fan-out demo (SPLIT AT → recall fans out across ranges)
 │   ├── load-corpus.ts           # load clustered vectors (feeds the distribution demo)
-│   ├── show-distribution.sh     # per-node range distribution + survivability proof
+│   ├── show-distribution.sh     # per-node range distribution + STRICT node-kill survivability proof (CI-run)
+│   ├── mcp-server.ts            # stdio entrypoint for the self-hosted memory MCP server
+│   ├── readiness.ts            # readiness gate — weighted, evidence-backed judge-readiness report
 │   └── provision-cluster.sh     # ccloud CLI — provision the Cloud Serverless cluster
 ├── docs/
 │   ├── BENCHMARK.md             # recall/latency/distribution results + methodology
@@ -212,6 +268,8 @@ repos/cockroachdb/
     ├── integration.test.ts      # DB-client ↔ memory ↔ consistency integration (mock offline / live CRDB)
     ├── load.test.ts             # concurrent pool + remember/recall load exercise (mock offline / live CRDB)
     ├── fanout.test.ts           # multi-range ANN fan-out — recall correctness (both) + >=2-range gate (live CRDB)
+    ├── mcp.test.ts              # MCP round-trip — a real MCP Client drives remember/recall/audit (offline)
+    ├── readiness.test.ts        # readiness gate e2e — automatable completeness >=95% (offline, DB-free)
     └── db_mock.ts               # in-memory pg mock (vector cosine + Date semantics) for the offline path
 ```
 
@@ -266,10 +324,13 @@ Archon is our own product; this entry reuses the public Archon challenge build f
 - [x] Wire `MemoryAgent` end-to-end: `ingestEvent` (embed + remember fused events) → `recallAnswer` (vector recall → narrator). Demo + tests cover the offline path; real Bedrock is a creds swap.
 - [x] Benchmark the vector index (recall@k, latency, `vector_search_beam_size` sweep) — `scripts/benchmark.ts`, results in `docs/BENCHMARK.md`; recall floor smoke gates CI.
 - [x] Prove distribution + survivability on a multi-node cluster — `docker-compose.cluster.yml` + `scripts/show-distribution.sh`.
+- [x] **Node-loss survival demonstrated in CI** — the `cluster-survival` CI job stands up the 3-node cluster and runs `show-distribution.sh` in `STRICT=1` mode: it stops `roach3` and asserts recall keeps serving (fails the build otherwise). The "kill any one node → recall keeps serving" claim is CI-proven, not just asserted.
 - [x] Demonstrate multi-range ANN fan-out (memory forced into ≥2 KV ranges via `SPLIT AT`; one unscoped recall fans out — top-k from ≥2 ranges — with correct top-k) — `scripts/fanout-demo.ts` + `tests/fanout.test.ts`, CI-gated.
 - [x] Verify the live CockroachDB Cloud recall path (v25.4.10, eu-west-1) — `vector search` EXPLAIN confirmed.
+- [x] Expose the CockroachDB memory as a **self-hosted MCP server** (`recall`/`audit`/`remember` tools) with a CI round-trip test — `src/mcp/server.ts`, `tests/mcp.test.ts` ([Agentic MCP surface](#agentic-mcp-surface)).
+- [x] **Readiness gate** — a machine-checkable, weighted judge-readiness report (`scripts/readiness.ts`, CI `readiness` job) that fails the build if automatable completeness drops below 95% and lists the user-gated items ([Readiness gate](#readiness-gate)).
 - [ ] Deploy the agent API on AWS Lambda/ECS + a public demo URL.
-- [ ] Expose memory recall through the CockroachDB Cloud Managed MCP Server as an agent tool.
+- [ ] Wire the hosted CockroachDB *Cloud Managed MCP Server* (console-generated creds) — the hosted counterpart to our self-hosted surface.
 - [ ] Sub-3-minute demo video.
 
 ## License
