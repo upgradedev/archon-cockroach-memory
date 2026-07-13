@@ -133,8 +133,10 @@ VS Code, a custom orchestrator) can call the CockroachDB-backed memory as tools:
 Run it over stdio with `npm run mcp:server` (offline `FakeEmbedder` without AWS creds; real
 Bedrock Titan with them — same tools, same store). A full **round-trip is tested in CI**
 ([`tests/mcp.test.ts`](./tests/mcp.test.ts)): a real MCP `Client` connects over an in-process
-transport, lists the tools, and drives `remember → recall → audit` against the CockroachDB
-memory layer — offline, no DB or AWS required.
+transport, lists the tools, and drives `remember → recall → audit` through the protocol against
+the CockroachDB memory layer. It follows the same `DATABASE_URL` gating as the rest of the suite —
+the mock when no DB is configured, and the **real distributed vector index in CI's `build-test`
+job** (which stands CockroachDB up) — needing no AWS either way.
 
 This is an **honest** agentic surface we run ourselves; it is **not** the hosted CockroachDB
 *Cloud Managed MCP Server* product (which needs console-generated Cloud creds and cannot be

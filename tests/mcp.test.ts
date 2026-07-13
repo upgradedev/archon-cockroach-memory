@@ -3,10 +3,12 @@
 //
 // This proves the CockroachDB-backed memory is a real, agent-callable MCP surface:
 // a genuine MCP `Client` lists the tools and calls remember/recall/audit through the
-// protocol (JSON-RPC over InMemoryTransport — deterministic, offline, no subprocess),
-// and the CockroachDB memory layer answers. Runs fully offline: the in-memory pg mock
-// stands in for CockroachDB and the FakeEmbedder for Bedrock Titan, so the whole
-// round trip is verified in CI with no DB and no AWS.
+// protocol (JSON-RPC over InMemoryTransport — deterministic, no subprocess), and the
+// CockroachDB memory layer answers. Same DATABASE_URL gating as the rest of the suite:
+// with no DATABASE_URL (a laptop, or `npm test` alone) it runs against the in-memory pg
+// mock; in CI's build-test job — which sets DATABASE_URL to the live CockroachDB it
+// stands up — the SAME round trip runs against the real distributed vector index. Either
+// way it needs no AWS (the FakeEmbedder stands in for Bedrock Titan).
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
