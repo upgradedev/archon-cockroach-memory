@@ -7,12 +7,10 @@
 // all backed by the same CockroachDB `agent_memory` table and native vector index the
 // rest of the app uses.
 //
-// HONEST SCOPE (see README / docs/TOOLS.md): this is a **self-hosted** MCP server we
-// run over our own CockroachDB store. It is NOT the CockroachDB *Cloud Managed* MCP
-// Server (a hosted CockroachDB Cloud product that needs console-generated creds and
-// cannot be self-hosted or reached reproducibly in CI). We build this honest agentic
-// surface instead; the Cloud-managed hosted variant remains a roadmap item. It does
-// not, on its own, tick the hackathon's "Cloud Managed MCP Server" required-feature box.
+// HONEST SCOPE (see README / docs/TOOLS.md): this is the additional self-hosted MCP
+// surface over our application memory. The separately configured CockroachDB Cloud
+// Managed MCP Server is the counted challenge feature and is verified read-only by
+// scripts/cloud-mcp-audit.ts plus protected deployment workflows.
 //
 // Design mirrors the CockroachDB Cloud Managed MCP surface's safety posture: the read
 // tools (recall, audit) are the default; the write tool (remember) is explicitly
@@ -24,7 +22,12 @@ import {
   defaultEmbedder,
   type Embedder,
 } from "../memory/embeddings.js";
-import { recall, listForAudit, type MemoryKind } from "../memory/memory.js";
+import {
+  auditMemoryCount,
+  recall,
+  listForAudit,
+  type MemoryKind,
+} from "../memory/memory.js";
 import { remember as rememberMemory } from "../memory/memory.js";
 import { auditConsistency } from "../memory/consistency.js";
 
@@ -118,27 +121,56 @@ export function createMemoryMcpServer(embedder: Embedder = defaultEmbedder()): M
     {
       title: "Audit memory for contradictions",
       description:
-        "Scan the stored memory (a plain SELECT over the scope — sees BOTH sides of a " +
-        "conflict, not a top-k slice) for cross-session contradictions (two writes gave " +
+        "Scan a bounded stored-memory slice (a plain SELECT, not vector top-k) for " +
+        "cross-session contradictions (two writes gave " +
         "one record different values) and dangling references, and recommend which value " +
-        "to trust. Strictly read-only: never mutates memory.",
+        "to trust. Returns exact coverage and withholds all-clear when truncated. " +
+        "Strictly read-only: never mutates memory.",
       inputSchema: {
         company: z.string().optional().describe("Scope the audit to one company"),
         period: z.string().optional().describe("Scope the audit to one period"),
         kind: kindSchema.optional().describe("Scope the audit to one memory kind"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(500)
+          .describe("Maximum memories to scan; coverage reports truncation"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ company, period, kind }) => {
-      const memories = await listForAudit({
+    async ({ company, period, kind, limit }) => {
+      const scope = {
         company,
         period,
         kind: kind as MemoryKind | undefined,
-      });
+        limit,
+      };
+      const [memories, total] = await Promise.all([
+        listForAudit(scope, embedder.modelId),
+        auditMemoryCount(scope, embedder.modelId),
+      ]);
       const report = auditConsistency(memories);
+      const coverage = {
+        total,
+        scanned: memories.length,
+        limit,
+        complete: memories.length >= total,
+      };
+      const structured = {
+        ...report,
+        ok: report.ok && coverage.complete,
+        coverage,
+        generatedAt: new Date().toISOString(),
+      };
       const lines: string[] = [
-        `Audited ${report.audited} memories across ${report.subjects} records: ` +
-          (report.ok ? "no conflicts." : "conflicts found."),
+        `Audited ${coverage.scanned} of ${coverage.total} memories across ${report.subjects} records: ` +
+          (!coverage.complete
+            ? "scan truncated; all-clear withheld."
+            : report.ok
+              ? "no findings in the complete scope."
+              : "findings detected."),
       ];
       for (const c of report.contradictions) {
         lines.push(
@@ -152,7 +184,7 @@ export function createMemoryMcpServer(embedder: Embedder = defaultEmbedder()): M
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        structuredContent: report as unknown as Record<string, unknown>,
+        structuredContent: structured as unknown as Record<string, unknown>,
       };
     }
   );
@@ -171,6 +203,11 @@ export function createMemoryMcpServer(embedder: Embedder = defaultEmbedder()): M
         company: z.string().optional(),
         period: z.string().optional(),
         sourceRef: z.string().optional().describe("Originating record id"),
+        idempotencyKey: z
+          .string()
+          .max(256)
+          .optional()
+          .describe("Stable upstream event/request key for retry-safe writes"),
         metadata: z
           .record(z.string(), z.unknown())
           .optional()
@@ -178,13 +215,22 @@ export function createMemoryMcpServer(embedder: Embedder = defaultEmbedder()): M
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ kind, content, company, period, sourceRef, metadata }) => {
+    async ({
+      kind,
+      content,
+      company,
+      period,
+      sourceRef,
+      idempotencyKey,
+      metadata,
+    }) => {
       const id = await rememberMemory(embedder, {
         kind: kind as MemoryKind,
         content,
         company,
         period,
         sourceRef,
+        idempotencyKey,
         metadata,
       });
       return {

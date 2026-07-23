@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Deploy the public Archon Memory recall demo as an AWS Lambda + Function URL.
+# LEGACY / BREAK-GLASS PATH — not the production deployment.
+#
+# The supported path is aws/template.yaml + .github/workflows/deploy-aws.yml. It
+# uses CloudFront, API Gateway, Secrets Manager, canary rollout, observability,
+# and GitHub OIDC. This historical Function URL script remains runnable so old
+# demos are not destroyed, but it places DATABASE_URL in Lambda configuration
+# and therefore must not be used for a judge-facing or production deployment.
+#
+# Deploy the historical Archon Memory recall demo as Lambda + Function URL.
 #
 # The Lambda wraps `new MemoryAgent(defaultEmbedder(), defaultNarrator()).recallAnswer(q)`
 # (src/lambda.ts → src/http/handler.ts): real Bedrock Titan embeddings + Claude
@@ -16,13 +24,23 @@
 #
 # Prereqs: aws CLI (v2) authenticated, and:
 #   DATABASE_URL   CockroachDB Cloud connection string (verify-full)
-# Optional overrides: AWS_REGION (default us-west-2 — Bedrock region on this
-#   account; us-east-1 is gated), FN_NAME, ECR_REPO, RESERVED_CONCURRENCY, MEMORY_MB.
+# Required override: explicit AWS_REGION. Optional: FN_NAME, ECR_REPO,
+# RESERVED_CONCURRENCY, MEMORY_MB.
 #
 #   DATABASE_URL='postgresql://…' bash aws/deploy-lambda.sh
 set -euo pipefail
 
-REGION="${AWS_REGION:-us-west-2}"
+if [ "${ALLOW_LEGACY_DEPLOY:-}" != "1" ]; then
+  echo "Refusing legacy deployment. Use the OIDC SAM workflow." >&2
+  echo "Break glass only: set ALLOW_LEGACY_DEPLOY=1 and an explicit AWS_REGION." >&2
+  exit 2
+fi
+
+echo "WARNING: aws/deploy-lambda.sh is legacy and stores DATABASE_URL in Lambda configuration." >&2
+echo "Use aws/template.yaml through the OIDC deployment workflow for staging/production." >&2
+echo "Continuing only because this compatibility path was invoked explicitly." >&2
+
+REGION="${AWS_REGION:?set an explicit AWS_REGION for the break-glass deployment}"
 FN="${FN_NAME:-archon-cockroach-memory}"
 ROLE="${FN}-role"
 ECR_REPO="${ECR_REPO:-archon-cockroach-memory}"
@@ -31,6 +49,11 @@ MEMORY_MB="${MEMORY_MB:-512}"
 TIMEOUT="${TIMEOUT:-30}"
 BEDROCK_REGION="${BEDROCK_REGION:-$REGION}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PACKAGE_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf -- "$PACKAGE_DIR"
+}
+trap cleanup EXIT
 
 : "${DATABASE_URL:?set DATABASE_URL to the CockroachDB Cloud connection string}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
@@ -59,21 +82,21 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
     || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" >/dev/null
   REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
-  IMAGE="${REGISTRY}/${ECR_REPO}:latest"
+  SOURCE_REVISION="$(git -C "$HERE" rev-parse --verify HEAD)"
+  IMAGE="${REGISTRY}/${ECR_REPO}:${SOURCE_REVISION}"
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
   docker build -f "$HERE/aws/Dockerfile" -t "$IMAGE" "$HERE"
   docker push "$IMAGE"
   PACKAGE_TYPE="Image"
 else
   echo "▸ docker absent → esbuild zip package"
-  rm -rf "$HERE/build"; mkdir -p "$HERE/build"
-  npx --prefix "$HERE" esbuild "$HERE/src/lambda.ts" \
-    --bundle --platform=node --target=node20 --format=cjs \
+  "$HERE/node_modules/.bin/esbuild" "$HERE/src/lambda.ts" \
+    --bundle --platform=node --target=node22 --format=cjs \
     --external:pg-native --external:@aws-sdk/signature-v4-crt \
-    --outfile="$HERE/build/lambda.js"
+    --outfile="$PACKAGE_DIR/lambda.js"
   # Zip the bundle with lambda.js at the archive ROOT (handler = lambda.handler).
   # Prefer `zip`; fall back to python (portable on Windows git-bash, which has no zip).
-  ( cd "$HERE/build"
+  ( cd "$PACKAGE_DIR"
     if command -v zip >/dev/null 2>&1; then
       zip -q function.zip lambda.js
     elif command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
@@ -88,7 +111,7 @@ fi
 
 # aws CLI needs a native path for `fileb://`; on Windows git-bash convert the MSYS
 # path (/c/…) to a mixed Windows path (C:/…) so aws.exe can read the zip.
-ZIP_FILE="$HERE/build/function.zip"
+ZIP_FILE="$PACKAGE_DIR/function.zip"
 if command -v cygpath >/dev/null 2>&1; then ZIP_FILE="$(cygpath -m "$ZIP_FILE")"; fi
 
 # ── 3. Create or update the function ────────────────────────────────────────────
@@ -108,7 +131,7 @@ else
     aws lambda update-function-code --function-name "$FN" \
       --zip-file "fileb://$ZIP_FILE" --region "$REGION" >/dev/null
   else
-    aws lambda create-function --function-name "$FN" --runtime nodejs20.x \
+    aws lambda create-function --function-name "$FN" --runtime nodejs22.x \
       --handler lambda.handler --zip-file "fileb://$ZIP_FILE" \
       --role "$ROLE_ARN" --timeout "$TIMEOUT" --memory-size "$MEMORY_MB" --region "$REGION" >/dev/null
   fi
@@ -151,12 +174,12 @@ echo "▸ verifying recall (real Bedrock + CockroachDB)…"
 sleep 5
 Q='{"question":"What was the true employer cost and the off-bank wedge?","limit":5}'
 if [ "$FURL_AUTH_TYPE" = "NONE" ]; then
-  curl -fsS -X POST "$URL" -H 'content-type: application/json' -d "$Q" | head -c 1200
+  curl -fsS -X POST "${URL}recall" -H 'content-type: application/json' -d "$Q" | head -c 1200
 else
   AKID="$(aws configure get aws_access_key_id)"; SECRET="$(aws configure get aws_secret_access_key)"
   TOK_ARG=(); ST="$(aws configure get aws_session_token || true)"; [ -n "$ST" ] && TOK_ARG=(-H "x-amz-security-token: $ST")
   curl -fsS --aws-sigv4 "aws:amz:${REGION}:lambda" --user "${AKID}:${SECRET}" "${TOK_ARG[@]}" \
-    -X POST "$URL" -H 'content-type: application/json' -d "$Q" | head -c 1200
+    -X POST "${URL}recall" -H 'content-type: application/json' -d "$Q" | head -c 1200
 fi
 echo
 echo "▸ done. Demo URL: $URL"

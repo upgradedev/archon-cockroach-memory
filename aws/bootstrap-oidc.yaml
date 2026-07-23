@@ -1,0 +1,910 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  One-time eu-west-1 delivery bootstrap for Archon Memory: GitHub OIDC trust,
+  environment-bound deploy roles, CloudFormation execution roles, and a private
+  immutable-artifact bucket.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: archon-memory
+    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
+  GitHubOrganization:
+    Type: String
+    Default: upgradedev
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepository:
+    Type: String
+    Default: archon-cockroach-memory
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  ExistingGitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Existing account-wide token.actions.githubusercontent.com provider ARN.
+      Leave empty only when this account does not already have that provider.
+
+Rules:
+  EuWestOneOnly:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, eu-west-1]
+        AssertDescription: Archon application delivery resources must be in eu-west-1.
+
+Conditions:
+  CreateGitHubOidcProvider: !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AppName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetireOldCandidateVersions
+            Status: Enabled
+            Prefix: candidates/
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+              NewerNoncurrentVersions: 5
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  StagingLambdaRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-staging-lambda-runtime"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: staging-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-staging-api:*
+              - Sid: WriteXrayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingStatisticSummaries
+                  - xray:GetSamplingTargets
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+              - Sid: ReadOnlyStagingDatabaseSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-*
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api
+              - Sid: InvokeStagingTitanEmbedding
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api
+              - Sid: InvokeStagingClaudeProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api
+              - Sid: InvokeOnlyModelsBehindStagingClaudeProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api
+                    bedrock:InferenceProfileArn: !Sub >-
+                      arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: staging
+
+  ProductionLambdaRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-production-lambda-runtime"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: production-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-production-api:*
+              - Sid: WriteXrayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingStatisticSummaries
+                  - xray:GetSamplingTargets
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+              - Sid: ReadOnlyProductionDatabaseSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-*
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api
+              - Sid: InvokeProductionTitanEmbedding
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api
+              - Sid: InvokeProductionClaudeProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api
+              - Sid: InvokeOnlyModelsBehindProductionClaudeProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*
+                Condition:
+                  ArnEquals:
+                    lambda:SourceFunctionArn: !Sub >-
+                      arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api
+                    bedrock:InferenceProfileArn: !Sub >-
+                      arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: production
+
+  StagingCodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-staging-codedeploy"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${AppName}-staging-*/*
+      Policies:
+        - PolicyName: staging-lambda-traffic-shift
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDeploymentAlarms
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Sid: ShiftStagingLambdaAlias
+                Effect: Allow
+                Action:
+                  - lambda:GetAlias
+                  - lambda:GetProvisionedConcurrencyConfig
+                  - lambda:UpdateAlias
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api
+                  - !Sub >-
+                    arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api:live
+              - Sid: ReadCandidateRevision
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: staging
+
+  ProductionCodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-production-codedeploy"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${AppName}-production-*/*
+      Policies:
+        - PolicyName: production-lambda-traffic-shift
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDeploymentAlarms
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Sid: ShiftProductionLambdaAlias
+                Effect: Allow
+                Action:
+                  - lambda:GetAlias
+                  - lambda:GetProvisionedConcurrencyConfig
+                  - lambda:UpdateAlias
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api
+                  - !Sub >-
+                    arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api:live
+              - Sid: ReadCandidateRevision
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: production
+
+  DatabaseOperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-database-operator"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:production-db
+      Policies:
+        - PolicyName: reconcile-cockroach-release
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDedicatedMigrationCredential
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/operator/cockroach-admin-*
+              - Sid: ManageOnlyRuntimeDatabaseCredentials
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:TagResource
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-*
+                  - !Sub >-
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-*
+              - Sid: CreateRealTitanEmbeddings
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+              - Sid: EvaluateGoldenQuestionWithClaudeProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+              - Sid: InvokeOnlyGoldenEvaluationModelBehindProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*
+                Condition:
+                  ArnEquals:
+                    bedrock:InferenceProfileArn: !Sub >-
+                      arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-6
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: production-db
+
+  StagingCloudFormationResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AppName}-staging-cloudformation-resources"
+      Description: Staging-only named resources managed by the staging stack.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: StagingApplicationBucket
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:DeleteBucketEncryption
+              - s3:DeleteBucketLifecycle
+              - s3:DeleteBucketOwnershipControls
+              - s3:DeleteBucketPolicy
+              - s3:DeleteBucketPublicAccessBlock
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:GetBucketPolicyStatus
+              - s3:GetBucketPublicAccessBlock
+              - s3:GetBucketTagging
+              - s3:GetBucketVersioning
+              - s3:GetBucketOwnershipControls
+              - s3:GetEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:ListBucket
+              - s3:PutBucketEncryption
+              - s3:PutBucketLifecycleConfiguration
+              - s3:PutBucketOwnershipControls
+              - s3:PutBucketPolicy
+              - s3:PutBucketPublicAccessBlock
+              - s3:PutBucketTagging
+              - s3:PutBucketVersioning
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+          - Sid: StagingApplicationBucketObjects
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+          - Sid: ReadImmutableCandidate
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+          - Sid: StagingLambda
+            Effect: Allow
+            Action:
+              - lambda:AddPermission
+              - lambda:CreateAlias
+              - lambda:CreateFunction
+              - lambda:DeleteAlias
+              - lambda:DeleteFunction
+              - lambda:DeleteFunctionConcurrency
+              - lambda:GetAlias
+              - lambda:GetFunction
+              - lambda:GetFunctionCodeSigningConfig
+              - lambda:GetFunctionConfiguration
+              - lambda:GetFunctionConcurrency
+              - lambda:GetPolicy
+              - lambda:GetRuntimeManagementConfig
+              - lambda:ListAliases
+              - lambda:ListTags
+              - lambda:ListVersionsByFunction
+              - lambda:PublishVersion
+              - lambda:PutFunctionConcurrency
+              - lambda:PutRuntimeManagementConfig
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:UpdateAlias
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-*"
+
+  ProductionCloudFormationResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AppName}-production-cloudformation-resources"
+      Description: Production-only named resources managed by the production stack.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ProductionApplicationBucket
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:DeleteBucketEncryption
+              - s3:DeleteBucketLifecycle
+              - s3:DeleteBucketOwnershipControls
+              - s3:DeleteBucketPolicy
+              - s3:DeleteBucketPublicAccessBlock
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:GetBucketPolicyStatus
+              - s3:GetBucketPublicAccessBlock
+              - s3:GetBucketTagging
+              - s3:GetBucketVersioning
+              - s3:GetBucketOwnershipControls
+              - s3:GetEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:ListBucket
+              - s3:PutBucketEncryption
+              - s3:PutBucketLifecycleConfiguration
+              - s3:PutBucketOwnershipControls
+              - s3:PutBucketPolicy
+              - s3:PutBucketPublicAccessBlock
+              - s3:PutBucketTagging
+              - s3:PutBucketVersioning
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+          - Sid: ProductionApplicationBucketObjects
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+          - Sid: ReadImmutableCandidate
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+          - Sid: ProductionLambda
+            Effect: Allow
+            Action:
+              - lambda:AddPermission
+              - lambda:CreateAlias
+              - lambda:CreateFunction
+              - lambda:DeleteAlias
+              - lambda:DeleteFunction
+              - lambda:DeleteFunctionConcurrency
+              - lambda:GetAlias
+              - lambda:GetFunction
+              - lambda:GetFunctionCodeSigningConfig
+              - lambda:GetFunctionConfiguration
+              - lambda:GetFunctionConcurrency
+              - lambda:GetPolicy
+              - lambda:GetRuntimeManagementConfig
+              - lambda:ListAliases
+              - lambda:ListTags
+              - lambda:ListVersionsByFunction
+              - lambda:PublishVersion
+              - lambda:PutFunctionConcurrency
+              - lambda:PutRuntimeManagementConfig
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:UpdateAlias
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-*"
+
+  CloudFormationCommonExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AppName}-cloudformation-common"
+      Description: Service-limited common permissions for Archon SAM stacks.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ApiGatewayV2
+            Effect: Allow
+            Action:
+              - apigateway:DELETE
+              - apigateway:GET
+              - apigateway:PATCH
+              - apigateway:POST
+              - apigateway:PUT
+            Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*"
+          - Sid: LogsMetricsAndDeployments
+            Effect: Allow
+            Action:
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DeleteDashboards
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:PutDashboard
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:TagResource
+              - cloudwatch:UntagResource
+              - codedeploy:CreateApplication
+              - codedeploy:CreateDeployment
+              - codedeploy:CreateDeploymentGroup
+              - codedeploy:DeleteApplication
+              - codedeploy:DeleteDeploymentGroup
+              - codedeploy:GetApplication
+              - codedeploy:GetDeployment
+              - codedeploy:GetDeploymentConfig
+              - codedeploy:GetDeploymentGroup
+              - codedeploy:ListTagsForResource
+              - codedeploy:RegisterApplicationRevision
+              - codedeploy:TagResource
+              - codedeploy:UntagResource
+              - codedeploy:UpdateDeploymentGroup
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:DescribeLogGroups
+              - logs:ListTagsForResource
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+            Resource: "*"
+          - Sid: CloudFrontApplicationEdge
+            Effect: Allow
+            Action:
+              - cloudfront:CreateCloudFrontOriginAccessIdentity
+              - cloudfront:CreateDistribution
+              - cloudfront:CreateFunction
+              - cloudfront:CreateOriginAccessControl
+              - cloudfront:CreateResponseHeadersPolicy
+              - cloudfront:DeleteCloudFrontOriginAccessIdentity
+              - cloudfront:DeleteDistribution
+              - cloudfront:DeleteFunction
+              - cloudfront:DeleteOriginAccessControl
+              - cloudfront:DeleteResponseHeadersPolicy
+              - cloudfront:DescribeFunction
+              - cloudfront:GetDistribution
+              - cloudfront:GetDistributionConfig
+              - cloudfront:GetCachePolicy
+              - cloudfront:GetFunction
+              - cloudfront:GetOriginAccessControl
+              - cloudfront:GetOriginRequestPolicy
+              - cloudfront:GetResponseHeadersPolicy
+              - cloudfront:ListTagsForResource
+              - cloudfront:PublishFunction
+              - cloudfront:TagResource
+              - cloudfront:UntagResource
+              - cloudfront:UpdateDistribution
+              - cloudfront:UpdateFunction
+              - cloudfront:UpdateOriginAccessControl
+              - cloudfront:UpdateResponseHeadersPolicy
+            Resource: "*"
+
+  StagingExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-staging-cloudformation"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CloudFormationCommonExecutionPolicy
+        - !Ref StagingCloudFormationResourcePolicy
+      Policies:
+        - PolicyName: pass-staging-service-roles
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt StagingLambdaRuntimeRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt StagingCodeDeployRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: codedeploy.amazonaws.com
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: staging
+
+  ProductionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-production-cloudformation"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CloudFormationCommonExecutionPolicy
+        - !Ref ProductionCloudFormationResourcePolicy
+      Policies:
+        - PolicyName: pass-production-service-roles
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ProductionLambdaRuntimeRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ProductionCodeDeployRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: codedeploy.amazonaws.com
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: production
+
+  StagingDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-staging-deploy"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:staging
+      Policies:
+        - PolicyName: deploy-staging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:UpdateStack
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-staging/*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt StagingExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${ArtifactBucket.Arn}/candidates/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetAlias
+                  - lambda:UpdateAlias
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-*"
+
+  ProductionDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-production-deploy"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:production
+      Policies:
+        - PolicyName: deploy-production
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:UpdateStack
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-production/*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt ProductionExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${ArtifactBucket.Arn}/candidates/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetAlias
+                  - lambda:UpdateAlias
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-*"
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  StagingDeployRoleArn:
+    Value: !GetAtt StagingDeployRole.Arn
+  StagingExecutionRoleArn:
+    Value: !GetAtt StagingExecutionRole.Arn
+  ProductionDeployRoleArn:
+    Value: !GetAtt ProductionDeployRole.Arn
+  ProductionExecutionRoleArn:
+    Value: !GetAtt ProductionExecutionRole.Arn
+  StagingLambdaExecutionRoleArn:
+    Value: !GetAtt StagingLambdaRuntimeRole.Arn
+  ProductionLambdaExecutionRoleArn:
+    Value: !GetAtt ProductionLambdaRuntimeRole.Arn
+  StagingCodeDeployServiceRoleArn:
+    Value: !GetAtt StagingCodeDeployRole.Arn
+  ProductionCodeDeployServiceRoleArn:
+    Value: !GetAtt ProductionCodeDeployRole.Arn
+  DatabaseOperatorRoleArn:
+    Value: !GetAtt DatabaseOperatorRole.Arn
+  GitHubOidcProviderArn:
+    Value: !If
+      - CreateGitHubOidcProvider
+      - !Ref GitHubOidcProvider
+      - !Ref ExistingGitHubOidcProviderArn

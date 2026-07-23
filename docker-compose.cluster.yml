@@ -13,7 +13,7 @@
 # DB Console: http://localhost:8080
 services:
   roach1:
-    image: cockroachdb/cockroach:latest
+    image: cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0
     hostname: roach1
     command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach1
     ports:
@@ -23,14 +23,14 @@ services:
       - roach1-data:/cockroach/cockroach-data
 
   roach2:
-    image: cockroachdb/cockroach:latest
+    image: cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0
     hostname: roach2
     command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach2
     volumes:
       - roach2-data:/cockroach/cockroach-data
 
   roach3:
-    image: cockroachdb/cockroach:latest
+    image: cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0
     hostname: roach3
     command: start --insecure --join=roach1,roach2,roach3 --advertise-addr=roach3
     volumes:

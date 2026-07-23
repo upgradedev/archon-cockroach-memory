@@ -12,22 +12,21 @@ Everything below is a verbatim capture of a real run. A gated integration test
 (`tests/bedrock.integration.test.ts`) re-runs this against live Bedrock when
 `RUN_BEDROCK_IT=1` is set and skips cleanly offline so CI stays green with no creds.
 
-## Run metadata
+## Latest run metadata
 
 | Field | Value |
 |---|---|
-| Timestamp (UTC) | `2026-07-12T15:23:03Z` |
-| AWS account | `308857099262` (IAM user `tf-surface-studio`) |
-| Region | `us-west-2` |
+| Timestamp (UTC) | `2026-07-23` |
+| Region | `eu-west-1` — co-located with the CockroachDB Cloud cluster |
 | Embedding model ID | `amazon.titan-embed-text-v2:0` |
-| Narrator model ID | `us.anthropic.claude-sonnet-4-6` (cross-region inference profile) |
+| Narrator model ID | `eu.anthropic.claude-sonnet-4-6` (EU geo inference profile) |
 | SDK | `@aws-sdk/client-bedrock-runtime` (InvokeModel for Titan, Converse for Claude) |
 | Calls made | 2 (one Titan embed, one Claude Converse turn) — money-safe smoke |
 
-> Region note: `us-east-1` for `us.anthropic.claude-sonnet-4-6` is gated behind the
-> Anthropic use-case form on this account; `us-west-2` has model access enabled and
-> is the code default (`DEFAULT_REGION` / `EMBED_REGION`). Override with
-> `BEDROCK_REGION`.
+Both gated integration tests passed live in `eu-west-1`: Titan returned a normalized
+1024-dimensional embedding and Claude produced a substantive answer grounded in the
+supplied memories. The older `us-west-2` verification from 2026-07-12 remains
+reproducible by overriding `BEDROCK_REGION` and using the `us.` inference profile.
 
 ## 1. Titan V2 embedding (real)
 
@@ -62,7 +61,8 @@ Two recalled memories were supplied as grounding evidence:
 - `[1]` (payroll_event) — "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost EUR 63,800, net paid from bank EUR 41,000."
 - `[2]` (insight) — "The bank salary transfer of EUR 41,000 understates the true employer cost by EUR 22,800."
 
-**Request** (`BedrockNarrator.narrate` → `converse`, `ConverseCommand`):
+**Captured 2026-07-12 request** (`BedrockNarrator.narrate` → `converse`,
+`ConverseCommand`):
 
 - `modelId`: `us.anthropic.claude-sonnet-4-6`
 - `system`: the Archon CFO-analyst grounding prompt (see `src/agents/narrator.ts`)
@@ -88,11 +88,12 @@ prompt asks for.
 ## Reproduce
 
 Requires AWS credentials with Bedrock model access to the two model IDs above in
-`us-west-2` (`aws sts get-caller-identity` must succeed).
+`eu-west-1` (`aws sts get-caller-identity` must succeed).
 
 ```bash
 # Gated real-Bedrock integration test (skips cleanly without the flag):
-RUN_BEDROCK_IT=1 AWS_PROFILE=default BEDROCK_REGION=us-west-2 \
+RUN_BEDROCK_IT=1 AWS_PROFILE=default BEDROCK_REGION=eu-west-1 \
+  BEDROCK_MODEL_ID=eu.anthropic.claude-sonnet-4-6 \
   npm run test:bedrock
 ```
 

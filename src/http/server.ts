@@ -8,11 +8,17 @@
 //
 //   PORT=8787 DATABASE_URL=… npm run serve
 //   GET  /health
-//   GET  /recall?q=…&company=…&limit=…
-//   POST /recall   {"question":"…","company":"…","limit":5}
+//   POST /recall   {"question":"…","limit":5}
 
 import { createServer } from "node:http";
-import { handleRecall, type RecallRequest } from "./handler.js";
+import {
+  handleAudit,
+  handleHealth,
+  handleProof,
+  handleRecall,
+  type AuditRequest,
+  type RecallRequest,
+} from "./handler.js";
 import { closePool } from "../db/client.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -22,7 +28,7 @@ async function readBody(req: import("node:http").IncomingMessage): Promise<strin
   let total = 0;
   for await (const chunk of req) {
     total += (chunk as Buffer).length;
-    if (total > 64 * 1024) throw new Error("payload too large"); // bound the read
+    if (total > 4 * 1024) throw new Error("payload too large"); // match Lambda bound
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -30,30 +36,52 @@ async function readBody(req: import("node:http").IncomingMessage): Promise<strin
 
 const server = createServer(async (req, res) => {
   const send = (status: number, body: unknown) => {
-    res.writeHead(status, { "content-type": "application/json" });
+    res.writeHead(status, {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
     res.end(JSON.stringify(body));
   };
   try {
     const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
-    if (url.pathname === "/health") return send(200, { ok: true, service: "archon-cockroach-memory" });
-    if (url.pathname !== "/recall") return send(404, { error: "not found" });
-
-    let raw: RecallRequest;
-    if (req.method === "POST") {
-      const text = await readBody(req);
-      raw = text ? (JSON.parse(text) as RecallRequest) : {};
-    } else {
-      raw = {
-        question: url.searchParams.get("q") ?? url.searchParams.get("question") ?? undefined,
+    const pathname = url.pathname.startsWith("/api/")
+      ? url.pathname.slice(4)
+      : url.pathname;
+    if (pathname === "/health" && req.method === "GET") {
+      const result = handleHealth();
+      return send(result.status, result.body);
+    }
+    if (pathname === "/audit" && req.method === "GET") {
+      const raw: AuditRequest = {
         company: url.searchParams.get("company") ?? undefined,
+        period: url.searchParams.get("period") ?? undefined,
         kind: url.searchParams.get("kind") ?? undefined,
         limit: url.searchParams.get("limit") ?? undefined,
       };
+      const result = await handleAudit(raw);
+      return send(result.status, result.body);
     }
+    if (pathname === "/proof" && req.method === "GET") {
+      const result = await handleProof();
+      return send(result.status, result.body);
+    }
+    if (pathname !== "/recall") return send(404, { error: "not found" });
+    if (req.method !== "POST") {
+      return send(405, { error: "method not allowed" });
+    }
+
+    if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      return send(415, { error: "content-type must be application/json" });
+    }
+    const text = await readBody(req);
+    const raw: RecallRequest = text ? (JSON.parse(text) as RecallRequest) : {};
     const { status, body } = await handleRecall(raw);
     send(status, body);
   } catch (err) {
-    console.error("server error:", err);
+    console.error("server request failed", {
+      errorType: err instanceof Error ? err.name : "UnknownError",
+    });
     send(400, { error: "bad request" });
   }
 });

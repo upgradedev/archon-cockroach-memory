@@ -30,6 +30,7 @@ import { FakeEmbedder } from "../src/memory/embeddings.js";
 import { FakeNarrator } from "../src/agents/narrator.js";
 import { MemoryAgent } from "../src/agents/memory-agent.js";
 import { handleRecall } from "../src/http/handler.js";
+import { createHandler } from "../src/lambda.js";
 import { remember, recall, listForAudit, memoryCount } from "../src/memory/memory.js";
 import { query, closePool } from "../src/db/client.js";
 
@@ -135,7 +136,10 @@ test("Isolation: recall scoped to one company cannot read another company's memo
   assert.ok(aHits.every((h) => h.company === "TenantA"), "no TenantB rows leak into TenantA recall");
   assert.ok(!aHits.some((h) => h.content.includes("TENANT-B")), "TenantB content is not exposed to TenantA");
 
-  const bAudit = await listForAudit({ company: "TenantB" });
+  const bAudit = await listForAudit(
+    { company: "TenantB" },
+    emb.modelId
+  );
   assert.ok(bAudit.every((m) => m.company === "TenantB"), "audit scope does not cross tenants");
 });
 
@@ -149,12 +153,28 @@ test("Exposure: the public recall handler never leaks internals on error", async
     },
   };
   const agent = new MemoryAgent(new FakeEmbedder(), throwingNarrator as never);
-  await assert.rejects(() => agent.recallAnswer("anything"), /./); // agent surfaces the raw error internally
-  // …but the HTTP handler wrapper must translate it to a safe body. Drive the
-  // handler with an agent whose recall itself fails and assert no DSN leaks.
-  const res = await handleRecall({ question: "x".repeat(5000) }); // oversized → 400 path, no internals
-  assert.equal(res.status, 400);
-  assert.ok(!JSON.stringify(res.body).includes("postgres"), "no connection string in response");
+  const dependencyFailureFixture =
+    "Helios SA synthetic evidence that reaches the narrator.";
+  await agent.remember(
+    "insight",
+    dependencyFailureFixture,
+    { company: "Helios SA" }
+  );
+  const publicHandler = createHandler({ agent });
+  await assert.rejects(
+    () =>
+      publicHandler({
+        requestContext: { http: { method: "POST" } },
+        rawPath: "/api/recall",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ question: dependencyFailureFixture }),
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "request failed" &&
+      !error.message.includes("postgres") &&
+      !error.message.includes("ECONNREFUSED")
+  );
 });
 
 test("Exposure: MCP recall output exposes content/score but never the raw embedding vector", async () => {
@@ -178,11 +198,27 @@ test("Exposure: MCP recall output exposes content/score but never the raw embedd
 
 // ── Input abuse / DoS bounds ──────────────────────────────────────────────────
 test("Abuse: the recall handler bounds question length, limit, and kind", async () => {
+  assert.equal((await handleRecall(null)).status, 400, "JSON null rejected safely");
+  assert.equal((await handleRecall([])).status, 400, "JSON array rejected safely");
   assert.equal((await handleRecall({ question: "" })).status, 400, "empty question rejected");
   assert.equal((await handleRecall({ question: "x".repeat(1000) })).status, 400, "oversized question rejected");
   assert.equal((await handleRecall({ question: "ok", kind: "malicious" })).status, 400, "unknown kind rejected");
+  assert.equal(
+    (await handleRecall({ question: "ok", limit: true })).status,
+    400,
+    "boolean limit rejected"
+  );
+  assert.equal(
+    (await handleRecall({ question: "ok", limit: 0.5 })).status,
+    400,
+    "fractional limit rejected"
+  );
   // A huge limit is clamped, not honored — a valid 200, but bounded work.
-  const ok = await handleRecall({ question: "seed", company: "Acme", limit: 9999 });
+  const ok = await handleRecall({
+    question: "seed",
+    company: "Helios SA",
+    limit: 9999,
+  });
   assert.equal(ok.status, 200);
   assert.ok((ok.body.recalled as number) <= 20, "limit is clamped to MAX_LIMIT");
 });

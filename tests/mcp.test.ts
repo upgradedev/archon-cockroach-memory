@@ -133,3 +133,42 @@ test("an agent can audit memory for a cross-session contradiction through MCP", 
   assert.equal(c!.resolution.recommendedValue, 12000);
   assert.equal(c!.resolution.rule, "importance");
 });
+
+test("audit_memory withholds all-clear when its bounded scan is incomplete", async () => {
+  for (const sourceRef of ["COV-1", "COV-2"]) {
+    await client.callTool({
+      name: "remember_memory",
+      arguments: {
+        kind: "document",
+        content: `Coverage fixture ${sourceRef} is present.`,
+        company: "CoverageCo",
+        period: "2026-04",
+        sourceRef,
+      },
+    });
+  }
+
+  const audited = await client.callTool({
+    name: "audit_memory",
+    arguments: { company: "CoverageCo", limit: 1 },
+  });
+  const report = audited.structuredContent as
+    | {
+        ok: boolean;
+        coverage: {
+          total: number;
+          scanned: number;
+          limit: number;
+          complete: boolean;
+        };
+      }
+    | undefined;
+  assert.ok(report);
+  assert.equal(report!.coverage.total, 2);
+  assert.equal(report!.coverage.scanned, 1);
+  assert.equal(report!.coverage.limit, 1);
+  assert.equal(report!.coverage.complete, false);
+  assert.equal(report!.ok, false);
+  const text = audited.content as Array<{ type: string; text: string }>;
+  assert.match(text[0]!.text, /all-clear withheld/i);
+});

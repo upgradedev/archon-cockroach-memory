@@ -1,5 +1,11 @@
 # CockroachDB Cloud — live-cluster smoke evidence
 
+> Historical SQL capture: the evidence below was recorded on v25.4.10. The same
+> live cluster had been upgraded to **v26.2.1** when independently re-verified
+> through CockroachDB Cloud Managed MCP on 2026-07-23. See
+> [`MANAGED_MCP_SMOKE.md`](./MANAGED_MCP_SMOKE.md). Version strings here are
+> timestamped evidence, not a claim that the cluster remains on the older release.
+
 Judge-facing proof that the vector-memory path runs against the **live, managed
 CockroachDB Cloud Serverless cluster**, not only a local Docker node — the distributed
 vector index is *used* (EXPLAIN plans a `vector search` node), the ANN recall returns
