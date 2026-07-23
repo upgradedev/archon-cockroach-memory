@@ -174,7 +174,10 @@ test("J5: recall fans out across many records but returns only the scoped tenant
   const emb = new FakeEmbedder();
   const agent = new MemoryAgent(emb, new FakeNarrator());
   await agent.ingestEvent(sampleEvent("Helios SA", "2026-04"));
-  await agent.ingestEvent(sampleEvent("Rival Ltd", "2026-04"));
+  await agent.ingestEvent({
+    ...sampleEvent("Rival Ltd", "2026-04"),
+    event_id: "EVT-RIVAL-2604",
+  });
   assert.ok((await memoryCount()) >= 10, "both tenants' memories coexist");
 
   const hits = await recall(emb, "employer cost for the team", { company: "Helios SA", limit: 5 });

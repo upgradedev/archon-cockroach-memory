@@ -36,7 +36,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
         with:
-          language: ${{ matrix.language }}
+          languages: ${{ matrix.language }}
           queries: security-and-quality
 
       - name: Autobuild

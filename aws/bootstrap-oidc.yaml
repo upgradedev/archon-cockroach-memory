@@ -437,11 +437,7 @@ Resources:
             Action:
               - s3:CreateBucket
               - s3:DeleteBucket
-              - s3:DeleteBucketEncryption
-              - s3:DeleteBucketLifecycle
-              - s3:DeleteBucketOwnershipControls
               - s3:DeleteBucketPolicy
-              - s3:DeleteBucketPublicAccessBlock
               - s3:GetBucketAcl
               - s3:GetBucketLocation
               - s3:GetBucketPolicy
@@ -453,8 +449,8 @@ Resources:
               - s3:GetEncryptionConfiguration
               - s3:GetLifecycleConfiguration
               - s3:ListBucket
-              - s3:PutBucketEncryption
-              - s3:PutBucketLifecycleConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:PutLifecycleConfiguration
               - s3:PutBucketOwnershipControls
               - s3:PutBucketPolicy
               - s3:PutBucketPublicAccessBlock
@@ -518,11 +514,7 @@ Resources:
             Action:
               - s3:CreateBucket
               - s3:DeleteBucket
-              - s3:DeleteBucketEncryption
-              - s3:DeleteBucketLifecycle
-              - s3:DeleteBucketOwnershipControls
               - s3:DeleteBucketPolicy
-              - s3:DeleteBucketPublicAccessBlock
               - s3:GetBucketAcl
               - s3:GetBucketLocation
               - s3:GetBucketPolicy
@@ -534,8 +526,8 @@ Resources:
               - s3:GetEncryptionConfiguration
               - s3:GetLifecycleConfiguration
               - s3:ListBucket
-              - s3:PutBucketEncryption
-              - s3:PutBucketLifecycleConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:PutLifecycleConfiguration
               - s3:PutBucketOwnershipControls
               - s3:PutBucketPolicy
               - s3:PutBucketPublicAccessBlock

@@ -283,7 +283,7 @@ test(
     assert.ok(vector[0]?.embedding);
     const planRows = await query<Record<string, unknown>>(
       `EXPLAIN SELECT id
-         FROM agent_memory
+         FROM agent_memory@${EXPECTED_VECTOR_INDEX_NAME}
         WHERE tenant_id = 'public-demo'
           AND embed_model = $2
           AND status = 'active'

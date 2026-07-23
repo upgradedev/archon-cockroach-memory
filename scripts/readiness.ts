@@ -86,7 +86,6 @@ function generatedArtifactPaths(): string[] {
     ".aws-sam",
     "__pycache__",
     "coverage",
-    "node_modules",
     "playwright-report",
     "test-results",
   ]);
@@ -99,6 +98,9 @@ function generatedArtifactPaths(): string[] {
         ? `${relative}/${entry.name}`
         : entry.name;
       if (entry.isDirectory()) {
+        // Dependency trees are required to execute this gate and are already
+        // protected by .gitignore/secret scanning. Do not recurse through them.
+        if (entry.name === "node_modules") continue;
         if (
           blockedDirectories.has(entry.name) ||
           (relative === "demo/assets" &&
@@ -281,7 +283,7 @@ function sourceChecks(): SourceCheck[] {
       "product.no-local-build-products",
       "Product Readiness",
       localArtifacts.length === 0 && !has("web/dist"),
-      "No local dependency/build/video products are left in the repository workspace.",
+      "No local build/video products are left in the repository workspace.",
       "Local build or generated video artifacts remain."
     ),
     sourceCheck(

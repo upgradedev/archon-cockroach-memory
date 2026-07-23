@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { PUBLIC_DEMO_TENANT_ID } from "../config/scope.js";
 import { query, toVectorLiteral } from "../db/client.js";
+import { EXPECTED_VECTOR_INDEX_NAME } from "../db/proof.js";
 import type { Embedder } from "./embeddings.js";
 import type { AuditMemory } from "./consistency.js";
 
@@ -164,6 +165,9 @@ export async function recall(
     filters.push(`company = $${params.length}`);
   }
   const where = `WHERE ${filters.join(" AND ")}`;
+  const vectorIndexName = opts.company
+    ? EXPECTED_VECTOR_INDEX_NAME
+    : "idx_agent_memory_scope_embedding";
   params.push(Math.max(1, Math.min(opts.limit ?? 5, 50)));
   const limitParam = `$${params.length}`;
 
@@ -180,7 +184,7 @@ export async function recall(
   }>(
     `SELECT id, kind, company, period, source_ref, content, metadata, created_at,
             (embedding <=> $1::VECTOR) AS distance
-       FROM agent_memory
+       FROM agent_memory@${vectorIndexName}
        ${where}
      ORDER BY embedding <=> $1::VECTOR
      LIMIT ${limitParam}`,

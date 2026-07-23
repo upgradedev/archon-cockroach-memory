@@ -564,7 +564,7 @@ async function verifyAdmin(
     );
     const explain = await client.query(
       `EXPLAIN SELECT id
-         FROM agent_memory
+         FROM agent_memory@${EXPECTED_VECTOR_INDEX_NAME}
         WHERE tenant_id = 'public-demo'
           AND embed_model = $2
           AND status = 'active'
