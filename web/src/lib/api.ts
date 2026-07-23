@@ -659,7 +659,7 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
   snapshot.hasEvidence = Boolean(
     snapshot.database.provider === "CockroachDB" &&
       snapshot.database.region === "eu-west-1" &&
-      snapshot.database.regionEvidence === "deployment-config" &&
+      snapshot.database.regionEvidence === "cockroach-cloud-api-release-gate" &&
       snapshot.database.runtimePrincipal?.startsWith("archon_") &&
       snapshot.vectorIndex.enabled === true &&
       snapshot.vectorIndex.name === "idx_agent_memory_company_scope_embedding" &&

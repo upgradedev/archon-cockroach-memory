@@ -15,9 +15,14 @@ export function isExpectedVectorIndexDefinition(
   definition: string
 ): boolean {
   const normalized = normalizeIndexDefinition(definition);
+  const target =
+    "(?:[a-z0-9_]+\\.)?(?:public\\.)?agent_memory";
+  const vectorIndexHead =
+    `(?:vector index ${EXPECTED_VECTOR_INDEX_NAME} on ${target}` +
+    `(?: using cspann)?|index ${EXPECTED_VECTOR_INDEX_NAME} on ${target}` +
+    " using cspann)";
   const expected = new RegExp(
-    `^create vector index ${EXPECTED_VECTOR_INDEX_NAME} ` +
-      "on (?:[a-z0-9_]+\\.)?(?:public\\.)?agent_memory using cspann " +
+    `^create ${vectorIndexHead} ` +
       "\\(\\s*tenant_id(?:\\s+asc)?\\s*,\\s*" +
       "embed_model(?:\\s+asc)?\\s*,\\s*" +
       "status(?:\\s+asc)?\\s*,\\s*" +
