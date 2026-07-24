@@ -9,7 +9,7 @@
 // CI has no creds and does not set the flag, so it is reported skipped, never
 // failed — the pipeline stays green offline. Run it locally with real creds via:
 //
-//   RUN_BEDROCK_IT=1 AWS_PROFILE=default BEDROCK_REGION=us-west-2 \
+//   RUN_BEDROCK_IT=1 AWS_PROFILE=default BEDROCK_REGION=eu-west-1 \
 //     node --import tsx --test tests/bedrock.integration.test.ts
 //
 // Money-safe: two tiny calls total (one Titan embed, one short Converse turn).
@@ -82,13 +82,18 @@ test(
   { skip: RUN ? false : "set RUN_BEDROCK_IT=1 (with AWS creds) to run the real Bedrock integration test" },
   async () => {
     const narrator = new BedrockNarrator();
-    const { answer, citations, modelId } = await narrator.narrate(
+    const { answer, citations, modelId, grounding } = await narrator.narrate(
       "What was our real employer payroll cost last month, and how much of it was off the bank transfer?",
       HITS
     );
     // Answer came from the real Claude Sonnet model, not the fake narrator.
     assert.notEqual(modelId, "fake-narrator");
     assert.match(modelId, /anthropic|claude/i, `unexpected model id ${modelId}`);
+    assert.equal(
+      grounding.status,
+      "verified",
+      `golden judge question must pass all grounding checks: ${JSON.stringify(grounding)}`
+    );
     // Non-empty, substantive grounded answer.
     assert.ok(answer.length > 40, "answer must be a substantive non-empty string");
     assert.ok(!/No relevant memories/i.test(answer), "must not be the empty-recall fallback");

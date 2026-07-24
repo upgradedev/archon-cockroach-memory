@@ -10,7 +10,10 @@
 // the relevant prior facts by MEANING and reason with continuity instead of
 // starting cold. That is "CockroachDB as the agents' memory layer".
 
+import { createHash } from "node:crypto";
+import { PUBLIC_DEMO_TENANT_ID } from "../config/scope.js";
 import { query, toVectorLiteral } from "../db/client.js";
+import { EXPECTED_VECTOR_INDEX_NAME } from "../db/proof.js";
 import type { Embedder } from "./embeddings.js";
 import type { AuditMemory } from "./consistency.js";
 
@@ -23,6 +26,9 @@ export interface MemoryInput {
   sourceRef?: string | null; // originating row id
   content: string; // the recallable natural-language fact
   metadata?: Record<string, unknown> | null;
+  // An upstream event/request key. If omitted, a deterministic key is derived
+  // from the immutable memory payload, making retries safe by default.
+  idempotencyKey?: string;
 }
 
 export interface MemoryRecord {
@@ -42,48 +48,114 @@ export interface RecallHit extends MemoryRecord {
 }
 
 export interface RecallOptions {
-  kind?: MemoryKind; // pre-filter (also a vector-index prefix column)
-  company?: string; // pre-filter (also a vector-index prefix column)
+  kind?: MemoryKind;
+  company?: string;
   limit?: number; // top-k, default 5
 }
 
 // ── write ────────────────────────────────────────────────────────────────────
-// Embed `content` and persist the memory. Returns the new row id.
+// Embed `content` and persist the memory. Sequential and concurrent retries with
+// the same immutable payload return the existing id and do not create duplicate
+// evidence. A preflight lookup also avoids paying for a second Bedrock embedding
+// on the common retry path.
 export async function remember(embedder: Embedder, input: MemoryInput): Promise<string> {
+  const company = input.company ?? "_global";
+  const period = input.period ?? null;
+  const sourceRef = input.sourceRef ?? null;
+  const metadataJson =
+    input.metadata == null ? null : canonicalJson(input.metadata);
+  const contentHash = sha256(
+    canonicalJson({
+      tenantId: PUBLIC_DEMO_TENANT_ID,
+      kind: input.kind,
+      company,
+      period,
+      sourceRef,
+      content: input.content,
+      metadata: input.metadata ?? null,
+    })
+  );
+  const idempotencyKey =
+    input.idempotencyKey?.trim() || `sha256:${contentHash}`;
+  if (idempotencyKey.length > 256) {
+    throw new Error("idempotencyKey must be at most 256 characters.");
+  }
+
+  const existing = await findIdempotentMemory(
+    embedder.modelId,
+    idempotencyKey
+  );
+  if (existing) {
+    assertIdempotencyMatch(existing, contentHash);
+    return existing.id;
+  }
+
   const embedding = await embedder.embed(input.content);
+  assertEmbedding(embedding, embedder.dim);
   const rows = await query<{ id: string }>(
     `INSERT INTO agent_memory
-       (kind, company, period, source_ref, content, metadata, embedding, embed_model)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::VECTOR, $8)
+       (tenant_id, kind, company, period, source_ref, content, metadata,
+        embedding, embed_model, idempotency_key, content_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::VECTOR, $9, $10, $11)
+     ON CONFLICT (tenant_id, embed_model, idempotency_key) DO NOTHING
      RETURNING id`,
     [
+      PUBLIC_DEMO_TENANT_ID,
       input.kind,
-      input.company ?? "_global",
-      input.period ?? null,
-      input.sourceRef ?? null,
+      company,
+      period,
+      sourceRef,
       input.content,
-      input.metadata ? JSON.stringify(input.metadata) : null,
+      metadataJson,
       toVectorLiteral(embedding),
       embedder.modelId,
+      idempotencyKey,
+      contentHash,
     ]
   );
-  return rows[0].id;
+  if (rows[0]) return rows[0].id;
+
+  // A concurrent writer won the unique-key race. Read and verify its immutable
+  // payload before returning the shared id.
+  const winner = await findIdempotentMemory(
+    embedder.modelId,
+    idempotencyKey
+  );
+  if (!winner) {
+    throw new Error("Idempotent memory insert conflicted but no row was found.");
+  }
+  assertIdempotencyMatch(winner, contentHash);
+  return winner.id;
 }
 
 // ── read ─────────────────────────────────────────────────────────────────────
 // Recall the top-k memories most semantically similar to `queryText`, optionally
-// pre-filtered by kind/company. Unscoped recall (no filters) is accelerated by
-// the global distributed vector index (EXPLAIN → `vector search`). A scoped
-// recall additionally constrains kind/company via their btree indexes; at scale,
-// per-tenant prefix vector indexes are the planned optimization (BUILD_PLAN).
+// pre-filtered by kind/company. The public production shape equality-constrains
+// tenant/model/status/company and is served by the matching prefix C-SPANN index.
+// Benchmark-only unscoped recall is served by the separate global vector index.
 export async function recall(
   embedder: Embedder,
   queryText: string,
   opts: RecallOptions = {}
 ): Promise<RecallHit[]> {
-  const qvec = toVectorLiteral(await embedder.embed(queryText));
-  const filters: string[] = [];
-  const params: unknown[] = [qvec];
+  const queryEmbedding = await embedder.embed(queryText);
+  assertEmbedding(queryEmbedding, embedder.dim);
+  const qvec = toVectorLiteral(queryEmbedding);
+  // All vector-index prefix columns are equality constrained. tenant_id is
+  // process configuration (never request input), embed_model prevents vectors
+  // from incompatible model spaces being compared, and superseded/retracted
+  // evidence is excluded from current-state recall.
+  const filters: string[] = [
+    "tenant_id = $2",
+    "embed_model = $3",
+    "status = $4",
+  ];
+  const params: unknown[] = [
+    qvec,
+    PUBLIC_DEMO_TENANT_ID,
+    embedder.modelId,
+    "active",
+  ];
   if (opts.kind) {
     params.push(opts.kind);
     filters.push(`kind = $${params.length}`);
@@ -92,7 +164,16 @@ export async function recall(
     params.push(opts.company);
     filters.push(`company = $${params.length}`);
   }
-  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const where = `WHERE ${filters.join(" AND ")}`;
+  const vectorIndexName = opts.company
+    ? EXPECTED_VECTOR_INDEX_NAME
+    : "idx_agent_memory_scope_embedding";
+  // CockroachDB vector indexes accept equality constraints on their declared
+  // prefix columns. An additional non-prefix kind predicate is intentionally
+  // left to the cost-based optimizer instead of forcing an ineligible index.
+  const tableExpression = opts.kind
+    ? "agent_memory"
+    : `agent_memory@${vectorIndexName}`;
   params.push(Math.max(1, Math.min(opts.limit ?? 5, 50)));
   const limitParam = `$${params.length}`;
 
@@ -109,7 +190,7 @@ export async function recall(
   }>(
     `SELECT id, kind, company, period, source_ref, content, metadata, created_at,
             (embedding <=> $1::VECTOR) AS distance
-       FROM agent_memory
+       FROM ${tableExpression}
        ${where}
      ORDER BY embedding <=> $1::VECTOR
      LIMIT ${limitParam}`,
@@ -139,24 +220,32 @@ export async function recall(
 
 // ── self-audit (consistency) read ─────────────────────────────────────────────
 // Read-only projection of the stored memories a consistency audit needs, scoped
-// by company / period / kind. This is a plain SELECT — no vector search — so the
-// audit sees EVERY memory in scope (both sides of a cross-session contradiction),
-// not just a top-k recall neighbourhood. It NEVER writes: the audit is a
-// recommender that only reads what the agent already stored.
+// by company / period / kind. This is a bounded plain SELECT — no vector search.
+// `auditMemoryCount` applies the identical filters so callers can prove whether
+// the scan was complete and must withhold an all-clear on a truncated slice.
 //
-// The CockroachDB `agent_memory` table has no soft-delete/`superseded_at` column,
-// so every row in scope is active by construction. `importance` is not a column
-// here either; when a memory carries explicit salience it lives in `metadata`
+// `importance` is not a column; when a memory carries explicit salience it lives
+// in `metadata`
 // (e.g. the off-bank-cost insight's `importance: 0.9`), and the audit's resolver
 // reads it from there — so no schema change is needed to make the importance rule
 // fire on real ingested memories.
-export async function listForAudit(scope: {
+export interface MemoryAuditScope {
   company?: string;
   period?: string;
   kind?: MemoryKind;
-} = {}): Promise<AuditMemory[]> {
-  const filters: string[] = [];
-  const params: unknown[] = [];
+  limit?: number;
+}
+
+function auditWhere(
+  scope: MemoryAuditScope,
+  embedModel: string
+): { where: string; params: unknown[] } {
+  const filters: string[] = [
+    "tenant_id = $1",
+    "embed_model = $2",
+    "status = $3",
+  ];
+  const params: unknown[] = [PUBLIC_DEMO_TENANT_ID, embedModel, "active"];
   if (scope.company) {
     params.push(scope.company);
     filters.push(`company = $${params.length}`);
@@ -169,7 +258,16 @@ export async function listForAudit(scope: {
     params.push(scope.kind);
     filters.push(`kind = $${params.length}`);
   }
-  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  return { where: `WHERE ${filters.join(" AND ")}`, params };
+}
+
+export async function listForAudit(
+  scope: MemoryAuditScope,
+  embedModel: string
+): Promise<AuditMemory[]> {
+  const { where, params } = auditWhere(scope, embedModel);
+  params.push(Math.max(1, Math.min(scope.limit ?? 500, 500)));
+  const limitParam = `$${params.length}`;
 
   const rows = await query<{
     id: string;
@@ -183,7 +281,9 @@ export async function listForAudit(scope: {
   }>(
     `SELECT id, kind, company, period, source_ref, content, metadata, created_at
        FROM agent_memory
-       ${where}`,
+       ${where}
+      ORDER BY created_at DESC
+      LIMIT ${limitParam}`,
     params
   );
 
@@ -200,13 +300,126 @@ export async function listForAudit(scope: {
   }));
 }
 
+export async function auditMemoryCount(
+  scope: MemoryAuditScope,
+  embedModel: string
+): Promise<number> {
+  const { where, params } = auditWhere(scope, embedModel);
+  const rows = await query<{ n: string }>(
+    `SELECT count(*) AS n
+       FROM agent_memory
+       ${where}`,
+    params
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 // Count stored memories, optionally by company — a cheap observability probe.
-export async function memoryCount(company?: string): Promise<number> {
-  const rows = company
-    ? await query<{ n: string }>(
-        `SELECT count(*) AS n FROM agent_memory WHERE company = $1`,
-        [company]
+export async function memoryCount(
+  company?: string,
+  embedModel?: string
+): Promise<number> {
+  const params: unknown[] = [PUBLIC_DEMO_TENANT_ID, "active"];
+  const filters = ["tenant_id = $1", "status = $2"];
+  if (company) {
+    params.push(company);
+    filters.push(`company = $${params.length}`);
+  }
+  if (embedModel) {
+    params.push(embedModel);
+    filters.push(`embed_model = $${params.length}`);
+  }
+  const rows = await query<{ n: string }>(
+    `SELECT count(*) AS n
+       FROM agent_memory
+      WHERE ${filters.join(" AND ")}`,
+    params
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+interface IdempotentRow {
+  id: string;
+  content_hash: string | null;
+}
+
+async function findIdempotentMemory(
+  embedModel: string,
+  idempotencyKey: string
+): Promise<IdempotentRow | undefined> {
+  const rows = await query<IdempotentRow>(
+    `SELECT id, content_hash
+       FROM agent_memory
+      WHERE tenant_id = $1
+        AND embed_model = $2
+        AND idempotency_key = $3
+      LIMIT 1`,
+    [PUBLIC_DEMO_TENANT_ID, embedModel, idempotencyKey]
+  );
+  return rows[0];
+}
+
+function assertIdempotencyMatch(
+  existing: IdempotentRow,
+  expectedHash: string
+): void {
+  if (
+    existing.content_hash !== null &&
+    existing.content_hash !== expectedHash
+  ) {
+    throw new Error(
+      "idempotencyKey was already used for a different immutable memory payload."
+    );
+  }
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function assertEmbedding(embedding: number[], expectedDimension: number): void {
+  if (
+    embedding.length !== expectedDimension ||
+    embedding.some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error(
+      `Embedding must contain exactly ${expectedDimension} finite dimensions.`
+    );
+  }
+}
+
+// Deterministic JSON makes content hashes stable even when callers construct
+// metadata objects with a different key insertion order.
+function canonicalJson(value: unknown, stack = new Set<object>()): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Memory metadata must contain finite numbers.");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (stack.has(value)) throw new Error("Memory metadata must not be cyclic.");
+    stack.add(value);
+    const rendered = `[${value.map((item) => canonicalJson(item, stack)).join(",")}]`;
+    stack.delete(value);
+    return rendered;
+  }
+  if (typeof value === "object") {
+    if (stack.has(value)) throw new Error("Memory metadata must not be cyclic.");
+    stack.add(value);
+    const rendered = `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson(
+            (value as Record<string, unknown>)[key],
+            stack
+          )}`
       )
-    : await query<{ n: string }>(`SELECT count(*) AS n FROM agent_memory`);
-  return Number(rows[0].n);
+      .join(",")}}`;
+    stack.delete(value);
+    return rendered;
+  }
+  throw new Error("Memory metadata must be JSON-serializable.");
 }

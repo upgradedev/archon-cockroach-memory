@@ -17,14 +17,20 @@ jobs:
   # Stage 1 — fail fast on any committed secret (ADR-005).
   secret-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - name: gitleaks detect (pinned v8.18.4, redacted)
+      - name: gitleaks detect (verified v8.30.1, redacted)
         run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz gitleaks
-          ./gitleaks detect --source . --redact --no-banner
+          set -euo pipefail
+          curl -sSLo /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" |
+            sha256sum --check
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --no-banner
 
   # Stage 2a — dependency vulnerability audit (offline; runs in parallel with tests).
   # --audit-level=high: low/moderate advisories are reported but do not fail the
@@ -33,11 +39,12 @@ jobs:
   dep-audit:
     needs: secret-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install deps
         run: npm ci
@@ -47,14 +54,15 @@ jobs:
   build-test:
     needs: secret-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install deps
@@ -66,7 +74,7 @@ jobs:
       - name: Start CockroachDB (v25.2+ for native vector indexing)
         run: |
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
-            cockroachdb/cockroach:latest start-single-node --insecure
+            cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
           echo "Waiting for CockroachDB to accept SQL..."
           for i in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
@@ -75,8 +83,14 @@ jobs:
             sleep 2
           done
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_migration"
           # Fail loudly if it never came up.
           docker exec crdb cockroach sql --insecure -e "SELECT 1"
+
+      - name: Rehearse legacy migration, drift failure, and idempotent re-apply
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/archon_migration?sslmode=disable
+        run: npm run db:migration:rehearsal
 
       - name: Apply schema (creates the VECTOR(1024) memory table + vector index)
         run: npm run db:schema
@@ -115,14 +129,15 @@ jobs:
   cluster-survival:
     needs: secret-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install deps
@@ -171,20 +186,21 @@ jobs:
   pen-test:
     needs: secret-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install deps
         run: npm ci
       - name: Start CockroachDB (v25.2+ native vector indexing)
         run: |
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
-            cockroachdb/cockroach:latest start-single-node --insecure
+            cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
           for i in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
             sleep 2
@@ -195,6 +211,35 @@ jobs:
         run: npm run db:schema
       - name: Application-security suite (real-CRDB parameterization proof)
         run: npm run test:security
+      - name: Prove role-bound RLS ignores mutable application_name
+        run: |
+          set -euo pipefail
+          docker exec crdb cockroach sql --insecure --database archon_memory --execute "
+            CREATE USER IF NOT EXISTS archon_runtime_ci;
+            GRANT archon_public_reader TO archon_runtime_ci;
+            UPDATE agent_memory
+               SET tenant_id = 'public-demo', company = 'Helios SA', status = 'active'
+             WHERE id = (SELECT id FROM agent_memory LIMIT 1);
+          "
+          RESULT="$(docker exec crdb cockroach sql \
+            --insecure \
+            --database archon_memory \
+            --format=csv \
+            --execute "
+              SET ROLE archon_runtime_ci;
+              SET application_name = 'archon.attacker-selected-tenant';
+              SELECT count(*) AS visible,
+                     count(*) FILTER (
+                       WHERE tenant_id = 'public-demo'
+                         AND company = 'Helios SA'
+                         AND status = 'active'
+                     ) AS correctly_scoped
+                FROM agent_memory;
+            " | tail -n 1)"
+          VISIBLE="${RESULT%%,*}"
+          SCOPED="${RESULT##*,}"
+          test "$VISIBLE" -ge 1
+          test "$VISIBLE" = "$SCOPED"
       - name: Dump CockroachDB logs on failure
         if: failure()
         run: docker logs crdb || true
@@ -206,26 +251,27 @@ jobs:
   load:
     needs: secret-scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
       LOAD_N: "2000"
+      PUBLIC_DEMO_COMPANY: LoadCorp
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install deps
         run: npm ci
-      - name: Install k6 (pinned)
-        run: |
-          curl -sSL https://github.com/grafana/k6/releases/download/v0.52.0/k6-v0.52.0-linux-amd64.tar.gz | tar -xz
-          sudo mv k6-v0.52.0-linux-amd64/k6 /usr/local/bin/k6
-          k6 version
+      - name: Install k6 (SHA-pinned action and version)
+        uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+        with:
+          k6-version: "2.0.0"
       - name: Start CockroachDB
         run: |
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
-            cockroachdb/cockroach:latest start-single-node --insecure
+            cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
           for i in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
             sleep 2
@@ -252,26 +298,94 @@ jobs:
         if: failure()
         run: docker logs crdb || true
 
+  # Stage 2f — the judge-facing React app, browser journeys, and deployable SAM
+  # architecture are first-class release gates. All build/browser artifacts live
+  # only on the ephemeral CI runner.
+  frontend-iac:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.164.0
+      - name: Install pinned CloudFormation linter
+        run: python -m pip install --disable-pip-version-check cfn-lint==1.53.1
+      - name: Install locked backend and frontend dependencies
+        run: |
+          npm ci
+          npm ci --prefix web
+      - name: Dependency audit
+        run: |
+          npm audit --audit-level=high
+          npm audit --prefix web --audit-level=high
+      - name: Backend and frontend type/unit/build gates
+        run: |
+          npm run typecheck
+          npm run typecheck --prefix web
+          npm test --prefix web
+          npm run build --prefix web
+      - name: Validate and build the serverless architecture
+        run: |
+          cfn-lint aws/bootstrap-oidc.yaml
+          sam validate --lint --template-file aws/template.yaml --region eu-west-1
+          PATH="$PWD/node_modules/.bin:$PATH" sam build \
+            --template-file aws/template.yaml \
+            --build-dir .aws-sam/build \
+            --parallel
+          if grep -q "Type: AWS::IAM::" .aws-sam/build/template.yaml; then
+            echo "Application stack must not synthesize IAM resources." >&2
+            exit 1
+          fi
+      - name: Install Chromium in the ephemeral runner
+        run: npx --prefix web playwright install --with-deps chromium
+      - name: Desktop and mobile judge journeys
+        run: npm run test:e2e --prefix web
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-ci-${{ github.sha }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Stage 3 — the READINESS GATE. Runs ONLY after the offline suite (build-test), the
   # node-kill survival job (cluster-survival), the pen-test job, and the load job are
   # green, so its checks reflect real CI state, not just committed files.
-  # Fails the build if automatable completeness < 95%. Publishes readiness.json.
+  # Fails unless every repository-verifiable source check passes. Submission-only
+  # requirements remain visibly pending and cannot masquerade as eligibility.
   readiness:
-    needs: [build-test, cluster-survival, pen-test, load]
+    needs: [dep-audit, build-test, cluster-survival, pen-test, load, frontend-iac]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install deps
         run: npm ci
-      - name: Readiness gate (fail if automatable completeness < 95%)
+      - name: Source readiness gate (100% repository-verifiable checks)
+        env:
+          READINESS_OUTPUT: readiness.json
+          SOURCE_READINESS_FLOOR: "100"
         run: npm run readiness
       - name: Upload readiness report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: readiness-report
           path: readiness.json

@@ -13,9 +13,9 @@
 //        splits — `ALTER TABLE agent_memory SPLIT AT VALUES (…)`. CockroachDB splits a table
 //        into N ranges regardless of size; the split is ENFORCED (won't merge back). The rows
 //        (random UUID PKs) scatter across the ranges. `SHOW RANGES FROM TABLE` proves >=2.
-//     2. Run ONE unscoped ANN recall (`ORDER BY embedding <=> q LIMIT k`). It is served by the
-//        GLOBAL vector index (a company filter would use the btree pre-filter instead — see
-//        schema.sql), and its plan is `vector search → lookup join`: the lookup FANS OUT across
+//     2. Run ONE benchmark-only unscoped ANN recall (`ORDER BY embedding <=> q LIMIT k`). It is
+//        served by the GLOBAL vector index (the production fixed-scope query uses the dedicated
+//        company-prefix C-SPANN index), and its plan is `vector search → lookup join`: the lookup FANS OUT across
 //        the primary ranges to fetch the semantic top-k, whose PKs are spread over the ranges.
 //        We prove the fan-out concretely: the returned neighbours come from >=2 distinct ranges.
 //     3. It stays CORRECT under that distributed execution: recall@k vs brute-force ground

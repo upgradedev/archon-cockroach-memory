@@ -132,7 +132,9 @@ CREATE INDEX IF NOT EXISTS idx_validation_passed ON validation_results (passed);
 
 CREATE TABLE IF NOT EXISTS agent_memory (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- Scope / retrieval filters (exact-match, via the btree indexes below).
+    -- Scope / retrieval filters. tenant_id is server-derived and independently
+    -- enforced by CockroachDB RLS below; public callers never choose it.
+    tenant_id     TEXT NOT NULL DEFAULT 'public-demo',
     kind          TEXT NOT NULL,            -- document | payroll_event | validation | insight
     company       TEXT NOT NULL DEFAULT '_global',
     period        TEXT,                     -- YYYY-MM, when the memory is period-scoped
@@ -142,8 +144,99 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     metadata      JSONB,                    -- structured payload (amounts, doc_type, …)
     embedding     VECTOR(1024) NOT NULL,    -- Bedrock Titan V2 embedding of `content`
     embed_model   TEXT NOT NULL,
-    created_at    TIMESTAMPTZ DEFAULT now()
+    -- Durable lifecycle / replay fields.
+    idempotency_key TEXT,
+    content_hash    TEXT,
+    status          TEXT NOT NULL DEFAULT 'active',
+    superseded_by   UUID,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT chk_agent_memory_status
+      CHECK (status IN ('active', 'superseded', 'retracted'))
 );
+
+-- Forward-only, idempotent migration for clusters created with the original
+-- challenge schema. CREATE TABLE IF NOT EXISTS does not add newly introduced
+-- columns, so each addition is explicit and safe to re-run.
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'public-demo';
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS superseded_by UUID;
+ALTER TABLE agent_memory
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE agent_memory
+    ADD CONSTRAINT IF NOT EXISTS chk_agent_memory_status
+    CHECK (status IN ('active', 'superseded', 'retracted'));
+
+-- Defense in depth for the public demo. Install the fail-closed authorization
+-- baseline before any optional/performance index migration, so even an
+-- unrelated index drift cannot leave a legacy broad policy in effect.
+--
+-- CockroachDB schema changes do not have full atomicity inside a multi-statement
+-- explicit transaction. Each statement below is therefore an implicit
+-- transaction and the ordering fails closed:
+--   * revoke ambient object-creation and stale table grants first;
+--   * install immutable restrictive + permissive v1 policies;
+--   * enable/force RLS;
+--   * only then remove legacy policies.
+-- A retry is safe because the replacement policies use IF NOT EXISTS.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+CREATE ROLE IF NOT EXISTS archon_public_reader WITH NOLOGIN;
+ALTER ROLE archon_public_reader WITH NOBYPASSRLS;
+
+REVOKE ALL ON TABLE documents FROM archon_public_reader;
+REVOKE ALL ON TABLE employees FROM archon_public_reader;
+REVOKE ALL ON TABLE employee_payroll FROM archon_public_reader;
+REVOKE ALL ON TABLE payroll_events FROM archon_public_reader;
+REVOKE ALL ON TABLE payroll_event_payslips FROM archon_public_reader;
+REVOKE ALL ON TABLE validation_results FROM archon_public_reader;
+REVOKE ALL ON TABLE agent_memory FROM archon_public_reader;
+GRANT SELECT ON TABLE agent_memory TO archon_public_reader;
+
+CREATE POLICY IF NOT EXISTS agent_memory_migration_operator_v1
+    ON agent_memory
+    AS PERMISSIVE
+    FOR ALL
+    TO CURRENT_USER
+    USING (true)
+    WITH CHECK (true);
+
+CREATE POLICY IF NOT EXISTS agent_memory_public_demo_permit_v1
+    ON agent_memory
+    AS PERMISSIVE
+    FOR SELECT
+    TO archon_public_reader
+    USING (
+      tenant_id = 'public-demo'
+      AND company = 'Helios SA'
+      AND status = 'active'
+    );
+
+CREATE POLICY IF NOT EXISTS agent_memory_public_demo_guard_v1
+    ON agent_memory
+    AS RESTRICTIVE
+    FOR SELECT
+    TO archon_public_reader
+    USING (
+      tenant_id = 'public-demo'
+      AND company = 'Helios SA'
+      AND status = 'active'
+    );
+
+ALTER TABLE agent_memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_memory FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS agent_memory_tenant_permissive ON agent_memory;
+DROP POLICY IF EXISTS agent_memory_tenant_restrictive ON agent_memory;
+DROP POLICY IF EXISTS agent_memory_public_demo_reader ON agent_memory;
+DROP POLICY IF EXISTS agent_memory_migration_operator ON agent_memory;
 
 -- Distributed vector index (cosine). CockroachDB organizes the vectors into a
 -- hierarchical k-means partition tree and distributes it across the cluster.
@@ -158,8 +251,32 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 CREATE VECTOR INDEX IF NOT EXISTS idx_agent_memory_embedding
     ON agent_memory (embedding vector_cosine_ops);
 
+-- Production recall always equality-constrains tenant, embedding model, and
+-- active lifecycle state. These prefix indexes therefore keep ANN work inside
+-- the exact security/model space the query is allowed to see. The second index
+-- additionally accelerates the fixed-company public demo path.
+CREATE VECTOR INDEX IF NOT EXISTS idx_agent_memory_scope_embedding
+    ON agent_memory (
+      tenant_id,
+      embed_model,
+      status,
+      embedding vector_cosine_ops
+    );
+CREATE VECTOR INDEX IF NOT EXISTS idx_agent_memory_company_scope_embedding
+    ON agent_memory (
+      tenant_id,
+      embed_model,
+      status,
+      company,
+      embedding vector_cosine_ops
+    );
+
 -- Conventional secondary indexes for exact-match filtering / housekeeping.
 CREATE INDEX IF NOT EXISTS idx_agent_memory_kind ON agent_memory (kind);
 CREATE INDEX IF NOT EXISTS idx_agent_memory_company ON agent_memory (company);
 CREATE INDEX IF NOT EXISTS idx_agent_memory_source_ref ON agent_memory (source_ref);
 CREATE INDEX IF NOT EXISTS idx_agent_memory_period ON agent_memory (period);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_active_scope
+    ON agent_memory (tenant_id, embed_model, status, company, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_idempotency
+    ON agent_memory (tenant_id, embed_model, idempotency_key);

@@ -18,7 +18,7 @@ export const EMBED_DIM = Number(process.env.EMBED_DIM ?? 1024);
 export const DEFAULT_EMBED_MODEL =
   process.env.BEDROCK_EMBED_MODEL_ID || "amazon.titan-embed-text-v2:0";
 const EMBED_REGION =
-  process.env.BEDROCK_REGION || process.env.AWS_REGION || "us-west-2";
+  process.env.BEDROCK_REGION || process.env.AWS_REGION || "eu-west-1";
 
 export interface Embedder {
   readonly modelId: string;

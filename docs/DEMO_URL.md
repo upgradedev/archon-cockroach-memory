@@ -1,81 +1,43 @@
-# Public demo — AWS Lambda Function URL
+# Judge application and legacy cutover
 
-The recall path (`MemoryAgent.recallAnswer` → ANN vector search over the CockroachDB
-distributed vector index → Bedrock narration) is deployed as a **public AWS Lambda
-Function URL**. It runs **real** AWS Bedrock Titan embeddings + Claude Sonnet narration
-(the Lambda execution role injects credentials) over **CockroachDB Cloud** (`DATABASE_URL`).
+## Current judge URL
 
-## Live URL
+The unrestricted CloudFront production URL is not recorded until the exact
+main-branch candidate passes:
 
-**`https://g5ocwu4w33tkcnmfmbh3nstbxy0hqdxa.lambda-url.us-west-2.on.aws/`**
+1. source CI;
+2. staging deployment and real health/recall/audit/proof smoke;
+3. hosted staging Playwright;
+4. identical-candidate production promotion;
+5. production smoke and hosted Playwright.
 
-- **Region:** us-west-2 · **Runtime:** nodejs20.x (zip) · **Auth:** `AWS_IAM` (SigV4-signed).
-- **Why IAM, not anonymous:** this AWS account blocks anonymous (`AuthType NONE`) Function
-  URLs with an account/org guardrail — an unauthenticated request returns `403 Forbidden`
-  even with a correct config + public resource policy. IAM auth is explicitly allowed by the
-  challenge rules, so the URL is deployed with `AWS_IAM` and invoked with a signed request.
-  (To deploy anonymously on an account without that guardrail: `FURL_AUTH_TYPE=NONE bash
-  aws/deploy-lambda.sh`.)
+After those receipts exist, this file will contain the production URL and commit
+SHA. Until then, repository readiness must report the demo deliverable as pending.
 
-Deploy / redeploy: `DATABASE_URL='postgresql://…' bash aws/deploy-lambda.sh` (idempotent).
+## Legacy `us-west-2` workload
 
-## Usage (SigV4-signed)
+The old IAM-authenticated Lambda Function URL is a private historical smoke
+surface, not a public judge demo. It remains temporarily available only to avoid
+an unverified cutover.
 
-```bash
-URL="https://g5ocwu4w33tkcnmfmbh3nstbxy0hqdxa.lambda-url.us-west-2.on.aws/"
-AKID="$(aws configure get aws_access_key_id)"; SECRET="$(aws configure get aws_secret_access_key)"
+Known legacy resources:
 
-# ask the agent's memory a question
-curl --aws-sigv4 "aws:amz:us-west-2:lambda" --user "$AKID:$SECRET" \
-  -X POST "$URL" -H 'content-type: application/json' \
-  -d '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}'
-```
+- Lambda `archon-cockroach-memory`
+- its IAM-authenticated Function URL
+- log group `/aws/lambda/archon-cockroach-memory`
+- role `archon-cockroach-memory-role` and its policies
+- a legacy Lambda environment containing `DATABASE_URL`
 
-The response carries the grounded `answer`, the Bedrock `modelId`, the number of memories
-`recalled`, the `citations` (the exact memories the answer is grounded in), and
-`consistencyOk` (the self-audit over the recalled top-k).
+Retirement occurs only after the new `eu-west-1` public production receipts and
+Managed MCP audit pass. The retirement order is:
 
-## Seeding the demo data
+1. delete the legacy Function URL;
+2. delete the Lambda;
+3. remove the dedicated log group after the retention decision;
+4. detach/delete the dedicated role policies and role;
+5. revoke the CockroachDB login embedded in the legacy Lambda configuration;
+6. run a scoped final `us-west-2` inventory and record a sanitized receipt here.
 
-The Cloud store is seeded with a representative fused payroll event (real Titan embeddings)
-so the headline question answers substantively:
-
-```bash
-AWS_PROFILE=default DATABASE_URL='postgresql://…' DEMO_RESET=1 npm run demo:seed
-```
-
-## Verified live response (2026-07-13)
-
-A signed request to the live URL with the headline question returned **HTTP 200** with a real
-**Claude Sonnet** answer (`modelId: us.anthropic.claude-sonnet-4-6`) grounded in real
-**CockroachDB Cloud** memories recalled via real **Titan** embeddings:
-
-> "In April 2026, Helios SA had **4 employees** with a true employer cost of **€15,375** [2].
-> The bank salary transfer was only **€8,600**, creating an off-bank employer-cost wedge of
-> **€6,775** — driven primarily by employer social-security contributions of **€3,075**
-> (approximately 35.8% of the bank transfer alone) [1][2]."
-
-```json
-{ "modelId": "us.anthropic.claude-sonnet-4-6", "recalled": 5,
-  "citations": [
-    { "marker": "[1]", "kind": "insight",
-      "content": "Off-bank employment cost at Helios SA for 2026-04: the bank salary transfer of €8,600 understates the true cost of employing the team by €6,775 …" },
-    { "marker": "[2]", "kind": "payroll_event",
-      "content": "Payroll for Helios SA in 2026-04: 4 employees, gross €12,300, true employer cost €15,375, net paid from bank €8,600." } ],
-  "consistencyOk": true }
-```
-
-## How it is deployed
-
-`aws/deploy-lambda.sh` is idempotent (create-or-update) and packages the handler two ways:
-
-- **docker present** → builds the container image ([`aws/Dockerfile`](../aws/Dockerfile)),
-  pushes to ECR, deploys a container-image Lambda;
-- **docker absent** → esbuild-bundles the handler into a zip and deploys a zip Lambda
-  (identical handler bundle — `@aws-sdk` Titan+Claude and `pg` are inlined).
-
-**Money-safety:** reserved concurrency is capped (default 3), the timeout is short, and the
-handler bounds question length — a public URL cannot run away with cost. The IAM execution
-role grants `bedrock:InvokeModel` (Titan embed + the Claude cross-region inference profile)
-and CloudWatch Logs; a non-VPC Lambda reaches CockroachDB Cloud over its public
-`verify-full` endpoint.
+`aws/deploy-lambda.sh` is break-glass only. It requires both
+`ALLOW_LEGACY_DEPLOY=1` and an explicit region, uses a temporary package
+directory, and cannot silently recreate a default `us-west-2` workload.

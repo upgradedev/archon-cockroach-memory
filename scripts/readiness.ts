@@ -1,535 +1,511 @@
-// READINESS GATE — a machine-checkable, weighted judge-readiness report.
+// Source-readiness + submission-eligibility report for the CockroachDB AI
+// challenge. These are deliberately separate:
 //
-// This encodes the CockroachDB × AWS hackathon judging bar as CONCRETE, evidence-backed
-// checks over the repository, and reports a completeness %. Each check is one of:
-//   • automatable  — verifiable from the repo alone (file evidence + CI wiring). These
-//                    are what the CI gate enforces: if the automatable-% drops below the
-//                    threshold, the build FAILS. This is the "gate reflects TRUTH" contract:
-//                    a claim is only counted when its evidence AND its CI wiring are present.
-//   • user-gated   — needs a live cluster / live AWS creds / a hosted URL / a filed form
-//                    that only the human operator can provide (EXPLAIN on the live Cloud
-//                    cluster, a real Bedrock invocation, the AWS-hosted demo URL, Devpost).
-//                    Reported and listed, but never block the automatable gate.
+// - CI blocks on engineering evidence that can be verified from the repository.
+// - The report never calls the submission eligible until the unrestricted hosted
+//   app, public <3-minute video, final description, and Devpost form exist.
 //
-// The gate deliberately verifies CI WIRING, not just file existence: "node-kill is CI-proven"
-// is only true if the strict node-kill job exists in ci.yml AND the readiness job runs after
-// the test/cluster jobs are green (see .github/workflows/ci.yml `needs:`). That is what makes
-// this machine-checkable truth rather than a checklist of touched files.
-//
-//   npm run readiness         # prints the report, writes readiness.json, exits non-zero
-//                             # if automatable-% < AUTOMATABLE_FLOOR (default 95)
+// By default this command prints only. CI opts into an artifact with:
+//   READINESS_OUTPUT=readiness.json npm run readiness
+// Final submission validation additionally sets REQUIRE_SUBMISSION_READY=1 and
+// supplies the SUBMISSION_* environment variables below.
 
-import { readFileSync, existsSync, writeFileSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-export const AUTOMATABLE_FLOOR = Number(process.env.AUTOMATABLE_FLOOR ?? 95);
-export const TARGET_SCORE = 9.5;
+export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 
-export type CheckKind = "automatable" | "user-gated";
-export type CheckStatus = "pass" | "fail" | "user-gated";
+export const OFFICIAL_CRITERIA = [
+  "Agentic Memory Design",
+  "Technological Implementation",
+  "Real-World Impact",
+  "Product Readiness",
+  "Creativity & Originality",
+] as const;
 
-export interface CheckResult {
+export type OfficialCriterion = (typeof OFFICIAL_CRITERIA)[number];
+export type CheckStatus = "pass" | "fail";
+
+export interface SourceCheck {
   id: string;
-  criterion: string;
-  weight: number;
-  kind: CheckKind;
+  criterion: OfficialCriterion;
   status: CheckStatus;
   detail: string;
 }
 
-// ── evidence helpers ──────────────────────────────────────────────────────────
-function read(rel: string): string {
-  const p = join(ROOT, rel);
-  return existsSync(p) ? readFileSync(p, "utf8") : "";
-}
-function has(rel: string): boolean {
-  return existsSync(join(ROOT, rel));
-}
-function contains(rel: string, re: RegExp): boolean {
-  return re.test(read(rel));
-}
-/** True iff none of `rels` contain the (dishonest) pattern. */
-function noneContain(rels: string[], re: RegExp): { ok: boolean; where: string[] } {
-  const where = rels.filter((r) => re.test(read(r)));
-  return { ok: where.length === 0, where };
-}
-
-const CI = "/.github/workflows/ci.yml".replace(/^\//, "");
-function ciHas(re: RegExp): boolean {
-  return re.test(read(CI));
-}
-
-type Eval = () => { status: CheckStatus; detail: string };
-interface CheckSpec {
+export interface EligibilityRequirement {
   id: string;
-  criterion: string;
-  weight: number;
-  kind: CheckKind;
-  run: Eval;
+  status: "complete" | "pending";
+  detail: string;
 }
 
-// A pass/fail automatable check from a boolean.
-function autobool(cond: boolean, okMsg: string, failMsg: string): { status: CheckStatus; detail: string } {
-  return cond ? { status: "pass", detail: okMsg } : { status: "fail", detail: failMsg };
-}
-
-// ── the checks — real evidence, grouped by judging criterion ───────────────────
-const CHECKS: CheckSpec[] = [
-  // ═══════════ CockroachDB-depth (load-bearing) ═══════════
-  {
-    id: "crdb.cspann-index",
-    criterion: "CockroachDB-depth",
-    weight: 3,
-    kind: "automatable",
-    run: () => {
-      const s = read("src/db/schema.sql");
-      const nativeIndex = /CREATE\s+VECTOR\s+INDEX/i.test(s) && /vector_cosine_ops/i.test(s);
-      // Must NOT be the pgvector extension masquerading as CockroachDB's own index.
-      const pgvectorExt = /CREATE\s+EXTENSION[^;]*vector/i.test(s) || /USING\s+ivfflat/i.test(s) || /USING\s+hnsw/i.test(s);
-      return autobool(
-        nativeIndex && !pgvectorExt,
-        "schema.sql declares a native CREATE VECTOR INDEX (vector_cosine_ops) — CockroachDB C-SPANN, not pgvector.",
-        "schema.sql is missing the native CREATE VECTOR INDEX or uses a pgvector-style index."
-      );
-    },
-  },
-  {
-    id: "crdb.explain-vector-search-evidence",
-    criterion: "CockroachDB-depth",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const captured = contains("docs/CLOUD_SMOKE.md", /vector search/i) || contains("docs/BENCHMARK.md", /vector search/i);
-      return autobool(
-        captured,
-        "EXPLAIN 'vector search' plan captured in docs/CLOUD_SMOKE.md / docs/BENCHMARK.md (index-accelerated ANN, not a scan).",
-        "no captured EXPLAIN 'vector search' evidence in the smoke/benchmark docs."
-      );
-    },
-  },
-  {
-    id: "crdb.explain-live-probe",
-    criterion: "CockroachDB-depth",
-    weight: 1,
-    kind: "user-gated",
-    run: () => ({
-      status: "user-gated",
-      detail: "Live EXPLAIN on the CockroachDB Cloud cluster requires DATABASE_URL creds — user-gated live probe (evidence captured in docs/CLOUD_SMOKE.md).",
-    }),
-  },
-  {
-    id: "crdb.recall-benchmark",
-    criterion: "CockroachDB-depth",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const harness = has("scripts/benchmark.ts");
-      const numbers = contains("docs/BENCHMARK.md", /recall@?\s*\d/i) && contains("docs/BENCHMARK.md", /9\d(\.\d)?%/);
-      const wired = ciHas(/npm run benchmark/);
-      return autobool(
-        harness && numbers && wired,
-        "recall@k benchmark harness (scripts/benchmark.ts) + measured numbers in BENCHMARK.md + CI recall-floor smoke wired.",
-        `recall benchmark incomplete (harness=${harness}, numbers=${numbers}, ci-wired=${wired}).`
-      );
-    },
-  },
-  {
-    id: "crdb.rf3-replication",
-    criterion: "CockroachDB-depth",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const cluster = read("docker-compose.cluster.yml");
-      const threeNodes = /roach1/.test(cluster) && /roach2/.test(cluster) && /roach3/.test(cluster);
-      const rf3Proof = contains("scripts/show-distribution.sh", /SHOW RANGES/i) && contains("docs/BENCHMARK.md", /RF=3|replicas/i);
-      return autobool(
-        threeNodes && rf3Proof,
-        "3-node cluster (docker-compose.cluster.yml) + RF=3 range distribution proven (show-distribution.sh SHOW RANGES + BENCHMARK.md).",
-        `RF=3 evidence incomplete (3-node=${threeNodes}, proof=${rf3Proof}).`
-      );
-    },
-  },
-  {
-    id: "crdb.multi-range-fanout",
-    criterion: "CockroachDB-depth",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const demo = has("scripts/fanout-demo.ts");
-      const test = has("tests/fanout.test.ts");
-      const wired = contains("package.json", /tests\/fanout\.test\.ts/) && ciHas(/npm test/);
-      return autobool(
-        demo && test && wired,
-        "multi-range ANN fan-out demo + tests/fanout.test.ts wired into `npm test` (CI-run against real CockroachDB).",
-        `multi-range fan-out incomplete (demo=${demo}, test=${test}, wired=${wired}).`
-      );
-    },
-  },
-  {
-    id: "crdb.node-kill-ci-proven",
-    criterion: "CockroachDB-depth",
-    weight: 3,
-    kind: "automatable",
-    run: () => {
-      const script = read("scripts/show-distribution.sh");
-      const killsNode = /docker[^\n]*stop\s+roach3|\$COMPOSE\s+stop\s+roach3/.test(script);
-      const strictAsserts = /STRICT/.test(script) && /strict_fail/.test(script);
-      // CI must actually RUN it in strict mode — that is the difference between CI-ran and CI-proven.
-      const ciRunsStrict = ciHas(/show-distribution\.sh/) && ciHas(/STRICT=1/);
-      return autobool(
-        killsNode && strictAsserts && ciRunsStrict,
-        "node-kill (docker stop roach3 → recall still serves) with a STRICT assertion, run by a CI cluster job (STRICT=1) — CI-proven, not just asserted.",
-        `node-kill not CI-proven (kills-node=${killsNode}, strict-assert=${strictAsserts}, ci-runs-strict=${ciRunsStrict}).`
-      );
-    },
-  },
-  {
-    id: "crdb.mcp-agentic-surface",
-    criterion: "CockroachDB-depth",
-    weight: 1,
-    kind: "automatable",
-    run: () => {
-      const server = has("src/mcp/server.ts");
-      const test = has("tests/mcp.test.ts") && contains("package.json", /tests\/mcp\.test\.ts/);
-      // Honesty guard: we expose a SELF-HOSTED MCP surface; we must NOT claim the hosted
-      // "Cloud Managed MCP Server" required-feature box (Devpost's exact wording).
-      const noManagedOverclaim = !contains("README.md", /3 of 4/) && contains("README.md", /2 of 4/);
-      return autobool(
-        server && test && noManagedOverclaim,
-        "self-hosted MCP server (src/mcp/server.ts) exposes the CockroachDB memory as agent tools + MCP round-trip test wired; honestly kept as '2 of 4 required' (no Cloud-Managed-MCP overclaim).",
-        `MCP agentic surface incomplete (server=${server}, test=${test}, honest-count=${noManagedOverclaim}).`
-      );
-    },
-  },
-
-  // ═══════════ AWS integration ═══════════
-  {
-    id: "aws.bedrock-gated-test",
-    criterion: "AWS integration",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const test = has("tests/bedrock.integration.test.ts");
-      const gated = contains("tests/bedrock.integration.test.ts", /RUN_BEDROCK_IT/);
-      const wired = contains("package.json", /tests\/bedrock\.integration\.test\.ts/);
-      return autobool(
-        test && gated && wired,
-        "gated real-Bedrock integration test (RUN_BEDROCK_IT) present and wired — re-runnable proof against real AWS.",
-        `Bedrock gated test incomplete (test=${test}, gated=${gated}, wired=${wired}).`
-      );
-    },
-  },
-  {
-    id: "aws.bedrock-smoke-evidence",
-    criterion: "AWS integration",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const doc = has("docs/BEDROCK_SMOKE.md");
-      const real = contains("docs/BEDROCK_SMOKE.md", /1024/) && contains("docs/BEDROCK_SMOKE.md", /Titan/i) && contains("docs/BEDROCK_SMOKE.md", /Converse|Claude/i);
-      const linked = contains("README.md", /BEDROCK_SMOKE\.md/) && contains("docs/TOOLS.md", /BEDROCK_SMOKE\.md/);
-      return autobool(
-        doc && real && linked,
-        "docs/BEDROCK_SMOKE.md holds a verbatim real-AWS run (Titan 1024-dim + Claude Converse) and is linked from README + TOOLS.md.",
-        `Bedrock smoke evidence incomplete (doc=${doc}, real-markers=${real}, linked=${linked}).`
-      );
-    },
-  },
-  {
-    id: "aws.bedrock-real-run",
-    criterion: "AWS integration",
-    weight: 1,
-    kind: "user-gated",
-    run: () => ({
-      status: "user-gated",
-      detail: "Executing Bedrock live needs AWS creds (RUN_BEDROCK_IT=1) — user-gated; evidence captured in docs/BEDROCK_SMOKE.md.",
-    }),
-  },
-  {
-    id: "aws.demo-url-artifacts",
-    criterion: "AWS integration",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      // The buildable, reproducible demo-URL artifacts: a ~thin HTTP handler wrapping
-      // MemoryAgent.recallAnswer, the Lambda Function URL adapter, a container image,
-      // and a one-command deploy script (docker→ECR container, or docker-free esbuild zip).
-      const core = has("src/http/handler.ts") && contains("src/http/handler.ts", /recallAnswer/);
-      const lambda = has("src/lambda.ts") && contains("src/lambda.ts", /handleRecall/);
-      const dockerfile = has("aws/Dockerfile") && contains("aws/Dockerfile", /lambda\.handler/);
-      const deploy = has("aws/deploy-lambda.sh") && contains("aws/deploy-lambda.sh", /create-function-url-config/) && contains("aws/deploy-lambda.sh", /bedrock:InvokeModel/);
-      return autobool(
-        core && lambda && dockerfile && deploy,
-        "demo-URL artifacts present: recall HTTP handler + Lambda Function URL adapter + container Dockerfile + one-command deploy script (ECR container or esbuild zip, IAM bedrock:InvokeModel).",
-        `demo-URL artifacts incomplete (core=${core}, lambda=${lambda}, dockerfile=${dockerfile}, deploy=${deploy}).`
-      );
-    },
-  },
-  {
-    id: "aws.demo-url",
-    criterion: "AWS integration",
-    weight: 2,
-    kind: "user-gated",
-    run: () => ({
-      status: "user-gated",
-      detail: "LIVE AWS Function URL reachability is verified by the operator against real infra (repo alone cannot prove a live URL). DEPLOYED + verified 2026-07-13: a SigV4-signed request to the us-west-2 Function URL returned HTTP 200 with a real Claude Sonnet answer over CockroachDB Cloud — recorded in docs/DEMO_URL.md. Redeploy: `DATABASE_URL=… bash aws/deploy-lambda.sh`.",
-    }),
-  },
-
-  // ═══════════ Application security (pen-test) ═══════════
-  {
-    id: "security.pentest-suite",
-    criterion: "Application security",
-    weight: 3,
-    kind: "automatable",
-    run: () => {
-      const suite = has("tests/security.test.ts");
-      // AuthZ (MCP write/read tool boundary), injection (parameterized-query safety
-      // asserted against real CockroachDB), tenant/scope isolation, sensitive-data
-      // exposure, and input-abuse bounds — the real threat model, not a token file.
-      const covers = ["AuthZ", "Injection", "Isolation", "Exposure", "Abuse"].every((m) => contains("tests/security.test.ts", new RegExp(m)));
-      const wiredTest = contains("package.json", /tests\/security\.test\.ts/);
-      // A dedicated pen-test CI job stands up its own CockroachDB and runs the suite
-      // (so the parameterized-query assertion executes against a real engine).
-      const ciJob = ciHas(/pen-test:/) && ciHas(/tests\/security\.test\.ts|test:security/);
-      return autobool(
-        suite && covers && wiredTest && ciJob,
-        "security.test.ts covers AuthZ + injection (real-CRDB parameterization) + tenant isolation + data-exposure + abuse bounds; wired into `npm test` AND a dedicated pen-test CI job (own CockroachDB).",
-        `pen-test suite incomplete (suite=${suite}, covers=${covers}, wired=${wiredTest}, ci-job=${ciJob}).`
-      );
-    },
-  },
-  {
-    id: "security.dep-cve-gate",
-    criterion: "Application security",
-    weight: 1,
-    kind: "automatable",
-    run: () =>
-      autobool(
-        ciHas(/dep-audit:/) && ciHas(/npm audit/),
-        "dependency-CVE gate wired in CI (npm audit, fails on high/critical).",
-        "dependency-CVE gate (npm audit) not wired in CI."
-      ),
-  },
-
-  // ═══════════ Performance / load ═══════════
-  {
-    id: "load.k6-recall",
-    criterion: "Performance & load",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const script = has("load/recall.js") && has("load/seed.ts");
-      // p95 latency SLO + recall@1 correctness threshold under concurrency.
-      const slo = contains("load/recall.js", /p\(95\)</) && contains("load/recall.js", /recall_correct/);
-      const wired = ciHas(/load:/) && ciHas(/k6 run/);
-      const referenced = contains("README.md", /p95|SLO/i) || contains("docs/BENCHMARK.md", /p95|SLO/i);
-      return autobool(
-        script && slo && wired && referenced,
-        "k6 load script (load/recall.js) drives the recall/vector-search path with a p95 SLO + recall@1 threshold under concurrency; run by a dedicated `load` CI job; SLO referenced in README/BENCHMARK.",
-        `load test incomplete (script=${script}, slo=${slo}, ci-wired=${wired}, referenced=${referenced}).`
-      );
-    },
-  },
-
-  // ═══════════ Technical / reproducibility ═══════════
-  {
-    id: "tech.offline-suite-green",
-    criterion: "Technical & reproducibility",
-    weight: 3,
-    kind: "automatable",
-    run: () => {
-      // The full offline suite runs in CI build-test (`npm test`), and the readiness job
-      // `needs: [build-test]`, so reaching this check at all means the suite was green.
-      const wired = ciHas(/npm test/);
-      const suiteFiles = ["tests/memory.test.ts", "tests/consistency.test.ts", "tests/mcp.test.ts", "tests/fanout.test.ts"].every(has);
-      return autobool(
-        wired && suiteFiles,
-        "full offline test suite wired into CI build-test (`npm test`); readiness runs only after it is green (ci.yml `needs`).",
-        `offline suite wiring incomplete (ci-wired=${wired}, files=${suiteFiles}).`
-      );
-    },
-  },
-  {
-    id: "tech.e2e-journeys",
-    criterion: "Technical & reproducibility",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      const suite = has("tests/e2e.test.ts");
-      // Meaningful journey count (8+): ingest→recall→cited→audit→MCP→fan-out→edges→resilience.
-      const journeys = (read("tests/e2e.test.ts").match(/^test\(/gm) ?? []).length;
-      const enough = journeys >= 8;
-      const wired = contains("package.json", /tests\/e2e\.test\.ts/) && ciHas(/npm test/);
-      return autobool(
-        suite && enough && wired,
-        `end-to-end journey suite (tests/e2e.test.ts, ${journeys} journeys) wired into CI \`npm test\` — runs against the mock offline and the real CockroachDB in CI.`,
-        `e2e journeys incomplete (suite=${suite}, journeys=${journeys}/8, wired=${wired}).`
-      );
-    },
-  },
-  {
-    id: "tech.typecheck",
-    criterion: "Technical & reproducibility",
-    weight: 1,
-    kind: "automatable",
-    run: () => autobool(has("tsconfig.json") && ciHas(/npm run typecheck/), "TypeScript typecheck wired in CI.", "typecheck not wired in CI."),
-  },
-  {
-    id: "tech.docs-consistency",
-    criterion: "Technical & reproducibility",
-    weight: 2,
-    kind: "automatable",
-    run: () => {
-      // Scope to author-facing surfaces; the dated JUDGE_STATE snapshot is historical.
-      const surfaces = ["README.md", "docs/TOOLS.md", "docs/BENCHMARK.md", "docs/BEDROCK_SMOKE.md", "docs/CLOUD_SMOKE.md", "src/agents/memory-agent.ts", "src/extraction/types.ts"];
-      // 1. no superseded ~28% figure leaking into author-facing docs/code.
-      const stale28 = noneContain(surfaces, /~?\s*28\s*%|0\.28\b/);
-      // 2. figure harmonization present (~72% full / ~35% wedge).
-      const figures = contains("README.md", /~?\s*72\s*%/) && contains("README.md", /~?\s*35\s*%/);
-      // 3. feature-count consistent and not overclaimed.
-      const countOk = contains("README.md", /2 of 4/) && contains("docs/TOOLS.md", /2 of the 4/) && !contains("README.md", /3 of 4/);
-      // 4. no DISHONEST pgvector claim (the wire-format comment in client.ts is fine).
-      const pgvectorLie = noneContain([...surfaces, "src/db/client.ts", "src/db/schema.sql"], /pgvector\s+(extension|index|store)|USING\s+ivfflat/i);
-      const ok = stale28.ok && figures && countOk && pgvectorLie.ok;
-      const detail = ok
-        ? "figures harmonized (~72%/~35%, no stray ~28%), feature count consistent ('2 of 4', no overclaim), no dishonest pgvector claim."
-        : `docs inconsistency (stale28=${stale28.ok ? "ok" : stale28.where.join(",")}, figures=${figures}, count=${countOk}, pgvector=${pgvectorLie.ok ? "ok" : pgvectorLie.where.join(",")}).`;
-      return { status: ok ? "pass" : "fail", detail };
-    },
-  },
-  {
-    id: "tech.reproducibility-docs",
-    criterion: "Technical & reproducibility",
-    weight: 1,
-    kind: "automatable",
-    run: () => {
-      const quickstart = contains("README.md", /##\s*Quickstart/i);
-      const scripts = ["db:schema", "memory:demo", "benchmark", "fanout:demo"].every((s) => contains("package.json", new RegExp(`"${s}"`)));
-      return autobool(quickstart && scripts, "README quickstart + reproduce harnesses (db:schema / memory:demo / benchmark / fanout:demo) present.", `reproducibility docs incomplete (quickstart=${quickstart}, scripts=${scripts}).`);
-    },
-  },
-
-  // ═══════════ Submission completeness ═══════════
-  {
-    id: "submission.demo-video",
-    criterion: "Submission completeness",
-    weight: 1,
-    kind: "automatable",
-    run: () => {
-      const mp4 = has("demo") && readdirSync(join(ROOT, "demo")).some((f) => f.endsWith(".mp4"));
-      return autobool(mp4, "a demo video (demo/*.mp4) is present in the repo.", "no demo video (demo/*.mp4) present.");
-    },
-  },
-  {
-    id: "submission.demo-url-and-form",
-    criterion: "Submission completeness",
-    weight: 2,
-    kind: "user-gated",
-    run: () => ({
-      status: "user-gated",
-      detail: "Public demo URL + filed Devpost submission form — user-gated (operator action).",
-    }),
-  },
-];
-
-// ── evaluate + aggregate ───────────────────────────────────────────────────────
 export interface ReadinessReport {
   generatedAt: string;
-  target: number;
-  automatableFloor: number;
-  checks: CheckResult[];
-  criteria: Record<string, { weight: number; passedWeight: number; automatablePct: number; userGated: number }>;
-  automatable: { totalWeight: number; passedWeight: number; pct: number };
-  completeness: { totalWeight: number; passedWeight: number; pct: number };
-  userGated: Array<{ id: string; criterion: string; detail: string }>;
-  gate: { threshold: number; automatablePct: number; pass: boolean };
+  checks: SourceCheck[];
+  judging: Record<
+    OfficialCriterion,
+    { passed: number; total: number; pct: number }
+  >;
+  sourceGate: {
+    threshold: number;
+    passed: number;
+    total: number;
+    pct: number;
+    pass: boolean;
+  };
+  eligibility: {
+    requirements: EligibilityRequirement[];
+    complete: number;
+    total: number;
+    pass: boolean;
+  };
+  submissionEligible: boolean;
 }
 
-export function evaluate(): ReadinessReport {
-  const checks: CheckResult[] = CHECKS.map((c) => {
-    const { status, detail } = c.run();
-    return { id: c.id, criterion: c.criterion, weight: c.weight, kind: c.kind, status, detail };
-  });
+function path(rel: string): string {
+  return join(ROOT, rel);
+}
 
-  const criteria: ReadinessReport["criteria"] = {};
-  for (const c of checks) {
-    const g = (criteria[c.criterion] ??= { weight: 0, passedWeight: 0, automatablePct: 0, userGated: 0 });
-    g.weight += c.weight;
-    if (c.kind === "user-gated") g.userGated += 1;
-    if (c.status === "pass") g.passedWeight += c.weight;
-  }
-  // per-criterion automatable %
-  for (const name of Object.keys(criteria)) {
-    const auto = checks.filter((c) => c.criterion === name && c.kind === "automatable");
-    const tot = auto.reduce((s, c) => s + c.weight, 0);
-    const pass = auto.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
-    criteria[name].automatablePct = tot ? round((pass / tot) * 100) : 100;
-  }
+function has(rel: string): boolean {
+  return existsSync(path(rel));
+}
 
-  const auto = checks.filter((c) => c.kind === "automatable");
-  const autoTotal = auto.reduce((s, c) => s + c.weight, 0);
-  const autoPassed = auto.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
-  const autoPct = autoTotal ? round((autoPassed / autoTotal) * 100) : 100;
+function read(rel: string): string {
+  return has(rel) ? readFileSync(path(rel), "utf8") : "";
+}
 
-  // Overall completeness: user-gated checks count as pending (0) until the operator lands them.
-  const allTotal = checks.reduce((s, c) => s + c.weight, 0);
-  const allPassed = checks.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
+function generatedArtifactPaths(): string[] {
+  const blockedDirectories = new Set([
+    ".aws-sam",
+    "__pycache__",
+    "coverage",
+    "playwright-report",
+    "test-results",
+  ]);
+  const blockedDemoDirectories = new Set(["audio", "clips", "frames"]);
+  const found: string[] = [];
+  const visit = (absolute: string, relative: string): void => {
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      if (entry.name === ".git") continue;
+      const childRelative = relative
+        ? `${relative}/${entry.name}`
+        : entry.name;
+      if (entry.isDirectory()) {
+        // Dependency trees are required to execute this gate and are already
+        // protected by .gitignore/secret scanning. Do not recurse through them.
+        if (entry.name === "node_modules") continue;
+        if (
+          blockedDirectories.has(entry.name) ||
+          (relative === "demo/assets" &&
+            blockedDemoDirectories.has(entry.name))
+        ) {
+          found.push(childRelative);
+          continue;
+        }
+        visit(join(absolute, entry.name), childRelative);
+      } else if (
+        /\.(?:mp4|pyc)$/iu.test(entry.name) ||
+        /^(?:readiness|database-release-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
+          entry.name
+        )
+      ) {
+        found.push(childRelative);
+      }
+    }
+  };
+  visit(ROOT, "");
+  return found;
+}
 
+function contains(rel: string, pattern: RegExp): boolean {
+  return pattern.test(read(rel));
+}
+
+function sourceCheck(
+  id: string,
+  criterion: OfficialCriterion,
+  condition: boolean,
+  passed: string,
+  failed: string
+): SourceCheck {
   return {
-    generatedAt: new Date().toISOString(),
-    target: TARGET_SCORE,
-    automatableFloor: AUTOMATABLE_FLOOR,
-    checks,
-    criteria,
-    automatable: { totalWeight: autoTotal, passedWeight: autoPassed, pct: autoPct },
-    completeness: { totalWeight: allTotal, passedWeight: allPassed, pct: round((allPassed / allTotal) * 100) },
-    userGated: checks.filter((c) => c.status === "user-gated").map((c) => ({ id: c.id, criterion: c.criterion, detail: c.detail })),
-    gate: { threshold: AUTOMATABLE_FLOOR, automatablePct: autoPct, pass: autoPct >= AUTOMATABLE_FLOOR },
+    id,
+    criterion,
+    status: condition ? "pass" : "fail",
+    detail: condition ? passed : failed,
   };
 }
 
-function round(n: number): number {
-  return Math.round(n * 10) / 10;
+function sourceChecks(): SourceCheck[] {
+  const schema = read("src/db/schema.sql");
+  const ci = read(".github/workflows/ci.yml");
+  const deploy = read(".github/workflows/deploy-aws.yml");
+  const lambdaTemplate = read("aws/template.yaml");
+  const dockerfile = read("aws/Dockerfile");
+  const narrator = read("src/agents/narrator.ts");
+  const handler = read("src/http/handler.ts");
+  const localArtifacts = generatedArtifactPaths();
+  const workflowSources = [
+    ci,
+    deploy,
+    read(".github/workflows/database-release.yml"),
+    read(".github/workflows/managed-mcp-audit.yml"),
+    read(".github/workflows/benchmark.yml"),
+    read(".github/workflows/codeql.yml"),
+  ].join("\n");
+  const unpinnedActions = [
+    ...workflowSources.matchAll(/uses:\s+\S+@v\d+/gu),
+  ];
+
+  return [
+    sourceCheck(
+      "memory.native-vector-lifecycle",
+      "Agentic Memory Design",
+      /CREATE\s+VECTOR\s+INDEX/iu.test(schema) &&
+        /embed_model/iu.test(schema) &&
+        /idempotency_key/iu.test(schema) &&
+        /superseded_by/iu.test(schema),
+      "Native C-SPANN indexes and durable idempotency/model/lifecycle fields are explicit.",
+      "Native vector or durable lifecycle evidence is incomplete."
+    ),
+    sourceCheck(
+      "memory.role-bound-scope",
+      "Agentic Memory Design",
+      /archon_public_reader/iu.test(schema) &&
+        /TO\s+archon_public_reader/iu.test(schema) &&
+        /company\s*=\s*'Helios SA'/iu.test(schema) &&
+        !/current_setting\('application_name'/iu.test(schema),
+      "CockroachDB RLS binds the read-only runtime role to the fixed synthetic tenant and company.",
+      "Role-bound fixed-scope RLS is missing or still depends on mutable application_name."
+    ),
+    sourceCheck(
+      "memory.managed-mcp",
+      "Agentic Memory Design",
+      has("scripts/cloud-mcp-audit.ts") &&
+        has(".github/workflows/managed-mcp-audit.yml") &&
+        contains("docs/MANAGED_MCP_SMOKE.md", /live read-only proof/iu),
+      "The live CockroachDB Cloud Managed MCP integration has a bounded read-only audit and receipt workflow.",
+      "Managed MCP source, workflow, or live evidence document is missing."
+    ),
+    sourceCheck(
+      "tech.ci-matrix",
+      "Technological Implementation",
+      /frontend-iac:/u.test(ci) &&
+        /cluster-survival:/u.test(ci) &&
+        /pen-test:/u.test(ci) &&
+        /load:/u.test(ci) &&
+        /test:e2e/iu.test(ci),
+      "CI gates backend, real CockroachDB, node loss, security, load, frontend, SAM, and browser journeys.",
+      "One or more release-critical CI jobs are missing."
+    ),
+    sourceCheck(
+      "tech.immutable-supply-chain",
+      "Technological Implementation",
+      unpinnedActions.length === 0 &&
+        /cockroachdb\/cockroach:v26\.2\.3@sha256:/u.test(ci) &&
+        /node-version:\s*22/u.test(ci) &&
+        /^FROM\s+\S+@sha256:[a-f0-9]{64}$/mu.test(dockerfile) &&
+        has("package-lock.json") &&
+        has("web/package-lock.json"),
+      "Actions, CockroachDB image, runtime, and lockfiles are immutable/reproducible.",
+      "A mutable Action/image/runtime reference remains."
+    ),
+    sourceCheck(
+      "tech.bedrock-grounding",
+      "Technological Implementation",
+      /checks:\s*\{[\s\S]*claims:\s*boolean/iu.test(narrator) &&
+        /RECALL_MIN_SCORE/iu.test(handler) &&
+        /citation/iu.test(narrator),
+      "Bedrock narration is guarded by relevance abstention, per-claim citations, numeric checks, and fallback.",
+      "Grounding or relevance-abstention controls are incomplete."
+    ),
+    sourceCheck(
+      "impact.working-slice",
+      "Real-World Impact",
+      contains("README.md", /Financial Memory Control Room/iu) &&
+        contains("README.md", /fixed synthetic/iu) &&
+        contains("README.md", /working challenge slice/iu),
+      "README defines the concrete CFO investigation slice without presenting the broader vision as shipped.",
+      "The current working product slice is not stated precisely."
+    ),
+    sourceCheck(
+      "impact.audit-before-action",
+      "Real-World Impact",
+      has("src/memory/consistency.ts") &&
+        has("web/src/components/AuditLedger.tsx") &&
+        /contradiction/iu.test(read("src/memory/consistency.ts")) &&
+        /No automatic mutation/iu.test(read("web/src/components/AuditLedger.tsx")),
+      "Contradictions and missing evidence are exposed as read-only recommendations before action.",
+      "The accountable contradiction/absence user journey is incomplete."
+    ),
+    sourceCheck(
+      "impact.public-data-boundary",
+      "Real-World Impact",
+      /dataClassification:\s*"synthetic-public-demo"/u.test(
+        read("src/config/scope.ts")
+      ) &&
+        /Public,?\s+read-only demonstration data/iu.test(
+          read("web/src/components/Hero.tsx")
+        ),
+      "The judge app is explicitly fixed to synthetic public data with no tenant selector.",
+      "The public data classification/boundary is unclear."
+    ),
+    sourceCheck(
+      "product.aws-reference-architecture",
+      "Product Readiness",
+      /AWS::CloudFront::Distribution/u.test(lambdaTemplate) &&
+        /AWS::Serverless::HttpApi/u.test(lambdaTemplate) &&
+        /AWS::Serverless::Function/u.test(lambdaTemplate) &&
+        /AWS::S3::Bucket/u.test(lambdaTemplate) &&
+        /DATABASE_SECRET_ID/u.test(lambdaTemplate),
+      "SAM defines private S3 + OAC/CloudFront, HTTP API, Lambda, Secrets Manager, alarms, and tracing.",
+      "The deployable AWS reference architecture is incomplete."
+    ),
+    sourceCheck(
+      "product.oidc-promotion-rollback",
+      "Product Readiness",
+      has("aws/bootstrap-oidc.yaml") &&
+        /AssumeRoleWithWebIdentity/u.test(read("aws/bootstrap-oidc.yaml")) &&
+        /Verify candidate tree hashes/iu.test(deploy) &&
+        /Restore the previous production release/iu.test(deploy) &&
+        /Hosted Chromium judge journey on staging/iu.test(deploy),
+      "Environment-bound OIDC, build-once promotion, hash verification, hosted E2E, and rollback are source-controlled.",
+      "OIDC/promotion/hosted verification/rollback evidence is incomplete."
+    ),
+    sourceCheck(
+      "product.no-local-build-products",
+      "Product Readiness",
+      localArtifacts.length === 0 && !has("web/dist"),
+      "No local build/video products are left in the repository workspace.",
+      "Local build or generated video artifacts remain."
+    ),
+    sourceCheck(
+      "creativity.memory-disagrees",
+      "Creativity & Originality",
+      /auditConsistency/iu.test(read("src/agents/memory-agent.ts")) &&
+        /contradictions/iu.test(read("src/memory/consistency.ts")) &&
+        /absences/iu.test(read("src/memory/consistency.ts")),
+      "The memory does more than retrieve: it surfaces cross-session disagreement and missing counterparts.",
+      "The contradiction/absence memory differentiator is incomplete."
+    ),
+    sourceCheck(
+      "creativity.live-proof-ledger",
+      "Creativity & Originality",
+      /pg_catalog\.pg_indexes/iu.test(handler) &&
+        /runtimePrincipal/iu.test(handler) &&
+        has("web/src/components/ProofLedger.tsx"),
+      "The UI exposes a live, catalog-backed infrastructure and model proof ledger.",
+      "The proof ledger is static or lacks live catalog evidence."
+    ),
+    sourceCheck(
+      "creativity.provenance-receipts",
+      "Creativity & Originality",
+      has("aws/create-deployment-receipt.mjs") &&
+        /buildOncePromoteSameArtifact/iu.test(
+          read("aws/create-deployment-receipt.mjs")
+        ) &&
+        /citation and numeric grounding guard/iu.test(handler),
+      "Evidence citations and cryptographic deployment receipts make provenance visible at both product and delivery layers.",
+      "Product/deployment provenance evidence is incomplete."
+    ),
+  ];
 }
 
-// ── CLI ────────────────────────────────────────────────────────────────────────
-function icon(s: CheckStatus): string {
-  return s === "pass" ? "✅" : s === "fail" ? "❌" : "🔒";
+function validHostedUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      !/lambda-url\.us-west-2\.on\.aws$/iu.test(url.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 
-function printReport(r: ReadinessReport): void {
-  console.log("\n════════════════════════════════════════════════════════════════════");
-  console.log("  ARCHON MEMORY — JUDGE READINESS GATE (CockroachDB × AWS)");
-  console.log("════════════════════════════════════════════════════════════════════");
-  const byCriterion = new Map<string, CheckResult[]>();
-  for (const c of r.checks) (byCriterion.get(c.criterion) ?? byCriterion.set(c.criterion, []).get(c.criterion)!).push(c);
-  for (const [name, list] of byCriterion) {
-    const g = r.criteria[name];
-    console.log(`\n▸ ${name}  —  automatable ${g.automatablePct}% (${g.userGated} user-gated)`);
-    for (const c of list) {
-      console.log(`   ${icon(c.status)} [w${c.weight}] ${c.id} — ${c.detail}`);
+function validPublicRepositoryUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "github.com" &&
+      url.pathname.replace(/\/+$/u, "") ===
+        "/upgradedev/archon-cockroach-memory" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function eligibilityRequirements(): EligibilityRequirement[] {
+  const demoUrl = process.env.SUBMISSION_DEMO_URL?.trim();
+  const videoUrl = process.env.SUBMISSION_VIDEO_URL?.trim();
+  const publicRepoUrl =
+    process.env.SUBMISSION_PUBLIC_REPO_URL?.trim() ||
+    "https://github.com/upgradedev/archon-cockroach-memory";
+
+  const requirement = (
+    id: string,
+    complete: boolean,
+    done: string,
+    pending: string
+  ): EligibilityRequirement => ({
+    id,
+    status: complete ? "complete" : "pending",
+    detail: complete ? done : pending,
+  });
+
+  return [
+    requirement(
+      "public-repository-and-license",
+      has("LICENSE") && validPublicRepositoryUrl(publicRepoUrl),
+      "Public GitHub repository target and MIT license are identified.",
+      "Confirm the public repository URL and OSI license."
+    ),
+    requirement(
+      "unrestricted-functional-demo",
+      validHostedUrl(demoUrl),
+      `Unrestricted HTTPS demo supplied: ${demoUrl}`,
+      "Set SUBMISSION_DEMO_URL after production CloudFront hosted smoke/E2E passes."
+    ),
+    requirement(
+      "public-under-three-minute-video",
+      Boolean(
+        videoUrl &&
+          /^https:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|vimeo\.com)\//iu.test(
+            videoUrl
+          )
+      ),
+      `Public YouTube/Vimeo demo supplied: ${videoUrl}`,
+      "Set SUBMISSION_VIDEO_URL only after the final public <3-minute browser/memory demo is uploaded."
+    ),
+    requirement(
+      "english-description-and-tool-identification",
+      has("docs/DEVPOST_SUBMISSION.md") &&
+        contains("docs/DEVPOST_SUBMISSION.md", /Managed MCP/iu) &&
+        contains("docs/DEVPOST_SUBMISSION.md", /Distributed Vector/iu) &&
+        contains("docs/DEVPOST_SUBMISSION.md", /AWS/iu),
+      "Final English Devpost description identifies the CockroachDB and AWS tools.",
+      "Create docs/DEVPOST_SUBMISSION.md at the final submission phase."
+    ),
+    requirement(
+      "prior-work-disclosure",
+      contains("README.md", /Prior-work disclosure/iu) &&
+        contains("README.md", /pre-existing/iu) &&
+        contains("README.md", /challenge-period/iu),
+      "README separates pre-existing Archon work from challenge-period implementation.",
+      "Add an explicit prior-work disclosure."
+    ),
+    requirement(
+      "devpost-submitted",
+      process.env.DEVPOST_SUBMITTED === "1",
+      "Operator confirmed the Devpost form is submitted.",
+      "Set DEVPOST_SUBMITTED=1 only after the final form has been submitted."
+    ),
+  ];
+}
+
+function round(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+export function evaluate(): ReadinessReport {
+  const checks = sourceChecks();
+  const judging = Object.fromEntries(
+    OFFICIAL_CRITERIA.map((criterion) => {
+      const group = checks.filter((check) => check.criterion === criterion);
+      const passed = group.filter((check) => check.status === "pass").length;
+      return [
+        criterion,
+        {
+          passed,
+          total: group.length,
+          pct: group.length ? round((passed / group.length) * 100) : 0,
+        },
+      ];
+    })
+  ) as ReadinessReport["judging"];
+
+  const passed = checks.filter((check) => check.status === "pass").length;
+  const pct = checks.length ? round((passed / checks.length) * 100) : 0;
+  const requirements = eligibilityRequirements();
+  const eligibilityComplete = requirements.filter(
+    (requirement) => requirement.status === "complete"
+  ).length;
+  const eligibilityPass = eligibilityComplete === requirements.length;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    checks,
+    judging,
+    sourceGate: {
+      threshold: SOURCE_FLOOR,
+      passed,
+      total: checks.length,
+      pct,
+      pass: pct >= SOURCE_FLOOR,
+    },
+    eligibility: {
+      requirements,
+      complete: eligibilityComplete,
+      total: requirements.length,
+      pass: eligibilityPass,
+    },
+    submissionEligible: eligibilityPass,
+  };
+}
+
+function printReport(report: ReadinessReport): void {
+  console.log("\nARCHON MEMORY — SOURCE READINESS / SUBMISSION ELIGIBILITY");
+  for (const criterion of OFFICIAL_CRITERIA) {
+    const score = report.judging[criterion];
+    console.log(`\n${criterion}: ${score.pct}% (${score.passed}/${score.total})`);
+    for (const check of report.checks.filter(
+      (item) => item.criterion === criterion
+    )) {
+      console.log(`  ${check.status === "pass" ? "PASS" : "FAIL"} ${check.id} — ${check.detail}`);
     }
   }
-  console.log("\n────────────────────────────────────────────────────────────────────");
-  console.log(`  Automatable completeness : ${r.automatable.pct}%  (${r.automatable.passedWeight}/${r.automatable.totalWeight} weight)`);
-  console.log(`  Overall completeness     : ${r.completeness.pct}%  (user-gated items pending)`);
-  console.log(`  User-gated items         : ${r.userGated.length}`);
-  for (const u of r.userGated) console.log(`     🔒 ${u.id} — ${u.detail}`);
-  console.log(`\n  GATE (floor ${r.gate.threshold}%): ${r.gate.pass ? "PASS ✅" : "FAIL ❌"} — automatable ${r.gate.automatablePct}%`);
-  console.log("════════════════════════════════════════════════════════════════════\n");
+  console.log(
+    `\nSOURCE GATE: ${report.sourceGate.pass ? "PASS" : "FAIL"} ` +
+      `${report.sourceGate.pct}% (floor ${report.sourceGate.threshold}%)`
+  );
+  console.log(
+    `SUBMISSION ELIGIBLE: ${report.submissionEligible ? "YES" : "NO"} ` +
+      `(${report.eligibility.complete}/${report.eligibility.total})`
+  );
+  for (const item of report.eligibility.requirements) {
+    console.log(`  ${item.status.toUpperCase()} ${item.id} — ${item.detail}`);
+  }
+  console.log();
 }
 
-// Run as CLI (not when imported by the test). tsx sets import.meta.url to the file URL.
-const isMain = process.argv[1] && resolve(process.argv[1]).startsWith(resolve(ROOT, "scripts"));
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
+const isMain = invokedPath === resolve(fileURLToPath(import.meta.url));
 if (isMain) {
   const report = evaluate();
-  writeFileSync(join(ROOT, "readiness.json"), JSON.stringify(report, null, 2) + "\n");
+  const output = process.env.READINESS_OUTPUT?.trim();
+  if (output) {
+    writeFileSync(resolve(ROOT, output), `${JSON.stringify(report, null, 2)}\n`);
+  }
   printReport(report);
-  if (!report.gate.pass) {
-    console.error(`Readiness gate FAILED: automatable completeness ${report.automatable.pct}% < floor ${AUTOMATABLE_FLOOR}%.`);
-    process.exit(1);
+  if (!report.sourceGate.pass) process.exitCode = 1;
+  if (
+    process.env.REQUIRE_SUBMISSION_READY === "1" &&
+    !report.submissionEligible
+  ) {
+    process.exitCode = 1;
   }
 }

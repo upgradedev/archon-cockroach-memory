@@ -1,0 +1,62 @@
+name: Cockroach Cloud Managed MCP Audit
+
+# This is deliberately workflow_dispatch-only: Cockroach Cloud credentials are
+# never made available to pull requests, forks, or untrusted branch workflows.
+# Action major tags follow the same review/Dependabot policy as deploy-aws.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-mcp-production-audit
+  cancel-in-progress: false
+
+jobs:
+  read-only-proof:
+    name: Verify the live cluster through Managed MCP
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production-audit
+    env:
+      CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
+      COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
+      COCKROACH_DATABASE: ${{ vars.COCKROACH_DATABASE || 'archon' }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run the bounded read-only Managed MCP proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CCLOUD_API_KEY"
+          test -n "$COCKROACH_CLUSTER_ID"
+          npm run --silent mcp:cloud:audit | tee managed-mcp-receipt.json
+          jq -e \
+            '.ok == true and
+             .mode == "read-only" and
+             (.proofs | length) >= 4 and
+             (.redactions | index("API key")) != null' \
+            managed-mcp-receipt.json
+
+      - name: Upload the sanitized proof receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: managed-mcp-proof-${{ github.run_id }}
+          path: managed-mcp-receipt.json
+          if-no-files-found: warn
+          retention-days: 30

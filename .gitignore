@@ -31,10 +31,24 @@ Thumbs.db
 # Test / coverage
 coverage/
 .nyc_output/
+web/playwright-report/
+web/test-results/
+.aws-sam/
+deployment-receipt*.json
+*-deployment-receipt.json
+database-release-receipt.json
+managed-mcp-*-receipt.json
+managed-mcp-receipt.json
 
 # Readiness gate — generated report (produced by `npm run readiness` / CI)
 readiness.json
 
-# Demo video build — regenerable intermediates (keep the mp4, frames, fixtures + build inputs)
+# Demo video build — keep only source fixtures and authoring inputs.
 demo/assets/audio/
 demo/assets/clips/
+demo/assets/frames/
+demo/*.mp4
+
+# Python bytecode
+__pycache__/
+*.py[cod]

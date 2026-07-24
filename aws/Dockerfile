@@ -12,7 +12,7 @@
 # optional native deps (pg-native, signature-v4-crt) are left external and are
 # gracefully skipped at runtime.
 
-FROM public.ecr.aws/lambda/nodejs:20
+FROM amazon/aws-lambda-nodejs:22.2026.07.20.07-x86_64@sha256:848fd1a3f02f63bdbadb9b57107e33f1f01239cddbc0a8c6c13b70c8e87ddbd0
 
 WORKDIR /var/task
 COPY package.json package-lock.json ./
@@ -22,8 +22,8 @@ COPY tsconfig.json ./
 COPY src ./src
 
 # Bundle the Function URL handler to ${LAMBDA_TASK_ROOT}/lambda.js (exports `handler`).
-RUN npx esbuild src/lambda.ts \
-      --bundle --platform=node --target=node20 --format=cjs \
+RUN ./node_modules/.bin/esbuild src/lambda.ts \
+      --bundle --platform=node --target=node22 --format=cjs \
       --external:pg-native --external:@aws-sdk/signature-v4-crt \
       --outfile=${LAMBDA_TASK_ROOT}/lambda.js
 

@@ -1,7 +1,7 @@
 # Local CockroachDB single node for development.
 #
-# Vector indexing requires CockroachDB v25.2+. The `latest` tag tracks the
-# current stable; pin to a v25.2+ tag if you need reproducibility.
+# Vector indexing requires CockroachDB v25.2+. CI and local compose use the same
+# immutable v26.2.3 multi-architecture manifest.
 #
 #   docker compose up -d
 #   npm run db:schema      # applies src/db/schema.sql (enables + creates vector index)
@@ -11,7 +11,7 @@
 # SQL:        postgresql://root@localhost:26257/archon_memory?sslmode=disable
 services:
   cockroach:
-    image: cockroachdb/cockroach:latest
+    image: cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0
     command: start-single-node --insecure
     ports:
       - "26257:26257" # SQL (pg-wire)

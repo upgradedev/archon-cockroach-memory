@@ -17,12 +17,12 @@ import {
   type ContentBlock,
 } from "@aws-sdk/client-bedrock-runtime";
 
-// `us.anthropic.claude-sonnet-4-6` is a cross-region inference profile.
-// Verified invokable on account 308857099262 in us-west-2 (us-east-1 is gated
-// behind the Anthropic use-case form on this account). Both overridable by env.
-export const DEFAULT_MODEL_ID = process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-sonnet-4-6";
+// EU cross-region inference keeps narration in the same regional geography as
+// the CockroachDB cluster. Both values remain overridable for other deployments.
+export const DEFAULT_MODEL_ID =
+  process.env.BEDROCK_MODEL_ID || "eu.anthropic.claude-sonnet-4-6";
 export const DEFAULT_REGION =
-  process.env.BEDROCK_REGION || process.env.AWS_REGION || "us-west-2";
+  process.env.BEDROCK_REGION || process.env.AWS_REGION || "eu-west-1";
 
 // The only surface `converse()` needs from a Bedrock client. The real
 // BedrockRuntimeClient satisfies it; so does a one-line test fake.

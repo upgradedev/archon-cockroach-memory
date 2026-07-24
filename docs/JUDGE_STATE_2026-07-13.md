@@ -1,11 +1,18 @@
 # Judge State — 2026-07-13
 
+> **SUPERSEDED HISTORICAL SNAPSHOT.** This file records the repository on
+> 2026-07-13 and must not be used as current readiness evidence. The canonical
+> current state is [README.md](../README.md), [TOOLS.md](./TOOLS.md), and CI
+> deployment receipts. Video, public demo, and Managed MCP claims below describe
+> what was true on that date; video/post/submission are currently deferred to the
+> final phase.
+
 > **Purpose.** A durable snapshot of where this entry stands against the judging bar after
 > the 2026-07-12/13 judgment review and the merged fixes (PRs #7–#11). It records the current
 > per-criterion self-assessment, the discrepancies those PRs closed, and the ranked path to
-> push the score *above* the target bar. **Video and blog/post are deliberately excluded** —
-> both are treated as done / ready-to-submit and are not scored gaps here; this doc is about the
-> build and the two weakest axes (AWS integration + submission-completeness).
+> push the score *above* the target bar. At that date, video and blog/post were
+> incorrectly treated as ready-to-submit; the current documentation supersedes
+> that assumption.
 
 ## 1. Challenge + target
 
@@ -22,7 +29,7 @@
 | Criterion | Score | Basis (verified in repo) |
 |---|---|---|
 | **CockroachDB-depth** | **9.5** | Real native distributed vector index — **C-SPANN, not pgvector** (`CREATE VECTOR INDEX … vector_cosine_ops` in `src/db/schema.sql`). `EXPLAIN` plans a `vector search` node on local v26.2.2, the 3-node cluster, and live Cloud v25.4.10 (`docs/CLOUD_SMOKE.md`). Recall@10 benchmarked 96.5%→99.6% (`docs/BENCHMARK.md`). RF=3 on every range + leaseholders across 3 nodes. Multi-range ANN fan-out demonstrated (`docs/BENCHMARK.md` Result 3b). Not vanilla Postgres. |
-| **AWS integration** | **~8.5** | Amazon Bedrock now **runs for real** (was coded-not-run): Titan Text Embeddings V2 → real 1024-dim unit vector, and Claude Sonnet 4.6 Converse RAG narrator, us-west-2, account `308857099262` — verbatim capture in `docs/BEDROCK_SMOKE.md`, re-runnable via gated `tests/bedrock.integration.test.ts`. Gap: no AWS-hosted demo URL yet (deploy is roadmap). |
+| **AWS integration** | **~8.5** | Historical `us-west-2` Bedrock verification (account identifier redacted); see the dated capture in `docs/BEDROCK_SMOKE.md`. At that date there was no AWS-hosted demo URL. |
 | **Technical** | **9** | Layered memory/agents/extraction, injectable offline fakes, full test pyramid (unit + live-CRDB integration + e2e), CI green (gitleaks + CodeQL + CockroachDB smoke). |
 | **Reproducibility** | **9** | README quickstart, `npm run` harnesses (`db:schema`, `memory:demo`, `benchmark`, `fanout:demo`), `show-distribution.sh`, `provision-cluster.sh`; offline path runs with no AWS creds; both smoke docs give exact reproduce steps. |
 | **Submission-completeness** | **gap** | Still the weakest axis — no public demo URL and the Devpost submission form is not yet filed. |

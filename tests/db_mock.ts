@@ -12,6 +12,7 @@ if (!process.env.DATABASE_URL) {
 
 interface MockRecord {
   id: string;
+  tenant_id: string;
   kind: string;
   company: string;
   period: string | null;
@@ -19,6 +20,10 @@ interface MockRecord {
   content: string;
   metadata: any | null;
   embedding: number[];
+  embed_model: string;
+  idempotency_key: string | null;
+  content_hash: string | null;
+  status: "active" | "superseded" | "retracted";
   // The pg driver returns a TIMESTAMP column as a JS Date, not a string — mirror
   // that here so the mock exercises the same createdAt normalization as prod.
   created_at: Date;
@@ -27,9 +32,15 @@ interface MockRecord {
 const db: MockRecord[] = [];
 
 function dotProduct(a: number[], b: number[]): number {
+  if (
+    a.length !== b.length ||
+    a.some((value) => !Number.isFinite(value)) ||
+    b.some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error("Mock VECTOR operands must have equal finite dimensions.");
+  }
   let dot = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
   }
   return dot;
@@ -45,21 +56,60 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
     return { rows: [] };
   }
 
-  // 2. INSERT INTO agent_memory
+  // 2. Idempotency preflight / concurrent-winner lookup
+  if (
+    queryStr
+      .toUpperCase()
+      .startsWith("SELECT ID, CONTENT_HASH FROM AGENT_MEMORY")
+  ) {
+    const [tenant, model, key] = params;
+    const found = db.find(
+      (record) =>
+        record.tenant_id === tenant &&
+        record.embed_model === model &&
+        record.idempotency_key === key
+    );
+    return {
+      rows: found
+        ? [{ id: found.id, content_hash: found.content_hash }]
+        : [],
+    };
+  }
+
+  // 3. INSERT INTO agent_memory
   if (queryStr.toUpperCase().startsWith("INSERT INTO AGENT_MEMORY")) {
-    const kind = params[0];
-    const company = params[1] ?? "_global";
-    const period = params[2] ?? null;
-    const source_ref = params[3] ?? null;
-    const content = params[4];
-    const metadata = params[5] ? JSON.parse(params[5]) : null;
-    const embeddingStr: string = params[6];
+    const scopedInsert = /\(\s*tenant_id\s*,/iu.test(queryStr);
+    const tenant_id = scopedInsert ? params[0] : "public-demo";
+    const offset = scopedInsert ? 1 : 0;
+    const kind = params[offset];
+    const company = params[offset + 1] ?? "_global";
+    const period = params[offset + 2] ?? null;
+    const source_ref = params[offset + 3] ?? null;
+    const content = params[offset + 4];
+    const metadata = params[offset + 5]
+      ? JSON.parse(params[offset + 5])
+      : null;
+    const embeddingStr: string = params[offset + 6];
     const embedding = embeddingStr
       ? embeddingStr.slice(1, -1).split(",").map(Number)
       : [];
+    const embed_model = params[offset + 7] ?? "test";
+    const idempotency_key = scopedInsert ? params[offset + 8] ?? null : null;
+    const content_hash = scopedInsert ? params[offset + 9] ?? null : null;
+
+    if (idempotency_key !== null) {
+      const conflict = db.find(
+        (record) =>
+          record.tenant_id === tenant_id &&
+          record.embed_model === embed_model &&
+          record.idempotency_key === idempotency_key
+      );
+      if (conflict) return { rows: [] };
+    }
 
     const record: MockRecord = {
       id: "mock-id-" + Math.random().toString(36).substring(2, 10),
+      tenant_id,
       kind,
       company,
       period,
@@ -67,41 +117,49 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
       content,
       metadata,
       embedding,
+      embed_model,
+      idempotency_key,
+      content_hash,
+      status: "active",
       created_at: new Date(),
     };
     db.push(record);
     return { rows: [{ id: record.id }] };
   }
 
-  // 3. SELECT count(*)
+  // 4. SELECT count(*)
   if (queryStr.toUpperCase().startsWith("SELECT COUNT(*)")) {
     let filtered = [...db];
-    const match = queryStr.match(/company\s*=\s*\$(\d+)/i);
-    if (match) {
-      const idx = parseInt(match[1]!, 10) - 1;
-      const comp = params[idx];
-      filtered = filtered.filter((r) => r.company === comp);
+    const filterMatches = [
+      ...queryStr.matchAll(
+        /(\btenant_id\b|\bcompany\b|\bperiod\b|\bkind\b|\bstatus\b|\bembed_model\b)\s*=\s*\$(\d+)/giu
+      ),
+    ];
+    for (const match of filterMatches) {
+      const column = match[1]!.toLowerCase() as keyof MockRecord;
+      const index = Number(match[2]) - 1;
+      filtered = filtered.filter((record) => record[column] === params[index]);
     }
     return { rows: [{ n: String(filtered.length) }] };
   }
 
-  // 4. SELECT for vector recall or normal select
+  // 5. SELECT for vector recall or normal select
   if (queryStr.toUpperCase().startsWith("SELECT ID, KIND, COMPANY, PERIOD, SOURCE_REF, CONTENT, METADATA, CREATED_AT")) {
     let filtered = [...db];
 
     // Apply dynamic column filters: column = $N
-    const filterMatches = [...queryStr.matchAll(/(\bcompany\b|\bperiod\b|\bkind\b)\s*=\s*\$(\d+)/gi)];
+    const filterMatches = [
+      ...queryStr.matchAll(
+        /(\btenant_id\b|\bembed_model\b|\bstatus\b|\bcompany\b|\bperiod\b|\bkind\b)\s*=\s*\$(\d+)/giu
+      ),
+    ];
     for (const m of filterMatches) {
       const col = m[1]!.toLowerCase();
       const pIdx = parseInt(m[2]!, 10) - 1; // Correctly parse digits after $
       const val = params[pIdx];
-      if (col === "company") {
-        filtered = filtered.filter((r) => r.company === val);
-      } else if (col === "period") {
-        filtered = filtered.filter((r) => r.period === val);
-      } else if (col === "kind") {
-        filtered = filtered.filter((r) => r.kind === val);
-      }
+      filtered = filtered.filter(
+        (record) => record[col as keyof MockRecord] === val
+      );
     }
 
     // Vector search distance calculation
@@ -139,6 +197,9 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
       }
     } else {
       // Normal select
+      filtered.sort(
+        (a, b) => b.created_at.getTime() - a.created_at.getTime()
+      );
       rows = filtered.map((r) => ({
         id: r.id,
         kind: r.kind,
@@ -149,6 +210,12 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
         metadata: r.metadata,
         created_at: r.created_at,
       }));
+
+      const limitMatch = queryStr.match(/LIMIT\s+\$(\d+)/iu);
+      if (limitMatch) {
+        const limitIdx = Number(limitMatch[1]) - 1;
+        rows = rows.slice(0, params[limitIdx] as number);
+      }
     }
 
     return { rows };
