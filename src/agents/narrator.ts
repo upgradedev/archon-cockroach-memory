@@ -308,7 +308,9 @@ function escapePromptText(value: string): string {
 
 function extractNumbers(value: string): string[] {
   const matches =
-    value.match(/(?:[€$£]\s*)?-?\d+(?:[.,]\d+)*(?:\s*%)?/gu) ?? [];
+    value.match(
+      /(?:(?:EUR|USD|GBP|euros?|dollars?|pounds?|[€$£])\s*)?-?\d+(?:[.,]\d+)*(?:\s*(?:EUR|USD|GBP|euros?|dollars?|pounds?|[€$£]))?(?:\s*%)?/giu
+    ) ?? [];
   return matches.map(normalizeNumber);
 }
 
@@ -347,12 +349,30 @@ function significantTokens(value: string): string[] {
 }
 
 function normalizeNumber(value: string): string {
-  const currency = value.trim().match(/^[€$£]/u)?.[0] ?? "";
-  let normalized = value
-    .trim()
-    .replace(/^[€$£]\s*/u, "")
-    .replace(/\s*%$/u, "");
-  const percent = /\s*%$/u.test(value) ? "%" : "";
+  const raw = value.trim();
+  const percent = /\s*%$/u.test(raw) ? "%" : "";
+  let normalized = raw.replace(/\s*%$/u, "").trim();
+  const prefixMatch = normalized.match(
+    /^(EUR|USD|GBP|euros?|dollars?|pounds?|[€$£])\s*/iu
+  );
+  if (prefixMatch) normalized = normalized.slice(prefixMatch[0].length);
+  const suffixMatch = normalized.match(
+    /\s*(EUR|USD|GBP|euros?|dollars?|pounds?|[€$£])$/iu
+  );
+  if (suffixMatch) {
+    normalized = normalized.slice(0, -suffixMatch[0].length).trim();
+  }
+
+  const prefixCurrency = canonicalCurrency(prefixMatch?.[1]);
+  const suffixCurrency = canonicalCurrency(suffixMatch?.[1]);
+  // Conflicting double currency notation must never compare equal to a normal
+  // cited amount. Equivalent prefix/suffix forms collapse to one ISO unit.
+  const currency =
+    prefixCurrency && suffixCurrency && prefixCurrency !== suffixCurrency
+      ? `${prefixCurrency}/${suffixCurrency}:`
+      : prefixCurrency || suffixCurrency
+        ? `${prefixCurrency ?? suffixCurrency}:`
+        : "";
 
   // English thousands (63,800.50) and continental thousands
   // (63.800,50) normalize to the same canonical decimal spelling.
@@ -366,6 +386,29 @@ function normalizeNumber(value: string): string {
 
   const numeric = Number(normalized);
   return `${currency}${Number.isFinite(numeric) ? numeric.toString() : normalized}${percent}`;
+}
+
+function canonicalCurrency(value: string | undefined): "EUR" | "USD" | "GBP" | "" {
+  if (!value) return "";
+  switch (value.toUpperCase()) {
+    case "€":
+    case "EUR":
+    case "EURO":
+    case "EUROS":
+      return "EUR";
+    case "$":
+    case "USD":
+    case "DOLLAR":
+    case "DOLLARS":
+      return "USD";
+    case "£":
+    case "GBP":
+    case "POUND":
+    case "POUNDS":
+      return "GBP";
+    default:
+      return "";
+  }
 }
 
 // Pick the narrator by environment: real Bedrock Claude when AWS creds are
