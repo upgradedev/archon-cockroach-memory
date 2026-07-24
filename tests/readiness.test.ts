@@ -150,3 +150,22 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
     /- !Ref CloudFormationApiGatewayStageTagPolicy/u
   );
 });
+
+test("readiness: CloudFront pins valid AWS managed policies for the SPA and uncached API", () => {
+  const template = readFileSync(
+    new URL("../aws/template.yaml", import.meta.url),
+    "utf8"
+  );
+  const cachePolicyIds = [
+    ...template.matchAll(/^\s+CachePolicyId:\s+([0-9a-f-]+)\s*$/gmu),
+  ].map((match) => match[1]);
+
+  assert.deepEqual(cachePolicyIds, [
+    "658327ea-f89d-4fab-a63d-7e88639e58f6",
+    "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+  ]);
+  assert.match(
+    template,
+    /PathPattern: \/api\/\*[\s\S]*?CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad[\s\S]*?OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac/u
+  );
+});
