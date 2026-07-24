@@ -384,6 +384,87 @@ test("BedrockNarrator replaces a safe but overly free paraphrase with exact cite
   assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
+test("BedrockNarrator discards uncited repair prose and returns exact cited evidence", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "Here is the grounded answer. The payroll burden was €63,800 [2]. " +
+            "The off-bank gap was €22,800 [1].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost and off-bank gap?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, {
+    citations: true,
+    numerics: true,
+    claims: true,
+  });
+  assert.ok(!result.answer.includes("Here is"));
+  assert.ok(!result.answer.includes("payroll burden"));
+  assert.ok(!result.answer.includes("off-bank gap"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
+});
+
+test("BedrockNarrator rejects an uncited numeric claim before exact evidence repair", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "The actual cost was €63,800. The payroll burden was €63,800 [2].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.checks.citations, false);
+});
+
+test("BedrockNarrator does not borrow numeric evidence across citations", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "The true employer cost was €63,800 [1].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.checks.numerics, false);
+});
+
 test("BedrockNarrator rejects non-canonical citation markers", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {

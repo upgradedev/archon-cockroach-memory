@@ -218,33 +218,28 @@ export class BedrockNarrator implements Narrator {
           },
         };
       }
-      // When markers and all numeric facts are valid but the wording is too
-      // paraphrastic, use its valid citation participation to render the complete
-      // bounded recall set as exact evidence sentences. This preserves the strict
-      // 80% lexical guard and question coverage: the unsafe paraphrase is never
-      // shown, and the extractive result must pass the full validator.
-      if (
-        repairedValidation.checks.citations &&
-        repairedValidation.checks.numerics &&
-        !repairedValidation.checks.claims
-      ) {
-        const extractive = verifiedExtractiveAnswer(
-          repairedAnswer,
-          citations
-        );
-        if (extractive) {
-          return {
-            answer: extractive.answer,
-            citations,
-            modelId: repairedResult.modelId,
-            grounding: {
-              status: "extractive",
-              checks: extractive.checks,
-              reason:
-                "lexically unsafe paraphrase replaced with exact cited evidence",
-            },
-          };
-        }
+      // A repair can include an uncited preamble that makes the aggregate
+      // citation check fail even though its markers are canonical and every
+      // numeric token came from evidence. Discard the entire model draft and
+      // render the complete bounded recall set as exact evidence sentences.
+      // The extractive guard independently rejects unknown markers/numbers and
+      // the final rendering must still pass every unchanged grounding check.
+      const extractive = verifiedExtractiveAnswer(
+        repairedAnswer,
+        citations
+      );
+      if (extractive) {
+        return {
+          answer: extractive.answer,
+          citations,
+          modelId: repairedResult.modelId,
+          grounding: {
+            status: "extractive",
+            checks: extractive.checks,
+            reason:
+              "unsafe model wording replaced with exact cited evidence",
+          },
+        };
       }
       const fallback = deterministicGroundedAnswer(citations);
       return {
@@ -435,20 +430,36 @@ function verifiedExtractiveAnswer(
   answer: string;
   checks: { citations: true; numerics: true; claims: true };
 } | null {
-  const references = [...answer.matchAll(/\[(\d+)\]/gu)].map((match) => ({
-    raw: match[1]!,
-    index: Number(match[1]),
-  }));
-  if (
-    references.length === 0 ||
-    references.some(
-      ({ raw, index }) =>
-        !Number.isInteger(index) ||
-        raw !== String(index) ||
-        index < 1 ||
-        index > citations.length
-    )
-  ) {
+  let citedClaims = 0;
+  const safeParticipation = splitClaims(answer).every((claim) => {
+    const references = [...claim.matchAll(/\[(\d+)\]/gu)].map((match) => ({
+      raw: match[1]!,
+      index: Number(match[1]),
+    }));
+    const claimNumbers = extractNumbers(claim.replace(/\[\d+\]/gu, ""));
+    if (references.length === 0) {
+      return claimNumbers.length === 0;
+    }
+    citedClaims += 1;
+    if (
+      references.some(
+        ({ raw, index }) =>
+          !Number.isInteger(index) ||
+          raw !== String(index) ||
+          index < 1 ||
+          index > citations.length
+      )
+    ) {
+      return false;
+    }
+    const evidenceNumbers = new Set(
+      [...new Set(references.map(({ index }) => index))].flatMap((index) =>
+        extractNumbers(citations[index - 1]!.content)
+      )
+    );
+    return claimNumbers.every((number) => evidenceNumbers.has(number));
+  });
+  if (!safeParticipation || citedClaims === 0) {
     return null;
   }
 
