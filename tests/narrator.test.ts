@@ -320,6 +320,57 @@ test("BedrockNarrator attempts at most one repair before deterministic fallback"
   assert.ok(!result.answer.includes("€999,999"));
 });
 
+test("BedrockNarrator keeps only independently verified sentences from repair output", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "Here is the answer.\nTrue employer cost was €63,800 [2].\nThe fabricated cost was €999,999 [2].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "verified");
+  assert.equal(result.answer, "True employer cost was €63,800 [2].");
+  assert.ok(!result.answer.includes("Here is"));
+  assert.ok(!result.answer.includes("€999,999"));
+  assert.match(result.grounding.reason ?? "", /independently verified/iu);
+});
+
+test("BedrockNarrator rejects non-canonical citation markers", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      return {
+        output: {
+          message: {
+            content: [{ text: "True employer cost was €63,800 [02]." }],
+          },
+        },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.checks.citations, false);
+});
+
 test("BedrockNarrator fails closed when the bounded repair call is unavailable", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {

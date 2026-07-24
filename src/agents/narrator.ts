@@ -201,6 +201,23 @@ export class BedrockNarrator implements Narrator {
       citations
     );
     if (!repairedValidation.ok) {
+      // A model may add an uncited preamble or trailing aside even when its
+      // substantive sentences are valid. Retain only sentences that independently
+      // pass every unchanged guard; never add or rewrite a citation on its behalf.
+      const sanitized = validatedCitedSubset(repairedAnswer, citations);
+      if (sanitized) {
+        return {
+          answer: sanitized.answer,
+          citations,
+          modelId: repairedResult.modelId,
+          grounding: {
+            status: "verified",
+            checks: sanitized.checks,
+            reason:
+              "bounded repair retained only independently verified cited sentences",
+          },
+        };
+      }
       const fallback = deterministicGroundedAnswer(citations);
       return {
         answer: fallback,
@@ -268,30 +285,36 @@ export function validateGroundedAnswer(
       checks: { citations: boolean; numerics: boolean; claims: boolean };
       reason: string;
     } {
-  const claims = answer
-    .split(/(?<=[.!?])\s+|\n+/gu)
-    .map((claim) => claim.trim())
-    .filter(Boolean);
-  const claimReferences = claims.map((claim) =>
-    [...claim.matchAll(/\[(\d+)\]/gu)].map((match) => Number(match[1]))
+  const claims = splitClaims(answer);
+  const claimReferenceMatches = claims.map((claim) =>
+    [...claim.matchAll(/\[(\d+)\]/gu)].map((match) => ({
+      raw: match[1]!,
+      index: Number(match[1]),
+    }))
   );
+  const claimReferences = claimReferenceMatches.map((references) =>
+    references.map((reference) => reference.index)
+  );
+  const canonicalCitedClaims = claimReferenceMatches.filter(
+    (references) =>
+      references.length > 0 &&
+      references.every(
+        ({ raw, index }) =>
+          Number.isInteger(index) &&
+          raw === String(index) &&
+          index >= 1 &&
+          index <= citations.length
+      )
+  ).length;
   const citationsOk =
-    claims.length > 0 &&
-    claimReferences.every(
-      (references) =>
-        references.length > 0 &&
-        references.every(
-          (index) =>
-            Number.isInteger(index) &&
-            index >= 1 &&
-            index <= citations.length
-        )
-    );
+    claims.length > 0 && canonicalCitedClaims === claims.length;
   if (!citationsOk) {
     return {
       ok: false,
       checks: { citations: false, numerics: false, claims: false },
-      reason: "one or more model claims lacked a valid evidence citation",
+      reason:
+        "one or more model claims lacked a canonical evidence citation " +
+        `(claims=${claims.length}, canonical=${canonicalCitedClaims})`,
     };
   }
 
@@ -350,6 +373,31 @@ export function validateGroundedAnswer(
     ok: true,
     checks: { citations: true, numerics: true, claims: true },
   };
+}
+
+function splitClaims(answer: string): string[] {
+  return answer
+    .split(/(?<=[.!?])\s+|\n+/gu)
+    .map((claim) => claim.trim())
+    .filter(Boolean);
+}
+
+function validatedCitedSubset(
+  answer: string,
+  citations: Citation[]
+): {
+  answer: string;
+  checks: { citations: true; numerics: true; claims: true };
+} | null {
+  const retained = splitClaims(answer).filter(
+    (claim) => validateGroundedAnswer(claim, citations).ok
+  );
+  if (retained.length === 0) return null;
+  const sanitizedAnswer = retained.join(" ");
+  const validation = validateGroundedAnswer(sanitizedAnswer, citations);
+  return validation.ok
+    ? { answer: sanitizedAnswer, checks: validation.checks }
+    : null;
 }
 
 function noEvidenceGrounding(): GroundingTrace {
