@@ -591,7 +591,7 @@ Resources:
             Action:
               - cloudformation:CreateChangeSet
             Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31"
-          - Sid: ApiGatewayV2
+          - Sid: ApiGatewayV2Lifecycle
             Effect: Allow
             Action:
               - apigateway:DELETE
@@ -600,6 +600,13 @@ Resources:
               - apigateway:POST
               - apigateway:PUT
             Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*"
+          - Sid: ApiGatewayV2Tags
+            Effect: Allow
+            Action:
+              - apigateway:DELETE
+              - apigateway:GET
+              - apigateway:POST
+            Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*"
           - Sid: LogsMetricsAndDeployments
             Effect: Allow
             Action:

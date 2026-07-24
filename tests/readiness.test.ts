@@ -121,6 +121,10 @@ test("readiness: both CloudFormation execution roles can expand only the regiona
     commonPolicy,
     /- Sid: ExpandAwsSamTransform\s+Effect: Allow\s+Action:\s+- cloudformation:CreateChangeSet\s+Resource: !Sub "arn:\$\{AWS::Partition\}:cloudformation:\$\{AWS::Region\}:aws:transform\/Serverless-2016-10-31"/u
   );
+  assert.match(
+    commonPolicy,
+    /- Sid: ApiGatewayV2Tags\s+Effect: Allow\s+Action:\s+- apigateway:DELETE\s+- apigateway:GET\s+- apigateway:POST\s+Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/tags\/\*"/u
+  );
   assert.ok(stagingRole);
   assert.match(stagingRole, /- !Ref CloudFormationCommonExecutionPolicy/u);
   assert.ok(productionRole);
