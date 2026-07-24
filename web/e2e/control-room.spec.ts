@@ -175,7 +175,9 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
   await expect(
     page.getByRole("heading", { name: "Memory that disagrees out loud." })
   ).toBeVisible();
-  await expect(page.getByText("Fixed synthetic scope")).toBeVisible();
+  await expect(
+    page.getByText("Fixed synthetic scope", { exact: true })
+  ).toBeVisible();
   await expect(page.getByText("API reachable")).toBeVisible();
 
   await expect(page.getByText("CockroachDB", { exact: true }).first()).toBeVisible();
