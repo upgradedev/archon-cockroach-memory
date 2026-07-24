@@ -322,4 +322,119 @@ describe("public API client", () => {
       }),
     );
   });
+
+  it("rejects non-canonical citation marker numbering", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          question: "What is the real labour cost?",
+          answer: "True employer cost was €15,375 [01].",
+          modelId: "eu.anthropic.claude-sonnet-4-6",
+          recalled: 1,
+          citations: [
+            {
+              marker: "[01]",
+              memoryId: "m-1",
+              kind: "payroll_event",
+              company: "Helios SA",
+              period: "2026-04",
+              score: 0.94,
+              content: "Helios SA true employer cost was €15,375.",
+              sourceRef: "EVT-HELIOS-2604",
+            },
+          ],
+          grounding: {
+            status: "verified",
+            checks: { citations: true, numerics: true, claims: true },
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      recallMemory("What is the real labour cost?"),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<PublicApiError>>({
+        message:
+          "Recall returned missing or malformed CockroachDB citations, so no answer is displayed.",
+      }),
+    );
+  });
+
+  it("accepts only the exact evidence rendering for extractive grounding", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          question: "What is the real labour cost?",
+          answer: "Helios SA true employer cost was €15,375 [1].",
+          modelId: "eu.anthropic.claude-sonnet-4-6",
+          recalled: 1,
+          citations: [
+            {
+              marker: "[1]",
+              memoryId: "m-1",
+              kind: "payroll_event",
+              company: "Helios SA",
+              period: "2026-04",
+              score: 0.94,
+              content: "Helios SA true employer cost was €15,375.",
+              sourceRef: "EVT-HELIOS-2604",
+            },
+          ],
+          grounding: {
+            status: "extractive",
+            checks: { citations: true, numerics: true, claims: true },
+          },
+          warning: "The model answer was accepted without modification.",
+        }),
+      ),
+    );
+
+    const result = await recallMemory("What is the real labour cost?");
+    expect(result.trace.grounding).toBe("extractive");
+    expect(result.degraded).toBe(false);
+    expect(result.warning).toMatch(/exact revalidated CockroachDB evidence/iu);
+    expect(result.warning).not.toMatch(/accepted without modification/iu);
+  });
+
+  it("rejects a forged extractive paraphrase even when checks claim success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          question: "What is the real labour cost?",
+          answer: "The labour cost was €15,375 [1].",
+          modelId: "eu.anthropic.claude-sonnet-4-6",
+          recalled: 1,
+          citations: [
+            {
+              marker: "[1]",
+              memoryId: "m-1",
+              kind: "payroll_event",
+              company: "Helios SA",
+              period: "2026-04",
+              score: 0.94,
+              content: "Helios SA true employer cost was €15,375.",
+              sourceRef: "EVT-HELIOS-2604",
+            },
+          ],
+          grounding: {
+            status: "extractive",
+            checks: { citations: true, numerics: true, claims: true },
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      recallMemory("What is the real labour cost?"),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<PublicApiError>>({
+        message:
+          "Recall extractive answer did not match the exact cited evidence rendering.",
+      }),
+    );
+  });
 });

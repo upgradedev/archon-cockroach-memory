@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   evaluate,
   OFFICIAL_CRITERIA,
@@ -60,4 +61,22 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
     report.checks.find((check) => check.id === "memory.managed-mcp")?.status,
     "pass"
   );
+});
+
+test("readiness: both AWS release gates accept only fully grounded safe-answer states", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const safeStatusGate =
+    '(.grounding.status == "verified" or .grounding.status == "extractive")';
+
+  assert.equal(workflow.split(safeStatusGate).length - 1, 2);
+  for (const check of ["citations", "numerics", "claims"]) {
+    assert.equal(
+      workflow.split(`.grounding.checks.${check} == true`).length - 1,
+      2,
+      `both AWS release gates must require grounding.checks.${check}`
+    );
+  }
 });

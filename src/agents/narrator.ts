@@ -32,7 +32,7 @@ export interface Citation {
 }
 
 export interface GroundingTrace {
-  status: "verified" | "fallback" | "no-evidence";
+  status: "verified" | "extractive" | "fallback" | "no-evidence";
   checks: {
     citations: boolean;
     numerics: boolean;
@@ -238,7 +238,7 @@ export class BedrockNarrator implements Narrator {
             citations,
             modelId: repairedResult.modelId,
             grounding: {
-              status: "verified",
+              status: "extractive",
               checks: extractive.checks,
               reason:
                 "lexically unsafe paraphrase replaced with exact cited evidence",

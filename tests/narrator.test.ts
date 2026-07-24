@@ -367,7 +367,7 @@ test("BedrockNarrator replaces a safe but overly free paraphrase with exact cite
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "verified");
+  assert.equal(result.grounding.status, "extractive");
   assert.deepEqual(result.grounding.checks, {
     citations: true,
     numerics: true,
@@ -434,7 +434,7 @@ test("BedrockNarrator fails closed when the bounded repair call is unavailable",
   assert.ok(!result.answer.includes("€999,999"));
 });
 
-test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidence", async () => {
+test("BedrockNarrator withholds an unrelated claim and returns exact evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
       return {
@@ -450,14 +450,15 @@ test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidenc
     "What happened?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.status, "extractive");
   assert.equal(result.grounding.checks.citations, true);
   assert.equal(result.grounding.checks.numerics, true);
-  assert.equal(result.grounding.checks.claims, false);
+  assert.equal(result.grounding.checks.claims, true);
   assert.ok(!result.answer.includes("resigned"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
-test("BedrockNarrator rejects a fabricated clause appended to supported evidence", async () => {
+test("BedrockNarrator withholds a fabricated clause and returns exact evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
       return {
@@ -478,11 +479,12 @@ test("BedrockNarrator rejects a fabricated clause appended to supported evidence
     "What happened?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.status, "extractive");
   assert.equal(result.grounding.checks.citations, true);
   assert.equal(result.grounding.checks.numerics, true);
-  assert.equal(result.grounding.checks.claims, false);
+  assert.equal(result.grounding.checks.claims, true);
   assert.ok(!result.answer.includes("resigned"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
 test("memory markup is escaped so evidence cannot close its untrusted boundary", async () => {

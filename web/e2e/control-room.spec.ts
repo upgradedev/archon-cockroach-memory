@@ -207,8 +207,13 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
   await expect(page.getByText(/native C-SPANN vector index/)).toBeVisible();
   const groundingStatus = page.getByTestId("grounding-status");
   if (live) {
-    await expect(groundingStatus).toContainText(/verified|fallback/);
+    await expect(groundingStatus).toContainText(/verified|extractive|fallback/);
     const status = await groundingStatus.textContent();
+    if (status?.includes("extractive")) {
+      await expect(
+        page.getByText(/exact revalidated CockroachDB evidence/i)
+      ).toBeVisible();
+    }
     if (status?.includes("fallback")) {
       await expect(
         page.getByText(/deterministic cited fallback/i)

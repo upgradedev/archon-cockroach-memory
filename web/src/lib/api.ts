@@ -384,17 +384,24 @@ export async function recallMemory(
     citations.length === 0 ||
     citations.length !== rawCitations.length ||
     new Set(citations.map((citation) => citation.marker)).size !==
-      citations.length
+      citations.length ||
+    citations.some(
+      (citation, index) => citation.marker !== `[${index + 1}]`,
+    )
   ) {
     throw new PublicApiError(
       "/api/recall",
       "Recall returned missing or malformed CockroachDB citations, so no answer is displayed.",
     );
   }
-  if (grounding !== "verified" && grounding !== "fallback") {
+  if (
+    grounding !== "verified" &&
+    grounding !== "extractive" &&
+    grounding !== "fallback"
+  ) {
     throw new PublicApiError(
       "/api/recall",
-      "Recall did not report a verified or deterministic-fallback grounding state.",
+      "Recall did not report a verified, extractive, or deterministic-fallback grounding state.",
     );
   }
   if (
@@ -424,7 +431,7 @@ export async function recallMemory(
     );
   }
   if (
-    grounding === "verified" &&
+    (grounding === "verified" || grounding === "extractive") &&
     !(
       asBoolean(groundingChecks?.citations) === true &&
       asBoolean(groundingChecks?.numerics) === true &&
@@ -433,7 +440,7 @@ export async function recallMemory(
   ) {
     throw new PublicApiError(
       "/api/recall",
-      "Recall claimed verified grounding without all evidence checks passing.",
+      "Recall claimed safe grounding without all evidence checks passing.",
     );
   }
   const deterministicFallback =
@@ -447,15 +454,34 @@ export async function recallMemory(
       "Recall fallback did not match the deterministic cited evidence rendering.",
     );
   }
+  const deterministicExtractive = citations
+    .flatMap((citation) =>
+      citation.content
+        .split(/(?<=[.!?])\s+|\n+/gu)
+        .map((claim) => claim.trim())
+        .filter(Boolean)
+        .map(
+          (claim) =>
+            `${claim.replace(/[.!?]+$/u, "").trim()} ${citation.marker}.`,
+        ),
+    )
+    .join(" ");
+  if (grounding === "extractive" && answer !== deterministicExtractive) {
+    throw new PublicApiError(
+      "/api/recall",
+      "Recall extractive answer did not match the exact cited evidence rendering.",
+    );
+  }
   const degraded =
     (asBoolean(body.degraded) ?? false) ||
     /fake|offline/iu.test(modelId) ||
-    grounding !== "verified";
+    grounding === "fallback";
   const warning =
-    asString(body.warning) ??
-    (grounding && grounding !== "verified"
-      ? "Model output did not pass the grounding guard; the displayed answer is the deterministic cited fallback."
-      : null);
+    grounding === "extractive"
+      ? "Model paraphrase was withheld; the displayed answer is exact revalidated CockroachDB evidence."
+      : grounding === "fallback"
+        ? "Model output did not pass the grounding guard; the displayed answer is the deterministic cited fallback."
+        : asString(body.warning);
 
   return {
     question: echoedQuestion,
