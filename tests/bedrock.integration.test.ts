@@ -12,7 +12,8 @@
 //   RUN_BEDROCK_IT=1 AWS_PROFILE=default BEDROCK_REGION=eu-west-1 \
 //     node --import tsx --test tests/bedrock.integration.test.ts
 //
-// Money-safe: two tiny calls total (one Titan embed, one short Converse turn).
+// Money-safe: one Titan embed plus one short Converse turn; a second Converse
+// turn is allowed only when the deterministic grounding guard requests repair.
 // Verified-good evidence (models, region, real response) is in docs/BEDROCK_SMOKE.md.
 
 import { test } from "node:test";
