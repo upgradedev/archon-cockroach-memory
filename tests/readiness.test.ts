@@ -101,7 +101,7 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
   );
 });
 
-test("readiness: both CloudFormation roles have scoped SAM transform and HTTP API stage-tag permissions", () => {
+test("readiness: both CloudFormation roles have scoped SAM transform and HTTP API tag permissions", () => {
   const bootstrap = readFileSync(
     new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
     "utf8"
@@ -123,6 +123,10 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
   assert.match(
     commonPolicy,
     /- Sid: ExpandAwsSamTransform\s+Effect: Allow\s+Action:\s+- cloudformation:CreateChangeSet\s+Resource: !Sub "arn:\$\{AWS::Partition\}:cloudformation:\$\{AWS::Region\}:aws:transform\/Serverless-2016-10-31"/u
+  );
+  assert.match(
+    commonPolicy,
+    /- Sid: ApiGatewayV2ApiTags\s+Effect: Allow\s+Action:\s+- apigateway:DELETE\s+- apigateway:GET\s+- apigateway:POST\s+Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/tags\/\*"/u
   );
   assert.ok(stageTagPolicy);
   assert.match(
