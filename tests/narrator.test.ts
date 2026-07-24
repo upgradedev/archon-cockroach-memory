@@ -514,11 +514,15 @@ test("BedrockNarrator returns canonical evidence when the bounded repair call is
     },
   };
 
-  const result = await new BedrockNarrator(fakeClient).narrate(
+  const result = await new BedrockNarrator(
+    fakeClient,
+    "eu.anthropic.test-model"
+  ).narrate(
     "What was the cost?",
     HITS
   );
   assert.equal(calls, 2);
+  assert.equal(result.modelId, "eu.anthropic.test-model");
   assert.equal(result.grounding.status, "extractive");
   assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
   assert.equal(result.answer, CANONICAL_EXTRACTIVE);
@@ -548,7 +552,64 @@ test("canonical extraction remains fail-closed for evidence containing an invali
     unsafeEvidence
   );
   assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, false);
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
+});
+
+test("repair failure remains fallback when canonical evidence is invalid", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      if (calls === 2) throw new Error("simulated repair transport failure");
+      return {
+        output: {
+          message: {
+            content: [{ text: "The fabricated cost was €999,999 [99]." }],
+          },
+        },
+      } as any;
+    },
+  };
+  const unsafeEvidence: RecallHit[] = [
+    { ...HITS[0]!, content: `${HITS[0]!.content} [99]` },
+    HITS[1]!,
+  ];
+
+  const result = await new BedrockNarrator(
+    fakeClient,
+    "eu.anthropic.test-model"
+  ).narrate("What was the cost?", unsafeEvidence);
+  assert.equal(calls, 2);
+  assert.equal(result.modelId, "eu.anthropic.test-model");
+  assert.equal(result.grounding.status, "fallback");
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
+});
+
+test("FakeNarrator remains fallback when canonical evidence is invalid", async () => {
+  const unsafeEvidence: RecallHit[] = [
+    { ...HITS[0]!, content: `${HITS[0]!.content} [99]` },
+    HITS[1]!,
+  ];
+
+  const result = await new FakeNarrator().narrate(
+    "What was the cost?",
+    unsafeEvidence
+  );
+  assert.equal(result.modelId, "fake-narrator");
+  assert.equal(result.grounding.status, "fallback");
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
 });
 
 test("BedrockNarrator withholds an unrelated claim and returns exact evidence", async () => {

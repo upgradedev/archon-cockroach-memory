@@ -204,7 +204,7 @@ export class BedrockNarrator implements Narrator {
         modelId: initialResult.modelId,
         grounding: {
           status: "fallback",
-          checks: initialValidation.checks,
+          checks: { citations: false, numerics: false, claims: false },
           reason: `${initialValidation.reason}; bounded repair was unavailable`,
         },
       };
@@ -239,7 +239,7 @@ export class BedrockNarrator implements Narrator {
         modelId: repairedResult.modelId,
         grounding: {
           status: "fallback",
-          checks: repairedValidation.checks,
+          checks: { citations: false, numerics: false, claims: false },
           reason: repairedValidation.reason,
         },
       };
