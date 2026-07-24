@@ -107,7 +107,10 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
     "utf8"
   );
   const commonPolicy = bootstrap.match(
-    /  CloudFormationCommonExecutionPolicy:[\s\S]*?\n  StagingExecutionRole:/u
+    /  CloudFormationCommonExecutionPolicy:[\s\S]*?\n  CloudFormationApiGatewayStageTagPolicy:/u
+  )?.[0];
+  const stageTagPolicy = bootstrap.match(
+    /  CloudFormationApiGatewayStageTagPolicy:[\s\S]*?\n  StagingExecutionRole:/u
   )?.[0];
   const stagingRole = bootstrap.match(
     /  StagingExecutionRole:[\s\S]*?\n  ProductionExecutionRole:/u
@@ -121,12 +124,25 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
     commonPolicy,
     /- Sid: ExpandAwsSamTransform\s+Effect: Allow\s+Action:\s+- cloudformation:CreateChangeSet\s+Resource: !Sub "arn:\$\{AWS::Partition\}:cloudformation:\$\{AWS::Region\}:aws:transform\/Serverless-2016-10-31"/u
   );
+  assert.ok(stageTagPolicy);
   assert.match(
-    commonPolicy,
+    stageTagPolicy,
+    /Metadata:\s+cfn-lint:\s+config:\s+# The live AWS::ApiGatewayV2::Stage provider requires these native\s+# actions, but cfn-lint 1\.53\.1 has not added them to rule W3037 yet\.\s+ignore_checks:\s+- W3037/u
+  );
+  assert.match(
+    stageTagPolicy,
     /- Sid: ApiGatewayV2StageTags\s+Effect: Allow\s+Action:\s+- apigateway:TagResource\s+- apigateway:UntagResource\s+Resource:\s+- !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/apis\/\*\/stages"\s+- !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/apis\/\*\/stages\/\*"/u
   );
   assert.ok(stagingRole);
   assert.match(stagingRole, /- !Ref CloudFormationCommonExecutionPolicy/u);
+  assert.match(
+    stagingRole,
+    /- !Ref CloudFormationApiGatewayStageTagPolicy/u
+  );
   assert.ok(productionRole);
   assert.match(productionRole, /- !Ref CloudFormationCommonExecutionPolicy/u);
+  assert.match(
+    productionRole,
+    /- !Ref CloudFormationApiGatewayStageTagPolicy/u
+  );
 });
