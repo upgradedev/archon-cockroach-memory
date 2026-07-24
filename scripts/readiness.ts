@@ -331,6 +331,24 @@ function validHostedUrl(value: string | undefined): boolean {
   }
 }
 
+function validPublicRepositoryUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "github.com" &&
+      url.pathname.replace(/\/+$/u, "") ===
+        "/upgradedev/archon-cockroach-memory" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function eligibilityRequirements(): EligibilityRequirement[] {
   const demoUrl = process.env.SUBMISSION_DEMO_URL?.trim();
   const videoUrl = process.env.SUBMISSION_VIDEO_URL?.trim();
@@ -352,8 +370,7 @@ function eligibilityRequirements(): EligibilityRequirement[] {
   return [
     requirement(
       "public-repository-and-license",
-      has("LICENSE") &&
-        /github\.com\/upgradedev\/archon-cockroach-memory/iu.test(publicRepoUrl),
+      has("LICENSE") && validPublicRepositoryUrl(publicRepoUrl),
       "Public GitHub repository target and MIT license are identified.",
       "Confirm the public repository URL and OSI license."
     ),

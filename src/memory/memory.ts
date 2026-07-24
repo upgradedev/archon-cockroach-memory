@@ -168,6 +168,12 @@ export async function recall(
   const vectorIndexName = opts.company
     ? EXPECTED_VECTOR_INDEX_NAME
     : "idx_agent_memory_scope_embedding";
+  // CockroachDB vector indexes accept equality constraints on their declared
+  // prefix columns. An additional non-prefix kind predicate is intentionally
+  // left to the cost-based optimizer instead of forcing an ineligible index.
+  const tableExpression = opts.kind
+    ? "agent_memory"
+    : `agent_memory@${vectorIndexName}`;
   params.push(Math.max(1, Math.min(opts.limit ?? 5, 50)));
   const limitParam = `$${params.length}`;
 
@@ -184,7 +190,7 @@ export async function recall(
   }>(
     `SELECT id, kind, company, period, source_ref, content, metadata, created_at,
             (embedding <=> $1::VECTOR) AS distance
-       FROM agent_memory@${vectorIndexName}
+       FROM ${tableExpression}
        ${where}
      ORDER BY embedding <=> $1::VECTOR
      LIMIT ${limitParam}`,
