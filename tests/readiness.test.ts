@@ -101,7 +101,7 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
   );
 });
 
-test("readiness: both CloudFormation execution roles can expand only the regional AWS SAM transform", () => {
+test("readiness: both CloudFormation roles have scoped SAM transform and HTTP API stage-tag permissions", () => {
   const bootstrap = readFileSync(
     new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
     "utf8"
@@ -123,7 +123,7 @@ test("readiness: both CloudFormation execution roles can expand only the regiona
   );
   assert.match(
     commonPolicy,
-    /- Sid: ApiGatewayV2Tags\s+Effect: Allow\s+Action:\s+- apigateway:DELETE\s+- apigateway:GET\s+- apigateway:POST\s+Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/tags\/\*"/u
+    /- Sid: ApiGatewayV2StageTags\s+Effect: Allow\s+Action:\s+- apigateway:TagResource\s+- apigateway:UntagResource\s+Resource:\s+- !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/apis\/\*\/stages"\s+- !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/apis\/\*\/stages\/\*"/u
   );
   assert.ok(stagingRole);
   assert.match(stagingRole, /- !Ref CloudFormationCommonExecutionPolicy/u);

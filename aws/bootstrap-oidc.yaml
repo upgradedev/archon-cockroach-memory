@@ -600,13 +600,14 @@ Resources:
               - apigateway:POST
               - apigateway:PUT
             Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*"
-          - Sid: ApiGatewayV2Tags
+          - Sid: ApiGatewayV2StageTags
             Effect: Allow
             Action:
-              - apigateway:DELETE
-              - apigateway:GET
-              - apigateway:POST
-            Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*"
+              - apigateway:TagResource
+              - apigateway:UntagResource
+            Resource:
+              - !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages"
+              - !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
           - Sid: LogsMetricsAndDeployments
             Effect: Allow
             Action:
