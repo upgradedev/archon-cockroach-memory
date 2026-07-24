@@ -600,13 +600,6 @@ Resources:
               - apigateway:POST
               - apigateway:PUT
             Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*"
-          - Sid: ApiGatewayV2Tags
-            Effect: Allow
-            Action:
-              - apigateway:DELETE
-              - apigateway:GET
-              - apigateway:POST
-            Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*"
           - Sid: LogsMetricsAndDeployments
             Effect: Allow
             Action:
@@ -670,6 +663,30 @@ Resources:
               - cloudfront:UpdateResponseHeadersPolicy
             Resource: "*"
 
+  CloudFormationApiGatewayStageTagPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn-lint:
+        config:
+          # The live AWS::ApiGatewayV2::Stage provider requires these native
+          # actions, but cfn-lint 1.53.1 has not added them to rule W3037 yet.
+          ignore_checks:
+            - W3037
+    Properties:
+      ManagedPolicyName: !Sub "${AppName}-cloudformation-apigateway-stage-tags"
+      Description: Native tag permissions required only by the HTTP API Stage provider.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ApiGatewayV2StageTags
+            Effect: Allow
+            Action:
+              - apigateway:TagResource
+              - apigateway:UntagResource
+            Resource:
+              - !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages"
+              - !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
+
   StagingExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -683,6 +700,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Ref CloudFormationCommonExecutionPolicy
+        - !Ref CloudFormationApiGatewayStageTagPolicy
         - !Ref StagingCloudFormationResourcePolicy
       Policies:
         - PolicyName: pass-staging-service-roles
@@ -720,6 +738,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Ref CloudFormationCommonExecutionPolicy
+        - !Ref CloudFormationApiGatewayStageTagPolicy
         - !Ref ProductionCloudFormationResourcePolicy
       Policies:
         - PolicyName: pass-production-service-roles
