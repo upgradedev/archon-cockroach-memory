@@ -100,3 +100,29 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
     /name: Prove the candidate is still the main branch head/u
   );
 });
+
+test("readiness: both CloudFormation execution roles can expand only the regional AWS SAM transform", () => {
+  const bootstrap = readFileSync(
+    new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
+    "utf8"
+  );
+  const commonPolicy = bootstrap.match(
+    /  CloudFormationCommonExecutionPolicy:[\s\S]*?\n  StagingExecutionRole:/u
+  )?.[0];
+  const stagingRole = bootstrap.match(
+    /  StagingExecutionRole:[\s\S]*?\n  ProductionExecutionRole:/u
+  )?.[0];
+  const productionRole = bootstrap.match(
+    /  ProductionExecutionRole:[\s\S]*?\n  StagingDeployRole:/u
+  )?.[0];
+
+  assert.ok(commonPolicy);
+  assert.match(
+    commonPolicy,
+    /- Sid: ExpandAwsSamTransform\s+Effect: Allow\s+Action:\s+- cloudformation:CreateChangeSet\s+Resource: !Sub "arn:\${AWS::Partition}:cloudformation:\${AWS::Region}:aws:transform\/Serverless-2016-10-31"/u
+  );
+  assert.ok(stagingRole);
+  assert.match(stagingRole, /- !Ref CloudFormationCommonExecutionPolicy/u);
+  assert.ok(productionRole);
+  assert.match(productionRole, /- !Ref CloudFormationCommonExecutionPolicy/u);
+});
