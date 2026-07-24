@@ -31,17 +31,17 @@
     "test:e2e": "node --import tsx --test --test-concurrency=1 tests/e2e.test.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.1075.0",
-    "@aws-sdk/client-secrets-manager": "^3.1075.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1094.0",
+    "@aws-sdk/client-secrets-manager": "^3.1094.0",
     "@aws-sdk/credential-provider-node": "^3.972.58",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^26.1.1",
     "@types/pg": "^8.11.10",
-    "esbuild": "0.25.6",
-    "tsx": "^4.16.2",
-    "typescript": "^5.5.3"
+    "esbuild": "0.28.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
   }
 }
