@@ -207,6 +207,61 @@ test("BedrockNarrator rejects a currency changed from the cited evidence", async
   assert.ok(!result.answer.includes("$63,800"));
 });
 
+test("BedrockNarrator treats a cited ISO currency code and its symbol as equivalent", async () => {
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      return {
+        output: {
+          message: {
+            content: [
+              { text: "The true employer cost was €63,800 [1]." },
+            ],
+          },
+        },
+      } as any;
+    },
+  };
+  const isoEvidence: RecallHit[] = [
+    {
+      ...HITS[1]!,
+      content:
+        "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost EUR 63,800, " +
+        "net paid from bank EUR 41,000.",
+    },
+  ];
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    isoEvidence
+  );
+  assert.equal(result.grounding.status, "verified");
+  assert.equal(result.grounding.checks.numerics, true);
+});
+
+test("BedrockNarrator treats a cited currency symbol and its ISO code as equivalent", async () => {
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      return {
+        output: {
+          message: {
+            content: [
+              { text: "The true employer cost was EUR 63,800 [1]." },
+            ],
+          },
+        },
+      } as any;
+    },
+  };
+  const symbolEvidence: RecallHit[] = [{ ...HITS[1]! }];
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    symbolEvidence
+  );
+  assert.equal(result.grounding.status, "verified");
+  assert.equal(result.grounding.checks.numerics, true);
+});
+
 test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
