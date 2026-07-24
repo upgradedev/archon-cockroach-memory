@@ -80,3 +80,23 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
     );
   }
 });
+
+test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-head proof", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    workflow,
+    /name: Prove CodeQL succeeded for the exact release SHA/u
+  );
+  assert.match(
+    workflow,
+    /actions\/workflows\/codeql\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    workflow,
+    /name: Prove the candidate is still the main branch head/u
+  );
+});

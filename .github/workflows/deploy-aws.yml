@@ -37,6 +37,9 @@ jobs:
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out the exact successful CI commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -54,6 +57,41 @@ jobs:
           MAIN_SHA="$(git rev-parse origin/main)"
           test "$EXPECTED_SHA" = "$MAIN_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Prove CodeQL succeeded for the exact release SHA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in {1..20}; do
+            CODEQL_STATE="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/codeql.yml/runs?branch=main&event=push&per_page=20" |
+                jq -r --arg sha "$EXPECTED_SHA" '
+                  [.workflow_runs[] | select(.head_sha == $sha)][0] |
+                  if . == null then "missing"
+                  elif .conclusion != null then .conclusion
+                  else .status
+                  end
+                '
+            )"
+            case "$CODEQL_STATE" in
+              success)
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required|startup_failure|stale)
+                echo "CodeQL did not pass for release SHA $EXPECTED_SHA: $CODEQL_STATE" >&2
+                exit 1
+                ;;
+              *)
+                sleep 15
+                ;;
+            esac
+          done
+          echo "CodeQL did not complete for release SHA $EXPECTED_SHA." >&2
+          exit 1
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -540,6 +578,16 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
+
+      - name: Prove the candidate is still the main branch head
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          test "$EXPECTED_SHA" = "$(git rev-parse origin/main)"
+          test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0

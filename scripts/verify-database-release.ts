@@ -16,6 +16,10 @@ import {
   indexDefinitionFingerprint,
   isExpectedVectorIndexDefinition,
 } from "../src/db/proof.js";
+import {
+  affirmativeSystemGrants,
+  type SystemGrant,
+} from "../src/db/system-grants.js";
 import { parseDatabaseSecret } from "../src/db/secret.js";
 
 const { Client } = pg;
@@ -221,11 +225,19 @@ async function verifyRuntimeGrants(
     throw new Error("Runtime database privileges exceed CONNECT.");
   }
 
-  const systemGrants = await client.query(
+  const systemGrants = await client.query<SystemGrant>(
     `SHOW SYSTEM GRANTS FOR ${principalSql}`
   );
-  if (systemGrants.rowCount !== 0) {
-    throw new Error("Runtime principal unexpectedly has system privileges.");
+  const affirmativeGrants = affirmativeSystemGrants(systemGrants.rows);
+  if (affirmativeGrants.length !== 0) {
+    const privilegeTypes = [
+      ...new Set(
+        affirmativeGrants.map((grant) => grant.privilege_type.toUpperCase())
+      ),
+    ].sort();
+    throw new Error(
+      `Runtime principal has affirmative system privileges: ${privilegeTypes.join(", ")}.`
+    );
   }
 }
 
@@ -687,7 +699,8 @@ async function main(): Promise<void> {
           runtimeTablePrivilegeMatrix: "SELECT agent_memory only",
           runtimeSchemaPrivilegeMatrix: "USAGE only",
           runtimeDatabasePrivilegeMatrix: "CONNECT only",
-          runtimeSystemPrivileges: "none",
+          runtimeSystemPrivileges:
+            "no affirmative grants; restrictive role options only",
           contradiction: "INV-2043.total",
           recommendedValue: 18_400,
           absence: "PAY-118",
