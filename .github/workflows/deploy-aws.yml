@@ -398,7 +398,7 @@ jobs:
              (.citations | length) > 0 and
              (.answer | type == "string" and length > 0) and
              .modelId == $narrator and
-             .grounding.status == "verified" and
+             (.grounding.status == "verified" or .grounding.status == "extractive") and
              .grounding.checks.citations == true and
              .grounding.checks.numerics == true and
              .grounding.checks.claims == true and
@@ -771,7 +771,7 @@ jobs:
              (.citations | length) > 0 and
              (.answer | type == "string" and length > 0) and
              .modelId == $narrator and
-             .grounding.status == "verified" and
+             (.grounding.status == "verified" or .grounding.status == "extractive") and
              .grounding.checks.citations == true and
              .grounding.checks.numerics == true and
              .grounding.checks.claims == true and

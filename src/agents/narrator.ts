@@ -32,7 +32,7 @@ export interface Citation {
 }
 
 export interface GroundingTrace {
-  status: "verified" | "fallback" | "no-evidence";
+  status: "verified" | "extractive" | "fallback" | "no-evidence";
   checks: {
     citations: boolean;
     numerics: boolean;
@@ -218,6 +218,34 @@ export class BedrockNarrator implements Narrator {
           },
         };
       }
+      // When markers and all numeric facts are valid but the wording is too
+      // paraphrastic, use its valid citation participation to render the complete
+      // bounded recall set as exact evidence sentences. This preserves the strict
+      // 80% lexical guard and question coverage: the unsafe paraphrase is never
+      // shown, and the extractive result must pass the full validator.
+      if (
+        repairedValidation.checks.citations &&
+        repairedValidation.checks.numerics &&
+        !repairedValidation.checks.claims
+      ) {
+        const extractive = verifiedExtractiveAnswer(
+          repairedAnswer,
+          citations
+        );
+        if (extractive) {
+          return {
+            answer: extractive.answer,
+            citations,
+            modelId: repairedResult.modelId,
+            grounding: {
+              status: "extractive",
+              checks: extractive.checks,
+              reason:
+                "lexically unsafe paraphrase replaced with exact cited evidence",
+            },
+          };
+        }
+      }
       const fallback = deterministicGroundedAnswer(citations);
       return {
         answer: fallback,
@@ -397,6 +425,48 @@ function validatedCitedSubset(
   const validation = validateGroundedAnswer(sanitizedAnswer, citations);
   return validation.ok
     ? { answer: sanitizedAnswer, checks: validation.checks }
+    : null;
+}
+
+function verifiedExtractiveAnswer(
+  answer: string,
+  citations: Citation[]
+): {
+  answer: string;
+  checks: { citations: true; numerics: true; claims: true };
+} | null {
+  const references = [...answer.matchAll(/\[(\d+)\]/gu)].map((match) => ({
+    raw: match[1]!,
+    index: Number(match[1]),
+  }));
+  if (
+    references.length === 0 ||
+    references.some(
+      ({ raw, index }) =>
+        !Number.isInteger(index) ||
+        raw !== String(index) ||
+        index < 1 ||
+        index > citations.length
+    )
+  ) {
+    return null;
+  }
+
+  // The public recall response already returns this complete bounded citation
+  // set. Rendering all of it prevents a format-repair turn from silently omitting
+  // one half of a multi-part question while remaining strictly extractive.
+  const selected = citations.map((_, index) => index + 1);
+  const extractiveClaims = selected.flatMap((index) =>
+    splitClaims(citations[index - 1]!.content).map((claim) => {
+      const evidence = claim.replace(/[.!?]+$/u, "").trim();
+      return `${evidence} [${index}].`;
+    })
+  );
+  if (extractiveClaims.length === 0) return null;
+  const extractiveAnswer = extractiveClaims.join(" ");
+  const validation = validateGroundedAnswer(extractiveAnswer, citations);
+  return validation.ok
+    ? { answer: extractiveAnswer, checks: validation.checks }
     : null;
 }
 

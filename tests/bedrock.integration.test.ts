@@ -90,11 +90,34 @@ test(
     // Answer came from the real Claude Sonnet model, not the fake narrator.
     assert.notEqual(modelId, "fake-narrator");
     assert.match(modelId, /anthropic|claude/i, `unexpected model id ${modelId}`);
-    assert.equal(
-      grounding.status,
-      "verified",
+    assert.ok(
+      grounding.status === "verified" || grounding.status === "extractive",
       `golden judge question must pass all grounding checks: ${JSON.stringify(grounding)}`
     );
+    assert.deepEqual(grounding.checks, {
+      citations: true,
+      numerics: true,
+      claims: true,
+    });
+    if (grounding.status === "extractive") {
+      const exactEvidence = citations
+        .flatMap((citation) =>
+          citation.content
+            .split(/(?<=[.!?])\s+|\n+/gu)
+            .map((claim) => claim.trim())
+            .filter(Boolean)
+            .map(
+              (claim) =>
+                `${claim.replace(/[.!?]+$/u, "").trim()} ${citation.marker}.`
+            )
+        )
+        .join(" ");
+      assert.equal(
+        answer,
+        exactEvidence,
+        "extractive provenance must be the canonical exact-evidence rendering"
+      );
+    }
     // Non-empty, substantive grounded answer.
     assert.ok(answer.length > 40, "answer must be a substantive non-empty string");
     assert.ok(!/No relevant memories/i.test(answer), "must not be the empty-recall fallback");

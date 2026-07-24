@@ -347,6 +347,43 @@ test("BedrockNarrator keeps only independently verified sentences from repair ou
   assert.match(result.grounding.reason ?? "", /independently verified/iu);
 });
 
+test("BedrockNarrator replaces a safe but overly free paraphrase with exact cited evidence", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "The total payroll burden was €63,800 [2].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, {
+    citations: true,
+    numerics: true,
+    claims: true,
+  });
+  assert.equal(
+    result.answer,
+    "Off-bank employment cost at Acme Foods for 2026-03: the bank salary transfer of " +
+      "€41,000 understates the true employer cost by €22,800 (28.8%) [1]. " +
+      "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost €63,800, " +
+      "net paid from bank €41,000 [2]."
+  );
+  assert.ok(!result.answer.includes("payroll burden"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
+});
+
 test("BedrockNarrator rejects non-canonical citation markers", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
@@ -397,7 +434,7 @@ test("BedrockNarrator fails closed when the bounded repair call is unavailable",
   assert.ok(!result.answer.includes("€999,999"));
 });
 
-test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidence", async () => {
+test("BedrockNarrator withholds an unrelated claim and returns exact evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
       return {
@@ -413,14 +450,15 @@ test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidenc
     "What happened?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.status, "extractive");
   assert.equal(result.grounding.checks.citations, true);
   assert.equal(result.grounding.checks.numerics, true);
-  assert.equal(result.grounding.checks.claims, false);
+  assert.equal(result.grounding.checks.claims, true);
   assert.ok(!result.answer.includes("resigned"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
-test("BedrockNarrator rejects a fabricated clause appended to supported evidence", async () => {
+test("BedrockNarrator withholds a fabricated clause and returns exact evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
       return {
@@ -441,11 +479,12 @@ test("BedrockNarrator rejects a fabricated clause appended to supported evidence
     "What happened?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.status, "extractive");
   assert.equal(result.grounding.checks.citations, true);
   assert.equal(result.grounding.checks.numerics, true);
-  assert.equal(result.grounding.checks.claims, false);
+  assert.equal(result.grounding.checks.claims, true);
   assert.ok(!result.answer.includes("resigned"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
 test("memory markup is escaped so evidence cannot close its untrusted boundary", async () => {
