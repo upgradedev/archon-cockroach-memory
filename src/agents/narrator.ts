@@ -90,10 +90,18 @@ const SYSTEM_PROMPT =
   "question using ONLY factual claims from the numbered MEMORY items. Ground every " +
   "claim in that memory and cite the item(s) used with their bracketed markers, " +
   "e.g. [1] or [2]. Copy numeric and euro figures exactly from cited evidence; do " +
-  "not calculate or invent a number. If the memory does not contain the answer, say " +
+  "not calculate, round, convert, derive a ratio, or invent a number. Do not state " +
+  "how many memory items were supplied. If the memory does not contain the answer, say " +
   "so plainly. Be concise (2-4 sentences), in plain English, no bullet lists. " +
   "Highlight the off-bank employer-cost wedge (the gap between the bank salary " +
   "transfer and the true employer cost) whenever the memory reveals it.";
+
+const REPAIR_SYSTEM_PROMPT =
+  SYSTEM_PROMPT +
+  " A prior draft failed a deterministic grounding check. Rewrite from scratch " +
+  "using direct, extractive wording from the cited evidence. Use at most two factual " +
+  "sentences, place the supporting citation marker at the end of each sentence, and " +
+  "use only the explicitly allowed numeric tokens. Never explain the repair.";
 
 // Real RAG narrator: retrieved memories → Claude Sonnet on Bedrock → cited answer.
 // Reuses the injectable Converse wrapper (same client, same model default the H0
@@ -124,35 +132,94 @@ export class BedrockNarrator implements Narrator {
       `${contextBlock(citations)}\n\n` +
       `<question>${escapePromptText(question)}</question>\n\n` +
       `Write the grounded, cited answer now.`;
-    const result = await converse(this.client, {
-      system: SYSTEM_PROMPT,
-      parts: [{ type: "text", text: userText }],
-      modelId: this.modelId,
-      maxTokens: 512,
-      temperature: 0.2,
-    });
-    const answer = result.text.trim();
-    const validation = validateGroundedAnswer(answer, citations);
-    if (!validation.ok) {
+    const generate = (system: string, text: string) =>
+      converse(this.client, {
+        system,
+        parts: [{ type: "text" as const, text }],
+        modelId: this.modelId,
+        maxTokens: 512,
+        temperature: 0,
+      });
+    const initialResult = await generate(SYSTEM_PROMPT, userText);
+    const initialAnswer = initialResult.text.trim();
+    const initialValidation = validateGroundedAnswer(
+      initialAnswer,
+      citations
+    );
+    if (initialValidation.ok) {
+      return {
+        answer: initialAnswer,
+        citations,
+        modelId: initialResult.modelId,
+        grounding: {
+          status: "verified",
+          checks: initialValidation.checks,
+        },
+      };
+    }
+
+    // One bounded repair keeps ordinary paraphrase/format drift from making a
+    // deployment stochastic without ever weakening the fail-closed validator.
+    // The model receives only exact numeric lexemes already present in evidence.
+    const allowedNumericTokens = [
+      ...new Set(
+        citations.flatMap((citation) =>
+          extractNumberLexemes(citation.content)
+        )
+      ),
+    ];
+    const repairText =
+      `${userText}\n\n` +
+      `<grounding_repair>\n` +
+      `The prior draft was rejected: ${escapePromptText(initialValidation.reason)}.\n` +
+      `Allowed numeric tokens (copy verbatim or omit): ` +
+      `${allowedNumericTokens.length > 0 ? allowedNumericTokens.map((token) => JSON.stringify(token)).join(", ") : "(none)"}.\n` +
+      `Do not calculate, transform, or introduce any other numeric token. ` +
+      `Rewrite from the MEMORY evidence now.\n` +
+      `</grounding_repair>`;
+
+    const repairedResult = await generate(
+      REPAIR_SYSTEM_PROMPT,
+      repairText
+    ).catch(() => null);
+    if (repairedResult === null) {
       const fallback = deterministicGroundedAnswer(citations);
       return {
         answer: fallback,
         citations,
-        modelId: result.modelId,
+        modelId: initialResult.modelId,
         grounding: {
           status: "fallback",
-          checks: validation.checks,
-          reason: validation.reason,
+          checks: initialValidation.checks,
+          reason: `${initialValidation.reason}; bounded repair was unavailable`,
+        },
+      };
+    }
+    const repairedAnswer = repairedResult.text.trim();
+    const repairedValidation = validateGroundedAnswer(
+      repairedAnswer,
+      citations
+    );
+    if (!repairedValidation.ok) {
+      const fallback = deterministicGroundedAnswer(citations);
+      return {
+        answer: fallback,
+        citations,
+        modelId: repairedResult.modelId,
+        grounding: {
+          status: "fallback",
+          checks: repairedValidation.checks,
+          reason: repairedValidation.reason,
         },
       };
     }
     return {
-      answer,
+      answer: repairedAnswer,
       citations,
-      modelId: result.modelId,
+      modelId: repairedResult.modelId,
       grounding: {
         status: "verified",
-        checks: validation.checks,
+        checks: repairedValidation.checks,
       },
     };
   }
@@ -307,11 +374,15 @@ function escapePromptText(value: string): string {
 }
 
 function extractNumbers(value: string): string[] {
-  const matches =
+  return extractNumberLexemes(value).map(normalizeNumber);
+}
+
+function extractNumberLexemes(value: string): string[] {
+  return (
     value.match(
       /(?:(?:EUR|USD|GBP|euros?|dollars?|pounds?|[€$£])\s*)?-?\d+(?:[.,]\d+)*(?:\s*(?:EUR|USD|GBP|euros?|dollars?|pounds?|[€$£]))?(?:\s*%)?/giu
-    ) ?? [];
-  return matches.map(normalizeNumber);
+    ) ?? []
+  );
 }
 
 const CLAIM_STOPWORDS = new Set([

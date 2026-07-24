@@ -262,6 +262,90 @@ test("BedrockNarrator treats a cited currency symbol and its ISO code as equival
   assert.equal(result.grounding.checks.numerics, true);
 });
 
+test("BedrockNarrator performs one bounded repair after a rejected numeric draft", async () => {
+  let calls = 0;
+  let repairPrompt = "";
+  const temperatures: number[] = [];
+  const fakeClient: ConverseClientLike = {
+    async send(command: any) {
+      calls += 1;
+      temperatures.push(command.input.inferenceConfig.temperature);
+      if (calls === 2) {
+        repairPrompt = command.input.messages[0].content[0].text;
+      }
+      const text =
+        calls === 1
+          ? "The true cost was €63,800, with a derived 35.7% off-bank share [2]."
+          : "True employer cost was €63,800 [2].";
+      return {
+        output: { message: { content: [{ text }] } },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(temperatures, [0, 0]);
+  assert.ok(repairPrompt.includes('"€63,800"'));
+  assert.ok(!repairPrompt.includes("35.7%"));
+  assert.equal(result.grounding.status, "verified");
+  assert.equal(result.answer, "True employer cost was €63,800 [2].");
+  assert.ok(!result.answer.includes("35.7%"));
+});
+
+test("BedrockNarrator attempts at most one repair before deterministic fallback", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      return {
+        output: {
+          message: {
+            content: [{ text: "The fabricated cost was €999,999 [1]." }],
+          },
+        },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "fallback");
+  assert.ok(!result.answer.includes("€999,999"));
+});
+
+test("BedrockNarrator fails closed when the bounded repair call is unavailable", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      if (calls === 2) throw new Error("simulated repair transport failure");
+      return {
+        output: {
+          message: {
+            content: [{ text: "The fabricated cost was €999,999 [1]." }],
+          },
+        },
+      } as any;
+    },
+  };
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    HITS
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.grounding.status, "fallback");
+  assert.match(result.grounding.reason ?? "", /repair was unavailable/iu);
+  assert.ok(!result.answer.includes("€999,999"));
+});
+
 test("BedrockNarrator rejects a non-numeric claim unrelated to its cited evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
