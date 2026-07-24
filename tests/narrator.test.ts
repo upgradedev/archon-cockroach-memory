@@ -46,6 +46,18 @@ const HITS: RecallHit[] = [
   },
 ];
 
+const CANONICAL_EXTRACTIVE =
+  "Off-bank employment cost at Acme Foods for 2026-03: the bank salary transfer of " +
+  "€41,000 understates the true employer cost by €22,800 (28.8%) [1]. " +
+  "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost €63,800, " +
+  "net paid from bank €41,000 [2].";
+
+const GROUNDED_CHECKS = {
+  citations: true,
+  numerics: true,
+  claims: true,
+} as const;
+
 test("FakeNarrator grounds the answer in every recalled memory and cites each", async () => {
   const n = new FakeNarrator();
   const { answer, citations, modelId, grounding } = await n.narrate(
@@ -135,7 +147,7 @@ test("BedrockNarrator short-circuits on empty recall without calling Bedrock", a
   assert.match(answer, /No relevant memories/i);
 });
 
-test("BedrockNarrator rejects invalid citations and falls back to deterministic evidence", async () => {
+test("BedrockNarrator rejects invalid citations and returns canonical evidence", async () => {
   const fakeClient: ConverseClientLike = {
     async send() {
       return {
@@ -155,8 +167,9 @@ test("BedrockNarrator rejects invalid citations and falls back to deterministic 
     "What was the cost?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("€999,999"));
   for (const citation of result.citations) {
     assert.ok(result.answer.includes(citation.marker));
@@ -179,9 +192,9 @@ test("BedrockNarrator rejects numeric claims absent from cited evidence", async 
     "What was the cost?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, true);
-  assert.equal(result.grounding.checks.numerics, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("€999,999"));
 });
 
@@ -201,9 +214,9 @@ test("BedrockNarrator rejects a currency changed from the cited evidence", async
     "What was the cost?",
     HITS
   );
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, true);
-  assert.equal(result.grounding.checks.numerics, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("$63,800"));
 });
 
@@ -296,7 +309,7 @@ test("BedrockNarrator performs one bounded repair after a rejected numeric draft
   assert.ok(!result.answer.includes("35.7%"));
 });
 
-test("BedrockNarrator attempts at most one repair before deterministic fallback", async () => {
+test("BedrockNarrator attempts at most one repair before canonical extraction", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
     async send() {
@@ -316,11 +329,13 @@ test("BedrockNarrator attempts at most one repair before deterministic fallback"
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("€999,999"));
 });
 
-test("BedrockNarrator keeps only independently verified sentences from repair output", async () => {
+test("BedrockNarrator discards the whole repair when only one sentence validates", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
     async send() {
@@ -340,11 +355,12 @@ test("BedrockNarrator keeps only independently verified sentences from repair ou
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "verified");
-  assert.equal(result.answer, "True employer cost was €63,800 [2].");
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("Here is"));
   assert.ok(!result.answer.includes("€999,999"));
-  assert.match(result.grounding.reason ?? "", /independently verified/iu);
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
 test("BedrockNarrator replaces a safe but overly free paraphrase with exact cited evidence", async () => {
@@ -368,18 +384,8 @@ test("BedrockNarrator replaces a safe but overly free paraphrase with exact cite
   );
   assert.equal(calls, 2);
   assert.equal(result.grounding.status, "extractive");
-  assert.deepEqual(result.grounding.checks, {
-    citations: true,
-    numerics: true,
-    claims: true,
-  });
-  assert.equal(
-    result.answer,
-    "Off-bank employment cost at Acme Foods for 2026-03: the bank salary transfer of " +
-      "€41,000 understates the true employer cost by €22,800 (28.8%) [1]. " +
-      "Payroll for Acme Foods in 2026-03: 3 employees, true employer cost €63,800, " +
-      "net paid from bank €41,000 [2]."
-  );
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("payroll burden"));
   assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
@@ -406,18 +412,15 @@ test("BedrockNarrator discards uncited repair prose and returns exact cited evid
   );
   assert.equal(calls, 2);
   assert.equal(result.grounding.status, "extractive");
-  assert.deepEqual(result.grounding.checks, {
-    citations: true,
-    numerics: true,
-    claims: true,
-  });
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("Here is"));
   assert.ok(!result.answer.includes("payroll burden"));
   assert.ok(!result.answer.includes("off-bank gap"));
   assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
-test("BedrockNarrator rejects an uncited numeric claim before exact evidence repair", async () => {
+test("BedrockNarrator replaces the live-shape uncited numeric repair with canonical evidence", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
     async send() {
@@ -437,11 +440,13 @@ test("BedrockNarrator rejects an uncited numeric claim before exact evidence rep
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
+  assert.ok(!result.answer.includes("The actual cost"));
 });
 
-test("BedrockNarrator does not borrow numeric evidence across citations", async () => {
+test("BedrockNarrator discards numeric evidence borrowed across citations", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
     async send() {
@@ -461,8 +466,10 @@ test("BedrockNarrator does not borrow numeric evidence across citations", async 
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.numerics, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
+  assert.ok(!result.answer.includes("€63,800 [1]"));
 });
 
 test("BedrockNarrator rejects non-canonical citation markers", async () => {
@@ -485,11 +492,13 @@ test("BedrockNarrator rejects non-canonical citation markers", async () => {
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "fallback");
-  assert.equal(result.grounding.checks.citations, false);
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
+  assert.ok(!result.answer.includes("[02]"));
 });
 
-test("BedrockNarrator fails closed when the bounded repair call is unavailable", async () => {
+test("BedrockNarrator returns canonical evidence when the bounded repair call is unavailable", async () => {
   let calls = 0;
   const fakeClient: ConverseClientLike = {
     async send() {
@@ -505,14 +514,102 @@ test("BedrockNarrator fails closed when the bounded repair call is unavailable",
     },
   };
 
-  const result = await new BedrockNarrator(fakeClient).narrate(
+  const result = await new BedrockNarrator(
+    fakeClient,
+    "eu.anthropic.test-model"
+  ).narrate(
     "What was the cost?",
     HITS
   );
   assert.equal(calls, 2);
-  assert.equal(result.grounding.status, "fallback");
+  assert.equal(result.modelId, "eu.anthropic.test-model");
+  assert.equal(result.grounding.status, "extractive");
+  assert.deepEqual(result.grounding.checks, GROUNDED_CHECKS);
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.match(result.grounding.reason ?? "", /repair was unavailable/iu);
   assert.ok(!result.answer.includes("€999,999"));
+});
+
+test("canonical extraction remains fail-closed for evidence containing an invalid marker", async () => {
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      return {
+        output: {
+          message: {
+            content: [{ text: "The fabricated cost was €999,999 [99]." }],
+          },
+        },
+      } as any;
+    },
+  };
+  const unsafeEvidence: RecallHit[] = [
+    { ...HITS[0]!, content: `${HITS[0]!.content} [99]` },
+    HITS[1]!,
+  ];
+
+  const result = await new BedrockNarrator(fakeClient).narrate(
+    "What was the cost?",
+    unsafeEvidence
+  );
+  assert.equal(result.grounding.status, "fallback");
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
+});
+
+test("repair failure remains fallback when canonical evidence is invalid", async () => {
+  let calls = 0;
+  const fakeClient: ConverseClientLike = {
+    async send() {
+      calls += 1;
+      if (calls === 2) throw new Error("simulated repair transport failure");
+      return {
+        output: {
+          message: {
+            content: [{ text: "The fabricated cost was €999,999 [99]." }],
+          },
+        },
+      } as any;
+    },
+  };
+  const unsafeEvidence: RecallHit[] = [
+    { ...HITS[0]!, content: `${HITS[0]!.content} [99]` },
+    HITS[1]!,
+  ];
+
+  const result = await new BedrockNarrator(
+    fakeClient,
+    "eu.anthropic.test-model"
+  ).narrate("What was the cost?", unsafeEvidence);
+  assert.equal(calls, 2);
+  assert.equal(result.modelId, "eu.anthropic.test-model");
+  assert.equal(result.grounding.status, "fallback");
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
+});
+
+test("FakeNarrator remains fallback when canonical evidence is invalid", async () => {
+  const unsafeEvidence: RecallHit[] = [
+    { ...HITS[0]!, content: `${HITS[0]!.content} [99]` },
+    HITS[1]!,
+  ];
+
+  const result = await new FakeNarrator().narrate(
+    "What was the cost?",
+    unsafeEvidence
+  );
+  assert.equal(result.modelId, "fake-narrator");
+  assert.equal(result.grounding.status, "fallback");
+  assert.deepEqual(result.grounding.checks, {
+    citations: false,
+    numerics: false,
+    claims: false,
+  });
 });
 
 test("BedrockNarrator withholds an unrelated claim and returns exact evidence", async () => {

@@ -128,5 +128,15 @@ test(
       answer.includes("63,800") || answer.includes("63800"),
       "answer must quote the true employer cost from the recalled memory"
     );
+    assert.ok(
+      answer.includes("22,800") || answer.includes("22800"),
+      "answer must quote the off-bank wedge from the recalled memory"
+    );
+    for (const citation of citations) {
+      assert.ok(
+        answer.includes(citation.marker),
+        `answer must use required evidence marker ${citation.marker}`
+      );
+    }
   }
 );

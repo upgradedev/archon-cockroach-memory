@@ -183,6 +183,20 @@ export class BedrockNarrator implements Narrator {
       repairText
     ).catch(() => null);
     if (repairedResult === null) {
+      const extractive = canonicalExtractiveAnswer(citations);
+      if (extractive) {
+        return {
+          answer: extractive.answer,
+          citations,
+          modelId: initialResult.modelId,
+          grounding: {
+            status: "extractive",
+            checks: extractive.checks,
+            reason:
+              "bounded repair was unavailable; exact cited evidence rendered",
+          },
+        };
+      }
       const fallback = deterministicGroundedAnswer(citations);
       return {
         answer: fallback,
@@ -190,7 +204,7 @@ export class BedrockNarrator implements Narrator {
         modelId: initialResult.modelId,
         grounding: {
           status: "fallback",
-          checks: initialValidation.checks,
+          checks: { citations: false, numerics: false, claims: false },
           reason: `${initialValidation.reason}; bounded repair was unavailable`,
         },
       };
@@ -201,33 +215,10 @@ export class BedrockNarrator implements Narrator {
       citations
     );
     if (!repairedValidation.ok) {
-      // A model may add an uncited preamble or trailing aside even when its
-      // substantive sentences are valid. Retain only sentences that independently
-      // pass every unchanged guard; never add or rewrite a citation on its behalf.
-      const sanitized = validatedCitedSubset(repairedAnswer, citations);
-      if (sanitized) {
-        return {
-          answer: sanitized.answer,
-          citations,
-          modelId: repairedResult.modelId,
-          grounding: {
-            status: "verified",
-            checks: sanitized.checks,
-            reason:
-              "bounded repair retained only independently verified cited sentences",
-          },
-        };
-      }
-      // A repair can include an uncited preamble that makes the aggregate
-      // citation check fail even though its markers are canonical and every
-      // numeric token came from evidence. Discard the entire model draft and
-      // render the complete bounded recall set as exact evidence sentences.
-      // The extractive guard independently rejects unknown markers/numbers and
-      // the final rendering must still pass every unchanged grounding check.
-      const extractive = verifiedExtractiveAnswer(
-        repairedAnswer,
-        citations
-      );
+      // No token from a partially invalid model draft may survive. Render the
+      // complete bounded recall set directly from stored evidence, then run that
+      // deterministic output through the same unchanged grounding validator.
+      const extractive = canonicalExtractiveAnswer(citations);
       if (extractive) {
         return {
           answer: extractive.answer,
@@ -248,7 +239,7 @@ export class BedrockNarrator implements Narrator {
         modelId: repairedResult.modelId,
         grounding: {
           status: "fallback",
-          checks: repairedValidation.checks,
+          checks: { citations: false, numerics: false, claims: false },
           reason: repairedValidation.reason,
         },
       };
@@ -283,13 +274,26 @@ export class FakeNarrator implements Narrator {
         grounding: noEvidenceGrounding(),
       };
     }
+    const extractive = canonicalExtractiveAnswer(citations);
+    if (!extractive) {
+      return {
+        answer: deterministicGroundedAnswer(citations),
+        citations,
+        modelId: this.modelId,
+        grounding: {
+          status: "fallback",
+          checks: { citations: false, numerics: false, claims: false },
+          reason: "stored evidence could not produce a canonical grounded answer",
+        },
+      };
+    }
     return {
-      answer: deterministicGroundedAnswer(citations),
+      answer: extractive.answer,
       citations,
       modelId: this.modelId,
       grounding: {
         status: "verified",
-        checks: { citations: true, numerics: true, claims: true },
+        checks: extractive.checks,
       },
     };
   }
@@ -405,67 +409,15 @@ function splitClaims(answer: string): string[] {
     .filter(Boolean);
 }
 
-function validatedCitedSubset(
-  answer: string,
+function canonicalExtractiveAnswer(
   citations: Citation[]
 ): {
   answer: string;
   checks: { citations: true; numerics: true; claims: true };
 } | null {
-  const retained = splitClaims(answer).filter(
-    (claim) => validateGroundedAnswer(claim, citations).ok
-  );
-  if (retained.length === 0) return null;
-  const sanitizedAnswer = retained.join(" ");
-  const validation = validateGroundedAnswer(sanitizedAnswer, citations);
-  return validation.ok
-    ? { answer: sanitizedAnswer, checks: validation.checks }
-    : null;
-}
-
-function verifiedExtractiveAnswer(
-  answer: string,
-  citations: Citation[]
-): {
-  answer: string;
-  checks: { citations: true; numerics: true; claims: true };
-} | null {
-  let citedClaims = 0;
-  const safeParticipation = splitClaims(answer).every((claim) => {
-    const references = [...claim.matchAll(/\[(\d+)\]/gu)].map((match) => ({
-      raw: match[1]!,
-      index: Number(match[1]),
-    }));
-    const claimNumbers = extractNumbers(claim.replace(/\[\d+\]/gu, ""));
-    if (references.length === 0) {
-      return claimNumbers.length === 0;
-    }
-    citedClaims += 1;
-    if (
-      references.some(
-        ({ raw, index }) =>
-          !Number.isInteger(index) ||
-          raw !== String(index) ||
-          index < 1 ||
-          index > citations.length
-      )
-    ) {
-      return false;
-    }
-    const evidenceNumbers = new Set(
-      [...new Set(references.map(({ index }) => index))].flatMap((index) =>
-        extractNumbers(citations[index - 1]!.content)
-      )
-    );
-    return claimNumbers.every((number) => evidenceNumbers.has(number));
-  });
-  if (!safeParticipation || citedClaims === 0) {
-    return null;
-  }
-
   // The public recall response already returns this complete bounded citation
-  // set. Rendering all of it prevents a format-repair turn from silently omitting
-  // one half of a multi-part question while remaining strictly extractive.
+  // set. Rendering all of it prevents a model turn from silently omitting one
+  // half of a multi-part question. No model-generated token survives this path.
   const selected = citations.map((_, index) => index + 1);
   const extractiveClaims = selected.flatMap((index) =>
     splitClaims(citations[index - 1]!.content).map((claim) => {
