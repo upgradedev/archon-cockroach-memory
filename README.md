@@ -132,7 +132,9 @@ The deployment follows the AWS serverless web application reference pattern:
 - Private, encrypted, versioned S3 origin.
 - CloudFront Origin Access Control, same-origin `/api/*`, HTTP/2+3, compression,
   CSP/HSTS/security headers, and SPA routing.
-- API Gateway HTTP API with route-level throttling and no public mutation route.
+- API Gateway HTTP API with a named `live` stage, stage-wide throttling,
+  detailed metrics, vended CloudWatch access logs, no per-route overrides, and
+  no public mutation route.
 - Lambda Node.js 22 with reserved concurrency, X-Ray, retained logs, and bounded
   request/retrieval work.
 - Secrets Manager stores the least-privilege CockroachDB connection under a
@@ -162,11 +164,17 @@ secret scan
   → build once
   → cryptographic candidate receipt
   → protected database release (exact legacy supersession + payload-digest proof + fail-closed RLS + two-principal C-SPANN probes)
+  → pre-mutation proof of the scoped delivery-role read permissions
   → OIDC staging deploy + candidate-scoped 10%/5m proof-and-recall canary
+  → processed-template + live named-stage throttle/metrics/vended-log proof
   → full real recall smoke + hosted Playwright
   → identical-candidate production promotion
-  → candidate-scoped proof-and-recall canary + full recall + hosted Playwright
-  → recover previous traffic alias and versioned S3 index on verification failure
+  → candidate-scoped canary + named-stage proof + full recall + hosted Playwright
+  → recover the exact previous CloudFormation template/JSON parameters,
+    traffic alias, versioned S3 index, and verified public health/proof on any
+    post-deploy failure; `RetainExceptOnCreate` prevents initial-rollback
+    debris, and the retry-safe greenfield cleanup deletes its stack plus
+    bounded retained bucket versions/log groups
 ```
 
 Supply-chain references are immutable commit/image digests. Staging, production,
@@ -174,7 +182,12 @@ and database-operator OIDC subjects are bound to their GitHub environments.
 Bootstrap owns the environment-specific Lambda and CodeDeploy roles; the SAM
 application stack is CI-gated to synthesize no IAM resources. The one-time roles
 and artifact bucket are defined in
-[aws/bootstrap-oidc.yaml](./aws/bootstrap-oidc.yaml).
+[aws/bootstrap-oidc.yaml](./aws/bootstrap-oidc.yaml). Any bootstrap policy
+change is applied by the authorized bootstrap principal before the corresponding
+application release; each environment then preflights those permissions before
+SAM is allowed to mutate its stack. HTTP API delivery uses
+`/aws/vendedlogs/apigateway/*`, while the legacy log-group logical resource stays
+managed solely to keep exact-template rollback collision-free.
 
 This repository does **not** call the pipeline “live-complete” merely because
 the YAML exists. Full CI/CD is established only after main CI, staging,

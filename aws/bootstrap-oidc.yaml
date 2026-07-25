@@ -631,13 +631,23 @@ Resources:
               - codedeploy:TagResource
               - codedeploy:UntagResource
               - codedeploy:UpdateDeploymentGroup
+              - logs:CreateLogDelivery
               - logs:CreateLogGroup
+              - logs:DeleteLogDelivery
               - logs:DeleteLogGroup
               - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:DescribeResourcePolicies
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:GetLogDelivery
+              - logs:ListLogDeliveries
               - logs:ListTagsForResource
+              - logs:PutResourcePolicy
               - logs:PutRetentionPolicy
               - logs:TagResource
               - logs:UntagResource
+              - logs:UpdateLogDelivery
             Resource: "*"
           - Sid: CloudFrontApplicationEdge
             Effect: Allow
@@ -799,11 +809,13 @@ Resources:
                 Action:
                   - cloudformation:CreateChangeSet
                   - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
                   - cloudformation:DeleteChangeSet
                   - cloudformation:DescribeChangeSet
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStacks
                   - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
                   - cloudformation:GetTemplateSummary
                   - cloudformation:UpdateStack
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-staging/*"
@@ -830,6 +842,24 @@ Resources:
                 Resource:
                   - !Sub "${ArtifactBucket.Arn}/candidates/*"
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: DeleteFailedStagingGreenfieldRetainedResources
+                Effect: Allow
+                Action:
+                  - s3:DeleteBucket
+                  - s3:ListBucketVersions
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: DeleteFailedStagingGreenfieldObjectVersions
+                Effect: Allow
+                Action:
+                  - s3:DeleteObjectVersion
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: DeleteFailedStagingGreenfieldRetainedLogs
+                Effect: Allow
+                Action:
+                  - logs:DeleteLogGroup
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-staging-api"
               - Effect: Allow
                 Action:
                   - cloudfront:CreateInvalidation
@@ -840,6 +870,19 @@ Resources:
                   - lambda:GetAlias
                   - lambda:UpdateAlias
                 Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-*"
+              - Sid: VerifyStagingApiStage
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
+              - Sid: VerifyStagingApiAccessLogs
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-staging"
 
   ProductionDeployRole:
     Type: AWS::IAM::Role
@@ -870,11 +913,13 @@ Resources:
                 Action:
                   - cloudformation:CreateChangeSet
                   - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
                   - cloudformation:DeleteChangeSet
                   - cloudformation:DescribeChangeSet
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStacks
                   - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
                   - cloudformation:GetTemplateSummary
                   - cloudformation:UpdateStack
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-production/*"
@@ -901,6 +946,24 @@ Resources:
                 Resource:
                   - !Sub "${ArtifactBucket.Arn}/candidates/*"
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: DeleteFailedProductionGreenfieldRetainedResources
+                Effect: Allow
+                Action:
+                  - s3:DeleteBucket
+                  - s3:ListBucketVersions
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: DeleteFailedProductionGreenfieldObjectVersions
+                Effect: Allow
+                Action:
+                  - s3:DeleteObjectVersion
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: DeleteFailedProductionGreenfieldRetainedLogs
+                Effect: Allow
+                Action:
+                  - logs:DeleteLogGroup
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-production-api"
               - Effect: Allow
                 Action:
                   - cloudfront:CreateInvalidation
@@ -911,6 +974,19 @@ Resources:
                   - lambda:GetAlias
                   - lambda:UpdateAlias
                 Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-*"
+              - Sid: VerifyProductionApiStage
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
+              - Sid: VerifyProductionApiAccessLogs
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production"
 
 Outputs:
   ArtifactBucketName:

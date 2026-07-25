@@ -150,6 +150,10 @@ function sourceChecks(): SourceCheck[] {
   const ci = read(".github/workflows/ci.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
   const lambdaTemplate = read("aws/template.yaml");
+  const deliveryBootstrap = read("aws/bootstrap-oidc.yaml");
+  const apiStageProof = read("aws/prove-api-stage-controls.sh");
+  const stackRestore = read("aws/restore-cloudformation-stack.sh");
+  const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
   const dockerfile = read("aws/Dockerfile");
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
@@ -198,6 +202,14 @@ function sourceChecks(): SourceCheck[] {
     )?.[0] ?? "",
     deploy.match(
       /- name: Smoke production through CloudFront[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on production)/u
+    )?.[0] ?? "",
+  ];
+  const recoveryBlocks = [
+    deploy.match(
+      /- name: Restore the previous staging release on verification failure[\s\S]*?(?=\r?\n      - name: Publish sanitized staging deployment receipt)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Restore the previous production release on verification failure[\s\S]*?(?=\r?\n      - name: Publish sanitized production deployment receipt)/u
     )?.[0] ?? "",
   ];
   const canaryTrafficFragments = [
@@ -495,9 +507,39 @@ function sourceChecks(): SourceCheck[] {
         /AWS::Serverless::HttpApi/u.test(lambdaTemplate) &&
         /AWS::Serverless::Function/u.test(lambdaTemplate) &&
         /AWS::S3::Bucket/u.test(lambdaTemplate) &&
-        /DATABASE_SECRET_ID/u.test(lambdaTemplate),
-      "SAM defines private S3 + OAC/CloudFront, HTTP API, Lambda, Secrets Manager, alarms, and tracing.",
-      "The deployable AWS reference architecture is incomplete."
+        /DATABASE_SECRET_ID/u.test(lambdaTemplate) &&
+        /StageName:\s*live/u.test(lambdaTemplate) &&
+        /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ServerlessHttpApi\.Stage\]\]/u.test(
+          lambdaTemplate
+        ) &&
+        /DetailedMetricsEnabled:\s*true/u.test(lambdaTemplate) &&
+        /ThrottlingBurstLimit:\s*!Ref ApiThrottleBurst/u.test(
+          lambdaTemplate
+        ) &&
+        /ThrottlingRateLimit:\s*!Ref ApiThrottleRate/u.test(
+          lambdaTemplate
+        ) &&
+        /AccessLogSettings:/u.test(lambdaTemplate) &&
+        /\/aws\/vendedlogs\/apigateway\//u.test(lambdaTemplate) &&
+        (
+          lambdaTemplate.match(/DeletionPolicy:\s+RetainExceptOnCreate/gu) ??
+          []
+        ).length === 3 &&
+        /cloudformation:GetTemplate/u.test(deliveryBootstrap) &&
+        /logs:CreateLogDelivery/u.test(deliveryBootstrap) &&
+        /logs:PutResourcePolicy/u.test(deliveryBootstrap) &&
+        /logs:UpdateLogDelivery/u.test(deliveryBootstrap) &&
+        /logs:FilterLogEvents/u.test(deliveryBootstrap) &&
+        /--template-stage Processed/u.test(apiStageProof) &&
+        /apigatewayv2 get-stage/u.test(apiStageProof) &&
+        /logs filter-log-events/u.test(apiStageProof) &&
+        (
+          deploy.match(
+            /name: Prove transformed and live API stage controls/gu
+          ) ?? []
+        ).length === 2,
+      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves named-stage throttling, detailed metrics, and a real API access-log event in both environments.",
+      "The deployable AWS architecture or its live API stage-control proof is incomplete."
     ),
     sourceCheck(
       "product.oidc-promotion-rollback",
@@ -506,9 +548,44 @@ function sourceChecks(): SourceCheck[] {
         /AssumeRoleWithWebIdentity/u.test(read("aws/bootstrap-oidc.yaml")) &&
         /Verify candidate tree hashes/iu.test(deploy) &&
         /Restore the previous production release/iu.test(deploy) &&
-        /Hosted Chromium judge journey on staging/iu.test(deploy),
-      "Environment-bound OIDC, build-once promotion, hash verification, hosted E2E, and rollback are source-controlled.",
-      "OIDC/promotion/hosted verification/rollback evidence is incomplete."
+        /Hosted Chromium judge journey on staging/iu.test(deploy) &&
+        (
+          deploy.match(
+            /name: Preflight API stage-proof permissions before stack mutation/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(/--template-stage Original/gu) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? []
+        ).length === 2 &&
+        recoveryBlocks.every(
+          (block) =>
+            block.length > 0 &&
+            block.includes("bash aws/delete-greenfield-stack.sh") &&
+            block.includes('"$PREVIOUS_APPLICATION_URL/api/health"') &&
+            block.includes('"$PREVIOUS_APPLICATION_URL/api/proof"') &&
+            block.includes("set -euo pipefail") &&
+            (
+              block.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []
+            ).length === 2
+        ) &&
+        (
+          deploy.match(
+            /name: Refresh short-lived AWS credentials for (?:staging|production) recovery/gu
+          ) ?? []
+        ).length === 2 &&
+        (deploy.match(/timeout-minutes:\s+90/gu) ?? []).length === 2 &&
+        /--parameters "file:\/\/\$\{parameters_file\}"/u.test(stackRestore) &&
+        /cloudformation create-change-set/u.test(stackRestore) &&
+        /cloudformation execute-change-set/u.test(stackRestore) &&
+        /cloudformation wait stack-update-complete/u.test(stackRestore) &&
+        /cloudformation delete-stack/u.test(greenfieldCleanup) &&
+        /s3api list-object-versions/u.test(greenfieldCleanup) &&
+        /s3api delete-bucket/u.test(greenfieldCleanup),
+      "Environment-bound OIDC, build-once promotion, pre-mutation permission proof, hosted E2E, and full-stack fail-closed rollback are source-controlled.",
+      "OIDC/promotion/preflight/hosted verification/full-stack rollback evidence is incomplete."
     ),
     sourceCheck(
       "product.recovery-safe-canary",
