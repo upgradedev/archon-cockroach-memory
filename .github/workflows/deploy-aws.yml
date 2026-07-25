@@ -187,7 +187,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    timeout-minutes: 45
+    # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
+    timeout-minutes: 90
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-staging' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
@@ -242,16 +243,62 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
+      - name: Preflight API stage-proof permissions before stack mutation
+        id: api_preflight
+        env:
+          API_ACCESS_LOG_GROUP: /aws/apigateway/${{ env.APP_NAME }}-staging
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh preflight |
+            tee api-stage-preflight.json
+          jq -e \
+            '.ok == true and
+             .mode == "preflight" and
+             ((.state == "greenfield" and .deferredToPostDeploy == true) or
+              (.state == "existing" and
+               (.currentStage == "live" or .currentStage == "$default") and
+               (.accessLogGroup | type == "string" and length > 0)))' \
+            api-stage-preflight.json >/dev/null
+          echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Capture the current recoverable release
         id: previous
+        env:
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
         run: |
           set -euo pipefail
           FUNCTION_NAME=""
           FUNCTION_VERSION=""
           APPLICATION_URL=""
-          if aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" >/dev/null 2>&1; then
+          HAS_PREVIOUS_STACK=false
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" >/dev/null
+            HAS_PREVIOUS_STACK=true
+            aws cloudformation get-template \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --template-stage Original \
+              --output json |
+              jq -er '.TemplateBody | if type == "string" then . else tojson end' \
+                > previous-stack-template.yaml
+            test "$(wc -c < previous-stack-template.yaml)" -le 51200
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query 'Stacks[0].Parameters' \
+              --output json |
+              jq -e \
+                'map({ParameterKey, ParameterValue})
+                 | if (length > 0 and
+                       all(.[];
+                         (.ParameterKey | type == "string" and length > 0) and
+                         (.ParameterValue | type == "string")))
+                   then .
+                   else error("invalid stack parameter snapshot")
+                   end' > previous-stack-parameters.json
             FUNCTION_NAME="$(aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
               --region "$AWS_REGION" \
@@ -268,13 +315,33 @@ jobs:
                 --name live \
                 --region "$AWS_REGION" \
                 --query FunctionVersion \
-                --output text 2>/dev/null || true)"
+                --output text)"
+              [[ "$FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+            else
+              echo "The existing stack has no recoverable Lambda function." >&2
+              exit 1
             fi
+            test -n "$APPLICATION_URL"
+            test "$APPLICATION_URL" != "None"
+          elif [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
+            if stack_result="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "Stack state changed after the greenfield preflight." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$stack_result"; then
+              echo "Unable to confirm the greenfield stack state." >&2
+              exit 1
+            fi
+          else
+            echo "Invalid API stage preflight stack state." >&2
+            exit 1
           fi
           {
             echo "function_name=$FUNCTION_NAME"
             echo "function_version=$FUNCTION_VERSION"
             echo "application_url=$APPLICATION_URL"
+            echo "has_previous_stack=$HAS_PREVIOUS_STACK"
           } >> "$GITHUB_OUTPUT"
 
       - name: Deploy staging with recovery-safe SAM canary
@@ -334,6 +401,7 @@ jobs:
             ) &
             CANARY_PROBE_PID=$!
           fi
+          echo "started=true" >> "$GITHUB_OUTPUT"
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
@@ -360,10 +428,16 @@ jobs:
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
+          API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
+          API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
+          API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
           {
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
             echo "distribution_id=$DISTRIBUTION_ID"
+            echo "api_id=$API_ID"
+            echo "api_stage_name=$API_STAGE_NAME"
+            echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish the frontend and invalidate CloudFront
@@ -374,12 +448,24 @@ jobs:
         run: |
           set -euo pipefail
           echo "started=true" >> "$GITHUB_OUTPUT"
-          PREVIOUS_INDEX_VERSION="$(aws s3api head-object \
+          HAD_PREVIOUS_INDEX=false
+          if previous_index="$(aws s3api head-object \
             --bucket "$BUCKET_NAME" \
             --key index.html \
             --region "$AWS_REGION" \
-            --query VersionId \
-            --output text 2>/dev/null || true)"
+            --output json 2>&1)"; then
+            PREVIOUS_INDEX_VERSION="$(
+              jq -er '.VersionId | strings | select(length > 0)' \
+                <<<"$previous_index"
+            )"
+            HAD_PREVIOUS_INDEX=true
+          elif grep -Eqi 'NoSuchKey|Not Found|\(404\)' <<<"$previous_index"; then
+            PREVIOUS_INDEX_VERSION=""
+          else
+            echo "Unable to capture the current frontend index version." >&2
+            exit 1
+          fi
+          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >> "$GITHUB_OUTPUT"
           echo "previous_index_version=$PREVIOUS_INDEX_VERSION" >> "$GITHUB_OUTPUT"
           # Hashed assets are retained so the previous index remains recoverable.
           # The new index is the atomic switch and is uploaded last.
@@ -467,6 +553,26 @@ jobs:
                .resolution.recommendedValue == 18400) and
              any(.report.absences[]; .subject == "PAY-118")' <<<"$AUDIT"
 
+      - name: Prove transformed and live API stage controls
+        env:
+          API_ID: ${{ steps.stack.outputs.api_id }}
+          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
+          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh |
+            tee api-stage-proof.json
+          jq -e \
+            '.ok == true and
+             .stage == "live" and
+             .legacyDefaultStageAbsent == true and
+             .detailedMetrics == true and
+             .throttlingRate == 5 and
+             .throttlingBurst == 10 and
+             .accessLogEvent == "GET /api/health 200"' \
+            api-stage-proof.json >/dev/null
+
       - name: Hosted Chromium judge journey on staging
         env:
           PLAYWRIGHT_BASE_URL: ${{ steps.stack.outputs.application_url }}
@@ -477,73 +583,156 @@ jobs:
           npx --prefix web playwright install --with-deps chromium
           npm run test:e2e --prefix web
 
+      - name: Refresh short-lived AWS credentials for staging recovery
+        if: failure() && steps.deploy.outputs.started == 'true'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: archon-staging-recovery-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
       - name: Restore the previous staging release on verification failure
-        if: failure() && steps.deploy.outcome == 'success'
+        if: failure() && steps.deploy.outputs.started == 'true'
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
           FRONTEND_STARTED: ${{ steps.frontend.outputs.started }}
+          HAD_PREVIOUS_INDEX: ${{ steps.frontend.outputs.had_previous_index }}
           PREVIOUS_INDEX_VERSION: ${{ steps.frontend.outputs.previous_index_version }}
           PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
         run: |
-          set -u
-          if [ -z "$BUCKET_NAME" ]; then
-            BUCKET_NAME="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
-              --output text 2>/dev/null || true)"
+          set -euo pipefail
+          RECOVERY_FAILED=0
+          if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
+            if ! ENVIRONMENT=staging \
+              bash aws/delete-greenfield-stack.sh; then
+              echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            test "$RECOVERY_FAILED" -eq 0
+            exit 0
           fi
-          if [ -z "$DISTRIBUTION_ID" ]; then
-            DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
-              --output text 2>/dev/null || true)"
+          if ! bash aws/restore-cloudformation-stack.sh; then
+            echo "Failed to restore the exact previous CloudFormation stack." >&2
+            RECOVERY_FAILED=1
+          fi
+          RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
+            --output text 2>/dev/null || true)"
+          if [ -n "$RESTORED_BUCKET_NAME" ] &&
+             [ "$RESTORED_BUCKET_NAME" != "None" ]; then
+            BUCKET_NAME="$RESTORED_BUCKET_NAME"
+          else
+            RECOVERY_FAILED=1
+          fi
+          RESTORED_DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
+            --output text 2>/dev/null || true)"
+          if [ -n "$RESTORED_DISTRIBUTION_ID" ] &&
+             [ "$RESTORED_DISTRIBUTION_ID" != "None" ]; then
+            DISTRIBUTION_ID="$RESTORED_DISTRIBUTION_ID"
+          else
+            RECOVERY_FAILED=1
           fi
           if [ "$FRONTEND_STARTED" = "true" ] &&
+             [ "$HAD_PREVIOUS_INDEX" = "true" ] &&
              [ -n "$BUCKET_NAME" ] &&
              [ -n "$PREVIOUS_INDEX_VERSION" ] &&
              [ "$PREVIOUS_INDEX_VERSION" != "None" ]; then
-            aws s3api copy-object \
+            if ! aws s3api copy-object \
               --bucket "$BUCKET_NAME" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
               --metadata-directive REPLACE \
               --content-type "text/html; charset=utf-8" \
               --cache-control "no-cache,no-store,must-revalidate" \
-              --region "$AWS_REGION" >/dev/null
-          elif [ "$FRONTEND_STARTED" = "true" ] && [ -n "$BUCKET_NAME" ]; then
-            aws s3api delete-object \
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          elif [ "$FRONTEND_STARTED" = "true" ] &&
+               [ "$HAD_PREVIOUS_INDEX" = "false" ] &&
+               [ -n "$BUCKET_NAME" ]; then
+            if ! aws s3api delete-object \
               --bucket "$BUCKET_NAME" \
               --key index.html \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          elif [ "$FRONTEND_STARTED" = "true" ]; then
+            RECOVERY_FAILED=1
           fi
           if [ -n "$PREVIOUS_FUNCTION_NAME" ] &&
              [ -n "$PREVIOUS_FUNCTION_VERSION" ] &&
              [ "$PREVIOUS_FUNCTION_VERSION" != "None" ]; then
-            aws lambda update-alias \
+            if ! aws lambda update-alias \
               --function-name "$PREVIOUS_FUNCTION_NAME" \
               --name live \
               --function-version "$PREVIOUS_FUNCTION_VERSION" \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
           fi
           if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
-            aws cloudfront create-invalidation \
+            INVALIDATION_ID="$(aws cloudfront create-invalidation \
               --distribution-id "$DISTRIBUTION_ID" \
-              --paths '/*' >/dev/null
+              --paths '/*' \
+              --query 'Invalidation.Id' \
+              --output text)"
+            if ! aws cloudfront wait invalidation-completed \
+              --distribution-id "$DISTRIBUTION_ID" \
+              --id "$INVALIDATION_ID"; then
+              RECOVERY_FAILED=1
+            fi
+          else
+            RECOVERY_FAILED=1
           fi
+          if [ -n "$PREVIOUS_APPLICATION_URL" ] &&
+             [ "$PREVIOUS_APPLICATION_URL" != "None" ]; then
+            if ! curl --fail --silent --show-error \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              --max-time 30 "$PREVIOUS_APPLICATION_URL/api/health" |
+              jq -e '.ok == true and .status == "reachable"' >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+            if ! curl --fail --silent --show-error \
+              --retry 6 --retry-delay 5 --retry-all-errors \
+              --max-time 30 "$PREVIOUS_APPLICATION_URL/api/proof" |
+              jq -e '.memory.storeVerified == true and .memory.persisted == 9' \
+                >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          else
+            RECOVERY_FAILED=1
+          fi
+          test "$RECOVERY_FAILED" -eq 0
 
       - name: Publish sanitized staging deployment receipt
         if: success()
         env:
           APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
         run: |
-          jq \
+          jq -e \
+            --slurpfile apiStage api-stage-proof.json \
             --arg environment staging \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
             --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '. + {deployment: {
+            'if (($apiStage | length) == 1 and
+                 $apiStage[0].ok == true and
+                 $apiStage[0].stage == "live" and
+                 $apiStage[0].legacyDefaultStageAbsent == true and
+                 $apiStage[0].detailedMetrics == true and
+                 $apiStage[0].throttlingRate == 5 and
+                 $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].accessLogEvent == "GET /api/health 200")
+             then . + {deployment: {
               environment: $environment,
               stackName: $stackName,
               applicationUrl: $applicationUrl,
@@ -552,8 +741,11 @@ jobs:
               canary: "Canary10Percent5Minutes",
               canaryTrafficProbe: "weighted-alias-proof-and-recall",
               deployAlarm: "candidate-executed-version-errors",
-              recallGate: "post-promotion-with-explicit-restore"
-            }}' deployment-receipt.json > staging-deployment-receipt.json
+              recallGate: "post-promotion-with-explicit-restore",
+              apiStage: $apiStage[0]
+            }}
+             else error("invalid API stage proof")
+             end' deployment-receipt.json > staging-deployment-receipt.json
 
       - name: Upload staging receipt
         if: success()
@@ -576,7 +768,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    timeout-minutes: 50
+    # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
+    timeout-minutes: 90
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-production' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/production/database' }}
@@ -641,16 +834,62 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
+      - name: Preflight API stage-proof permissions before stack mutation
+        id: api_preflight
+        env:
+          API_ACCESS_LOG_GROUP: /aws/apigateway/${{ env.APP_NAME }}-production
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh preflight |
+            tee api-stage-preflight.json
+          jq -e \
+            '.ok == true and
+             .mode == "preflight" and
+             ((.state == "greenfield" and .deferredToPostDeploy == true) or
+              (.state == "existing" and
+               (.currentStage == "live" or .currentStage == "$default") and
+               (.accessLogGroup | type == "string" and length > 0)))' \
+            api-stage-preflight.json >/dev/null
+          echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Capture the current recoverable release
         id: previous
+        env:
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
         run: |
           set -euo pipefail
           FUNCTION_NAME=""
           FUNCTION_VERSION=""
           APPLICATION_URL=""
-          if aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" >/dev/null 2>&1; then
+          HAS_PREVIOUS_STACK=false
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" >/dev/null
+            HAS_PREVIOUS_STACK=true
+            aws cloudformation get-template \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --template-stage Original \
+              --output json |
+              jq -er '.TemplateBody | if type == "string" then . else tojson end' \
+                > previous-stack-template.yaml
+            test "$(wc -c < previous-stack-template.yaml)" -le 51200
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query 'Stacks[0].Parameters' \
+              --output json |
+              jq -e \
+                'map({ParameterKey, ParameterValue})
+                 | if (length > 0 and
+                       all(.[];
+                         (.ParameterKey | type == "string" and length > 0) and
+                         (.ParameterValue | type == "string")))
+                   then .
+                   else error("invalid stack parameter snapshot")
+                   end' > previous-stack-parameters.json
             FUNCTION_NAME="$(aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
               --region "$AWS_REGION" \
@@ -667,13 +906,33 @@ jobs:
                 --name live \
                 --region "$AWS_REGION" \
                 --query FunctionVersion \
-                --output text 2>/dev/null || true)"
+                --output text)"
+              [[ "$FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+            else
+              echo "The existing stack has no recoverable Lambda function." >&2
+              exit 1
             fi
+            test -n "$APPLICATION_URL"
+            test "$APPLICATION_URL" != "None"
+          elif [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
+            if stack_result="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "Stack state changed after the greenfield preflight." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$stack_result"; then
+              echo "Unable to confirm the greenfield stack state." >&2
+              exit 1
+            fi
+          else
+            echo "Invalid API stage preflight stack state." >&2
+            exit 1
           fi
           {
             echo "function_name=$FUNCTION_NAME"
             echo "function_version=$FUNCTION_VERSION"
             echo "application_url=$APPLICATION_URL"
+            echo "has_previous_stack=$HAS_PREVIOUS_STACK"
           } >> "$GITHUB_OUTPUT"
 
       - name: Deploy production with recovery-safe SAM canary
@@ -733,6 +992,7 @@ jobs:
             ) &
             CANARY_PROBE_PID=$!
           fi
+          echo "started=true" >> "$GITHUB_OUTPUT"
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
@@ -759,10 +1019,16 @@ jobs:
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
+          API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
+          API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
+          API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
           {
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
             echo "distribution_id=$DISTRIBUTION_ID"
+            echo "api_id=$API_ID"
+            echo "api_stage_name=$API_STAGE_NAME"
+            echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish the frontend and invalidate CloudFront
@@ -773,12 +1039,24 @@ jobs:
         run: |
           set -euo pipefail
           echo "started=true" >> "$GITHUB_OUTPUT"
-          PREVIOUS_INDEX_VERSION="$(aws s3api head-object \
+          HAD_PREVIOUS_INDEX=false
+          if previous_index="$(aws s3api head-object \
             --bucket "$BUCKET_NAME" \
             --key index.html \
             --region "$AWS_REGION" \
-            --query VersionId \
-            --output text 2>/dev/null || true)"
+            --output json 2>&1)"; then
+            PREVIOUS_INDEX_VERSION="$(
+              jq -er '.VersionId | strings | select(length > 0)' \
+                <<<"$previous_index"
+            )"
+            HAD_PREVIOUS_INDEX=true
+          elif grep -Eqi 'NoSuchKey|Not Found|\(404\)' <<<"$previous_index"; then
+            PREVIOUS_INDEX_VERSION=""
+          else
+            echo "Unable to capture the current frontend index version." >&2
+            exit 1
+          fi
+          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >> "$GITHUB_OUTPUT"
           echo "previous_index_version=$PREVIOUS_INDEX_VERSION" >> "$GITHUB_OUTPUT"
           aws s3 sync web/dist "s3://$BUCKET_NAME" \
             --region "$AWS_REGION" \
@@ -864,6 +1142,26 @@ jobs:
                .resolution.recommendedValue == 18400) and
              any(.report.absences[]; .subject == "PAY-118")' <<<"$AUDIT"
 
+      - name: Prove transformed and live API stage controls
+        env:
+          API_ID: ${{ steps.stack.outputs.api_id }}
+          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
+          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh |
+            tee api-stage-proof.json
+          jq -e \
+            '.ok == true and
+             .stage == "live" and
+             .legacyDefaultStageAbsent == true and
+             .detailedMetrics == true and
+             .throttlingRate == 5 and
+             .throttlingBurst == 10 and
+             .accessLogEvent == "GET /api/health 200"' \
+            api-stage-proof.json >/dev/null
+
       - name: Hosted Chromium judge journey on production
         env:
           PLAYWRIGHT_BASE_URL: ${{ steps.stack.outputs.application_url }}
@@ -874,73 +1172,156 @@ jobs:
           npx --prefix web playwright install --with-deps chromium
           npm run test:e2e --prefix web
 
+      - name: Refresh short-lived AWS credentials for production recovery
+        if: failure() && steps.deploy.outputs.started == 'true'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: archon-production-recovery-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
       - name: Restore the previous production release on verification failure
-        if: failure() && steps.deploy.outcome == 'success'
+        if: failure() && steps.deploy.outputs.started == 'true'
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
           FRONTEND_STARTED: ${{ steps.frontend.outputs.started }}
+          HAD_PREVIOUS_INDEX: ${{ steps.frontend.outputs.had_previous_index }}
           PREVIOUS_INDEX_VERSION: ${{ steps.frontend.outputs.previous_index_version }}
           PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
         run: |
-          set -u
-          if [ -z "$BUCKET_NAME" ]; then
-            BUCKET_NAME="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
-              --output text 2>/dev/null || true)"
+          set -euo pipefail
+          RECOVERY_FAILED=0
+          if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
+            if ! ENVIRONMENT=production \
+              bash aws/delete-greenfield-stack.sh; then
+              echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            test "$RECOVERY_FAILED" -eq 0
+            exit 0
           fi
-          if [ -z "$DISTRIBUTION_ID" ]; then
-            DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
-              --output text 2>/dev/null || true)"
+          if ! bash aws/restore-cloudformation-stack.sh; then
+            echo "Failed to restore the exact previous CloudFormation stack." >&2
+            RECOVERY_FAILED=1
+          fi
+          RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
+            --output text 2>/dev/null || true)"
+          if [ -n "$RESTORED_BUCKET_NAME" ] &&
+             [ "$RESTORED_BUCKET_NAME" != "None" ]; then
+            BUCKET_NAME="$RESTORED_BUCKET_NAME"
+          else
+            RECOVERY_FAILED=1
+          fi
+          RESTORED_DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
+            --output text 2>/dev/null || true)"
+          if [ -n "$RESTORED_DISTRIBUTION_ID" ] &&
+             [ "$RESTORED_DISTRIBUTION_ID" != "None" ]; then
+            DISTRIBUTION_ID="$RESTORED_DISTRIBUTION_ID"
+          else
+            RECOVERY_FAILED=1
           fi
           if [ "$FRONTEND_STARTED" = "true" ] &&
+             [ "$HAD_PREVIOUS_INDEX" = "true" ] &&
              [ -n "$BUCKET_NAME" ] &&
              [ -n "$PREVIOUS_INDEX_VERSION" ] &&
              [ "$PREVIOUS_INDEX_VERSION" != "None" ]; then
-            aws s3api copy-object \
+            if ! aws s3api copy-object \
               --bucket "$BUCKET_NAME" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
               --metadata-directive REPLACE \
               --content-type "text/html; charset=utf-8" \
               --cache-control "no-cache,no-store,must-revalidate" \
-              --region "$AWS_REGION" >/dev/null
-          elif [ "$FRONTEND_STARTED" = "true" ] && [ -n "$BUCKET_NAME" ]; then
-            aws s3api delete-object \
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          elif [ "$FRONTEND_STARTED" = "true" ] &&
+               [ "$HAD_PREVIOUS_INDEX" = "false" ] &&
+               [ -n "$BUCKET_NAME" ]; then
+            if ! aws s3api delete-object \
               --bucket "$BUCKET_NAME" \
               --key index.html \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          elif [ "$FRONTEND_STARTED" = "true" ]; then
+            RECOVERY_FAILED=1
           fi
           if [ -n "$PREVIOUS_FUNCTION_NAME" ] &&
              [ -n "$PREVIOUS_FUNCTION_VERSION" ] &&
              [ "$PREVIOUS_FUNCTION_VERSION" != "None" ]; then
-            aws lambda update-alias \
+            if ! aws lambda update-alias \
               --function-name "$PREVIOUS_FUNCTION_NAME" \
               --name live \
               --function-version "$PREVIOUS_FUNCTION_VERSION" \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
           fi
           if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
-            aws cloudfront create-invalidation \
+            INVALIDATION_ID="$(aws cloudfront create-invalidation \
               --distribution-id "$DISTRIBUTION_ID" \
-              --paths '/*' >/dev/null
+              --paths '/*' \
+              --query 'Invalidation.Id' \
+              --output text)"
+            if ! aws cloudfront wait invalidation-completed \
+              --distribution-id "$DISTRIBUTION_ID" \
+              --id "$INVALIDATION_ID"; then
+              RECOVERY_FAILED=1
+            fi
+          else
+            RECOVERY_FAILED=1
           fi
+          if [ -n "$PREVIOUS_APPLICATION_URL" ] &&
+             [ "$PREVIOUS_APPLICATION_URL" != "None" ]; then
+            if ! curl --fail --silent --show-error \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              --max-time 30 "$PREVIOUS_APPLICATION_URL/api/health" |
+              jq -e '.ok == true and .status == "reachable"' >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+            if ! curl --fail --silent --show-error \
+              --retry 6 --retry-delay 5 --retry-all-errors \
+              --max-time 30 "$PREVIOUS_APPLICATION_URL/api/proof" |
+              jq -e '.memory.storeVerified == true and .memory.persisted == 9' \
+                >/dev/null; then
+              RECOVERY_FAILED=1
+            fi
+          else
+            RECOVERY_FAILED=1
+          fi
+          test "$RECOVERY_FAILED" -eq 0
 
       - name: Publish sanitized production deployment receipt
         if: success()
         env:
           APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
         run: |
-          jq \
+          jq -e \
+            --slurpfile apiStage api-stage-proof.json \
             --arg environment production \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
             --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '. + {deployment: {
+            'if (($apiStage | length) == 1 and
+                 $apiStage[0].ok == true and
+                 $apiStage[0].stage == "live" and
+                 $apiStage[0].legacyDefaultStageAbsent == true and
+                 $apiStage[0].detailedMetrics == true and
+                 $apiStage[0].throttlingRate == 5 and
+                 $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].accessLogEvent == "GET /api/health 200")
+             then . + {deployment: {
               environment: $environment,
               stackName: $stackName,
               applicationUrl: $applicationUrl,
@@ -949,8 +1330,11 @@ jobs:
               canary: "Canary10Percent5Minutes",
               canaryTrafficProbe: "weighted-alias-proof-and-recall",
               deployAlarm: "candidate-executed-version-errors",
-              recallGate: "post-promotion-with-explicit-restore"
-            }}' deployment-receipt.json > production-deployment-receipt.json
+              recallGate: "post-promotion-with-explicit-restore",
+              apiStage: $apiStage[0]
+            }}
+             else error("invalid API stage proof")
+             end' deployment-receipt.json > production-deployment-receipt.json
 
       - name: Upload production receipt
         if: success()

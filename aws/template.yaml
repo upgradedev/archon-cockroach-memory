@@ -112,7 +112,7 @@ Globals:
 Resources:
   SpaBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub "${AppName}-${Environment}-web-${AWS::AccountId}-${AWS::Region}"
@@ -218,7 +218,7 @@ Resources:
 
   ApiAccessLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub "/aws/apigateway/${AppName}-${Environment}"
@@ -229,22 +229,40 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # Keep the legacy logical resource managed so an exact-template rollback can
+  # restore the former $default stage without colliding with a retained name.
+  # New HTTP API deliveries use AWS's wildcard-friendly vended-logs namespace.
+  ApiVendedAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/apigateway/${AppName}-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
+
   ServerlessHttpApi:
     Type: AWS::Serverless::HttpApi
     DependsOn:
-      - ApiAccessLogGroup
+      - ApiVendedAccessLogGroup
     Properties:
       Description: Public read-only judge API for Archon Memory
-      StageName: "$default"
+      # The regional SAM transform drops stage controls for a literal $default
+      # stage. A named stage keeps the generated AWS::ApiGatewayV2::Stage
+      # explicit in the processed template so throttling, metrics, and access
+      # logs are enforced rather than merely declared.
+      StageName: live
       FailOnWarnings: true
       DefaultRouteSettings:
         DetailedMetricsEnabled: true
         ThrottlingBurstLimit: !Ref ApiThrottleBurst
         ThrottlingRateLimit: !Ref ApiThrottleRate
       AccessLogSettings:
-        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        DestinationArn: !GetAtt ApiVendedAccessLogGroup.Arn
         Format: >-
-          {"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","responseLatency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}
+          {"requestId":"$context.requestId","requestTime":"$context.requestTime","stage":"$context.stage","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","responseLatency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}
       Tags:
         Application: !Ref AppName
         Environment: !Ref Environment
@@ -323,7 +341,7 @@ Resources:
 
   ArchonFunctionLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AppName}-${Environment}-api"
@@ -351,6 +369,9 @@ Resources:
             S3OriginConfig: {}
           - Id: ApiOrigin
             DomainName: !Sub "${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+            # The generated Stage reference creates an ordering edge: CloudFront
+            # cannot switch its origin path until the named stage exists.
+            OriginPath: !Join ["", ["/", !Ref ServerlessHttpApi.Stage]]
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only
@@ -533,7 +554,7 @@ Resources:
         - Name: ApiId
           Value: !Ref ServerlessHttpApi
         - Name: Stage
-          Value: "$default"
+          Value: live
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
@@ -588,7 +609,7 @@ Resources:
                 "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "metrics": [
-                  ["AWS/ApiGateway", "Count", "ApiId", "${ServerlessHttpApi}", "Stage", "$default"],
+                  ["AWS/ApiGateway", "Count", "ApiId", "${ServerlessHttpApi}", "Stage", "live"],
                   [".", "4xx", ".", ".", ".", "."],
                   [".", "5xx", ".", ".", ".", "."],
                   [".", "Latency", ".", ".", ".", ".", {"stat": "p95"}]
@@ -627,7 +648,16 @@ Outputs:
     Value: !Ref SpaBucket
   ApiEndpoint:
     Description: Direct HTTP API endpoint (CloudFront /api/* is preferred)
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/live"
+  ApiId:
+    Description: HTTP API identifier used by the protected live-stage release proof
+    Value: !Ref ServerlessHttpApi
+  ApiStageName:
+    Description: Named HTTP API stage whose controls are verified after deployment
+    Value: live
+  ApiAccessLogGroupName:
+    Description: Access-log group verified by the protected release pipeline
+    Value: !Ref ApiVendedAccessLogGroup
   FunctionName:
     Description: Lambda function name
     Value: !Ref ArchonFunction

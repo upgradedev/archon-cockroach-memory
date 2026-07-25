@@ -475,6 +475,216 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
   );
 });
 
+test("readiness: named HTTP API stage controls are proved from transform to live access log", () => {
+  const template = readFileSync(
+    new URL("../aws/template.yaml", import.meta.url),
+    "utf8"
+  );
+  const workflow = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const bootstrap = readFileSync(
+    new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
+    "utf8"
+  );
+  const proof = readFileSync(
+    new URL("../aws/prove-api-stage-controls.sh", import.meta.url),
+    "utf8"
+  );
+  const restore = readFileSync(
+    new URL("../aws/restore-cloudformation-stack.sh", import.meta.url),
+    "utf8"
+  );
+  const cleanup = readFileSync(
+    new URL("../aws/delete-greenfield-stack.sh", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(template, /StageName:\s+live/u);
+  assert.match(
+    template,
+    /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ServerlessHttpApi\.Stage\]\]/u
+  );
+  assert.match(
+    template,
+    /DefaultRouteSettings:\s+DetailedMetricsEnabled:\s+true\s+ThrottlingBurstLimit:\s+!Ref ApiThrottleBurst\s+ThrottlingRateLimit:\s+!Ref ApiThrottleRate/u
+  );
+  assert.match(
+    template,
+    /AccessLogSettings:\s+DestinationArn:\s+!GetAtt ApiVendedAccessLogGroup\.Arn/u
+  );
+  assert.match(
+    template,
+    /LogGroupName:\s+!Sub "\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-\$\{Environment\}"/u
+  );
+  assert.equal(
+    (template.match(/DeletionPolicy:\s+RetainExceptOnCreate/gu) ?? [])
+      .length,
+    3
+  );
+  assert.doesNotMatch(template, /StageName:\s+["']?\$default/u);
+  assert.equal(
+    (
+      workflow.match(
+        /name: Prove transformed and live API stage controls/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(proof, /--template-stage Processed/u);
+  assert.match(proof, /aws apigatewayv2 get-stage/u);
+  assert.match(proof, /\.DetailedMetricsEnabled == true/u);
+  assert.match(proof, /\.ThrottlingRateLimit == 5/u);
+  assert.match(proof, /\.ThrottlingBurstLimit == 10/u);
+  assert.match(proof, /aws logs describe-log-streams/u);
+  assert.match(proof, /aws logs filter-log-events/u);
+  assert.equal((proof.match(/--no-paginate/gu) ?? []).length, 2);
+  assert.match(proof, /\.stage == "live"/u);
+  assert.match(proof, /--stage-name '\$default'/u);
+  assert.match(proof, /legacyDefaultStageAbsent: true/u);
+  assert.match(proof, /\.routeKey == "GET \/api\/health"/u);
+  for (const output of [
+    "ApiId",
+    "ApiStageName",
+    "ApiAccessLogGroupName",
+  ]) {
+    assert.match(template, new RegExp(`^  ${output}:$`, "mu"));
+  }
+  assert.equal(
+    (
+      workflow.match(
+        /name: Preflight API stage-proof permissions before stack mutation/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/API_ID="\$\(jq -er/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/--slurpfile apiStage api-stage-proof\.json/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/else error\("invalid API stage proof"\)/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/apiStage: \$apiStage\[0\]/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/--template-stage Original/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/bash aws\/delete-greenfield-stack\.sh/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/"\$PREVIOUS_APPLICATION_URL\/api\/health"/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/"\$PREVIOUS_APPLICATION_URL\/api\/proof"/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/EXPECTED_STACK_STATE:/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/Stack state changed after the greenfield preflight/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /name: Refresh short-lived AWS credentials for (?:staging|production) recovery/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/timeout-minutes:\s+90/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []).length,
+    2
+  );
+  assert.ok(
+    (workflow.match(/aws cloudfront wait invalidation-completed/gu) ?? [])
+      .length >= 4
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (bootstrap.match(/- logs:FilterLogEvents$/gmu) ?? []).length,
+    2
+  );
+  for (const action of [
+    "logs:CreateLogDelivery",
+    "logs:PutResourcePolicy",
+    "logs:UpdateLogDelivery",
+    "logs:DeleteLogDelivery",
+    "logs:DescribeLogStreams",
+    "logs:DescribeResourcePolicies",
+    "logs:FilterLogEvents",
+    "logs:GetLogEvents",
+    "logs:GetLogDelivery",
+    "logs:ListLogDeliveries",
+  ]) {
+    const expectedCount =
+      action === "logs:DescribeLogStreams" ||
+      action === "logs:FilterLogEvents"
+        ? 3
+        : 1;
+    assert.equal(
+      (bootstrap.match(new RegExp(`- ${action}$`, "gmu")) ?? []).length,
+      expectedCount
+    );
+  }
+  assert.equal(
+    (
+      bootstrap.match(
+        /log-group:\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-(?:staging|production)"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(restore, /--parameters "file:\/\/\$\{parameters_file\}"/u);
+  assert.match(restore, /cloudformation create-change-set/u);
+  assert.match(restore, /cloudformation execute-change-set/u);
+  assert.match(restore, /cloudformation wait stack-update-complete/u);
+  assert.match(cleanup, /cloudformation delete-stack/u);
+  assert.match(cleanup, /s3api list-object-versions/u);
+  assert.match(cleanup, /s3api delete-bucket/u);
+  assert.equal(
+    (
+      bootstrap.match(
+        /Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/apis\/\*\/stages\/\*"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+});
+
 test("readiness: CloudFront pins valid AWS managed policies for the SPA and uncached API", () => {
   const template = readFileSync(
     new URL("../aws/template.yaml", import.meta.url),

@@ -341,6 +341,9 @@ jobs:
           npm run build --prefix web
       - name: Validate and build the serverless architecture
         run: |
+          bash -n aws/prove-api-stage-controls.sh
+          bash -n aws/delete-greenfield-stack.sh
+          bash -n aws/restore-cloudformation-stack.sh
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region eu-west-1
           PATH="$PWD/node_modules/.bin:$PATH" sam build \
