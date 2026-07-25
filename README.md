@@ -260,13 +260,14 @@ generated video assets.
 |---|---|
 | Live CockroachDB Cloud Basic cluster, AWS `eu-west-1` | Verified |
 | Historical native-vector plans / recall benchmark | Verified |
-| Runtime-principal company + kind C-SPANN serving gate | Verified in the [exact-SHA protected release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871) |
-| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Implemented; exposed read-only in `/api/proof` |
-| Live CockroachDB Cloud Managed MCP read-only proof | Verified after production in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871) |
+| Runtime-principal company + kind C-SPANN serving gate | Verified in the [latest exact-SHA protected release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) |
+| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Verified 9/9/9 in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) and exposed read-only in `/api/proof` |
+| Live CockroachDB Cloud Managed MCP read-only proof | Verified after production in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) |
 | Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Verified |
 | Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Verified end to end |
 | Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
+| `main` governance | [Active ruleset](https://github.com/upgradedev/archon-cockroach-memory/rules/19722191): PR only, no force-push/delete, strict `readiness` + CodeQL |
 | Final public video, post, and Devpost form | Deliberately last |
 
 Run `npm run readiness` for separate source-readiness and submission-eligibility

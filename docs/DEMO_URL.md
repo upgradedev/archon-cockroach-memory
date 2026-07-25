@@ -17,6 +17,17 @@ The first fully verified exact-SHA cutover baseline is:
 - identical-candidate production promotion, full smoke, and hosted Chromium journey;
 - final production CockroachDB Cloud Managed MCP read-only audit.
 
+The latest feature-bearing release is commit
+[`25ca1c84f9df7721b8415b9bd55cc5849bf96ca4`](https://github.com/upgradedev/archon-cockroach-memory/commit/25ca1c84f9df7721b8415b9bd55cc5849bf96ca4)
+in [Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107).
+Its protected schema-v5 receipt proves that the six exact 2026-07-13 legacy
+duplicates remain as linked `superseded` history while the public runtime sees
+exactly nine active canonical memories, nine unique idempotency keys, and nine
+payload-bound SHA-256 digests. Staging and production then passed the exact
+9/9/9 API contract, real recall, hosted Chromium, and the final Managed MCP
+audit. A separate read-only request after deployment observed the same 9/9/9
+Store proof and complete 9/9 audit coverage.
+
 The URL is a private-S3 React + Tailwind application behind CloudFront, with
 same-origin API Gateway and Lambda services in `eu-west-1`. It requires no
 credentials. Submission eligibility accepts this exact HTTPS CloudFront root

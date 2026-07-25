@@ -17,11 +17,12 @@ It never prints the Cloud API key, SQL credentials, memory text, or embeddings.
 ## Latest release-gated verification
 
 The exact commit
-[`2202d758b390efbd23ecd4532196f879f227f282`](https://github.com/upgradedev/archon-cockroach-memory/commit/2202d758b390efbd23ecd4532196f879f227f282)
+[`25ca1c84f9df7721b8415b9bd55cc5849bf96ca4`](https://github.com/upgradedev/archon-cockroach-memory/commit/25ca1c84f9df7721b8415b9bd55cc5849bf96ca4)
 passed the post-production Managed MCP job in
-[Deploy AWS run 30142557871](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871).
+[Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107).
 That job ran only after the same candidate passed source CI, CodeQL, the protected
-database release, staging and production smoke, and both hosted browser journeys.
+database schema-v5 Store-integrity release, staging and production smoke, and
+both hosted browser journeys.
 Its sanitized receipt is retained for 90 days as a GitHub Actions artifact and
 is not copied into the repository.
 
