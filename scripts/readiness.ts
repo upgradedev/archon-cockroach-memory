@@ -529,7 +529,13 @@ function sourceChecks(): SourceCheck[] {
         /logs:CreateLogDelivery/u.test(deliveryBootstrap) &&
         /logs:PutResourcePolicy/u.test(deliveryBootstrap) &&
         /logs:UpdateLogDelivery/u.test(deliveryBootstrap) &&
+        /logs:DescribeLogStreams/u.test(deliveryBootstrap) &&
         /logs:FilterLogEvents/u.test(deliveryBootstrap) &&
+        (
+          deliveryBootstrap.match(
+            /log-group:\/aws\/(?:vendedlogs\/)?apigateway\/\$\{AppName\}-(?:staging|production):\*"/gu
+          ) ?? []
+        ).length === 4 &&
         /--template-stage Processed/u.test(apiStageProof) &&
         /apigatewayv2 get-stage/u.test(apiStageProof) &&
         /logs filter-log-events/u.test(apiStageProof) &&

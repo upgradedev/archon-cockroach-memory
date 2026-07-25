@@ -875,14 +875,21 @@ Resources:
                 Action:
                   - apigateway:GET
                 Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
-              - Sid: VerifyStagingApiAccessLogs
+              - Sid: VerifyStagingApiAccessLogEvents
                 Effect: Allow
                 Action:
-                  - logs:DescribeLogStreams
                   - logs:FilterLogEvents
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-staging"
+              - Sid: VerifyStagingApiAccessLogStreams
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                # DescribeLogStreams is evaluated against child log-stream ARNs.
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging:*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-staging:*"
 
   ProductionDeployRole:
     Type: AWS::IAM::Role
@@ -979,14 +986,21 @@ Resources:
                 Action:
                   - apigateway:GET
                 Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*/stages/*"
-              - Sid: VerifyProductionApiAccessLogs
+              - Sid: VerifyProductionApiAccessLogEvents
                 Effect: Allow
                 Action:
-                  - logs:DescribeLogStreams
                   - logs:FilterLogEvents
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production"
+              - Sid: VerifyProductionApiAccessLogStreams
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                # DescribeLogStreams is evaluated against child log-stream ARNs.
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production:*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production:*"
 
 Outputs:
   ArtifactBucketName:
