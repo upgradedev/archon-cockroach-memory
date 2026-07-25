@@ -536,6 +536,12 @@ function sourceChecks(): SourceCheck[] {
             /log-group:\/aws\/(?:vendedlogs\/)?apigateway\/\$\{AppName\}-(?:staging|production):\*"/gu
           ) ?? []
         ).length === 4 &&
+        /Sid: VerifyStagingApiAccessLogs[\s\S]*?- logs:DescribeLogStreams\s+- logs:FilterLogEvents[\s\S]*?\$\{AppName\}-staging:\*"/u.test(
+          deliveryBootstrap
+        ) &&
+        /Sid: VerifyProductionApiAccessLogs[\s\S]*?- logs:DescribeLogStreams\s+- logs:FilterLogEvents[\s\S]*?\$\{AppName\}-production:\*"/u.test(
+          deliveryBootstrap
+        ) &&
         /--template-stage Processed/u.test(apiStageProof) &&
         /apigatewayv2 get-stage/u.test(apiStageProof) &&
         /logs filter-log-events/u.test(apiStageProof) &&
