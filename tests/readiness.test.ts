@@ -164,17 +164,133 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
     new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
     "utf8"
   );
+  const smokeBlocks = [
+    workflow.match(
+      /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
+    )?.[0],
+    workflow.match(
+      /- name: Smoke production through CloudFront[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on production)/u
+    )?.[0],
+  ];
   const safeStatusGate =
     '(.grounding.status == "verified" or .grounding.status == "extractive")';
 
-  assert.equal(workflow.split(safeStatusGate).length - 1, 2);
-  for (const check of ["citations", "numerics", "claims"]) {
-    assert.equal(
-      workflow.split(`.grounding.checks.${check} == true`).length - 1,
-      2,
-      `both AWS release gates must require grounding.checks.${check}`
+  for (const [index, block] of smokeBlocks.entries()) {
+    assert.ok(block, `AWS smoke block ${index + 1} must exist`);
+    assert.match(block, /-X POST "\$APPLICATION_URL\/api\/recall"/u);
+    assert.ok(block.includes(safeStatusGate));
+    for (const contract of [
+      ".recalled > 0",
+      "(.citations | length) > 0",
+      '(.answer | type == "string" and length > 0)',
+      ".modelId == $narrator",
+    ]) {
+      assert.ok(
+        block.includes(contract),
+        `AWS smoke block ${index + 1} must require ${contract}`
+      );
+    }
+    for (const check of ["citations", "numerics", "claims"]) {
+      assert.ok(
+        block.includes(`.grounding.checks.${check} == true`),
+        `AWS smoke block ${index + 1} must require grounding.checks.${check}`
+      );
+    }
+    for (const amount of ["€15,375", "€6,775"]) {
+      assert.ok(
+        block.includes(`contains("${amount}")`),
+        `AWS smoke block ${index + 1} must verify ${amount} evidence`
+      );
+    }
+  }
+});
+
+test("readiness: AWS canary isolates and exercises the exact candidate version", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const template = readFileSync(
+    new URL("../aws/template.yaml", import.meta.url),
+    "utf8"
+  );
+  const deploymentPreference = template.match(
+    /AutoPublishAlias:\s*live[\s\S]*?DeploymentPreference:[\s\S]*?(?=\r?\n      Environment:)/u
+  )?.[0];
+  const candidateAlarm = template.match(
+    /  LambdaCanaryErrorAlarm:[\s\S]*?(?=\r?\n  LambdaThrottleAlarm:)/u
+  )?.[0];
+  const operationalAlarm = template.match(
+    /  LambdaErrorAlarm:[\s\S]*?(?=\r?\n  LambdaCanaryErrorAlarm:)/u
+  )?.[0];
+  const canaryBlocks = [
+    workflow.match(
+      /- name: Deploy staging with recovery-safe SAM canary[\s\S]*?(?=\r?\n      - name: Resolve public, non-secret stack outputs)/u
+    )?.[0],
+    workflow.match(
+      /- name: Deploy production with recovery-safe SAM canary[\s\S]*?(?=\r?\n      - name: Resolve public, non-secret stack outputs)/u
+    )?.[0],
+  ];
+
+  for (const [index, block] of canaryBlocks.entries()) {
+    assert.ok(block, `AWS canary block ${index + 1} must exist`);
+    assert.match(block, /trap stop_canary_probe EXIT/u);
+    assert.match(block, /while true; do/u);
+    assert.match(block, /\$CANARY_URL\/api\/proof/u);
+    assert.match(block, /\$CANARY_URL\/api\/recall/u);
+    assert.match(
+      block,
+      /sam deploy[\s\S]*?--no-progressbar\s+stop_canary_probe\s+trap - EXIT/u
     );
   }
+  assert.ok(deploymentPreference);
+  assert.match(
+    deploymentPreference,
+    /Type:\s*Canary10Percent5Minutes[\s\S]*?Alarms:\s*- !Ref LambdaCanaryErrorAlarm/u
+  );
+  assert.doesNotMatch(deploymentPreference, /!Ref LambdaErrorAlarm/u);
+  assert.ok(candidateAlarm);
+  assert.match(
+    candidateAlarm,
+    /AlarmName:\s*!Sub\s+- "\$\{AppName\}-\$\{Environment\}-lambda-canary-errors-v\$\{CandidateVersion\}"\s+- CandidateVersion: !GetAtt ArchonFunction\.Version\.Version/u
+  );
+  assert.match(
+    candidateAlarm,
+    /Dimensions:\s*- Name: FunctionName\s+Value: !Ref ArchonFunction\s+- Name: Resource\s+Value: !Sub "\$\{ArchonFunction\}:live"\s+- Name: ExecutedVersion\s+Value: !GetAtt ArchonFunction\.Version\.Version/u
+  );
+  assert.ok(operationalAlarm);
+  assert.match(
+    operationalAlarm,
+    /Dimensions:\s*- Name: FunctionName\s+Value: !Ref ArchonFunction/u
+  );
+  assert.doesNotMatch(
+    operationalAlarm,
+    /Name:\s*(?:Resource|ExecutedVersion)/u
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /canaryTrafficProbe:\s*"weighted-alias-proof-and-recall"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /recallGate:\s*"post-promotion-with-explicit-restore"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /name: Restore the previous (?:staging|production) release on verification failure/gu
+      ) ?? []
+    ).length,
+    2
+  );
 });
 
 test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-head proof", () => {

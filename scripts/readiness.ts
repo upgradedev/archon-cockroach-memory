@@ -160,6 +160,56 @@ function sourceChecks(): SourceCheck[] {
     databaseRelease.match(
       /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
     )?.[0] ?? "";
+  const canaryDeploymentPreference =
+    lambdaTemplate.match(
+      /AutoPublishAlias:\s*live[\s\S]*?DeploymentPreference:[\s\S]*?(?=\r?\n      Environment:)/u
+    )?.[0] ?? "";
+  const candidateCanaryAlarm =
+    lambdaTemplate.match(
+      /  LambdaCanaryErrorAlarm:[\s\S]*?(?=\r?\n  LambdaThrottleAlarm:)/u
+    )?.[0] ?? "";
+  const operationalLambdaAlarm =
+    lambdaTemplate.match(
+      /  LambdaErrorAlarm:[\s\S]*?(?=\r?\n  LambdaCanaryErrorAlarm:)/u
+    )?.[0] ?? "";
+  const canaryDeployBlocks = [
+    deploy.match(
+      /- name: Deploy staging with recovery-safe SAM canary[\s\S]*?(?=\r?\n      - name: Resolve public, non-secret stack outputs)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Deploy production with recovery-safe SAM canary[\s\S]*?(?=\r?\n      - name: Resolve public, non-secret stack outputs)/u
+    )?.[0] ?? "",
+  ];
+  const fullRecallSmokeBlocks = [
+    deploy.match(
+      /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Smoke production through CloudFront[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on production)/u
+    )?.[0] ?? "",
+  ];
+  const canaryTrafficFragments = [
+    "trap stop_canary_probe EXIT",
+    "while true; do",
+    "$CANARY_URL/api/proof",
+    "$CANARY_URL/api/recall",
+    "sam deploy",
+    "stop_canary_probe",
+    "trap - EXIT",
+  ];
+  const fullRecallFragments = [
+    '-X POST "$APPLICATION_URL/api/recall"',
+    ".recalled > 0",
+    "(.citations | length) > 0",
+    '(.answer | type == "string" and length > 0)',
+    ".modelId == $narrator",
+    '(.grounding.status == "verified" or .grounding.status == "extractive")',
+    ".grounding.checks.citations == true",
+    ".grounding.checks.numerics == true",
+    ".grounding.checks.claims == true",
+    'contains("€15,375")',
+    'contains("€6,775")',
+  ];
   const localArtifacts = generatedArtifactPaths();
   const workflowSources = [
     ci,
@@ -391,6 +441,63 @@ function sourceChecks(): SourceCheck[] {
         /Hosted Chromium judge journey on staging/iu.test(deploy),
       "Environment-bound OIDC, build-once promotion, hash verification, hosted E2E, and rollback are source-controlled.",
       "OIDC/promotion/hosted verification/rollback evidence is incomplete."
+    ),
+    sourceCheck(
+      "product.recovery-safe-canary",
+      "Product Readiness",
+      canaryDeployBlocks.every(
+        (block) =>
+          block.length > 0 &&
+          canaryTrafficFragments.every((fragment) =>
+            block.includes(fragment)
+          ) &&
+          /sam deploy[\s\S]*?--no-progressbar\s+stop_canary_probe\s+trap - EXIT/u.test(
+            block
+          )
+      ) &&
+        fullRecallSmokeBlocks.every(
+          (block) =>
+            block.length > 0 &&
+            fullRecallFragments.every((fragment) => block.includes(fragment))
+        ) &&
+        (
+          deploy.match(
+            /canaryTrafficProbe:\s*"weighted-alias-proof-and-recall"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /deployAlarm:\s*"candidate-executed-version-errors"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /recallGate:\s*"post-promotion-with-explicit-restore"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /name: Restore the previous (?:staging|production) release on verification failure/gu
+          ) ?? []
+        ).length === 2 &&
+        /Type:\s*Canary10Percent5Minutes[\s\S]*?Alarms:\s*- !Ref LambdaCanaryErrorAlarm/u.test(
+          canaryDeploymentPreference
+        ) &&
+        !/!Ref LambdaErrorAlarm/u.test(canaryDeploymentPreference) &&
+        /AlarmName:\s*!Sub\s+- "\$\{AppName\}-\$\{Environment\}-lambda-canary-errors-v\$\{CandidateVersion\}"\s+- CandidateVersion: !GetAtt ArchonFunction\.Version\.Version/u.test(
+          candidateCanaryAlarm
+        ) &&
+        /Dimensions:\s*- Name: FunctionName\s+Value: !Ref ArchonFunction\s+- Name: Resource\s+Value: !Sub "\$\{ArchonFunction\}:live"\s+- Name: ExecutedVersion\s+Value: !GetAtt ArchonFunction\.Version\.Version/u.test(
+          candidateCanaryAlarm
+        ) &&
+        /Dimensions:\s*- Name: FunctionName\s+Value: !Ref ArchonFunction/u.test(
+          operationalLambdaAlarm
+        ) &&
+        !/Name:\s*(?:Resource|ExecutedVersion)/u.test(
+          operationalLambdaAlarm
+        ),
+      "Both CodeDeploy shifts continuously exercise proof and recall while a fresh alarm isolates the exact candidate ExecutedVersion; each environment then requires the full grounded recall contract with explicit release restoration.",
+      "The AWS canary is not candidate-version scoped, does not exercise both critical paths for the full shift, or lacks an environment-specific full recall/restore gate."
     ),
     sourceCheck(
       "product.no-local-build-products",
