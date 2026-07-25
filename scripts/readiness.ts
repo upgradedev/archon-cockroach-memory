@@ -566,7 +566,10 @@ function sourceChecks(): SourceCheck[] {
             block.includes("bash aws/delete-greenfield-stack.sh") &&
             block.includes('"$PREVIOUS_APPLICATION_URL/api/health"') &&
             block.includes('"$PREVIOUS_APPLICATION_URL/api/proof"') &&
-            block.includes("set -euo pipefail")
+            block.includes("set -euo pipefail") &&
+            (
+              block.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []
+            ).length === 2
         ) &&
         (
           deploy.match(
@@ -580,10 +583,7 @@ function sourceChecks(): SourceCheck[] {
         /cloudformation wait stack-update-complete/u.test(stackRestore) &&
         /cloudformation delete-stack/u.test(greenfieldCleanup) &&
         /s3api list-object-versions/u.test(greenfieldCleanup) &&
-        /s3api delete-bucket/u.test(greenfieldCleanup) &&
-        (
-          deploy.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []
-        ).length === 2,
+        /s3api delete-bucket/u.test(greenfieldCleanup),
       "Environment-bound OIDC, build-once promotion, pre-mutation permission proof, hosted E2E, and full-stack fail-closed rollback are source-controlled.",
       "OIDC/promotion/preflight/hosted verification/full-stack rollback evidence is incomplete."
     ),

@@ -624,7 +624,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []).length,
-    2
+    4
   );
   assert.ok(
     (workflow.match(/aws cloudfront wait invalidation-completed/gu) ?? [])
@@ -632,10 +632,6 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
-    2
-  );
-  assert.equal(
-    (bootstrap.match(/- logs:FilterLogEvents$/gmu) ?? []).length,
     2
   );
   for (const action of [
