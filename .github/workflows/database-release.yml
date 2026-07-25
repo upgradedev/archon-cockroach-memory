@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   reconcile:
-    name: Atomic schema, canonical seed, and runtime RLS proof
+    name: Atomic schema, seed, runtime RLS, and C-SPANN execution proof
     if: github.event_name == 'workflow_call' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -92,7 +92,8 @@ jobs:
              .cloud_provider == "AWS" and
              .plan == "BASIC" and
              .state == "CREATED" and
-             (.cockroach_version | startswith("v26.")) and
+             (.cockroach_version |
+               test("^v26\\.2(?:\\.|$)")) and
              any(.regions[];
                .name == "eu-west-1" and .primary == true)' \
             <<<"$CLUSTER_METADATA"
@@ -165,7 +166,7 @@ jobs:
           npm run --silent db:release:verify > database-release-receipt.json
           jq -e \
             --arg target "$TARGET_SHA" \
-            '.schemaVersion == 2 and
+            '.schemaVersion == 3 and
              .ok == true and
              .targetSha == $target and
              .region == "eu-west-1" and
@@ -176,11 +177,71 @@ jobs:
              .proofs.wrongCompanyInvisible == true and
              .proofs.wrongTenantInvisible == true and
              .proofs.retractedStatusInvisible == true and
-             .proofs.productionShapedVectorSearchPlan == true and
+             .proofs.companyScopedVectorIndex == true and
+             .proofs.companyKindScopedVectorIndex == true and
+             .proofs.fixedScopeServingViews == true and
+             .proofs.servingViewCanariesRejected == true and
+             .proofs.isolationCanaryCount == 3 and
+             .proofs.isolatedNonLoginServingViewOwner == true and
+             .proofs.servingViewOwnerPrivilegeBoundary ==
+               "direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges" and
+             .proofs.runtimePrincipalCspannPlanAndExecute == true and
+             .proofs.runtimePrincipalNoKindCspann == true and
+             .proofs.runtimePrincipalKindCspann == true and
+             .proofs.runtimeCspannEnvironmentCount == 2 and
+             (.proofs.indexDefinitionFingerprints.company |
+               test("^[a-f0-9]{64}$")) and
+             (.proofs.indexDefinitionFingerprints.kind |
+               test("^[a-f0-9]{64}$")) and
              (.releaseDigests.schemaSha256 | test("^[a-f0-9]{64}$")) and
              (.releaseDigests.fixtureManifestSha256 | test("^[a-f0-9]{64}$")) and
              .secretMaterialPrinted == false and
-             (.runtimes | length) == 2' \
+             (.runtimes | length) == 2 and
+             ([.runtimes[].environment] | sort) ==
+               ["production", "staging"] and
+             ([.runtimes[].cspannRecall.noKind.queryTemplateSha256] |
+               unique | length) == 1 and
+             ([.runtimes[].cspannRecall.kind.queryTemplateSha256] |
+               unique | length) == 1 and
+             all(.runtimes[];
+               ((.environment == "staging" and
+                 (.principal | test("^archon_staging_[a-z0-9]{6,40}$"))) or
+                (.environment == "production" and
+                 (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+               .cspannRecall.noKind.servingPath ==
+                 "public-no-kind-cspann" and
+               .cspannRecall.noKind.view ==
+                 "archon_public_memory_recall" and
+               .cspannRecall.noKind.index ==
+                 "idx_agent_memory_company_scope_embedding" and
+               .cspannRecall.noKind.vectorSearchPlanned == true and
+               .cspannRecall.noKind.executed == true and
+               .cspannRecall.noKind.scopeVerified == true and
+               .cspannRecall.noKind.probeReturned == true and
+               .cspannRecall.noKind.viewBoundaryVerified == true and
+               .cspannRecall.noKind.isolationCanariesRejected == 3 and
+               (.cspannRecall.noKind.returnedRows >= 1 and
+                .cspannRecall.noKind.returnedRows <= 5) and
+               (.cspannRecall.noKind.queryTemplateSha256 |
+                 test("^[a-f0-9]{64}$")) and
+               .cspannRecall.kind.servingPath ==
+                 "public-kind-cspann" and
+               .cspannRecall.kind.kind == "validation" and
+               .cspannRecall.kind.view ==
+                 "archon_public_memory_kind_recall" and
+               .cspannRecall.kind.index ==
+                 "idx_agent_memory_company_kind_scope_embedding" and
+               .cspannRecall.kind.vectorSearchPlanned == true and
+               .cspannRecall.kind.executed == true and
+               .cspannRecall.kind.scopeVerified == true and
+               .cspannRecall.kind.probeReturned == true and
+               .cspannRecall.kind.viewBoundaryVerified == true and
+               .cspannRecall.kind.isolationCanariesRejected == 3 and
+               (.cspannRecall.kind.returnedRows >= 1 and
+                .cspannRecall.kind.returnedRows <= 5) and
+               (.cspannRecall.kind.queryTemplateSha256 |
+                 test("^[a-f0-9]{64}$"))
+             )' \
             database-release-receipt.json
           unset ADMIN_SECRET DATABASE_URL
 

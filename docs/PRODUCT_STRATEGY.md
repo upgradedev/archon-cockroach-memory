@@ -57,7 +57,15 @@ listed explicitly in the repository's prior-work disclosure.
 - Server-derived `tenant_id`; no caller-controlled tenant context.
 - Fixed synthetic company on the unauthenticated public API.
 - Row-Level Security as database-level defense in depth.
-- `tenant_id + embed_model + status` prefix vector index.
+- Exact company-serving C-SPANN path:
+  `idx_agent_memory_company_scope_embedding` with
+  `tenant_id + embed_model + status + company` equality prefixes.
+- Exact kind-serving C-SPANN path:
+  `idx_agent_memory_company_kind_scope_embedding` with
+  `tenant_id + embed_model + status + company + kind` equality prefixes.
+- Fixed-predicate `archon_public_memory_recall` and
+  `archon_public_memory_kind_recall` serving views for the immutable public
+  scope; the runtime principals remain RLS-bound and read-only.
 - Active-only, model-space-safe recall; no unscoped public retrieval.
 - Idempotent writes and content digests.
 - Bounded audit input and explicit lifecycle status.

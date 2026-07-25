@@ -4,14 +4,31 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { query, closePool, toVectorLiteral } from "../src/db/client.js";
+import {
+  query,
+  closePool,
+  toVectorLiteral,
+  withClient,
+} from "../src/db/client.js";
 import { FakeEmbedder } from "../src/memory/embeddings.js";
 import type { Embedder } from "../src/memory/embeddings.js";
 import { FakeNarrator } from "../src/agents/narrator.js";
 import { MemoryAgent } from "../src/agents/memory-agent.js";
-import { remember, recall, listForAudit, memoryCount } from "../src/memory/memory.js";
+import {
+  buildRecallQuery,
+  remember,
+  recall,
+  listForAudit,
+  memoryCount,
+  type RecallQueryRow,
+} from "../src/memory/memory.js";
 import { handleProof } from "../src/http/handler.js";
-import { EXPECTED_VECTOR_INDEX_NAME } from "../src/db/proof.js";
+import {
+  EXPECTED_KIND_VECTOR_INDEX_NAME,
+  EXPECTED_VECTOR_INDEX_NAME,
+  PUBLIC_KIND_RECALL_VIEW_NAME,
+  PUBLIC_RECALL_VIEW_NAME,
+} from "../src/db/proof.js";
 
 const REAL_DB = Boolean(process.env.DATABASE_URL);
 if (!REAL_DB) {
@@ -269,35 +286,97 @@ test(
 );
 
 test(
-  "21. Integration: production-shaped scoped recall plans the exact vector index",
+  "21. Integration: runtime role plans and executes both public C-SPANN paths",
   { skip: !REAL_DB },
   async () => {
-    const vector = await query<{ embedding: string }>(
-      `SELECT embedding::STRING AS embedding
-         FROM agent_memory
-        WHERE company = $1
-          AND embed_model = $2
-        LIMIT 1`,
-      [COMPANY, new FakeEmbedder().modelId]
-    );
-    assert.ok(vector[0]?.embedding);
-    const planRows = await query<Record<string, unknown>>(
-      `EXPLAIN SELECT id
-         FROM agent_memory@${EXPECTED_VECTOR_INDEX_NAME}
-        WHERE tenant_id = 'public-demo'
-          AND embed_model = $2
-          AND status = 'active'
-          AND company = $3
-        ORDER BY embedding <=> $1::VECTOR
-        LIMIT 5`,
-      [vector[0]!.embedding, new FakeEmbedder().modelId, COMPANY]
-    );
-    const plan = planRows
-      .flatMap((row) => Object.values(row))
-      .map(String)
-      .join("\n");
-    assert.match(plan, /vector search/iu);
-    assert.match(plan, new RegExp(EXPECTED_VECTOR_INDEX_NAME, "u"));
+    const embedder = new FakeEmbedder();
+    const probeKey = "integration-runtime-cspann-v1";
+    await remember(embedder, {
+      kind: "validation",
+      company: "Helios SA",
+      content: "Runtime C-SPANN integration probe.",
+      idempotencyKey: probeKey,
+    });
+
+    await withClient(async (client) => {
+      await client.query("SET ROLE archon_public_reader");
+      try {
+        const vector = await client.query<{ embedding: string }>(
+          `SELECT embedding::STRING AS embedding
+             FROM agent_memory
+            WHERE idempotency_key = $1
+            LIMIT 1`,
+          [probeKey]
+        );
+        assert.ok(vector.rows[0]?.embedding);
+
+        for (const path of [
+          {
+            kind: undefined,
+            servingPath: "public-no-kind-cspann",
+            view: PUBLIC_RECALL_VIEW_NAME,
+            index: EXPECTED_VECTOR_INDEX_NAME,
+          },
+          {
+            kind: "validation" as const,
+            servingPath: "public-kind-cspann",
+            view: PUBLIC_KIND_RECALL_VIEW_NAME,
+            index: EXPECTED_KIND_VECTOR_INDEX_NAME,
+          },
+        ] as const) {
+          const statement = buildRecallQuery(
+            vector.rows[0]!.embedding,
+            embedder.modelId,
+            {
+              company: "Helios SA",
+              kind: path.kind,
+              limit: 5,
+            }
+          );
+          assert.equal(statement.fixedPublicScope, true);
+          assert.equal(statement.servingPath, path.servingPath);
+          assert.equal(statement.relation, path.view);
+          assert.equal(statement.expectedIndexName, path.index);
+          const explain = await client.query<Record<string, unknown>>(
+            `EXPLAIN ${statement.text}`,
+            statement.params
+          );
+          const plan = explain.rows
+            .flatMap((row) => Object.values(row))
+            .map(String)
+            .join("\n");
+          assert.match(plan, /vector search/iu);
+          assert.match(plan, new RegExp(path.index, "u"));
+
+          const result = await client.query<RecallQueryRow>(
+            statement.text,
+            statement.params
+          );
+          assert.ok(result.rows.length >= 1);
+          assert.ok(result.rows.length <= 5);
+          assert.ok(
+            result.rows.some(
+              (row) =>
+                row.idempotency_key === probeKey &&
+                Math.abs(Number(row.distance)) <= 0.00001
+            )
+          );
+          assert.ok(
+            result.rows.every(
+              (row) =>
+                row.tenant_id === "public-demo" &&
+                row.company === "Helios SA" &&
+                row.status === "active" &&
+                row.embed_model === embedder.modelId &&
+                (path.kind === undefined || row.kind === path.kind) &&
+                Number.isFinite(Number(row.distance))
+            )
+          );
+        }
+      } finally {
+        await client.query("RESET ROLE");
+      }
+    });
   }
 );
 

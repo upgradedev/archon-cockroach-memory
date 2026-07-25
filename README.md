@@ -90,8 +90,14 @@ Production recall equality-constrains:
 - `status = 'active'`
 - `company = 'Helios SA'`
 
-The schema contains both benchmark-oriented global indexing and prefix vector
-indexes for the production scope. `EXPLAIN` evidence, recall@k measurements,
+The schema contains benchmark-oriented global indexing plus two production
+prefix indexes: company-wide recall and company+kind recall. Because CockroachDB
+v26.2 represents RLS as an optimizer barrier, the production paths run through
+two dematerialized, fixed-scope serving views. The database release uses the
+exact application query to `EXPLAIN` and execute both paths as the real staging
+and production principals, then probes both views with the three isolation
+canary vectors without repeating tenant/company/status filters. `EXPLAIN`
+evidence, recall@k measurements,
 multi-range fan-out, RF=3 distribution, and node-loss survival are recorded in
 [docs/BENCHMARK.md](./docs/BENCHMARK.md) and
 [docs/CLOUD_SMOKE.md](./docs/CLOUD_SMOKE.md).
@@ -152,7 +158,7 @@ secret scan
   → source-readiness gate
   → build once
   → cryptographic candidate receipt
-  → protected database release (ordered fail-closed RLS + idempotent seed + runtime denial probes)
+  → protected database release (fail-closed RLS + seed + two-principal C-SPANN plan/execution probes)
   → OIDC staging deploy + real smoke + hosted Playwright
   → identical-candidate production promotion
   → continuously exercised canary + real smoke + hosted Playwright
@@ -176,6 +182,12 @@ and deployment receipts have all completed successfully.
 - CockroachDB RLS is bound to the `archon_public_reader` role and the exact
   `public-demo / Helios SA / active` scope. It does not trust mutable
   `application_name` as an identity.
+- The Lambda principals remain `NOBYPASSRLS`. Only
+  `archon_public_memory_view_owner` has the direct, non-inheritable
+  `BYPASSRLS` role option required by CockroachDB v26.2.3; it has no system
+  privileges, is `NOLOGIN`, has no members, receives only `SELECT` on
+  `agent_memory`, owns only the two fixed-predicate serving views, and ends
+  migration without `CREATE` authority on the schema.
 - Initial provisioning creates a dedicated login that inherits the NOLOGIN
   reader role. Existing secrets fail closed; credential rotation is not claimed
   until an explicit two-principal pending/activate/retire workflow is implemented.
@@ -239,7 +251,8 @@ generated video assets.
 | Evidence | State |
 |---|---|
 | Live CockroachDB Cloud Basic cluster, AWS `eu-west-1` | Verified |
-| Native vector recall / C-SPANN plan / benchmark evidence | Verified |
+| Historical native-vector plans / recall benchmark | Verified |
+| Runtime-principal company + kind C-SPANN serving gate | Implemented; must pass the protected database release |
 | Live CockroachDB Cloud Managed MCP read-only proof | Verified |
 | Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Verified |
 | Control Room, protected database release, zero-IAM SAM app stack, OIDC CI/CD source | Implemented; must pass CI |
@@ -258,7 +271,8 @@ documents, employees, payroll events, and validations. Those ideas and selected
 schema/extraction code were adapted from the earlier Archon/Nebius work.
 
 The **challenge-period** implementation is the CockroachDB `agent_memory` layer,
-native vector/prefix indexes, idempotency and lifecycle model, role-bound RLS,
+native vector/prefix indexes, fixed-scope C-SPANN serving views, idempotency and
+lifecycle model, role-bound RLS,
 recall/audit/proof APIs, grounded narrator guards, live Managed MCP integration,
 React Control Room, AWS serverless architecture, OIDC promotion/rollback
 pipeline, and the new verification suites.

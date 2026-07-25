@@ -11,9 +11,17 @@
 // starting cold. That is "CockroachDB as the agents' memory layer".
 
 import { createHash } from "node:crypto";
-import { PUBLIC_DEMO_TENANT_ID } from "../config/scope.js";
+import {
+  PUBLIC_DEMO_COMPANY,
+  PUBLIC_DEMO_TENANT_ID,
+} from "../config/scope.js";
 import { query, toVectorLiteral } from "../db/client.js";
-import { EXPECTED_VECTOR_INDEX_NAME } from "../db/proof.js";
+import {
+  EXPECTED_KIND_VECTOR_INDEX_NAME,
+  EXPECTED_VECTOR_INDEX_NAME,
+  PUBLIC_KIND_RECALL_VIEW_NAME,
+  PUBLIC_RECALL_VIEW_NAME,
+} from "../db/proof.js";
 import type { Embedder } from "./embeddings.js";
 import type { AuditMemory } from "./consistency.js";
 
@@ -51,6 +59,35 @@ export interface RecallOptions {
   kind?: MemoryKind;
   company?: string;
   limit?: number; // top-k, default 5
+}
+
+export interface RecallQuery {
+  text: string;
+  params: unknown[];
+  relation: string;
+  expectedIndexName: string | null;
+  fixedPublicScope: boolean;
+  servingPath:
+    | "public-no-kind-cspann"
+    | "public-kind-cspann"
+    | "internal-cspann"
+    | "bounded-scan";
+}
+
+export interface RecallQueryRow {
+  id: string;
+  tenant_id: string;
+  kind: MemoryKind;
+  company: string;
+  period: string | null;
+  source_ref: string | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  embed_model: string;
+  idempotency_key: string | null;
+  status: string;
+  created_at: string | Date;
+  distance: string;
 }
 
 // ── write ────────────────────────────────────────────────────────────────────
@@ -141,60 +178,11 @@ export async function recall(
   const queryEmbedding = await embedder.embed(queryText);
   assertEmbedding(queryEmbedding, embedder.dim);
   const qvec = toVectorLiteral(queryEmbedding);
-  // All vector-index prefix columns are equality constrained. tenant_id is
-  // process configuration (never request input), embed_model prevents vectors
-  // from incompatible model spaces being compared, and superseded/retracted
-  // evidence is excluded from current-state recall.
-  const filters: string[] = [
-    "tenant_id = $2",
-    "embed_model = $3",
-    "status = $4",
-  ];
-  const params: unknown[] = [
-    qvec,
-    PUBLIC_DEMO_TENANT_ID,
-    embedder.modelId,
-    "active",
-  ];
-  if (opts.kind) {
-    params.push(opts.kind);
-    filters.push(`kind = $${params.length}`);
-  }
-  if (opts.company) {
-    params.push(opts.company);
-    filters.push(`company = $${params.length}`);
-  }
-  const where = `WHERE ${filters.join(" AND ")}`;
-  const vectorIndexName = opts.company
-    ? EXPECTED_VECTOR_INDEX_NAME
-    : "idx_agent_memory_scope_embedding";
-  // CockroachDB vector indexes accept equality constraints on their declared
-  // prefix columns. An additional non-prefix kind predicate is intentionally
-  // left to the cost-based optimizer instead of forcing an ineligible index.
-  const tableExpression = opts.kind
-    ? "agent_memory"
-    : `agent_memory@${vectorIndexName}`;
-  params.push(Math.max(1, Math.min(opts.limit ?? 5, 50)));
-  const limitParam = `$${params.length}`;
+  const statement = buildRecallQuery(qvec, embedder.modelId, opts);
 
-  const rows = await query<{
-    id: string;
-    kind: MemoryKind;
-    company: string;
-    period: string | null;
-    source_ref: string | null;
-    content: string;
-    metadata: Record<string, unknown> | null;
-    created_at: string | Date;
-    distance: string;
-  }>(
-    `SELECT id, kind, company, period, source_ref, content, metadata, created_at,
-            (embedding <=> $1::VECTOR) AS distance
-       FROM ${tableExpression}
-       ${where}
-     ORDER BY embedding <=> $1::VECTOR
-     LIMIT ${limitParam}`,
-    params
+  const rows = await query<RecallQueryRow>(
+    statement.text,
+    statement.params
   );
 
   return rows.map((r) => {
@@ -216,6 +204,96 @@ export async function recall(
       score: 1 - distance,
     };
   });
+}
+
+// One production query constructor is shared by the application and the
+// database-release verifier. The fixed public serving views are intentionally
+// selected only for the immutable challenge scope; development/benchmark
+// companies retain the ordinary table path.
+export function buildRecallQuery(
+  qvec: string,
+  embedModel: string,
+  opts: RecallOptions = {}
+): RecallQuery {
+  const canonicalPublicDeployment =
+    PUBLIC_DEMO_TENANT_ID === "public-demo" &&
+    PUBLIC_DEMO_COMPANY === "Helios SA";
+  const fixedPublicScope =
+    canonicalPublicDeployment &&
+    (opts.company === undefined || opts.company === "Helios SA");
+  const company = fixedPublicScope ? "Helios SA" : opts.company;
+  // All vector-index prefix columns are equality constrained. tenant_id is
+  // process configuration (never request input), embed_model prevents vectors
+  // from incompatible model spaces being compared, and superseded/retracted
+  // evidence is excluded from current-state recall.
+  const filters: string[] = [
+    "tenant_id = $2",
+    "embed_model = $3",
+    "status = $4",
+  ];
+  const params: unknown[] = [
+    qvec,
+    PUBLIC_DEMO_TENANT_ID,
+    embedModel,
+    "active",
+  ];
+  if (opts.kind) {
+    params.push(opts.kind);
+    filters.push(`kind = $${params.length}`);
+  }
+  if (company) {
+    params.push(company);
+    filters.push(`company = $${params.length}`);
+  }
+  const where = `WHERE ${filters.join(" AND ")}`;
+  let relation: string;
+  let expectedIndexName: string | null;
+  let servingPath: RecallQuery["servingPath"];
+  if (fixedPublicScope) {
+    relation = opts.kind
+      ? PUBLIC_KIND_RECALL_VIEW_NAME
+      : PUBLIC_RECALL_VIEW_NAME;
+    expectedIndexName = opts.kind
+      ? EXPECTED_KIND_VECTOR_INDEX_NAME
+      : EXPECTED_VECTOR_INDEX_NAME;
+    servingPath = opts.kind
+      ? "public-kind-cspann"
+      : "public-no-kind-cspann";
+  } else if (canonicalPublicDeployment || opts.kind) {
+    // A canonical public runtime never forces a base-table vector index below
+    // FORCE RLS. Wrong-company internal calls fail closed as an empty bounded
+    // scan; non-production kind filters likewise avoid an ineligible hint.
+    relation = "agent_memory";
+    expectedIndexName = null;
+    servingPath = "bounded-scan";
+  } else {
+    expectedIndexName = company
+      ? EXPECTED_VECTOR_INDEX_NAME
+      : "idx_agent_memory_scope_embedding";
+    relation = `agent_memory@${expectedIndexName}`;
+    servingPath = "internal-cspann";
+  }
+  const requestedLimit =
+    opts.limit !== undefined && Number.isFinite(opts.limit)
+      ? Math.trunc(opts.limit)
+      : 5;
+  const limit = Math.max(1, Math.min(requestedLimit, 50));
+
+  return {
+    text:
+      `SELECT id, tenant_id, kind, company, period, source_ref, content, ` +
+      `metadata, embed_model, idempotency_key, status, created_at,
+            (embedding <=> $1::VECTOR) AS distance
+       FROM ${relation}
+       ${where}
+     ORDER BY embedding <=> $1::VECTOR
+     LIMIT ${limit}`,
+    params,
+    relation,
+    expectedIndexName,
+    fixedPublicScope,
+    servingPath,
+  };
 }
 
 // ── self-audit (consistency) read ─────────────────────────────────────────────

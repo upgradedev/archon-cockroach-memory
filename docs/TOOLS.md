@@ -16,12 +16,29 @@ Implementation:
   - `agent_memory.embedding VECTOR(1024)`
   - native `CREATE VECTOR INDEX ... vector_cosine_ops`
   - global index for benchmark/fan-out evidence
-  - prefix indexes on tenant, embedding model, lifecycle status, and company for
-    the production query shape
+  - `idx_agent_memory_company_scope_embedding` with
+    `tenant_id + embed_model + status + company` equality prefixes
+  - `idx_agent_memory_company_kind_scope_embedding` with
+    `tenant_id + embed_model + status + company + kind` equality prefixes
+  - fixed-predicate `archon_public_memory_recall` and
+    `archon_public_memory_kind_recall` serving views, owned by the isolated
+    non-login view owner while the runtime principals remain RLS-bound
 - `src/memory/memory.ts`
   - cosine `ORDER BY embedding <=> $1::VECTOR`
   - exact filters for tenant, model space, active status, kind/company
+  - one shared query builder that routes the no-kind and kind public paths
+    through their exact serving view and C-SPANN index
   - no pgvector extension
+- `scripts/verify-database-release.ts` and
+  `.github/workflows/database-release.yml`
+  - as each real staging and production runtime principal, `EXPLAIN` the exact
+    shared application query and require its exact C-SPANN index
+  - execute both query paths and verify bounded results, fixed scope, finite
+    distances, and the expected self-probe
+  - query both serving views with the three wrong-company, wrong-tenant, and
+    retracted-status canary vectors while deliberately omitting outer
+    tenant/company/status filters; use a high-recall gate beam, require exactly
+    three rejected canaries per path, and reject any visible canary
 - `scripts/benchmark.ts`, `scripts/fanout-demo.ts`,
   `scripts/show-distribution.sh`
   - recall@k, beam/latency, multi-range fan-out, RF=3 placement, and node-loss
@@ -35,10 +52,16 @@ Proof:
 - The judge app `/api/proof` performs a live `pg_catalog.pg_indexes` check for
   `idx_agent_memory_company_scope_embedding`; it does not infer index health from
   a static feature label.
+- The protected database release goes further: using each real staging and
+  production credential, it runs the exact shared application query, requires
+  a `vector search` plan on both the company and company+kind C-SPANN indexes,
+  executes both recalls, verifies the returned fixed scope and probe row, and
+  behaviorally rejects all three isolation canaries through both views.
 
-The currently recorded Cloud SQL capture is historical. The role-bound RLS and
-prefix-index migration are counted as live only after the new production
-deployment and Managed MCP audit receipts pass.
+The currently recorded Cloud SQL capture is historical. Catalog existence is
+not treated as proof of runtime index use; the new serving paths are counted as
+live only after the protected database release, production deployment, and
+Managed MCP audit receipts pass.
 
 ## 2. CockroachDB Cloud Managed MCP
 

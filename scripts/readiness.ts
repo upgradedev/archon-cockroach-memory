@@ -151,6 +151,11 @@ function sourceChecks(): SourceCheck[] {
   const dockerfile = read("aws/Dockerfile");
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
+  const memory = read("src/memory/memory.ts");
+  const databaseRelease = read("scripts/verify-database-release.ts");
+  const databaseReleaseWorkflow = read(
+    ".github/workflows/database-release.yml"
+  );
   const localArtifacts = generatedArtifactPaths();
   const workflowSources = [
     ci,
@@ -184,6 +189,28 @@ function sourceChecks(): SourceCheck[] {
         !/current_setting\('application_name'/iu.test(schema),
       "CockroachDB RLS binds the read-only runtime role to the fixed synthetic tenant and company.",
       "Role-bound fixed-scope RLS is missing or still depends on mutable application_name."
+    ),
+    sourceCheck(
+      "memory.fixed-scope-cspann-owner",
+      "Agentic Memory Design",
+      /archon_public_memory_view_owner\s+WITH\s+NOLOGIN/iu.test(schema) &&
+        /archon_public_memory_view_owner\s+WITH\s+NOLOGIN\s+BYPASSRLS/iu.test(
+          schema
+        ) &&
+        /GRANT\s+SELECT\s+ON\s+TABLE\s+agent_memory\s+TO\s+archon_public_memory_view_owner/iu.test(
+          schema
+        ) &&
+        /archon_public_memory_recall/iu.test(schema) &&
+        /archon_public_memory_kind_recall/iu.test(schema) &&
+        /security_invoker\s*=\s*false/iu.test(schema) &&
+        /sql\.auth\.skip_underlying_view_privilege_checks\.enabled\s*=\s*false/iu.test(
+          schema
+        ) &&
+        /REVOKE\s+CREATE\s+ON\s+SCHEMA\s+public\s+FROM\s+archon_public_memory_view_owner/iu.test(
+          schema
+        ),
+      "Two fixed-scope C-SPANN views use an isolated non-login owner while runtime roles remain RLS-bound.",
+      "The fixed-scope C-SPANN serving owner/views are incomplete or retain schema creation authority."
     ),
     sourceCheck(
       "memory.managed-mcp",
@@ -225,6 +252,52 @@ function sourceChecks(): SourceCheck[] {
         /citation/iu.test(narrator),
       "Bedrock narration is guarded by relevance abstention, per-claim citations, numeric checks, and fallback.",
       "Grounding or relevance-abstention controls are incomplete."
+    ),
+    sourceCheck(
+      "tech.runtime-cspann-release-gate",
+      "Technological Implementation",
+      /export\s+function\s+buildRecallQuery/iu.test(memory) &&
+        /buildRecallQuery/iu.test(databaseRelease) &&
+        /verifyRuntimeCspannPath/iu.test(databaseRelease) &&
+        /EXPLAIN\s+\$\{statement\.text\}/u.test(databaseRelease) &&
+        /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/iu.test(
+          databaseRelease
+        ) &&
+        /verifyServingViewBoundary/iu.test(databaseRelease) &&
+        /for\s*\(const\s+canary\s+of\s+canaryVectors\)/u.test(
+          databaseRelease
+        ) &&
+        /leaked\.rows\.length\s*!==\s*0/u.test(databaseRelease) &&
+        /SET vector_search_beam_size = 600/u.test(databaseRelease) &&
+        /class\s+ReleaseGateError\s+extends\s+Error/u.test(
+          databaseRelease
+        ) &&
+        /error\s+instanceof\s+ReleaseGateError/u.test(databaseRelease) &&
+        /safeRuntimeQuery/iu.test(databaseRelease) &&
+        /runtimePrincipalCspannPlanAndExecute/iu.test(
+          databaseReleaseWorkflow
+        ) &&
+        /all\(\.runtimes\[\];/u.test(databaseReleaseWorkflow) &&
+        /idx_agent_memory_company_kind_scope_embedding/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.cspannRecall\.noKind\.viewBoundaryVerified\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.cspannRecall\.kind\.viewBoundaryVerified\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        databaseReleaseWorkflow.match(
+          /isolationCanariesRejected\s*==\s*3/gu
+        )?.length === 2 &&
+        /isolationCanaryCount\s*==\s*3/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /servingViewOwnerPrivilegeBoundary\s*==\s*\n?\s*"direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges"/u.test(
+          databaseReleaseWorkflow
+        ),
+      "CI executes the exact application query as both runtime principals and rejects three-axis canaries through both fixed-scope C-SPANN views.",
+      "The database release does not enforce exact runtime-principal C-SPANN planning, execution, and serving-view isolation."
     ),
     sourceCheck(
       "impact.working-slice",
