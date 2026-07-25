@@ -267,7 +267,7 @@ Resources:
         Type: Canary10Percent5Minutes
         Role: !Ref CodeDeployServiceRoleArn
         Alarms:
-          - !Ref LambdaErrorAlarm
+          - !Ref LambdaCanaryErrorAlarm
       Environment:
         Variables:
           DATABASE_SECRET_ID: !Ref DatabaseSecretId
@@ -431,16 +431,53 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
 
+  # Broad, long-lived operational signal. It is intentionally not a CodeDeploy
+  # rollback alarm because a broken stable version must not block its recovery.
   LambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AppName}-${Environment}-lambda-errors"
-      AlarmDescription: Lambda errors detected in the public judge API
+      AlarmDescription: Lambda errors detected across the public judge API function
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
         - Name: FunctionName
           Value: !Ref ArchonFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # A new physical alarm per candidate avoids inheriting stale ALARM state. The
+  # full dimension set isolates the candidate behind the weighted live alias.
+  LambdaCanaryErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub
+        - "${AppName}-${Environment}-lambda-canary-errors-v${CandidateVersion}"
+        - CandidateVersion: !GetAtt ArchonFunction.Version.Version
+      AlarmDescription: Errors from only the candidate version behind the live weighted alias
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ArchonFunction
+        - Name: Resource
+          Value: !Sub "${ArchonFunction}:live"
+        - Name: ExecutedVersion
+          Value: !GetAtt ArchonFunction.Version.Version
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1

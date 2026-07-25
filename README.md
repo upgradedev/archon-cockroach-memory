@@ -140,7 +140,9 @@ The deployment follows the AWS serverless web application reference pattern:
   variable, GitHub secret, or CloudFormation parameter.
 - Titan Text Embeddings V2 creates normalized 1024-dimensional vectors.
 - Claude Sonnet 4.6 narrates from untrusted evidence through Bedrock Converse.
-- CloudWatch alarms and an operations dashboard cover Lambda, API, and delivery.
+- A candidate-version-scoped CodeDeploy alarm isolates the exact
+  `ExecutedVersion` behind the weighted alias; separate function/API/throttle
+  alarms and an operations dashboard retain broad operational coverage.
 
 The infrastructure is defined in [aws/template.yaml](./aws/template.yaml).
 Real eu-west-1 Bedrock proof is captured in
@@ -160,9 +162,10 @@ secret scan
   → build once
   → cryptographic candidate receipt
   → protected database release (fail-closed RLS + seed + two-principal C-SPANN plan/execution probes)
-  → OIDC staging deploy + real smoke + hosted Playwright
+  → OIDC staging deploy + candidate-scoped 10%/5m proof-and-recall canary
+  → full real recall smoke + hosted Playwright
   → identical-candidate production promotion
-  → continuously exercised canary + real smoke + hosted Playwright
+  → candidate-scoped proof-and-recall canary + full recall + hosted Playwright
   → recover previous traffic alias and versioned S3 index on verification failure
 ```
 
@@ -197,7 +200,11 @@ and deployment receipts have all completed successfully.
 - Request bytes, question length, top-k, audit scan, API rate, concurrency, and
   model calls are bounded.
 - Database/AWS exceptions are redacted; Lambda failures still reach native error
-  metrics so canary alarms can roll back.
+  metrics. The deployment alarm uses the weighted alias plus its exact candidate
+  `ExecutedVersion`, so both proof and recall can run throughout the canary
+  without old-version failures blocking a recovery. Full recall remains a
+  mandatory post-promotion gate with explicit alias and versioned-S3
+  restoration.
 - Memory text is escaped and treated as untrusted evidence, never as instructions.
 - The public database is a dedicated synthetic demonstration scope; no customer
   records are used.

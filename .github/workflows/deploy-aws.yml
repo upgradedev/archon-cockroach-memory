@@ -277,7 +277,7 @@ jobs:
             echo "application_url=$APPLICATION_URL"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Deploy the staging stack
+      - name: Deploy staging with recovery-safe SAM canary
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
@@ -313,7 +313,13 @@ jobs:
           trap stop_canary_probe EXIT
           if [ -n "$CANARY_URL" ] && [ "$CANARY_URL" != "None" ]; then
             (
-              for attempt in $(seq 1 180); do
+              # Exercise both the live proof boundary and the critical recall
+              # path. The CodeDeploy alarm is scoped to the candidate's exact
+              # ExecutedVersion, so failures from the previous weighted-alias
+              # target cannot poison its recovery.
+              attempt=0
+              while true; do
+                attempt=$((attempt + 1))
                 curl --fail --silent --max-time 30 \
                   "$CANARY_URL/api/proof" >/dev/null 2>&1 || true
                 if [ $((attempt % 5)) -eq 0 ]; then
@@ -538,7 +544,10 @@ jobs:
               applicationUrl: $applicationUrl,
               deployedAt: $deployedAt,
               smoke: "passed",
-              canary: "Canary10Percent5Minutes"
+              canary: "Canary10Percent5Minutes",
+              canaryTrafficProbe: "weighted-alias-proof-and-recall",
+              deployAlarm: "candidate-executed-version-errors",
+              recallGate: "post-promotion-with-explicit-restore"
             }}' deployment-receipt.json > staging-deployment-receipt.json
 
       - name: Upload staging receipt
@@ -662,7 +671,7 @@ jobs:
             echo "application_url=$APPLICATION_URL"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Deploy production with SAM canary rollback
+      - name: Deploy production with recovery-safe SAM canary
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
@@ -698,7 +707,13 @@ jobs:
           trap stop_canary_probe EXIT
           if [ -n "$CANARY_URL" ] && [ "$CANARY_URL" != "None" ]; then
             (
-              for attempt in $(seq 1 180); do
+              # Exercise both the live proof boundary and the critical recall
+              # path. The CodeDeploy alarm is scoped to the candidate's exact
+              # ExecutedVersion, so failures from the previous weighted-alias
+              # target cannot poison its recovery.
+              attempt=0
+              while true; do
+                attempt=$((attempt + 1))
                 curl --fail --silent --max-time 30 \
                   "$CANARY_URL/api/proof" >/dev/null 2>&1 || true
                 if [ $((attempt % 5)) -eq 0 ]; then
@@ -921,7 +936,10 @@ jobs:
               applicationUrl: $applicationUrl,
               deployedAt: $deployedAt,
               smoke: "passed",
-              canary: "Canary10Percent5Minutes"
+              canary: "Canary10Percent5Minutes",
+              canaryTrafficProbe: "weighted-alias-proof-and-recall",
+              deployAlarm: "candidate-executed-version-errors",
+              recallGate: "post-promotion-with-explicit-restore"
             }}' deployment-receipt.json > production-deployment-receipt.json
 
       - name: Upload production receipt

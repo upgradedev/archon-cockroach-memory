@@ -124,7 +124,10 @@ authenticated ccloud receipt is produced.
 - AWS Lambda Node.js 22: bounded recall/audit/proof adapter.
 - AWS Secrets Manager: least-privilege CockroachDB URL.
 - AWS X-Ray and CloudWatch: traces, logs, alarms, dashboard.
-- AWS CodeDeploy via SAM: production canary.
+- AWS CodeDeploy via SAM: 10%/5-minute canary continuously exercises live proof
+  and recall while a fresh alarm isolates the candidate `ExecutedVersion`
+  behind the weighted alias. Mandatory full-recall and hosted-browser gates
+  follow, with explicit prior-release restoration.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
 
