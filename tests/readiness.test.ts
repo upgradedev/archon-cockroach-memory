@@ -739,6 +739,14 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     ).length,
     4
   );
+  assert.match(
+    bootstrap,
+    /Sid: VerifyStagingApiAccessLogs[\s\S]*?- logs:DescribeLogStreams\s+- logs:FilterLogEvents[\s\S]*?\$\{AppName\}-staging:\*"/u
+  );
+  assert.match(
+    bootstrap,
+    /Sid: VerifyProductionApiAccessLogs[\s\S]*?- logs:DescribeLogStreams\s+- logs:FilterLogEvents[\s\S]*?\$\{AppName\}-production:\*"/u
+  );
   assert.match(restore, /--parameters "file:\/\/\$\{parameters_file\}"/u);
   assert.match(restore, /cloudformation create-change-set/u);
   assert.match(restore, /cloudformation execute-change-set/u);
