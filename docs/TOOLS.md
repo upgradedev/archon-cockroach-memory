@@ -36,9 +36,11 @@ Implementation:
   - execute both query paths and verify bounded results, fixed scope, finite
     distances, and the expected self-probe
   - query both serving views with the three wrong-company, wrong-tenant, and
-    retracted-status canary vectors while deliberately omitting outer
-    tenant/company/status filters; use a high-recall gate beam, require exactly
-    three rejected canaries per path, and reject any visible canary
+    retracted-status canary vectors; reassert every C-SPANN equality prefix
+    required by CockroachDB, use a high-recall gate beam, require exactly three
+    rejected canaries per path, and reject any visible canary. Exact catalog,
+    owner, grant, and view-definition checks independently prove that the
+    serving-view boundary itself has not drifted.
 - `scripts/benchmark.ts`, `scripts/fanout-demo.ts`,
   `scripts/show-distribution.sh`
   - recall@k, beam/latency, multi-range fan-out, RF=3 placement, and node-loss

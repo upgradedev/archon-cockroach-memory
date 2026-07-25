@@ -156,6 +156,10 @@ function sourceChecks(): SourceCheck[] {
   const databaseReleaseWorkflow = read(
     ".github/workflows/database-release.yml"
   );
+  const scopedServingQueryVerifier =
+    databaseRelease.match(
+      /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
+    )?.[0] ?? "";
   const localArtifacts = generatedArtifactPaths();
   const workflowSources = [
     ci,
@@ -263,12 +267,45 @@ function sourceChecks(): SourceCheck[] {
         /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/iu.test(
           databaseRelease
         ) &&
-        /verifyServingViewBoundary/iu.test(databaseRelease) &&
-        /for\s*\(const\s+canary\s+of\s+canaryVectors\)/u.test(
+        /schemaVersion:\s*4/u.test(databaseRelease) &&
+        /scopedServingQueriesRejectCanaries:\s*true/u.test(
           databaseRelease
         ) &&
-        /leaked\.rows\.length\s*!==\s*0/u.test(databaseRelease) &&
-        /SET vector_search_beam_size = 600/u.test(databaseRelease) &&
+        /\.schemaVersion\s*==\s*4/u.test(databaseReleaseWorkflow) &&
+        /\.proofs\.scopedServingQueriesRejectCanaries\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        scopedServingQueryVerifier.length > 0 &&
+        /for\s*\(const\s+canary\s+of\s+canaryVectors\)/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /buildRecallQuery\(embedding,\s*expectedModel/iu.test(
+          scopedServingQueryVerifier
+        ) &&
+        /company:\s*"Helios SA"/u.test(scopedServingQueryVerifier) &&
+        /kind:\s*input\.kind/u.test(scopedServingQueryVerifier) &&
+        /limit:\s*50/u.test(scopedServingQueryVerifier) &&
+        /!query\.fixedPublicScope/u.test(scopedServingQueryVerifier) &&
+        /query\.relation\s*!==\s*input\.expectedView/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /query\.expectedIndexName\s*!==\s*input\.expectedIndex/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /idempotency_key\s*===\s*canary\.idempotencyKey/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /\/idempotency_key\\s\*=\//u.test(scopedServingQueryVerifier) &&
+        /publicControlMissing/u.test(scopedServingQueryVerifier) &&
+        /scopedRows\.rows\.length\s*<\s*1/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /scopedRows\.rows\.length\s*>\s*50/u.test(
+          scopedServingQueryVerifier
+        ) &&
+        /SET vector_search_beam_size = 600/u.test(
+          scopedServingQueryVerifier
+        ) &&
         /class\s+ReleaseGateError\s+extends\s+Error/u.test(
           databaseRelease
         ) &&
@@ -281,16 +318,19 @@ function sourceChecks(): SourceCheck[] {
         /idx_agent_memory_company_kind_scope_embedding/u.test(
           databaseReleaseWorkflow
         ) &&
-        /\.cspannRecall\.noKind\.viewBoundaryVerified\s*==\s*true/u.test(
+        /\.cspannRecall\.noKind\.scopedServingQueryVerified\s*==\s*true/u.test(
           databaseReleaseWorkflow
         ) &&
-        /\.cspannRecall\.kind\.viewBoundaryVerified\s*==\s*true/u.test(
+        /\.cspannRecall\.kind\.scopedServingQueryVerified\s*==\s*true/u.test(
           databaseReleaseWorkflow
         ) &&
-        databaseReleaseWorkflow.match(
-          /isolationCanariesRejected\s*==\s*3/gu
-        )?.length === 2 &&
-        /isolationCanaryCount\s*==\s*3/u.test(
+        /\.cspannRecall\.noKind\.isolationCanariesRejected\s*==\s*3/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.cspannRecall\.kind\.isolationCanariesRejected\s*==\s*3/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.isolationCanaryCount\s*==\s*3/u.test(
           databaseReleaseWorkflow
         ) &&
         /servingViewOwnerPrivilegeBoundary\s*==\s*\n?\s*"direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges"/u.test(

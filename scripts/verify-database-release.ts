@@ -99,7 +99,7 @@ interface RuntimeCspannPathProof {
   executed: true;
   scopeVerified: true;
   probeReturned: true;
-  viewBoundaryVerified: true;
+  scopedServingQueryVerified: true;
   isolationCanariesRejected: number;
   returnedRows: number;
   queryTemplateSha256: string;
@@ -345,7 +345,7 @@ async function safeRuntimeQuery<T extends QueryResultRow>(
   }
 }
 
-async function verifyServingViewBoundary(
+async function verifyScopedServingQueryCanaries(
   client: PgClient,
   environment: "staging" | "production",
   input: {
@@ -354,10 +354,12 @@ async function verifyServingViewBoundary(
     probeEmbedding: string;
     kind?: MemoryKind;
     expectedView: string;
+    expectedIndex: string;
   },
   canaryVectors: IsolationCanaryVector[]
 ): Promise<number> {
-  const label = `${environment} runtime ${input.label} serving-view boundary`;
+  const label =
+    `${environment} runtime ${input.label} scoped serving-query canaries`;
   if (canaryVectors.length !== ISOLATION_CANARY_KEYS.length) {
     throw new ReleaseGateError(`${label} canary manifest is incomplete.`);
   }
@@ -367,51 +369,55 @@ async function verifyServingViewBoundary(
     [],
     `${label} high-recall beam`
   );
-  const statement = (
-    embedding: string,
-    idempotencyKey: string
-  ): { text: string; params: unknown[] } => {
-    const params: unknown[] = [embedding, expectedModel];
-    const filters = ["embed_model = $2"];
-    if (input.kind) {
-      params.push(input.kind);
-      filters.push(`kind = $${params.length}`);
+  const statement = (embedding: string): RecallQuery => {
+    // Reuse the production builder: CockroachDB v26.2.1 requires every
+    // C-SPANN prefix equality and rejects residual non-prefix filters on the
+    // accelerated path. Inspect canary keys in TypeScript rather than adding
+    // an idempotency_key SQL predicate that would invalidate FORCE_INDEX.
+    const query = buildRecallQuery(embedding, expectedModel, {
+      company: "Helios SA",
+      kind: input.kind,
+      limit: 50,
+    });
+    if (
+      !query.fixedPublicScope ||
+      query.relation !== input.expectedView ||
+      query.expectedIndexName !== input.expectedIndex ||
+      /idempotency_key\s*=/u.test(query.text)
+    ) {
+      throw new ReleaseGateError(`${label} shared query routing drifted.`);
     }
-    params.push(idempotencyKey);
-    filters.push(`idempotency_key = $${params.length}`);
-    return {
-      text:
-        `SELECT id, tenant_id, kind, company, period, source_ref, content, ` +
-        `metadata, embed_model, idempotency_key, status, created_at,
-                (embedding <=> $1::VECTOR) AS distance
-           FROM ${input.expectedView}
-          WHERE ${filters.join(" AND ")}
-       ORDER BY embedding <=> $1::VECTOR
-          LIMIT 5`,
-      params,
-    };
+    return query;
   };
 
-  // This deliberately omits tenant/company/status predicates. The fixed scope
-  // must come from the definer view itself, not from the application query.
+  // Exact catalog/owner/grant checks prove the definer-view boundary. These
+  // runtime probes separately prove the fully scoped production query returns
+  // only public rows and rejects all three sentinel keys under a high beam.
   try {
-    const publicProbe = statement(input.probeEmbedding, input.probeKey);
+    const publicProbe = statement(input.probeEmbedding);
     const visible = await safeRuntimeQuery<RecallQueryRow>(
       client,
       publicProbe.text,
       publicProbe.params,
       `${label} public control`
     );
-    const control = visible.rows[0];
+    const control = visible.rows.find(
+      (row) => row.idempotency_key === input.probeKey
+    );
+    const visibleScopeValid = visible.rows.every(
+      (row) =>
+        row.tenant_id === "public-demo" &&
+        row.company === "Helios SA" &&
+        row.status === "active" &&
+        row.embed_model === expectedModel &&
+        (input.kind === undefined || row.kind === input.kind) &&
+        Number.isFinite(Number(row.distance))
+    );
     if (
-      visible.rows.length !== 1 ||
-      control?.idempotency_key !== input.probeKey ||
-      control.tenant_id !== "public-demo" ||
-      control.company !== "Helios SA" ||
-      control.status !== "active" ||
-      control.embed_model !== expectedModel ||
-      (input.kind !== undefined && control.kind !== input.kind) ||
-      !Number.isFinite(Number(control.distance)) ||
+      visible.rows.length < 1 ||
+      visible.rows.length > 50 ||
+      !visibleScopeValid ||
+      !control ||
       Math.abs(Number(control.distance)) > 0.00001
     ) {
       throw new ReleaseGateError(`${label} public control failed.`);
@@ -421,19 +427,37 @@ async function verifyServingViewBoundary(
       if (input.kind !== undefined && canary.kind !== input.kind) {
         throw new ReleaseGateError(`${label} canary kind drifted.`);
       }
-      const canaryStatement = statement(
-        canary.embedding,
-        canary.idempotencyKey
-      );
-      const leaked = await safeRuntimeQuery<RecallQueryRow>(
+      const canaryStatement = statement(canary.embedding);
+      const scopedRows = await safeRuntimeQuery<RecallQueryRow>(
         client,
         canaryStatement.text,
         canaryStatement.params,
         `${label} isolation canary`
       );
-      if (leaked.rows.length !== 0) {
+      const leaked = scopedRows.rows.some(
+        (row) => row.idempotency_key === canary.idempotencyKey
+      );
+      const publicControlMissing = !scopedRows.rows.some(
+        (row) => row.idempotency_key === input.probeKey
+      );
+      const scopeDrifted = scopedRows.rows.some(
+        (row) =>
+          row.tenant_id !== "public-demo" ||
+          row.company !== "Helios SA" ||
+          row.status !== "active" ||
+          row.embed_model !== expectedModel ||
+          (input.kind !== undefined && row.kind !== input.kind) ||
+          !Number.isFinite(Number(row.distance))
+      );
+      if (
+        leaked ||
+        publicControlMissing ||
+        scopeDrifted ||
+        scopedRows.rows.length < 1 ||
+        scopedRows.rows.length > 50
+      ) {
         throw new ReleaseGateError(
-          `${label} exposed an isolation canary.`
+          `${label} exposed an isolation canary or scope drift.`
         );
       }
     }
@@ -556,18 +580,20 @@ async function verifyRuntimeCspannPath(
   ) {
     throw new ReleaseGateError(`${label} execution proof failed.`);
   }
-  const isolationCanariesRejected = await verifyServingViewBoundary(
-    client,
-    environment,
-    {
-      label: input.label,
-      probeKey: input.probeKey,
-      probeEmbedding: embedding,
-      kind: input.kind,
-      expectedView: input.expectedView,
-    },
-    canaryVectors
-  );
+  const isolationCanariesRejected =
+    await verifyScopedServingQueryCanaries(
+      client,
+      environment,
+      {
+        label: input.label,
+        probeKey: input.probeKey,
+        probeEmbedding: embedding,
+        kind: input.kind,
+        expectedView: input.expectedView,
+        expectedIndex: input.expectedIndex,
+      },
+      canaryVectors
+    );
 
   return {
     servingPath: statement.servingPath,
@@ -578,7 +604,7 @@ async function verifyRuntimeCspannPath(
     executed: true,
     scopeVerified: true,
     probeReturned: true,
-    viewBoundaryVerified: true,
+    scopedServingQueryVerified: true,
     isolationCanariesRejected,
     returnedRows,
     queryTemplateSha256: createHash("sha256")
@@ -1366,7 +1392,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     `${JSON.stringify(
       {
-        schemaVersion: 3,
+        schemaVersion: 4,
         ok: true,
         targetSha,
         region,
@@ -1390,7 +1416,7 @@ async function main(): Promise<void> {
           companyScopedVectorIndex: true,
           companyKindScopedVectorIndex: true,
           fixedScopeServingViews: true,
-          servingViewCanariesRejected: true,
+          scopedServingQueriesRejectCanaries: true,
           isolationCanaryCount: ISOLATION_CANARY_KEYS.length,
           isolatedNonLoginServingViewOwner: true,
           servingViewOwnerPrivilegeBoundary:
