@@ -189,6 +189,7 @@ async function main(): Promise<void> {
           "CONNECT",
           "USAGE public",
           "RLS-scoped SELECT agent_memory",
+          "SELECT fixed-scope C-SPANN recall views",
         ],
         secretArn: arn,
         region,

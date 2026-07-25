@@ -289,7 +289,10 @@ export async function handleProof(
   const index = indexRows.find(
     (row) =>
       row.index_name === EXPECTED_VECTOR_INDEX_NAME &&
-      isExpectedVectorIndexDefinition(row.index_definition)
+      isExpectedVectorIndexDefinition(
+        row.index_definition,
+        database?.database_name ?? ""
+      )
   );
   const verifiedIndex = Boolean(index);
   const cockroachRegion = process.env.COCKROACH_REGION?.trim() || null;

@@ -13,6 +13,7 @@
 -- Vector indexes are gated behind a cluster setting; sql_safe_updates must be
 -- relaxed to add an index to a table that may already hold rows.
 SET CLUSTER SETTING feature.vector_index.enabled = true;
+SET CLUSTER SETTING sql.auth.skip_underlying_view_privilege_checks.enabled = false;
 SET sql_safe_updates = false;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +271,90 @@ CREATE VECTOR INDEX IF NOT EXISTS idx_agent_memory_company_scope_embedding
       company,
       embedding vector_cosine_ops
     );
+CREATE VECTOR INDEX IF NOT EXISTS idx_agent_memory_company_kind_scope_embedding
+    ON agent_memory (
+      tenant_id,
+      embed_model,
+      status,
+      company,
+      kind,
+      embedding vector_cosine_ops
+    );
+
+-- CockroachDB v26.2 represents RLS as an optimizer barrier. A forced vector
+-- index below that barrier cannot be rewritten to a VectorSearch operator.
+-- These dematerialized serving views preserve the fixed public scope while
+-- planning their hinted scans as a dedicated non-login BYPASSRLS owner. In
+-- CockroachDB v26.2.3 BYPASSRLS is a direct, non-inheritable role option (not a
+-- valid table privilege); the owner therefore has no members and no system
+-- privileges. Lambda/runtime principals remain NOBYPASSRLS and receive SELECT
+-- on only these fixed-scope views plus the RLS-protected base table.
+CREATE ROLE IF NOT EXISTS archon_public_memory_view_owner WITH NOLOGIN;
+ALTER ROLE archon_public_memory_view_owner WITH NOLOGIN BYPASSRLS;
+GRANT USAGE ON SCHEMA public TO archon_public_memory_view_owner;
+REVOKE ALL ON TABLE agent_memory FROM archon_public_memory_view_owner;
+GRANT SELECT ON TABLE agent_memory TO archon_public_memory_view_owner;
+
+CREATE OR REPLACE VIEW archon_public_memory_recall (
+    id,
+    tenant_id,
+    kind,
+    company,
+    period,
+    source_ref,
+    content,
+    metadata,
+    embedding,
+    embed_model,
+    idempotency_key,
+    status,
+    created_at
+) WITH (security_invoker = false) AS
+SELECT id, tenant_id, kind, company, period, source_ref, content, metadata,
+       embedding, embed_model, idempotency_key, status, created_at
+  FROM public.agent_memory@{FORCE_INDEX=idx_agent_memory_company_scope_embedding}
+ WHERE tenant_id = 'public-demo'
+   AND company = 'Helios SA'
+   AND status = 'active';
+
+CREATE OR REPLACE VIEW archon_public_memory_kind_recall (
+    id,
+    tenant_id,
+    kind,
+    company,
+    period,
+    source_ref,
+    content,
+    metadata,
+    embedding,
+    embed_model,
+    idempotency_key,
+    status,
+    created_at
+) WITH (security_invoker = false) AS
+SELECT id, tenant_id, kind, company, period, source_ref, content, metadata,
+       embedding, embed_model, idempotency_key, status, created_at
+  FROM public.agent_memory@{FORCE_INDEX=idx_agent_memory_company_kind_scope_embedding}
+ WHERE tenant_id = 'public-demo'
+   AND company = 'Helios SA'
+   AND status = 'active';
+
+-- CockroachDB requires a prospective owner to have CREATE on the parent
+-- schema. apply-schema.ts also revokes this in its finally block, so a failed
+-- ownership transfer cannot strand the capability.
+GRANT CREATE ON SCHEMA public TO archon_public_memory_view_owner;
+ALTER VIEW archon_public_memory_recall
+    OWNER TO archon_public_memory_view_owner;
+ALTER VIEW archon_public_memory_kind_recall
+    OWNER TO archon_public_memory_view_owner;
+REVOKE CREATE ON SCHEMA public FROM archon_public_memory_view_owner;
+
+REVOKE ALL ON TABLE archon_public_memory_recall FROM PUBLIC;
+REVOKE ALL ON TABLE archon_public_memory_kind_recall FROM PUBLIC;
+REVOKE ALL ON TABLE archon_public_memory_recall FROM archon_public_reader;
+REVOKE ALL ON TABLE archon_public_memory_kind_recall FROM archon_public_reader;
+GRANT SELECT ON TABLE archon_public_memory_recall TO archon_public_reader;
+GRANT SELECT ON TABLE archon_public_memory_kind_recall TO archon_public_reader;
 
 -- Conventional secondary indexes for exact-match filtering / housekeeping.
 CREATE INDEX IF NOT EXISTS idx_agent_memory_kind ON agent_memory (kind);

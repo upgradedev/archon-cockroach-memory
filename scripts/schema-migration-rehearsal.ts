@@ -6,9 +6,17 @@
 import pg from "pg";
 import { applySchema } from "./apply-schema.js";
 import {
+  EXPECTED_KIND_VECTOR_INDEX_NAME,
   EXPECTED_VECTOR_INDEX_NAME,
+  PUBLIC_KIND_RECALL_VIEW_NAME,
+  PUBLIC_RECALL_VIEW_NAME,
+  isExpectedKindVectorIndexDefinition,
   isExpectedVectorIndexDefinition,
 } from "../src/db/proof.js";
+import {
+  buildRecallQuery,
+  type RecallQueryRow,
+} from "../src/memory/memory.js";
 
 const { Client } = pg;
 const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -22,7 +30,7 @@ if (!/^archon_migration(?:_ci)?$/u.test(databaseName)) {
   );
 }
 
-const zeroVector = `[${new Array(1024).fill("0").join(",")}]`;
+const unitVector = `[1,${new Array(1023).fill("0").join(",")}]`;
 
 async function setupLegacy(): Promise<void> {
   const client = new Client({ connectionString: databaseUrl });
@@ -62,11 +70,15 @@ async function setupLegacy(): Promise<void> {
          ('insight', 'Legacy Hidden Co', '2026-04', 'LEGACY-2',
           'Legacy wrong-company evidence remains isolated.',
           '{"record":"LEGACY-2"}', $1::VECTOR, 'fake-embed-v1')`,
-      [zeroVector]
+      [unitVector]
     );
     await client.query(
       `CREATE INDEX ${EXPECTED_VECTOR_INDEX_NAME}
          ON agent_memory (company)`
+    );
+    await client.query(
+      `CREATE INDEX ${EXPECTED_KIND_VECTOR_INDEX_NAME}
+         ON agent_memory (kind)`
     );
     await client.query("ALTER TABLE agent_memory ENABLE ROW LEVEL SECURITY");
     await client.query(`
@@ -89,7 +101,7 @@ async function proveFailedClosedDrift(): Promise<void> {
   } catch (error) {
     rejected =
       error instanceof Error &&
-      /exact company-scoped CockroachDB C-SPANN index/iu.test(error.message);
+      /exact public-serving CockroachDB C-SPANN index/iu.test(error.message);
   }
   if (!rejected) {
     throw new Error("Same-named non-vector index drift was not rejected.");
@@ -112,7 +124,12 @@ async function proveFailedClosedDrift(): Promise<void> {
     ) {
       throw new Error("Interrupted migration did not leave fail-closed policies.");
     }
+    await client.query(`DROP VIEW IF EXISTS ${PUBLIC_RECALL_VIEW_NAME}`);
+    await client.query(
+      `DROP VIEW IF EXISTS ${PUBLIC_KIND_RECALL_VIEW_NAME}`
+    );
     await client.query(`DROP INDEX ${EXPECTED_VECTOR_INDEX_NAME}`);
+    await client.query(`DROP INDEX ${EXPECTED_KIND_VECTOR_INDEX_NAME}`);
   } finally {
     await client.end().catch(() => undefined);
   }
@@ -144,20 +161,32 @@ async function verifyFinalState(): Promise<void> {
       throw new Error("Legacy rows/default backfills were not preserved.");
     }
 
-    const index = await client.query<{ indexdef: string }>(
-      `SELECT indexdef
+    const indexes = await client.query<{
+      indexname: string;
+      indexdef: string;
+    }>(
+      `SELECT indexname, indexdef
          FROM pg_catalog.pg_indexes
         WHERE schemaname = 'public'
           AND tablename = 'agent_memory'
-          AND indexname = $1`,
-      [EXPECTED_VECTOR_INDEX_NAME]
+          AND indexname = ANY($1::STRING[])`,
+      [[EXPECTED_VECTOR_INDEX_NAME, EXPECTED_KIND_VECTOR_INDEX_NAME]]
+    );
+    const indexByName = new Map(
+      indexes.rows.map((index) => [index.indexname, index.indexdef])
     );
     if (
-      index.rowCount !== 1 ||
-      !index.rows[0] ||
-      !isExpectedVectorIndexDefinition(index.rows[0].indexdef)
+      indexes.rowCount !== 2 ||
+      !isExpectedVectorIndexDefinition(
+        indexByName.get(EXPECTED_VECTOR_INDEX_NAME) ?? "",
+        databaseName
+      ) ||
+      !isExpectedKindVectorIndexDefinition(
+        indexByName.get(EXPECTED_KIND_VECTOR_INDEX_NAME) ?? "",
+        databaseName
+      )
     ) {
-      throw new Error("Final exact C-SPANN index is missing.");
+      throw new Error("Final exact C-SPANN indexes are missing.");
     }
 
     await client.query(`
@@ -171,7 +200,7 @@ async function verifyFinalState(): Promise<void> {
         ('public-demo', 'validation', 'Helios SA', '2026-04',
          'MIG-CANARY-STATUS', 'Retracted.', '{}',
          $1::VECTOR, 'fake-embed-v1', 'migration-retracted', 'retracted')
-    `, [zeroVector]);
+    `, [unitVector]);
     await client.query("CREATE USER IF NOT EXISTS archon_migration_ci");
     await client.query(
       "GRANT archon_public_reader TO archon_migration_ci"
@@ -198,6 +227,62 @@ async function verifyFinalState(): Promise<void> {
     ) {
       throw new Error("Final three-axis RLS behavior is not fail closed.");
     }
+
+    const probe = await client.query<{ embedding: string }>(
+      `SELECT embedding::STRING AS embedding
+         FROM agent_memory
+        WHERE source_ref = 'LEGACY-1'
+        LIMIT 1`
+    );
+    const embedding = probe.rows[0]?.embedding;
+    if (!embedding) {
+      throw new Error("Runtime migration probe is not visible.");
+    }
+    for (const path of [
+      {
+        kind: undefined,
+        expectedIndex: EXPECTED_VECTOR_INDEX_NAME,
+      },
+      {
+        kind: "insight" as const,
+        expectedIndex: EXPECTED_KIND_VECTOR_INDEX_NAME,
+      },
+    ]) {
+      const statement = buildRecallQuery(embedding, "fake-embed-v1", {
+        company: "Helios SA",
+        kind: path.kind,
+        limit: 5,
+      });
+      const explain = await client.query<Record<string, unknown>>(
+        `EXPLAIN ${statement.text}`,
+        statement.params
+      );
+      const plan = explain.rows
+        .flatMap((row) => Object.values(row))
+        .map(String)
+        .join("\n");
+      const result = await client.query<RecallQueryRow>(
+        statement.text,
+        statement.params
+      );
+      if (
+        !/vector search/iu.test(plan) ||
+        !plan.includes(path.expectedIndex) ||
+        statement.expectedIndexName !== path.expectedIndex ||
+        result.rows.length < 1 ||
+        !result.rows.some((row) => row.source_ref === "LEGACY-1") ||
+        result.rows.some(
+          (row) =>
+            row.tenant_id !== "public-demo" ||
+            row.company !== "Helios SA" ||
+            row.status !== "active" ||
+            row.embed_model !== "fake-embed-v1" ||
+            !Number.isFinite(Number(row.distance))
+        )
+      ) {
+        throw new Error("Runtime-principal C-SPANN migration proof failed.");
+      }
+    }
     await client.query("RESET ROLE");
   } finally {
     await client.end().catch(() => undefined);
@@ -219,7 +304,9 @@ async function main(): Promise<void> {
       failedStateRemainedRestrictive: true,
       idempotentSecondApply: true,
       exactCspannDefinition: true,
+      exactKindCspannDefinition: true,
       roleBoundThreeAxisRls: true,
+      runtimePrincipalCspannPlanAndExecute: true,
     })}\n`
   );
 }

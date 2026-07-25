@@ -144,7 +144,15 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
   }
 
   // 5. SELECT for vector recall or normal select
-  if (queryStr.toUpperCase().startsWith("SELECT ID, KIND, COMPANY, PERIOD, SOURCE_REF, CONTENT, METADATA, CREATED_AT")) {
+  const upperQuery = queryStr.toUpperCase();
+  if (
+    upperQuery.startsWith(
+      "SELECT ID, TENANT_ID, KIND, COMPANY, PERIOD, SOURCE_REF, CONTENT, METADATA, EMBED_MODEL, IDEMPOTENCY_KEY, STATUS, CREATED_AT"
+    ) ||
+    upperQuery.startsWith(
+      "SELECT ID, KIND, COMPANY, PERIOD, SOURCE_REF, CONTENT, METADATA, CREATED_AT"
+    )
+  ) {
     let filtered = [...db];
 
     // Apply dynamic column filters: column = $N
@@ -174,12 +182,16 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
         const dist = 1 - dotProduct(r.embedding, qvec);
         return {
           id: r.id,
+          tenant_id: r.tenant_id,
           kind: r.kind,
           company: r.company,
           period: r.period,
           source_ref: r.source_ref,
           content: r.content,
           metadata: r.metadata,
+          embed_model: r.embed_model,
+          idempotency_key: r.idempotency_key,
+          status: r.status,
           created_at: r.created_at,
           distance: String(dist),
         };
@@ -189,12 +201,14 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
       rows.sort((a, b) => Number(a.distance) - Number(b.distance));
 
       // Limit results
-      const limitMatch = queryStr.match(/LIMIT\s+\$(\d+)/i);
-      if (limitMatch) {
-        const limitIdx = parseInt(limitMatch[1]!, 10) - 1;
-        const limit = params[limitIdx] as number;
-        rows = rows.slice(0, limit);
-      }
+      const parameterizedLimit = queryStr.match(/LIMIT\s+\$(\d+)/iu);
+      const literalLimit = queryStr.match(/LIMIT\s+(\d+)/iu);
+      const limit = parameterizedLimit
+        ? (params[Number(parameterizedLimit[1]) - 1] as number)
+        : literalLimit
+          ? Number(literalLimit[1])
+          : undefined;
+      if (limit !== undefined) rows = rows.slice(0, limit);
     } else {
       // Normal select
       filtered.sort(

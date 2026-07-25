@@ -61,6 +61,71 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
     report.checks.find((check) => check.id === "memory.managed-mcp")?.status,
     "pass"
   );
+  assert.equal(
+    report.checks.find(
+      (check) => check.id === "memory.fixed-scope-cspann-owner"
+    )?.status,
+    "pass"
+  );
+  assert.equal(
+    report.checks.find(
+      (check) => check.id === "tech.runtime-cspann-release-gate"
+    )?.status,
+    "pass"
+  );
+});
+
+test("readiness: database release requires both C-SPANN paths from both runtime principals", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/database-release.yml", import.meta.url),
+    "utf8"
+  );
+  assert.match(workflow, /\.schemaVersion == 3/u);
+  assert.match(
+    workflow,
+    /\.proofs\.runtimePrincipalCspannPlanAndExecute == true/u
+  );
+  assert.match(workflow, /all\(\.runtimes\[\];/u);
+  assert.match(workflow, /public-no-kind-cspann/u);
+  assert.match(workflow, /public-kind-cspann/u);
+  assert.match(
+    workflow,
+    /\.cspannRecall\.noKind\.viewBoundaryVerified == true/u
+  );
+  assert.match(
+    workflow,
+    /\.cspannRecall\.kind\.viewBoundaryVerified == true/u
+  );
+  assert.equal(
+    workflow.match(/isolationCanariesRejected == 3/gu)?.length,
+    2
+  );
+  assert.match(workflow, /isolationCanaryCount == 3/u);
+  assert.match(workflow, /servingViewCanariesRejected == true/u);
+  assert.match(
+    workflow,
+    /servingViewOwnerPrivilegeBoundary ==\s*\n?\s*"direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges"/u
+  );
+  assert.match(
+    workflow,
+    /idx_agent_memory_company_kind_scope_embedding/u
+  );
+  const verifier = readFileSync(
+    new URL("../scripts/verify-database-release.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(verifier, /EXPLAIN \$\{statement\.text\}/u);
+  assert.match(
+    verifier,
+    /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/u
+  );
+  assert.match(verifier, /verifyServingViewBoundary/u);
+  assert.match(verifier, /ISOLATION_CANARY_KEYS/u);
+  assert.match(verifier, /for \(const canary of canaryVectors\)/u);
+  assert.match(verifier, /leaked\.rows\.length !== 0/u);
+  assert.match(verifier, /SET vector_search_beam_size = 600/u);
+  assert.match(verifier, /class ReleaseGateError extends Error/u);
+  assert.match(verifier, /error instanceof ReleaseGateError/u);
 });
 
 test("readiness: both AWS release gates accept only fully grounded safe-answer states", () => {

@@ -12,6 +12,13 @@ import {
   normalize,
 } from "../src/memory/embeddings.js";
 import { toVectorLiteral } from "../src/db/client.js";
+import { buildRecallQuery } from "../src/memory/memory.js";
+import {
+  EXPECTED_KIND_VECTOR_INDEX_NAME,
+  EXPECTED_VECTOR_INDEX_NAME,
+  PUBLIC_KIND_RECALL_VIEW_NAME,
+  PUBLIC_RECALL_VIEW_NAME,
+} from "../src/db/proof.js";
 
 function cosine(a: number[], b: number[]): number {
   let dot = 0;
@@ -54,6 +61,45 @@ test("overlapping text is more similar than disjoint text", async () => {
 // NOT the pgvector extension — this entry's index is CockroachDB-native C-SPANN.
 test("toVectorLiteral renders the pgvector-style VECTOR text literal", () => {
   assert.equal(toVectorLiteral([0.1, 0.2, 0.3]), "[0.1,0.2,0.3]");
+});
+
+test("shared recall query routes only the fixed public scope through serving views", () => {
+  const noKind = buildRecallQuery("[1]", "model-v1", {
+    company: "Helios SA",
+    limit: 500,
+  });
+  assert.equal(noKind.relation, PUBLIC_RECALL_VIEW_NAME);
+  assert.equal(noKind.expectedIndexName, EXPECTED_VECTOR_INDEX_NAME);
+  assert.equal(noKind.servingPath, "public-no-kind-cspann");
+  assert.match(noKind.text, /LIMIT 50$/u);
+  assert.doesNotMatch(noKind.text, /LIMIT \$\d+/u);
+
+  const kind = buildRecallQuery("[1]", "model-v1", {
+    company: "Helios SA",
+    kind: "insight",
+  });
+  assert.equal(kind.relation, PUBLIC_KIND_RECALL_VIEW_NAME);
+  assert.equal(kind.expectedIndexName, EXPECTED_KIND_VECTOR_INDEX_NAME);
+  assert.equal(kind.servingPath, "public-kind-cspann");
+
+  const defaultPublic = buildRecallQuery("[1]", "model-v1");
+  assert.equal(defaultPublic.relation, PUBLIC_RECALL_VIEW_NAME);
+  assert.equal(defaultPublic.servingPath, "public-no-kind-cspann");
+
+  const internal = buildRecallQuery("[1]", "model-v1", {
+    company: "Internal Co",
+    kind: "insight",
+  });
+  assert.equal(internal.relation, "agent_memory");
+  assert.equal(internal.expectedIndexName, null);
+  assert.equal(internal.servingPath, "bounded-scan");
+
+  const wrongCompany = buildRecallQuery("[1]", "model-v1", {
+    company: "Internal Co",
+  });
+  assert.equal(wrongCompany.relation, "agent_memory");
+  assert.equal(wrongCompany.expectedIndexName, null);
+  assert.equal(wrongCompany.servingPath, "bounded-scan");
 });
 
 // ── benchmark vector helpers (RandomEmbedder + clustered corpus generator) ──────

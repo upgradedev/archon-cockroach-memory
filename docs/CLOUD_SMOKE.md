@@ -40,7 +40,8 @@ plus a reconciliation memory referencing a separate payment):
 ## 1. The distributed vector index is USED (EXPLAIN → `vector search`)
 
 `EXPLAIN SELECT id FROM agent_memory ORDER BY embedding <=> $q::VECTOR LIMIT 5`
-(the exact unscoped ANN recall shape `src/memory/memory.ts::recall()` runs), verbatim:
+(the historical unscoped benchmark shape, not the current fixed-scope
+production serving query), verbatim:
 
 ```
 distribution: local
@@ -66,8 +67,10 @@ vectorized: true
 The plan bottoms out in a **`vector search`** node against
 `agent_memory@idx_agent_memory_embedding` (the native C-SPANN index), feeding a
 `lookup join` back to the primary key — index-accelerated ANN, **not** a full table
-scan. This is the same plan shape verified on the local single node (v26.2.2) and the
-3-node cluster; here it is confirmed on the managed Cloud cluster.
+scan. This historical capture proves native C-SPANN behavior on the managed
+cluster. The current release gate separately requires the exact application
+query to plan and execute both fixed-scope serving paths as each runtime
+principal.
 
 ## 2. The ANN recall returns correctly-ranked memories
 
