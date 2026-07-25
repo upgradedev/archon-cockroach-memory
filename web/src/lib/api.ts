@@ -112,6 +112,7 @@ export interface ProofSnapshot {
     regionEvidence: string | null;
     runtimePrincipal: string | null;
     topology: string | null;
+    activeMemories: number | null;
   };
   vectorIndex: {
     enabled: boolean | null;
@@ -131,6 +132,13 @@ export interface ProofSnapshot {
   scope: {
     company: string;
     mode: string | null;
+  };
+  memory: {
+    persisted: number | null;
+    idempotencyKeys: number | null;
+    contentDigests: number | null;
+    storeVerified: boolean | null;
+    evidence: string | null;
   };
   features: string[];
   memoryCount: number | null;
@@ -632,6 +640,35 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
   const scope = nested(body, "scope");
   const memory = nested(body, "memory");
   const benchmark = nested(body, "benchmark");
+  const databaseActiveMemories = asNumber(database?.activeMemories);
+  const persisted = asNumber(memory?.persisted);
+  const idempotencyKeys = asNumber(memory?.idempotencyKeys);
+  const contentDigests = asNumber(memory?.contentDigests);
+  const storeEvidence = asString(memory?.evidence);
+  const reportedStoreVerified = asBoolean(memory?.storeVerified);
+  const storeProofReported =
+    persisted !== null ||
+    idempotencyKeys !== null ||
+    contentDigests !== null ||
+    storeEvidence !== null ||
+    reportedStoreVerified !== null;
+  const storeVerified = storeProofReported
+    ? Boolean(
+        reportedStoreVerified === true &&
+          persisted !== null &&
+          Number.isSafeInteger(persisted) &&
+          persisted > 0 &&
+          idempotencyKeys !== null &&
+          Number.isSafeInteger(idempotencyKeys) &&
+          idempotencyKeys === persisted &&
+          contentDigests !== null &&
+          Number.isSafeInteger(contentDigests) &&
+          contentDigests === persisted &&
+          databaseActiveMemories === persisted &&
+          storeEvidence ===
+            "live bounded fixed-scope payload-digest verification"
+      )
+    : null;
   const features = asArray(body.features)
     .map((item) => {
       const feature = asRecord(item);
@@ -651,6 +688,7 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
         database?.replication,
         database?.nodes,
       ),
+      activeMemories: databaseActiveMemories,
     },
     vectorIndex: {
       enabled: asBoolean(vector?.enabled, vector?.active, vector?.verified),
@@ -671,12 +709,20 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
       company: asString(scope?.company) ?? PUBLIC_COMPANY,
       mode: asString(scope?.mode),
     },
+    memory: {
+      persisted,
+      idempotencyKeys,
+      contentDigests,
+      storeVerified,
+      evidence: storeEvidence,
+    },
     features,
     memoryCount: asNumber(
+      databaseActiveMemories,
       body.memoryCount,
-      database?.activeMemories,
       memory?.count,
       memory?.total,
+      persisted,
     ),
     generatedAt: asString(body.generatedAt),
     hasEvidence: false,
@@ -703,8 +749,17 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
       !/fake|offline/iu.test(snapshot.narrationModel) &&
       snapshot.scope.company === PUBLIC_COMPANY &&
       snapshot.scope.mode === "fixed-synthetic-demo" &&
+      snapshot.memory.storeVerified === true &&
+      snapshot.memory.persisted !== null &&
+      Number.isSafeInteger(snapshot.memory.persisted) &&
+      snapshot.memory.persisted > 0 &&
+      snapshot.memory.idempotencyKeys === snapshot.memory.persisted &&
+      snapshot.memory.contentDigests === snapshot.memory.persisted &&
+      snapshot.memory.evidence ===
+        "live bounded fixed-scope payload-digest verification" &&
+      snapshot.database.activeMemories === snapshot.memory.persisted &&
       snapshot.memoryCount !== null &&
-      snapshot.memoryCount > 0 &&
+      snapshot.memoryCount === snapshot.memory.persisted &&
       snapshot.generatedAt &&
       Number.isFinite(Date.parse(snapshot.generatedAt))
   );

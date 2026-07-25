@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
+const CANONICAL_DEMO_URL =
+  "https://d2s5v0o0eg2aaw.cloudfront.net";
 
 export const OFFICIAL_CRITERIA = [
   "Agentic Memory Design",
@@ -112,7 +114,7 @@ function generatedArtifactPaths(): string[] {
         visit(join(absolute, entry.name), childRelative);
       } else if (
         /\.(?:mp4|pyc)$/iu.test(entry.name) ||
-        /^(?:readiness|database-release-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
+        /^(?:readiness|database-release-receipt|legacy-reconciliation-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
           entry.name
         )
       ) {
@@ -152,9 +154,19 @@ function sourceChecks(): SourceCheck[] {
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
+  const readinessJob =
+    ci.match(
+      /(?:^|\r?\n)  readiness:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
   const databaseRelease = read("scripts/verify-database-release.ts");
   const databaseReleaseWorkflow = read(
     ".github/workflows/database-release.yml"
+  );
+  const demoReconciliation = read(
+    "src/memory/demo-reconciliation.ts"
+  );
+  const reconciliationRehearsal = read(
+    "scripts/reconcile-demo-memory-rehearsal.ts"
   );
   const scopedServingQueryVerifier =
     databaseRelease.match(
@@ -198,6 +210,12 @@ function sourceChecks(): SourceCheck[] {
     "trap - EXIT",
   ];
   const fullRecallFragments = [
+    ".database.activeMemories == .memory.persisted",
+    ".memory.persisted == 9",
+    ".memory.idempotencyKeys == .memory.persisted",
+    ".memory.contentDigests == .memory.persisted",
+    ".memory.storeVerified == true",
+    '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
     '-X POST "$APPLICATION_URL/api/recall"',
     ".recalled > 0",
     "(.citations | length) > 0",
@@ -276,6 +294,34 @@ function sourceChecks(): SourceCheck[] {
       "Managed MCP source, workflow, or live evidence document is missing."
     ),
     sourceCheck(
+      "memory.legacy-reconciliation",
+      "Agentic Memory Design",
+      /withSerializableRetry/iu.test(demoReconciliation) &&
+        /status = 'superseded'/iu.test(demoReconciliation) &&
+        /superseded_by/iu.test(demoReconciliation) &&
+        /historicalRowsPreserved:\s*true/iu.test(demoReconciliation) &&
+        !/DELETE\s+FROM\s+agent_memory/iu.test(demoReconciliation) &&
+        /db:memory:reconcile/iu.test(databaseReleaseWorkflow) &&
+        /legacy-reconciliation-receipt\.json/iu.test(
+          databaseReleaseWorkflow
+        ) &&
+        !/\.mode\s*==\s*"clean"/u.test(databaseReleaseWorkflow) &&
+        /\.mode\s*==\s*"migrated"\s+and\s+\.activeBefore\s*==\s*6\s+and\s+\.alreadySuperseded\s*==\s*0\s+and\s+\.supersededThisRun\s*==\s*6\s+and\s+\.linkedAfter\s*==\s*6/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.mode\s*==\s*"already-reconciled"\s+and\s+\.activeBefore\s*==\s*0\s+and\s+\.alreadySuperseded\s*==\s*6\s+and\s+\.supersededThisRun\s*==\s*0\s+and\s+\.linkedAfter\s*==\s*6/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /alteredCandidateRejected:\s*true/iu.test(
+          reconciliationRehearsal
+        ) &&
+        /transactionRollbackAfterMutation:\s*true/iu.test(
+          reconciliationRehearsal
+        ),
+      "Protected CI supersedes only exact legacy duplicates, preserves history, proves rejection plus post-mutation rollback, and emits a sanitized receipt.",
+      "Exact legacy-memory reconciliation, rollback rehearsal, or protected receipt gating is incomplete."
+    ),
+    sourceCheck(
       "tech.ci-matrix",
       "Technological Implementation",
       /frontend-iac:/u.test(ci) &&
@@ -285,6 +331,22 @@ function sourceChecks(): SourceCheck[] {
         /test:e2e/iu.test(ci),
       "CI gates backend, real CockroachDB, node loss, security, load, frontend, SAM, and browser journeys.",
       "One or more release-critical CI jobs are missing."
+    ),
+    sourceCheck(
+      "tech.fail-closed-ci-aggregate",
+      "Technological Implementation",
+      /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac\]/u.test(
+        readinessJob
+      ) &&
+        /^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/mu.test(readinessJob) &&
+        /^    steps:\r?\n      - name: Require every prerequisite CI job to pass\s*$/mu.test(
+          readinessJob
+        ) &&
+        /length == 7 and all\(\.\[\];\s*\.result == "success"\)/u.test(
+          readinessJob
+        ),
+      "The aggregate readiness check always runs and fails unless every prerequisite CI job succeeded.",
+      "The aggregate readiness check can be skipped or does not fail closed over every prerequisite."
     ),
     sourceCheck(
       "tech.immutable-supply-chain",
@@ -317,11 +379,17 @@ function sourceChecks(): SourceCheck[] {
         /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/iu.test(
           databaseRelease
         ) &&
-        /schemaVersion:\s*4/u.test(databaseRelease) &&
+        /schemaVersion:\s*5/u.test(databaseRelease) &&
         /scopedServingQueriesRejectCanaries:\s*true/u.test(
           databaseRelease
         ) &&
-        /\.schemaVersion\s*==\s*4/u.test(databaseReleaseWorkflow) &&
+        /\.schemaVersion\s*==\s*5/u.test(databaseReleaseWorkflow) &&
+        /\.proofs\.durableStoreIntegrity\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.canonicalActiveMemories\s*==\s*9/u.test(
+          databaseReleaseWorkflow
+        ) &&
         /\.proofs\.scopedServingQueriesRejectCanaries\s*==\s*true/u.test(
           databaseReleaseWorkflow
         ) &&
@@ -543,8 +611,15 @@ function validHostedUrl(value: string | undefined): boolean {
   try {
     const url = new URL(value);
     return (
+      url.href === `${CANONICAL_DEMO_URL}/` &&
       url.protocol === "https:" &&
-      !/lambda-url\.us-west-2\.on\.aws$/iu.test(url.hostname)
+      url.origin === CANONICAL_DEMO_URL &&
+      url.pathname === "/" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.port === "" &&
+      url.search === "" &&
+      url.hash === ""
     );
   } catch {
     return false;

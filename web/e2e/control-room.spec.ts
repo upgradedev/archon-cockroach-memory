@@ -50,6 +50,13 @@ async function installDeterministicApi(page: Page): Promise<void> {
         },
         embeddingModel: "amazon.titan-embed-text-v2:0",
         narrationModel: "eu.anthropic.claude-sonnet-4-6",
+        memory: {
+          persisted: 9,
+          idempotencyKeys: 9,
+          contentDigests: 9,
+          storeVerified: true,
+          evidence: "live bounded fixed-scope payload-digest verification",
+        },
         scope,
         features: [
           "role-bound fixed synthetic scope",
@@ -182,6 +189,18 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
 
   await expect(page.getByText("CockroachDB", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Fixed synthetic public dataset · read-only")).toBeVisible();
+  await expect(page.getByTestId("store-proof")).toHaveText("Store verified");
+  await expect(page.getByText("9 persistent records", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      "9/9 unique idempotency keys · 9/9 payload-bound SHA-256 digests",
+      { exact: true }
+    )
+  ).toBeVisible();
+  await expect(page.getByText("public mutation disabled", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("live bounded fixed-scope payload-digest verification", { exact: true })
+  ).toBeVisible();
   await expect(page.getByText("region evidence · cockroach-cloud-api-release-gate")).toBeVisible();
   if (live) {
     await expect(

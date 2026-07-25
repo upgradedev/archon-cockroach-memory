@@ -20,6 +20,7 @@ import {
   recall,
   listForAudit,
   memoryCount,
+  memoryStoreProof,
   type RecallQueryRow,
 } from "../src/memory/memory.js";
 import { handleProof } from "../src/http/handler.js";
@@ -68,6 +69,47 @@ test("3. Integration: memoryCount queries DB and reflects the inserted memory", 
   const count = await memoryCount(COMPANY);
   assert.ok(count >= 1);
 });
+
+test("3b. Integration: store proof verifies durable idempotency and digest coverage", async () => {
+  const proof = await memoryStoreProof(COMPANY, new FakeEmbedder().modelId);
+  assert.ok(proof.persisted >= 1);
+  assert.equal(proof.idempotencyKeys, proof.persisted);
+  assert.equal(proof.contentDigests, proof.persisted);
+  assert.equal(proof.storeVerified, true);
+  assert.equal(
+    proof.evidence,
+    "live bounded fixed-scope payload-digest verification"
+  );
+});
+
+test(
+  "3c. Integration: store proof rejects a syntactically valid but stale payload digest",
+  { skip: !REAL_DB },
+  async () => {
+    const embedder = new FakeEmbedder();
+    const id = await remember(embedder, {
+      company: "TamperProofCorp",
+      kind: "validation",
+      content: "The live proof must bind this payload to its digest.",
+      idempotencyKey: "tamper-proof-v1",
+    });
+    await query(
+      `UPDATE agent_memory
+          SET content_hash = repeat('0', 64)
+        WHERE id = $1`,
+      [id]
+    );
+
+    const proof = await memoryStoreProof(
+      "TamperProofCorp",
+      embedder.modelId
+    );
+    assert.equal(proof.persisted, 1);
+    assert.equal(proof.idempotencyKeys, 1);
+    assert.equal(proof.contentDigests, 0);
+    assert.equal(proof.storeVerified, false);
+  }
+);
 
 test("4. Integration: recall finds memory by vector cosine similarity matching", async () => {
   const embedder = new FakeEmbedder();
@@ -267,12 +309,20 @@ test(
   "20. Integration: live proof verifies the exact C-SPANN definition",
   { skip: !REAL_DB },
   async () => {
+    const embedder = new FakeEmbedder();
+    await remember(embedder, {
+      kind: "validation",
+      company: "Helios SA",
+      content: "Durable-store proof integration fixture.",
+      idempotencyKey: "integration-store-proof-v1",
+    });
     const proof = await handleProof(
-      new MemoryAgent(new FakeEmbedder(), new FakeNarrator())
+      new MemoryAgent(embedder, new FakeNarrator())
     );
     assert.equal(proof.status, 200);
     const vector = proof.body.vectorIndex as Record<string, unknown>;
     const database = proof.body.database as Record<string, unknown>;
+    const memory = proof.body.memory as Record<string, unknown>;
     assert.equal(vector.enabled, true);
     assert.equal(vector.name, EXPECTED_VECTOR_INDEX_NAME);
     assert.equal(
@@ -282,6 +332,13 @@ test(
     assert.match(String(vector.definitionFingerprint), /^[a-f0-9]{64}$/u);
     assert.match(String(database.version), /CockroachDB/iu);
     assert.ok(String(database.runtimePrincipal).length > 0);
+    assert.equal(memory.storeVerified, true);
+    assert.equal(memory.persisted, memory.idempotencyKeys);
+    assert.equal(memory.persisted, memory.contentDigests);
+    assert.equal(
+      memory.evidence,
+      "live bounded fixed-scope payload-digest verification"
+    );
   }
 );
 

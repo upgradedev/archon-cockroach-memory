@@ -11,6 +11,8 @@
   "scripts": {
     "db:schema": "tsx scripts/apply-schema.ts",
     "db:migration:rehearsal": "tsx scripts/schema-migration-rehearsal.ts",
+    "db:memory:reconcile": "tsx scripts/reconcile-demo-memory.ts",
+    "db:memory:reconciliation:rehearsal": "tsx scripts/reconcile-demo-memory-rehearsal.ts",
     "db:release:verify": "tsx scripts/verify-database-release.ts",
     "memory:demo": "tsx scripts/demo-memory.ts",
     "benchmark": "tsx scripts/benchmark.ts",

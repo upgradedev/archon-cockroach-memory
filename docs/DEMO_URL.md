@@ -1,43 +1,57 @@
 # Judge application and legacy cutover
 
-## Current judge URL
+## Canonical judge URL
 
-The unrestricted CloudFront production URL is not recorded until the exact
-main-branch candidate passes:
+The unrestricted production application is:
 
-1. source CI;
-2. staging deployment and real health/recall/audit/proof smoke;
-3. hosted staging Playwright;
-4. identical-candidate production promotion;
-5. production smoke and hosted Playwright.
+**https://d2s5v0o0eg2aaw.cloudfront.net**
 
-After those receipts exist, this file will contain the production URL and commit
-SHA. Until then, repository readiness must report the demo deliverable as pending.
+The first fully verified exact-SHA cutover baseline is:
 
-## Legacy `us-west-2` workload
+- commit
+  [`2202d758b390efbd23ecd4532196f879f227f282`](https://github.com/upgradedev/archon-cockroach-memory/commit/2202d758b390efbd23ecd4532196f879f227f282);
+- [Deploy AWS run 30142557871](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871);
+- source CI and exact-SHA CodeQL;
+- protected database schema/seed/RLS plus both runtime-principal C-SPANN paths;
+- staging canary, full API smoke, and hosted Chromium journey;
+- identical-candidate production promotion, full smoke, and hosted Chromium journey;
+- final production CockroachDB Cloud Managed MCP read-only audit.
 
-The old IAM-authenticated Lambda Function URL is a private historical smoke
-surface, not a public judge demo. It remains temporarily available only to avoid
-an unverified cutover.
+The URL is a private-S3 React + Tailwind application behind CloudFront, with
+same-origin API Gateway and Lambda services in `eu-west-1`. It requires no
+credentials. Submission eligibility accepts this exact HTTPS CloudFront root
+only; paths, query strings, fragments, credentials, and substitute hosts fail
+closed.
 
-Known legacy resources:
+## Retired legacy `us-west-2` workload
 
-- Lambda `archon-cockroach-memory`
-- its IAM-authenticated Function URL
-- log group `/aws/lambda/archon-cockroach-memory`
-- role `archon-cockroach-memory-role` and its policies
-- a legacy Lambda environment containing `DATABASE_URL`
+The historical IAM-authenticated Function URL was never the public judge demo.
+After the `eu-west-1` production and Managed MCP gates passed, the dedicated
+legacy resources were retired on 2026-07-25:
 
-Retirement occurs only after the new `eu-west-1` public production receipts and
-Managed MCP audit pass. The retirement order is:
+- Function URL deleted;
+- Lambda `archon-cockroach-memory` deleted;
+- log group `/aws/lambda/archon-cockroach-memory` deleted (2,082 bytes);
+- inline `bedrock-invoke` policy and dedicated
+  `archon-cockroach-memory-role` deleted;
+- shared AWS-managed `AWSLambdaBasicExecutionRole` policy only detached.
 
-1. delete the legacy Function URL;
-2. delete the Lambda;
-3. remove the dedicated log group after the retention decision;
-4. detach/delete the dedicated role policies and role;
-5. revoke the CockroachDB login embedded in the legacy Lambda configuration;
-6. run a scoped final `us-west-2` inventory and record a sanitized receipt here.
+Final direct inventory:
 
-`aws/deploy-lambda.sh` is break-glass only. It requires both
+```text
+ArchonLambdaFunctionsInUsWest2: []
+ArchonLambdaLogGroupsInUsWest2: []
+LegacyDedicatedIamRoles: []
+SharedCockroachOperatorCredentialTouched: false
+```
+
+The deleted AWS resources are not directly recoverable; their source remains in
+Git. The SQL credential found in the old Lambda was intentionally not revoked:
+it is the same operator credential still used by the protected database-release
+pipeline. Its migration requires a separate two-principal
+pending→prove→activate→observe→retire workflow. It is no longer attached to a
+`us-west-2` compute workload.
+
+`aws/deploy-lambda.sh` remains break-glass only. It requires both
 `ALLOW_LEGACY_DEPLOY=1` and an explicit region, uses a temporary package
 directory, and cannot silently recreate a default `us-west-2` workload.

@@ -145,6 +145,37 @@ jobs:
 
           npm run db:schema
           npm run demo:seed
+          npm run --silent db:memory:reconcile > legacy-reconciliation-receipt.json
+          jq -e \
+            --arg target "$TARGET_SHA" \
+            '.schemaVersion == 1 and
+             .ok == true and
+             .migrationId == "legacy-helios-event-v1" and
+             .targetSha == $target and
+             (.mode == "migrated" or
+              .mode == "already-reconciled") and
+             (.manifestSha256 | test("^[a-f0-9]{64}$")) and
+             (.targetRowSetSha256 | test("^[a-f0-9]{64}$")) and
+             .targetRowSetSha256 !=
+               "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" and
+             .expectedLegacyDuplicates == 6 and
+             ((.mode == "migrated" and
+               .activeBefore == 6 and
+               .alreadySuperseded == 0 and
+               .supersededThisRun == 6 and
+               .linkedAfter == 6) or
+              (.mode == "already-reconciled" and
+               .activeBefore == 0 and
+               .alreadySuperseded == 6 and
+               .supersededThisRun == 0 and
+               .linkedAfter == 6)) and
+             .canonicalActive == 9 and
+             .activeIntegrityGapsAfter == 0 and
+             .activeDistinctIdempotencyKeys == 9 and
+             .activeDistinctContentDigests == 9 and
+             .historicalRowsPreserved == true and
+             .secretMaterialPrinted == false' \
+            legacy-reconciliation-receipt.json
 
           if ! aws secretsmanager describe-secret \
             --secret-id "$STAGING_DATABASE_SECRET_ID" \
@@ -166,7 +197,7 @@ jobs:
           npm run --silent db:release:verify > database-release-receipt.json
           jq -e \
             --arg target "$TARGET_SHA" \
-            '.schemaVersion == 4 and
+            '.schemaVersion == 5 and
              .ok == true and
              .targetSha == $target and
              .region == "eu-west-1" and
@@ -180,6 +211,10 @@ jobs:
              .proofs.companyScopedVectorIndex == true and
              .proofs.companyKindScopedVectorIndex == true and
              .proofs.fixedScopeServingViews == true and
+             .proofs.durableStoreIntegrity == true and
+             .proofs.canonicalActiveMemories == 9 and
+             .proofs.distinctIdempotencyKeys == 9 and
+             .proofs.distinctContentDigests == 9 and
              .proofs.scopedServingQueriesRejectCanaries == true and
              .proofs.isolationCanaryCount == 3 and
              .proofs.isolatedNonLoginServingViewOwner == true and
@@ -208,6 +243,10 @@ jobs:
                  (.principal | test("^archon_staging_[a-z0-9]{6,40}$"))) or
                 (.environment == "production" and
                  (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+               .visibleMemories == 9 and
+               .canonicalMemories == 9 and
+               .distinctIdempotencyKeys == 9 and
+               .distinctContentDigests == 9 and
                .cspannRecall.noKind.servingPath ==
                  "public-no-kind-cspann" and
                .cspannRecall.noKind.view ==
@@ -249,6 +288,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: database-release-${{ env.TARGET_SHA }}
-          path: database-release-receipt.json
+          path: |
+            database-release-receipt.json
+            legacy-reconciliation-receipt.json
           if-no-files-found: error
           retention-days: 90

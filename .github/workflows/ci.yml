@@ -84,6 +84,7 @@ jobs:
           done
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_migration"
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_reconciliation"
           # Fail loudly if it never came up.
           docker exec crdb cockroach sql --insecure -e "SELECT 1"
 
@@ -91,6 +92,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://root@localhost:26257/archon_migration?sslmode=disable
         run: npm run db:migration:rehearsal
+
+      - name: Rehearse exact legacy-memory rejection, post-mutation rollback, and rerun
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/archon_reconciliation?sslmode=disable
+        run: npm run db:memory:reconciliation:rehearsal
 
       - name: Apply schema (creates the VECTOR(1024) memory table + vector index)
         run: npm run db:schema
@@ -361,16 +367,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Stage 3 — the READINESS GATE. Runs ONLY after the offline suite (build-test), the
-  # node-kill survival job (cluster-survival), the pen-test job, and the load job are
-  # green, so its checks reflect real CI state, not just committed files.
-  # Fails unless every repository-verifiable source check passes. Submission-only
-  # requirements remain visibly pending and cannot masquerade as eligibility.
+  # Stage 3 — the fail-closed READINESS GATE. It always evaluates after every
+  # prerequisite reaches a terminal state and explicitly fails if any prerequisite
+  # failed, was cancelled, or was skipped. Submission-only requirements remain
+  # visibly pending and cannot masquerade as eligibility.
   readiness:
-    needs: [dep-audit, build-test, cluster-survival, pen-test, load, frontend-iac]
+    needs: [secret-scan, dep-audit, build-test, cluster-survival, pen-test, load, frontend-iac]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Require every prerequisite CI job to pass
+        env:
+          PREREQUISITE_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -e 'length == 7 and all(.[]; .result == "success")' <<<"$PREREQUISITE_RESULTS"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:

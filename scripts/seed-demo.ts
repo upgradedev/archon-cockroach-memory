@@ -11,6 +11,8 @@
 //
 // Every write is idempotent. The production seed never deletes existing memory.
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MemoryAgent } from "../src/agents/memory-agent.js";
 import { defaultEmbedder } from "../src/memory/embeddings.js";
 import type { Embedder } from "../src/memory/embeddings.js";
@@ -62,8 +64,9 @@ export function demoEvent(): PayrollEvent {
   };
 }
 
-async function main() {
-  const embedder = defaultEmbedder();
+export async function seedDemo(
+  embedder: Embedder = defaultEmbedder()
+): Promise<void> {
   const agent = new MemoryAgent(embedder, new FakeNarrator());
   const ids = await agent.ingestEvent(demoEvent());
   const auditIds = await Promise.all([
@@ -164,7 +167,6 @@ async function main() {
       "runtime verification must prove wrong-company, wrong-tenant, and retracted rows are invisible."
   );
   console.log(`total memories now: ${await memoryCount()}`);
-  await closePool();
 }
 
 async function seedIsolationCanary(
@@ -203,10 +205,17 @@ async function seedIsolationCanary(
   );
 }
 
-main().catch(async (error) => {
-  await closePool().catch(() => undefined);
-  console.error("Demo seed failed", {
-    errorType: error instanceof Error ? error.name : "UnknownError",
-  });
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
+const isMain = invokedPath === resolve(fileURLToPath(import.meta.url));
+if (isMain) {
+  seedDemo()
+    .catch((error) => {
+      console.error("Demo seed failed", {
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      });
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await closePool().catch(() => undefined);
+    });
+}

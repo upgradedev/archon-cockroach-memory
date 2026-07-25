@@ -161,7 +161,7 @@ secret scan
   → source-readiness gate
   → build once
   → cryptographic candidate receipt
-  → protected database release (fail-closed RLS + seed + two-principal C-SPANN plan/execution probes)
+  → protected database release (exact legacy supersession + payload-digest proof + fail-closed RLS + two-principal C-SPANN probes)
   → OIDC staging deploy + candidate-scoped 10%/5m proof-and-recall canary
   → full real recall smoke + hosted Playwright
   → identical-candidate production promotion
@@ -260,12 +260,13 @@ generated video assets.
 |---|---|
 | Live CockroachDB Cloud Basic cluster, AWS `eu-west-1` | Verified |
 | Historical native-vector plans / recall benchmark | Verified |
-| Runtime-principal company + kind C-SPANN serving gate | Implemented; must pass the protected database release |
-| Live CockroachDB Cloud Managed MCP read-only proof | Verified |
+| Runtime-principal company + kind C-SPANN serving gate | Verified in the [exact-SHA protected release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871) |
+| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Implemented; exposed read-only in `/api/proof` |
+| Live CockroachDB Cloud Managed MCP read-only proof | Verified after production in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871) |
 | Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Verified |
-| Control Room, protected database release, zero-IAM SAM app stack, OIDC CI/CD source | Implemented; must pass CI |
-| New unrestricted CloudFront production URL and hosted receipts | Pending deployment |
-| Legacy `us-west-2` Lambda retirement | After verified cutover |
+| Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Verified end to end |
+| Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |
+| Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
 | Final public video, post, and Devpost form | Deliberately last |
 
 Run `npm run readiness` for separate source-readiness and submission-eligibility

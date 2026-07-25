@@ -12,7 +12,11 @@ import {
   normalize,
 } from "../src/memory/embeddings.js";
 import { toVectorLiteral } from "../src/db/client.js";
-import { buildRecallQuery } from "../src/memory/memory.js";
+import {
+  buildRecallQuery,
+  canonicalMemoryPayload,
+  memoryContentDigest,
+} from "../src/memory/memory.js";
 import {
   EXPECTED_KIND_VECTOR_INDEX_NAME,
   EXPECTED_VECTOR_INDEX_NAME,
@@ -61,6 +65,32 @@ test("overlapping text is more similar than disjoint text", async () => {
 // NOT the pgvector extension — this entry's index is CockroachDB-native C-SPANN.
 test("toVectorLiteral renders the pgvector-style VECTOR text literal", () => {
   assert.equal(toVectorLiteral([0.1, 0.2, 0.3]), "[0.1,0.2,0.3]");
+});
+
+test("memory integrity digest is canonical, scoped, and payload-sensitive", () => {
+  const input = {
+    kind: "validation" as const,
+    company: "Helios SA",
+    period: "2026-04",
+    sourceRef: "RECON-1",
+    content: "The reconciliation is complete.",
+    metadata: { source: "verified", amount: 42 },
+  };
+  const reordered = {
+    ...input,
+    metadata: { amount: 42, source: "verified" },
+  };
+  assert.equal(canonicalMemoryPayload(input), canonicalMemoryPayload(reordered));
+  assert.equal(memoryContentDigest(input), memoryContentDigest(reordered));
+  assert.match(memoryContentDigest(input), /^[a-f0-9]{64}$/u);
+  assert.notEqual(
+    memoryContentDigest(input),
+    memoryContentDigest({ ...input, content: "The reconciliation changed." })
+  );
+  assert.notEqual(
+    memoryContentDigest(input),
+    memoryContentDigest({ ...input, tenantId: "other-tenant" })
+  );
 });
 
 test("shared recall query routes only the fixed public scope through serving views", () => {

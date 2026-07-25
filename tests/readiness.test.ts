@@ -50,6 +50,74 @@ test("readiness: source readiness cannot masquerade as submission eligibility", 
   }
 });
 
+test("readiness: only the verified canonical CloudFront root is an eligible demo", () => {
+  const previous = process.env.SUBMISSION_DEMO_URL;
+  try {
+    process.env.SUBMISSION_DEMO_URL =
+      "https://d2s5v0o0eg2aaw.cloudfront.net";
+    assert.equal(
+      evaluate().eligibility.requirements.find(
+        (requirement) => requirement.id === "unrestricted-functional-demo"
+      )?.status,
+      "complete"
+    );
+
+    for (const invalid of [
+      "http://d2s5v0o0eg2aaw.cloudfront.net",
+      "https://example.com",
+      "https://d0000000000000.cloudfront.net",
+      "https://demo@d2s5v0o0eg2aaw.cloudfront.net",
+      "https://d2s5v0o0eg2aaw.cloudfront.net/api/proof",
+      "https://d2s5v0o0eg2aaw.cloudfront.net?claim=verified",
+      "https://d2s5v0o0eg2aaw.cloudfront.net#proof",
+      "https://d2s5v0o0eg2aaw.cloudfront.net?",
+      "https://d2s5v0o0eg2aaw.cloudfront.net#",
+    ]) {
+      process.env.SUBMISSION_DEMO_URL = invalid;
+      assert.equal(
+        evaluate().eligibility.requirements.find(
+          (requirement) => requirement.id === "unrestricted-functional-demo"
+        )?.status,
+        "pending",
+        invalid
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SUBMISSION_DEMO_URL;
+    } else {
+      process.env.SUBMISSION_DEMO_URL = previous;
+    }
+  }
+});
+
+test("readiness: aggregate CI gate fails closed over every prerequisite", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const readinessJob = workflow.match(
+    /(?:^|\r?\n)  readiness:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(readinessJob);
+  assert.match(
+    readinessJob,
+    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac\]/u
+  );
+  assert.match(
+    readinessJob,
+    /^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/mu
+  );
+  assert.match(
+    readinessJob,
+    /^    steps:\r?\n      - name: Require every prerequisite CI job to pass\s*$/mu
+  );
+  assert.match(
+    readinessJob,
+    /jq -e 'length == 7 and all\(\.\[\]; \.result == "success"\)'/u
+  );
+});
+
 test("readiness: required tool story is Vector + live Managed MCP", () => {
   const report = evaluate();
   assert.equal(
@@ -59,6 +127,12 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
   );
   assert.equal(
     report.checks.find((check) => check.id === "memory.managed-mcp")?.status,
+    "pass"
+  );
+  assert.equal(
+    report.checks.find(
+      (check) => check.id === "memory.legacy-reconciliation"
+    )?.status,
     "pass"
   );
   assert.equal(
@@ -75,12 +149,44 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
   );
 });
 
+test("readiness: protected legacy reconciliation requires preserved production history", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/database-release.yml", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(workflow, /\.mode == "clean"/u);
+  assert.match(
+    workflow,
+    /\.mode == "migrated" and\s*\.activeBefore == 6 and\s*\.alreadySuperseded == 0 and\s*\.supersededThisRun == 6 and\s*\.linkedAfter == 6/u
+  );
+  assert.match(
+    workflow,
+    /\.mode == "already-reconciled" and\s*\.activeBefore == 0 and\s*\.alreadySuperseded == 6 and\s*\.supersededThisRun == 0 and\s*\.linkedAfter == 6/u
+  );
+  assert.match(
+    workflow,
+    /\.targetRowSetSha256 !=\s*"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"/u
+  );
+
+  const rehearsal = readFileSync(
+    new URL("../scripts/reconcile-demo-memory-rehearsal.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(rehearsal, /alteredCandidateRejected:\s*true/u);
+  assert.match(rehearsal, /transactionRollbackAfterMutation:\s*true/u);
+  assert.match(rehearsal, /intentional post-mutation reconciliation rollback sentinel/u);
+});
+
 test("readiness: database release requires both C-SPANN paths from both runtime principals", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/database-release.yml", import.meta.url),
     "utf8"
   );
-  assert.match(workflow, /\.schemaVersion == 4/u);
+  assert.match(workflow, /\.schemaVersion == 5/u);
+  assert.match(workflow, /\.proofs\.durableStoreIntegrity == true/u);
+  assert.match(workflow, /\.proofs\.canonicalActiveMemories == 9/u);
+  assert.match(workflow, /\.proofs\.distinctIdempotencyKeys == 9/u);
+  assert.match(workflow, /\.proofs\.distinctContentDigests == 9/u);
   assert.match(
     workflow,
     /\.proofs\.runtimePrincipalCspannPlanAndExecute == true/u
@@ -121,7 +227,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../scripts/verify-database-release.ts", import.meta.url),
     "utf8"
   );
-  assert.match(verifier, /schemaVersion: 4/u);
+  assert.match(verifier, /schemaVersion: 5/u);
   assert.match(verifier, /scopedServingQueriesRejectCanaries: true/u);
   const scopedVerifier = verifier.match(
     /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
@@ -180,6 +286,12 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
     assert.match(block, /-X POST "\$APPLICATION_URL\/api\/recall"/u);
     assert.ok(block.includes(safeStatusGate));
     for (const contract of [
+      ".database.activeMemories == .memory.persisted",
+      ".memory.persisted == 9",
+      ".memory.idempotencyKeys == .memory.persisted",
+      ".memory.contentDigests == .memory.persisted",
+      ".memory.storeVerified == true",
+      '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
       ".recalled > 0",
       "(.citations | length) > 0",
       '(.answer | type == "string" and length > 0)',

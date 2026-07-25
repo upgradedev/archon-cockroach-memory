@@ -16,7 +16,7 @@ import { MemoryAgent } from "../agents/memory-agent.js";
 import { defaultEmbedder, type Embedder } from "../memory/embeddings.js";
 import { defaultNarrator, type Narrator } from "../agents/narrator.js";
 import type { MemoryKind } from "../memory/memory.js";
-import { memoryCount } from "../memory/memory.js";
+import { memoryStoreProof } from "../memory/memory.js";
 import {
   PUBLIC_DEMO_COMPANY,
   publicDemoScope,
@@ -264,8 +264,8 @@ export async function handleAudit(
 export async function handleProof(
   agent: MemoryAgent = buildAgent()
 ): Promise<RecallResponse> {
-  const [activeMemories, databaseRows, indexRows] = await Promise.all([
-    memoryCount(PUBLIC_DEMO_COMPANY, agent.embeddingModelId),
+  const [storeProof, databaseRows, indexRows] = await Promise.all([
+    memoryStoreProof(PUBLIC_DEMO_COMPANY, agent.embeddingModelId),
     query<{
       version: string;
       database_name: string;
@@ -315,8 +315,9 @@ export async function handleProof(
         runtimePrincipal: database?.database_user ?? null,
         region: cockroachRegion,
         regionEvidence,
-        activeMemories,
+        activeMemories: storeProof.persisted,
       },
+      memory: storeProof,
       vectorIndex: {
         engine: "native CockroachDB C-SPANN",
         enabled: verifiedIndex,
