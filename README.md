@@ -96,8 +96,9 @@ v26.2 represents RLS as an optimizer barrier, the production paths run through
 two dematerialized, fixed-scope serving views. The database release uses the
 exact application query to `EXPLAIN` and execute both paths as the real staging
 and production principals, then probes both views with the three isolation
-canary vectors without repeating tenant/company/status filters. `EXPLAIN`
-evidence, recall@k measurements,
+canary vectors while reasserting every prefix equality required for a legal
+C-SPANN search. Separate exact catalog, owner, grant, and view-definition checks
+prove the fixed boundary. `EXPLAIN` evidence, recall@k measurements,
 multi-range fan-out, RF=3 distribution, and node-loss survival are recorded in
 [docs/BENCHMARK.md](./docs/BENCHMARK.md) and
 [docs/CLOUD_SMOKE.md](./docs/CLOUD_SMOKE.md).

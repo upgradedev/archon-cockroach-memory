@@ -73,6 +73,18 @@ test("shared recall query routes only the fixed public scope through serving vie
   assert.equal(noKind.servingPath, "public-no-kind-cspann");
   assert.match(noKind.text, /LIMIT 50$/u);
   assert.doesNotMatch(noKind.text, /LIMIT \$\d+/u);
+  assert.match(
+    noKind.text,
+    /WHERE tenant_id = \$2 AND embed_model = \$3 AND status = \$4 AND company = \$5/u
+  );
+  assert.deepEqual(noKind.params, [
+    "[1]",
+    "public-demo",
+    "model-v1",
+    "active",
+    "Helios SA",
+  ]);
+  assert.doesNotMatch(noKind.text, /idempotency_key\s*=/u);
 
   const kind = buildRecallQuery("[1]", "model-v1", {
     company: "Helios SA",
@@ -81,6 +93,19 @@ test("shared recall query routes only the fixed public scope through serving vie
   assert.equal(kind.relation, PUBLIC_KIND_RECALL_VIEW_NAME);
   assert.equal(kind.expectedIndexName, EXPECTED_KIND_VECTOR_INDEX_NAME);
   assert.equal(kind.servingPath, "public-kind-cspann");
+  assert.match(
+    kind.text,
+    /WHERE tenant_id = \$2 AND embed_model = \$3 AND status = \$4 AND kind = \$5 AND company = \$6/u
+  );
+  assert.deepEqual(kind.params, [
+    "[1]",
+    "public-demo",
+    "model-v1",
+    "active",
+    "insight",
+    "Helios SA",
+  ]);
+  assert.doesNotMatch(kind.text, /idempotency_key\s*=/u);
 
   const defaultPublic = buildRecallQuery("[1]", "model-v1");
   assert.equal(defaultPublic.relation, PUBLIC_RECALL_VIEW_NAME);

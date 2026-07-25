@@ -166,7 +166,7 @@ jobs:
           npm run --silent db:release:verify > database-release-receipt.json
           jq -e \
             --arg target "$TARGET_SHA" \
-            '.schemaVersion == 3 and
+            '.schemaVersion == 4 and
              .ok == true and
              .targetSha == $target and
              .region == "eu-west-1" and
@@ -180,7 +180,7 @@ jobs:
              .proofs.companyScopedVectorIndex == true and
              .proofs.companyKindScopedVectorIndex == true and
              .proofs.fixedScopeServingViews == true and
-             .proofs.servingViewCanariesRejected == true and
+             .proofs.scopedServingQueriesRejectCanaries == true and
              .proofs.isolationCanaryCount == 3 and
              .proofs.isolatedNonLoginServingViewOwner == true and
              .proofs.servingViewOwnerPrivilegeBoundary ==
@@ -218,7 +218,7 @@ jobs:
                .cspannRecall.noKind.executed == true and
                .cspannRecall.noKind.scopeVerified == true and
                .cspannRecall.noKind.probeReturned == true and
-               .cspannRecall.noKind.viewBoundaryVerified == true and
+               .cspannRecall.noKind.scopedServingQueryVerified == true and
                .cspannRecall.noKind.isolationCanariesRejected == 3 and
                (.cspannRecall.noKind.returnedRows >= 1 and
                 .cspannRecall.noKind.returnedRows <= 5) and
@@ -235,7 +235,7 @@ jobs:
                .cspannRecall.kind.executed == true and
                .cspannRecall.kind.scopeVerified == true and
                .cspannRecall.kind.probeReturned == true and
-               .cspannRecall.kind.viewBoundaryVerified == true and
+               .cspannRecall.kind.scopedServingQueryVerified == true and
                .cspannRecall.kind.isolationCanariesRejected == 3 and
                (.cspannRecall.kind.returnedRows >= 1 and
                 .cspannRecall.kind.returnedRows <= 5) and

@@ -80,7 +80,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../.github/workflows/database-release.yml", import.meta.url),
     "utf8"
   );
-  assert.match(workflow, /\.schemaVersion == 3/u);
+  assert.match(workflow, /\.schemaVersion == 4/u);
   assert.match(
     workflow,
     /\.proofs\.runtimePrincipalCspannPlanAndExecute == true/u
@@ -90,18 +90,25 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(workflow, /public-kind-cspann/u);
   assert.match(
     workflow,
-    /\.cspannRecall\.noKind\.viewBoundaryVerified == true/u
+    /\.cspannRecall\.noKind\.scopedServingQueryVerified == true/u
   );
   assert.match(
     workflow,
-    /\.cspannRecall\.kind\.viewBoundaryVerified == true/u
+    /\.cspannRecall\.kind\.scopedServingQueryVerified == true/u
   );
-  assert.equal(
-    workflow.match(/isolationCanariesRejected == 3/gu)?.length,
-    2
+  assert.match(
+    workflow,
+    /\.cspannRecall\.noKind\.isolationCanariesRejected == 3/u
   );
-  assert.match(workflow, /isolationCanaryCount == 3/u);
-  assert.match(workflow, /servingViewCanariesRejected == true/u);
+  assert.match(
+    workflow,
+    /\.cspannRecall\.kind\.isolationCanariesRejected == 3/u
+  );
+  assert.match(workflow, /\.proofs\.isolationCanaryCount == 3/u);
+  assert.match(
+    workflow,
+    /\.proofs\.scopedServingQueriesRejectCanaries == true/u
+  );
   assert.match(
     workflow,
     /servingViewOwnerPrivilegeBoundary ==\s*\n?\s*"direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges"/u
@@ -114,16 +121,40 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../scripts/verify-database-release.ts", import.meta.url),
     "utf8"
   );
+  assert.match(verifier, /schemaVersion: 4/u);
+  assert.match(verifier, /scopedServingQueriesRejectCanaries: true/u);
+  const scopedVerifier = verifier.match(
+    /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
+  )?.[0];
+  assert.ok(scopedVerifier);
   assert.match(verifier, /EXPLAIN \$\{statement\.text\}/u);
   assert.match(
     verifier,
     /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/u
   );
-  assert.match(verifier, /verifyServingViewBoundary/u);
-  assert.match(verifier, /ISOLATION_CANARY_KEYS/u);
-  assert.match(verifier, /for \(const canary of canaryVectors\)/u);
-  assert.match(verifier, /leaked\.rows\.length !== 0/u);
-  assert.match(verifier, /SET vector_search_beam_size = 600/u);
+  assert.match(scopedVerifier, /for \(const canary of canaryVectors\)/u);
+  assert.match(scopedVerifier, /buildRecallQuery\(embedding, expectedModel/u);
+  assert.match(scopedVerifier, /company: "Helios SA"/u);
+  assert.match(scopedVerifier, /kind: input\.kind/u);
+  assert.match(scopedVerifier, /limit: 50/u);
+  assert.match(scopedVerifier, /!query\.fixedPublicScope/u);
+  assert.match(
+    scopedVerifier,
+    /query\.relation !== input\.expectedView/u
+  );
+  assert.match(
+    scopedVerifier,
+    /query\.expectedIndexName !== input\.expectedIndex/u
+  );
+  assert.match(
+    scopedVerifier,
+    /idempotency_key === canary\.idempotencyKey/u
+  );
+  assert.match(scopedVerifier, /\/idempotency_key\\s\*=\//u);
+  assert.match(scopedVerifier, /publicControlMissing/u);
+  assert.match(scopedVerifier, /scopedRows\.rows\.length < 1/u);
+  assert.match(scopedVerifier, /scopedRows\.rows\.length > 50/u);
+  assert.match(scopedVerifier, /SET vector_search_beam_size = 600/u);
   assert.match(verifier, /class ReleaseGateError extends Error/u);
   assert.match(verifier, /error instanceof ReleaseGateError/u);
 });
