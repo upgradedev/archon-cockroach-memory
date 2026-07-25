@@ -32,10 +32,9 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks detect --source . --redact --no-banner
 
-  # Stage 2a — dependency vulnerability audit (offline; runs in parallel with tests).
-  # --audit-level=high: low/moderate advisories are reported but do not fail the
-  # build (kept non-blocking to avoid transient-advisory noise); a high or critical
-  # vulnerability fails the job so it is surfaced, never silently suppressed.
+  # Stage 2a — dependency vulnerability audit (runs in parallel with tests).
+  # Runtime and development dependencies fail closed on moderate or higher
+  # advisories; low-only findings remain visible without blocking the release.
   dep-audit:
     needs: secret-scan
     runs-on: ubuntu-latest
@@ -48,8 +47,8 @@ jobs:
           cache: npm
       - name: Install deps
         run: npm ci
-      - name: npm audit (fail on high/critical)
-        run: npm audit --audit-level=high
+      - name: npm audit (fail on moderate/high/critical)
+        run: npm audit --audit-level=moderate
 
   build-test:
     needs: secret-scan
