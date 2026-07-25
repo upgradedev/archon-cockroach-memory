@@ -158,9 +158,19 @@ function sourceChecks(): SourceCheck[] {
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
+  const packageSource = read("package.json");
+  const managedMcpAudit = read("scripts/cloud-mcp-audit.ts");
+  const managedMcpAuditTests = read("tests/cloud-mcp-audit.test.ts");
+  const managedMcpWorkflow = read(
+    ".github/workflows/managed-mcp-audit.yml"
+  );
   const readinessJob =
     ci.match(
       /(?:^|\r?\n)  readiness:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const managedMcpDeployJob =
+    deploy.match(
+      /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
   const databaseRelease = read("scripts/verify-database-release.ts");
   const databaseReleaseWorkflow = read(
@@ -240,12 +250,36 @@ function sourceChecks(): SourceCheck[] {
     'contains("€15,375")',
     'contains("€6,775")',
   ];
+  const managedMcpGateFragments = [
+    'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
+    ".schemaVersion == 2",
+    '"tenantId":"public-demo"',
+    '"company":"Helios SA"',
+    '"status":"active"',
+    '"embedModel":"amazon.titan-embed-text-v2:0"',
+    '"index":"idx_agent_memory_active_scope"',
+    '"innerLimit":10',
+    '"outerLimit":1',
+    '"persisted":9',
+    '"idempotencyKeys":9',
+    '"contentDigests":9',
+    '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
+    "length == 4",
+    'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
+    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
+    'grep -Fq -- "$CCLOUD_API_KEY"',
+    'grep -Fq -- "$COCKROACH_CLUSTER_ID"',
+  ];
+  const managedMcpGateBlocks = [
+    managedMcpWorkflow,
+    managedMcpDeployJob,
+  ];
   const localArtifacts = generatedArtifactPaths();
   const workflowSources = [
     ci,
     deploy,
     read(".github/workflows/database-release.yml"),
-    read(".github/workflows/managed-mcp-audit.yml"),
+    managedMcpWorkflow,
     read(".github/workflows/benchmark.yml"),
     read(".github/workflows/codeql.yml"),
   ].join("\n");
@@ -299,11 +333,37 @@ function sourceChecks(): SourceCheck[] {
     sourceCheck(
       "memory.managed-mcp",
       "Agentic Memory Design",
-      has("scripts/cloud-mcp-audit.ts") &&
-        has(".github/workflows/managed-mcp-audit.yml") &&
-        contains("docs/MANAGED_MCP_SMOKE.md", /live read-only proof/iu),
-      "The live CockroachDB Cloud Managed MCP integration has a bounded read-only audit and receipt workflow.",
-      "Managed MCP source, workflow, or live evidence document is missing."
+      /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*2/iu.test(
+        managedMcpAudit
+      ) &&
+        /tenantId:\s*"public-demo"/u.test(managedMcpAudit) &&
+        /company:\s*"Helios SA"/u.test(managedMcpAudit) &&
+        /status:\s*"active"/u.test(managedMcpAudit) &&
+        /embedModel:\s*"amazon\.titan-embed-text-v2:0"/u.test(
+          managedMcpAudit
+        ) &&
+        /FORCE_INDEX=idx_agent_memory_active_scope/u.test(
+          managedMcpAudit
+        ) &&
+        /LIMIT 10[\s\S]*LIMIT 1/u.test(managedMcpAudit) &&
+        /parseManagedMcpAggregateResult/u.test(managedMcpAudit) &&
+        /assertExactKeys/u.test(managedMcpAudit) &&
+        /Number\.isSafeInteger/u.test(managedMcpAudit) &&
+        /structuredContent/u.test(managedMcpAudit) &&
+        /invokedDirectly/u.test(managedMcpAudit) &&
+        /persisted:\s*9[\s\S]*idempotencyKeys:\s*9[\s\S]*contentDigests:\s*9/u.test(
+          managedMcpAudit
+        ) &&
+        /tests\/cloud-mcp-audit\.test\.ts/u.test(packageSource) &&
+        /rejects malformed and ambiguous envelopes/u.test(
+          managedMcpAuditTests
+        ) &&
+        contains(
+          "docs/MANAGED_MCP_SMOKE.md",
+          /receipt schema v2/iu
+        ),
+      "Managed MCP v2 proves the exact fixed scope with an index-forced ten-row sentinel, strict typed aggregate parsing, and sanitized pure-test coverage.",
+      "Managed MCP v2 fixed scope, bounds, strict parser, import guard, tests, or evidence disclosure is incomplete."
     ),
     sourceCheck(
       "memory.legacy-reconciliation",
@@ -343,6 +403,19 @@ function sourceChecks(): SourceCheck[] {
         /test:e2e/iu.test(ci),
       "CI gates backend, real CockroachDB, node loss, security, load, frontend, SAM, and browser journeys.",
       "One or more release-critical CI jobs are missing."
+    ),
+    sourceCheck(
+      "tech.managed-mcp-receipt-v2-gate",
+      "Technological Implementation",
+      managedMcpGateBlocks.every(
+        (block) =>
+          block.length > 0 &&
+          managedMcpGateFragments.every((fragment) =>
+            block.includes(fragment)
+          )
+      ),
+      "Both protected Managed MCP paths enforce the exact v2 receipt shape, scope, bounds, 9/9/9 aggregate, four proof calls, and secret-value exclusions.",
+      "A Managed MCP workflow does not fail closed on the exact sanitized v2 receipt contract."
     ),
     sourceCheck(
       "tech.fail-closed-ci-aggregate",

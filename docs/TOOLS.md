@@ -71,18 +71,31 @@ Implementation:
 
 - `scripts/cloud-mcp-audit.ts` connects to CockroachDB Cloud's hosted Managed MCP
   endpoint with a service-account API key.
-- It permits only a bounded allowlist of read-only tools and fixed SQL.
+- It calls exactly `get_cluster`, `list_tables`, `get_table_schema`, and
+  `select_query`, in that order.
+- Its fixed SQL equality-constrains
+  `public-demo / Helios SA / active / amazon.titan-embed-text-v2:0`, forces
+  `idx_agent_memory_active_scope`, applies an inner `LIMIT 10` sentinel, and
+  applies an outer `LIMIT 1`.
+- It parses only `{ "rows": [one exact aggregate row] }` from either MCP text or
+  `structuredContent`, requires safe integer types, and fails unless persisted
+  rows, distinct idempotency keys, and valid distinct content digests are exactly
+  `9 / 9 / 9`.
 - It verifies cluster identity, table discovery, `agent_memory` schema, and a
   fixed-scope select.
-- It prints a sanitized JSON receipt with no API key, host, user, password, or
-  connection string.
+- Receipt schema v2 prints the exact scope, bound, aggregate, called-tool list,
+  and four proofs, with no API key, cluster identifier, host, user, password,
+  connection string, memory content, or embedding.
 - `.github/workflows/managed-mcp-audit.yml` runs only in the protected
-  `production-audit` environment and uploads the sanitized receipt.
+  `production-audit` environment, exact-gates every v2 field, checks that secret
+  values are absent, and uploads the sanitized receipt.
 
 Live proof:
 
-- [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) records the successful
-  read-only proof against the live AWS `eu-west-1` cluster.
+- [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
+  historical live read-only proof from the hardened v2 contract. Deploy AWS run
+  `30144685107` predates v2, so a new protected pass is required before the exact
+  scope/bound/`9 / 9 / 9` receipt is described as live-verified.
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
 application MCP server below.
