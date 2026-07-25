@@ -664,6 +664,14 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     ).length,
     2
   );
+  assert.equal(
+    (
+      bootstrap.match(
+        /log-group:\/aws\/(?:vendedlogs\/)?apigateway\/\$\{AppName\}-(?:staging|production):\*"/gu
+      ) ?? []
+    ).length,
+    4
+  );
   assert.match(restore, /--parameters "file:\/\/\$\{parameters_file\}"/u);
   assert.match(restore, /cloudformation create-change-set/u);
   assert.match(restore, /cloudformation execute-change-set/u);
