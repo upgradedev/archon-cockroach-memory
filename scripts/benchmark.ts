@@ -31,11 +31,14 @@
 // Runs fully OFFLINE — no AWS/Bedrock; the vectors carry no semantics, they exist
 // purely to stress and measure the index (Titan supplies real semantics in prod).
 //
-// SAFETY: DESTRUCTIVE — it TRUNCATEs agent_memory so the unscoped ANN query is
-// measured against exactly the benchmark corpus (the pure `vector search` plan, no
-// post-filtering). Point DATABASE_URL at an EPHEMERAL benchmark DB (CI runner, local
-// docker, throwaway cluster), never at a cluster holding real memories. It refuses
-// unless the DB name looks ephemeral or ALLOW_DESTRUCTIVE_BENCHMARK=1 is set.
+// SAFETY: DESTRUCTIVE — it deletes every agent_memory row so the unscoped ANN
+// query is measured against exactly the benchmark corpus (the pure `vector
+// search` plan, no post-filtering). DELETE is intentional: fixed-scope serving
+// views schema-lock their dependency against TRUNCATE/schema changes in
+// CockroachDB v26.2. Point DATABASE_URL at an EPHEMERAL benchmark DB (CI runner,
+// local docker, throwaway cluster), never at a cluster holding real memories. It
+// refuses unless the DB name looks ephemeral or
+// ALLOW_DESTRUCTIVE_BENCHMARK=1 is set.
 
 import { unitGaussianVector, normalize, EMBED_DIM } from "../src/memory/embeddings.js";
 import { query, withClient, closePool, toVectorLiteral } from "../src/db/client.js";
@@ -111,7 +114,7 @@ async function main() {
       (CORPUS === "clustered" ? ` (${CLUSTERS} clusters, noise ${NOISE})` : "")
   );
 
-  await query(`TRUNCATE agent_memory`);
+  await query(`DELETE FROM agent_memory`);
   const { corpus, queries } = generate();
 
   // ── 1. Write throughput — batched multi-row INSERTs ─────────────────────────
@@ -220,7 +223,7 @@ async function main() {
     if (best < floor) throw new Error(`best recall@${K} ${best.toFixed(3)} below floor ${floor}`);
   }
 
-  await query(`TRUNCATE agent_memory`);
+  await query(`DELETE FROM agent_memory`);
   await closePool();
 }
 
