@@ -24,10 +24,14 @@ import {
 } from "../src/db/proof.js";
 import {
   buildRecallQuery,
+  memoryContentDigest,
   type MemoryKind,
   type RecallQuery,
   type RecallQueryRow,
 } from "../src/memory/memory.js";
+import {
+  PUBLIC_DEMO_CANONICAL_KEYS,
+} from "../src/memory/demo-reconciliation.js";
 import {
   affirmativeSystemGrants,
   type SystemGrant,
@@ -49,17 +53,7 @@ const expectedDatabase =
   process.env.COCKROACH_DATABASE?.trim() || "archon";
 const secrets = new SecretsManagerClient({ region });
 
-const PUBLIC_FIXTURE_KEYS = [
-  "archon-event/v1/EVT-HELIOS-2604/summary",
-  "archon-event/v1/EVT-HELIOS-2604/off-bank-cost",
-  "archon-event/v1/EVT-HELIOS-2604/employee/E-01",
-  "archon-event/v1/EVT-HELIOS-2604/employee/E-02",
-  "archon-event/v1/EVT-HELIOS-2604/employee/E-03",
-  "archon-event/v1/EVT-HELIOS-2604/employee/E-04",
-  "archon-demo/v1/inv-2043-confirmed",
-  "archon-demo/v1/inv-2043-later-note",
-  "archon-demo/v1/recon-2043-missing-pay-118",
-] as const;
+const PUBLIC_FIXTURE_KEYS = PUBLIC_DEMO_CANONICAL_KEYS;
 
 const ISOLATION_CANARY_KEYS = [
   "archon-demo/v1/rls-hidden-company-canary",
@@ -113,13 +107,14 @@ interface RuntimeCspannProof {
 interface FixtureRow {
   id: string;
   tenant_id: string;
-  kind: string;
+  kind: MemoryKind;
   company: string;
   period: string | null;
   source_ref: string | null;
   content: string;
   metadata: Record<string, unknown> | null;
   idempotency_key: string;
+  content_hash: string | null;
   status: string;
   created_at: Date | string;
 }
@@ -622,6 +617,8 @@ async function verifyRuntime(
   principal: string;
   visibleMemories: number;
   canonicalMemories: number;
+  distinctIdempotencyKeys: number;
+  distinctContentDigests: number;
   cspannRecall: RuntimeCspannProof;
 }> {
   const expectedPrincipal = decodeURIComponent(
@@ -671,6 +668,8 @@ async function verifyRuntime(
       correctly_scoped: string;
       canonical_visible: string;
       isolation_canaries_visible: string;
+      idempotency_keys: string;
+      content_digests: string;
     }>(
       `SELECT count(*) AS visible,
               count(*) FILTER (
@@ -683,17 +682,31 @@ async function verifyRuntime(
               ) AS canonical_visible,
               count(*) FILTER (
                 WHERE idempotency_key = ANY($2::STRING[])
-              ) AS isolation_canaries_visible
+              ) AS isolation_canaries_visible,
+              count(DISTINCT idempotency_key) FILTER (
+                WHERE length(idempotency_key) BETWEEN 1 AND 256
+              ) AS idempotency_keys,
+              count(DISTINCT content_hash) FILTER (
+                WHERE content_hash ~ '^[a-f0-9]{64}$'
+              ) AS content_digests
          FROM agent_memory`,
       [PUBLIC_FIXTURE_KEYS, ISOLATION_CANARY_KEYS]
     );
     const scopeRow = scope.rows[0];
     const visible = Number(scopeRow?.visible ?? 0);
     const canonicalVisible = Number(scopeRow?.canonical_visible ?? 0);
+    const distinctIdempotencyKeys = Number(
+      scopeRow?.idempotency_keys ?? 0
+    );
+    const distinctContentDigests = Number(
+      scopeRow?.content_digests ?? 0
+    );
     if (
-      visible < PUBLIC_FIXTURE_KEYS.length ||
+      visible !== PUBLIC_FIXTURE_KEYS.length ||
       visible !== Number(scopeRow?.correctly_scoped ?? -1) ||
       canonicalVisible !== PUBLIC_FIXTURE_KEYS.length ||
+      distinctIdempotencyKeys !== PUBLIC_FIXTURE_KEYS.length ||
+      distinctContentDigests !== PUBLIC_FIXTURE_KEYS.length ||
       Number(scopeRow?.isolation_canaries_visible ?? -1) !== 0
     ) {
       throw new ReleaseGateError(
@@ -755,6 +768,8 @@ async function verifyRuntime(
       principal: expectedPrincipal,
       visibleMemories: visible,
       canonicalMemories: canonicalVisible,
+      distinctIdempotencyKeys,
+      distinctContentDigests,
       cspannRecall: { noKind, kind },
     };
   } finally {
@@ -1125,6 +1140,12 @@ async function verifyAdmin(
   version: string;
   databaseName: string;
   fixtureRows: number;
+  storeIntegrity: {
+    activeMemories: number;
+    canonicalMemories: number;
+    distinctIdempotencyKeys: number;
+    distinctContentDigests: number;
+  };
   indexDefinitionFingerprints: {
     company: string;
     kind: string;
@@ -1154,7 +1175,7 @@ async function verifyAdmin(
     ];
     const fixtures = await client.query<FixtureRow>(
       `SELECT id, tenant_id, kind, company, period, source_ref, content,
-              metadata, idempotency_key, status, created_at
+              metadata, idempotency_key, content_hash, status, created_at
          FROM agent_memory
         WHERE embed_model = $1
           AND idempotency_key = ANY($2::STRING[])`,
@@ -1172,6 +1193,81 @@ async function verifyAdmin(
     if (byKey.size !== allKeys.length) {
       throw new ReleaseGateError(
         "Canonical fixture keys are not unique."
+      );
+    }
+    const canonicalPublicRows = PUBLIC_FIXTURE_KEYS.map((key) =>
+      byKey.get(key)
+    );
+    if (
+      canonicalPublicRows.some(
+        (row) => {
+          if (
+            !row ||
+            row.tenant_id !== "public-demo" ||
+            row.company !== "Helios SA" ||
+            row.status !== "active" ||
+            typeof row.content_hash !== "string"
+          ) {
+            return true;
+          }
+          const expectedDigest = memoryContentDigest({
+            tenantId: row.tenant_id,
+            kind: row.kind,
+            company: row.company,
+            period: row.period,
+            sourceRef: row.source_ref,
+            content: row.content,
+            metadata: row.metadata,
+          });
+          return (
+            row.content_hash !== expectedDigest ||
+            !/^[a-f0-9]{64}$/u.test(row.content_hash)
+          );
+        }
+      )
+    ) {
+      throw new ReleaseGateError(
+        "Canonical public memory content-digest proof failed."
+      );
+    }
+
+    const activeStore = await client.query<{
+      active_memories: string;
+      canonical_memories: string;
+      idempotency_keys: string;
+      content_digests: string;
+    }>(
+      `SELECT count(*) AS active_memories,
+              count(*) FILTER (
+                WHERE idempotency_key = ANY($2::STRING[])
+              ) AS canonical_memories,
+              count(DISTINCT idempotency_key) FILTER (
+                WHERE length(idempotency_key) BETWEEN 1 AND 256
+              ) AS idempotency_keys,
+              count(DISTINCT content_hash) FILTER (
+                WHERE content_hash ~ '^[a-f0-9]{64}$'
+              ) AS content_digests
+         FROM agent_memory
+        WHERE tenant_id = 'public-demo'
+          AND company = 'Helios SA'
+          AND status = 'active'
+          AND embed_model = $1`,
+      [expectedModel, PUBLIC_FIXTURE_KEYS]
+    );
+    const storeRow = activeStore.rows[0];
+    const storeIntegrity = {
+      activeMemories: Number(storeRow?.active_memories ?? 0),
+      canonicalMemories: Number(storeRow?.canonical_memories ?? 0),
+      distinctIdempotencyKeys: Number(storeRow?.idempotency_keys ?? 0),
+      distinctContentDigests: Number(storeRow?.content_digests ?? 0),
+    };
+    if (
+      Object.values(storeIntegrity).some(
+        (value) => value !== PUBLIC_FIXTURE_KEYS.length
+      )
+    ) {
+      throw new ReleaseGateError(
+        "Canonical active memory store is not exactly reconciled."
       );
     }
 
@@ -1311,6 +1407,7 @@ async function verifyAdmin(
       version: databaseRow.version.split(" ").slice(0, 3).join(" "),
       databaseName: databaseRow.database_name,
       fixtureRows: fixtureCount,
+      storeIntegrity,
       indexDefinitionFingerprints: indexFingerprints,
       isolationCanaryVectors,
     };
@@ -1392,7 +1489,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     `${JSON.stringify(
       {
-        schemaVersion: 4,
+        schemaVersion: 5,
         ok: true,
         targetSha,
         region,
@@ -1416,6 +1513,13 @@ async function main(): Promise<void> {
           companyScopedVectorIndex: true,
           companyKindScopedVectorIndex: true,
           fixedScopeServingViews: true,
+          durableStoreIntegrity: true,
+          canonicalActiveMemories:
+            admin.storeIntegrity.canonicalMemories,
+          distinctIdempotencyKeys:
+            admin.storeIntegrity.distinctIdempotencyKeys,
+          distinctContentDigests:
+            admin.storeIntegrity.distinctContentDigests,
           scopedServingQueriesRejectCanaries: true,
           isolationCanaryCount: ISOLATION_CANARY_KEYS.length,
           isolatedNonLoginServingViewOwner: true,

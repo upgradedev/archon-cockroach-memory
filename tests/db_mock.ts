@@ -127,7 +127,42 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
     return { rows: [{ id: record.id }] };
   }
 
-  // 4. SELECT count(*)
+  // 4. Fixed-scope bounded payload-digest proof
+  if (
+    queryStr
+      .toUpperCase()
+      .startsWith(
+        "SELECT TENANT_ID, KIND, COMPANY, PERIOD, SOURCE_REF, CONTENT, METADATA, IDEMPOTENCY_KEY, CONTENT_HASH FROM AGENT_MEMORY"
+      )
+  ) {
+    let filtered = [...db];
+    const filterMatches = [
+      ...queryStr.matchAll(
+        /(\btenant_id\b|\bcompany\b|\bstatus\b|\bembed_model\b)\s*=\s*\$(\d+)/giu
+      ),
+    ];
+    for (const match of filterMatches) {
+      const column = match[1]!.toLowerCase() as keyof MockRecord;
+      const index = Number(match[2]) - 1;
+      filtered = filtered.filter((record) => record[column] === params[index]);
+    }
+    const limit = Number(params[4]);
+    return {
+      rows: filtered.slice(0, limit).map((record) => ({
+        tenant_id: record.tenant_id,
+        kind: record.kind,
+        company: record.company,
+        period: record.period,
+        source_ref: record.source_ref,
+        content: record.content,
+        metadata: record.metadata,
+        idempotency_key: record.idempotency_key,
+        content_hash: record.content_hash,
+      })),
+    };
+  }
+
+  // 5. SELECT count(*)
   if (queryStr.toUpperCase().startsWith("SELECT COUNT(*)")) {
     let filtered = [...db];
     const filterMatches = [
@@ -143,7 +178,7 @@ mock.method(pg.Pool.prototype, "query", async function (text: string, params: an
     return { rows: [{ n: String(filtered.length) }] };
   }
 
-  // 5. SELECT for vector recall or normal select
+  // 6. SELECT for vector recall or normal select
   const upperQuery = queryStr.toUpperCase();
   if (
     upperQuery.startsWith(

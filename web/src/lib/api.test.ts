@@ -8,6 +8,47 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function finalizedProofBody() {
+  return {
+    database: {
+      engine: "CockroachDB",
+      deployment: "CockroachDB Cloud on AWS",
+      version: "25.4.10",
+      region: "eu-west-1",
+      regionEvidence: "cockroach-cloud-api-release-gate",
+      runtimePrincipal: "archon_production_example",
+      activeMemories: 6,
+    },
+    vectorIndex: {
+      enabled: true,
+      name: "idx_agent_memory_company_scope_embedding",
+      engine: "native CockroachDB C-SPANN",
+      dimensions: 1024,
+      metric: "cosine",
+      lifecycleState: "active",
+      evidence: "live pg_catalog.pg_indexes definition",
+      definitionFingerprint:
+        "b7cc3c41bf7ba74c53ce75f7a8937132ef5facb5f4c78b5bfd52ad8667244d70",
+    },
+    embeddingModel: "amazon.titan-embed-text-v2:0",
+    narrationModel: "eu.anthropic.claude-sonnet-4-6",
+    memory: {
+      persisted: 6,
+      idempotencyKeys: 6,
+      contentDigests: 6,
+      storeVerified: true,
+      evidence: "live bounded fixed-scope payload-digest verification",
+    },
+    scope: {
+      tenantId: "public-demo",
+      company: "Helios SA",
+      mode: "fixed-synthetic-demo",
+    },
+    features: ["C-SPANN vector search", { name: "RF=3 survivability" }],
+    generatedAt: "2026-07-23T10:00:00.000Z",
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -209,46 +250,70 @@ describe("public API client", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        jsonResponse({
-          database: {
-            engine: "CockroachDB",
-            deployment: "CockroachDB Cloud on AWS",
-            version: "25.4.10",
-            region: "eu-west-1",
-            regionEvidence: "cockroach-cloud-api-release-gate",
-            runtimePrincipal: "archon_production_example",
-            activeMemories: 6,
-          },
-          vectorIndex: {
-            enabled: true,
-            name: "idx_agent_memory_company_scope_embedding",
-            engine: "native CockroachDB C-SPANN",
-            dimensions: 1024,
-            metric: "cosine",
-            lifecycleState: "active",
-            evidence: "live pg_catalog.pg_indexes definition",
-            definitionFingerprint:
-              "b7cc3c41bf7ba74c53ce75f7a8937132ef5facb5f4c78b5bfd52ad8667244d70",
-          },
-          embeddingModel: "amazon.titan-embed-text-v2:0",
-          narrationModel: "eu.anthropic.claude-sonnet-4-6",
-          scope: {
-            tenantId: "public-demo",
-            company: "Helios SA",
-            mode: "fixed-synthetic-demo",
-          },
-          features: ["C-SPANN vector search", { name: "RF=3 survivability" }],
-          generatedAt: "2026-07-23T10:00:00.000Z",
-        }),
+        jsonResponse(finalizedProofBody()),
       ),
     );
 
     const proof = await getProof();
 
     expect(proof.hasEvidence).toBe(true);
+    expect(proof.database.activeMemories).toBe(6);
+    expect(proof.memory).toEqual({
+      persisted: 6,
+      idempotencyKeys: 6,
+      contentDigests: 6,
+      storeVerified: true,
+      evidence: "live bounded fixed-scope payload-digest verification",
+    });
     expect(proof.vectorIndex.dimensions).toBe(1024);
     expect(proof.scope).toEqual({ company: "Helios SA", mode: "fixed-synthetic-demo" });
     expect(proof.features).toEqual(["C-SPANN vector search", "RF=3 survivability"]);
+  });
+
+  it("fails the infrastructure proof closed when durable-store coverage disagrees", async () => {
+    const body = finalizedProofBody();
+    body.memory.contentDigests = 5;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(body)),
+    );
+
+    const proof = await getProof();
+
+    expect(proof.memory.storeVerified).toBe(false);
+    expect(proof.memory.persisted).toBe(6);
+    expect(proof.memory.contentDigests).toBe(5);
+    expect(proof.hasEvidence).toBe(false);
+  });
+
+  it("fails the store proof closed when the database total disagrees", async () => {
+    const body = finalizedProofBody();
+    body.database.activeMemories = 99;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(body)),
+    );
+
+    const proof = await getProof();
+
+    expect(proof.memory.storeVerified).toBe(false);
+    expect(proof.database.activeMemories).toBe(99);
+    expect(proof.memoryCount).toBe(99);
+    expect(proof.hasEvidence).toBe(false);
+  });
+
+  it("does not normalize an unrecognized store evidence marker as verified", async () => {
+    const body = finalizedProofBody();
+    body.memory.evidence = "static application claim";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(body)),
+    );
+
+    const proof = await getProof();
+
+    expect(proof.memory.storeVerified).toBe(false);
+    expect(proof.hasEvidence).toBe(false);
   });
 
   it("accepts only the canonical zero-claim no-evidence response", async () => {

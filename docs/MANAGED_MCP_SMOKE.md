@@ -14,6 +14,17 @@ asks CockroachDB Cloud to:
 
 It never prints the Cloud API key, SQL credentials, memory text, or embeddings.
 
+## Latest release-gated verification
+
+The exact commit
+[`2202d758b390efbd23ecd4532196f879f227f282`](https://github.com/upgradedev/archon-cockroach-memory/commit/2202d758b390efbd23ecd4532196f879f227f282)
+passed the post-production Managed MCP job in
+[Deploy AWS run 30142557871](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30142557871).
+That job ran only after the same candidate passed source CI, CodeQL, the protected
+database release, staging and production smoke, and both hosted browser journeys.
+Its sanitized receipt is retained for 90 days as a GitHub Actions artifact and
+is not copied into the repository.
+
 ## Verified live run
 
 Run at **2026-07-23 06:23:43 UTC** against the live AWS `eu-west-1` CockroachDB

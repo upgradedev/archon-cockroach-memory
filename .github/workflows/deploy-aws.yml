@@ -419,7 +419,12 @@ jobs:
           jq -e \
             --arg embed "$BEDROCK_EMBED_MODEL_ID" \
             --arg narrator "$BEDROCK_NARRATOR_MODEL_ID" \
-            '.database.activeMemories > 0 and
+            '.database.activeMemories == .memory.persisted and
+             .memory.persisted == 9 and
+             .memory.idempotencyKeys == .memory.persisted and
+             .memory.contentDigests == .memory.persisted and
+             .memory.storeVerified == true and
+             .memory.evidence == "live bounded fixed-scope payload-digest verification" and
              .vectorIndex.enabled == true and
              .vectorIndex.name == "idx_agent_memory_company_scope_embedding" and
              .vectorIndex.evidence == "live pg_catalog.pg_indexes definition" and
@@ -811,7 +816,12 @@ jobs:
           jq -e \
             --arg embed "$BEDROCK_EMBED_MODEL_ID" \
             --arg narrator "$BEDROCK_NARRATOR_MODEL_ID" \
-            '.database.activeMemories > 0 and
+            '.database.activeMemories == .memory.persisted and
+             .memory.persisted == 9 and
+             .memory.idempotencyKeys == .memory.persisted and
+             .memory.contentDigests == .memory.persisted and
+             .memory.storeVerified == true and
+             .memory.evidence == "live bounded fixed-scope payload-digest verification" and
              .vectorIndex.enabled == true and
              .vectorIndex.name == "idx_agent_memory_company_scope_embedding" and
              .vectorIndex.evidence == "live pg_catalog.pg_indexes definition" and

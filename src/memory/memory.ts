@@ -39,6 +39,16 @@ export interface MemoryInput {
   idempotencyKey?: string;
 }
 
+export interface MemoryIntegrityInput {
+  tenantId?: string;
+  kind: MemoryKind;
+  company?: string;
+  period?: string | null;
+  sourceRef?: string | null;
+  content: string;
+  metadata?: Record<string, unknown> | null;
+}
+
 export interface MemoryRecord {
   id: string;
   kind: MemoryKind;
@@ -101,17 +111,7 @@ export async function remember(embedder: Embedder, input: MemoryInput): Promise<
   const sourceRef = input.sourceRef ?? null;
   const metadataJson =
     input.metadata == null ? null : canonicalJson(input.metadata);
-  const contentHash = sha256(
-    canonicalJson({
-      tenantId: PUBLIC_DEMO_TENANT_ID,
-      kind: input.kind,
-      company,
-      period,
-      sourceRef,
-      content: input.content,
-      metadata: input.metadata ?? null,
-    })
-  );
+  const contentHash = memoryContentDigest(input);
   const idempotencyKey =
     input.idempotencyKey?.trim() || `sha256:${contentHash}`;
   if (idempotencyKey.length > 256) {
@@ -416,6 +416,128 @@ export async function memoryCount(
   return Number(rows[0]?.n ?? 0);
 }
 
+export const MEMORY_STORE_PROOF_EVIDENCE =
+  "live bounded fixed-scope payload-digest verification" as const;
+
+const MAX_MEMORY_STORE_PROOF_ROWS = 256;
+
+export interface MemoryStoreProof {
+  persisted: number;
+  idempotencyKeys: number;
+  contentDigests: number;
+  storeVerified: boolean;
+  evidence: typeof MEMORY_STORE_PROOF_EVIDENCE;
+}
+
+interface MemoryStoreProofRow {
+  tenant_id: string;
+  kind: string;
+  company: string;
+  period: string | null;
+  source_ref: string | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  idempotency_key: string | null;
+  content_hash: string | null;
+}
+
+function isMemoryKind(value: string): value is MemoryKind {
+  return (
+    value === "document" ||
+    value === "payroll_event" ||
+    value === "validation" ||
+    value === "insight"
+  );
+}
+
+function verifiedStoredContentDigest(
+  row: MemoryStoreProofRow
+): string | null {
+  if (
+    !isMemoryKind(row.kind) ||
+    (row.metadata !== null &&
+      (typeof row.metadata !== "object" || Array.isArray(row.metadata))) ||
+    typeof row.content_hash !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(row.content_hash)
+  ) {
+    return null;
+  }
+  try {
+    const expected = memoryContentDigest({
+      tenantId: row.tenant_id,
+      kind: row.kind,
+      company: row.company,
+      period: row.period,
+      sourceRef: row.source_ref,
+      content: row.content,
+      metadata: row.metadata,
+    });
+    return row.content_hash === expected ? row.content_hash : null;
+  } catch {
+    return null;
+  }
+}
+
+// Read at most one row beyond the bounded proof limit so oversized or drifting
+// scopes fail closed. Payloads and integrity values are recomputed in-process but
+// only aggregate counts and the evidence marker leave the service.
+export async function memoryStoreProof(
+  company: string,
+  embedModel: string
+): Promise<MemoryStoreProof> {
+  const rows = await query<MemoryStoreProofRow>(
+    `SELECT tenant_id, kind, company, period, source_ref, content, metadata,
+            idempotency_key, content_hash
+       FROM agent_memory
+      WHERE tenant_id = $1
+        AND status = $2
+        AND company = $3
+        AND embed_model = $4
+      LIMIT $5`,
+    [
+      PUBLIC_DEMO_TENANT_ID,
+      "active",
+      company,
+      embedModel,
+      MAX_MEMORY_STORE_PROOF_ROWS + 1,
+    ]
+  );
+  const persisted = rows.length;
+  const completeBoundedRead =
+    persisted <= MAX_MEMORY_STORE_PROOF_ROWS;
+  const idempotencyKeys = new Set(
+    rows.flatMap((row) => {
+      const key = row.idempotency_key;
+      return typeof key === "string" &&
+        key === key.trim() &&
+        key.length >= 1 &&
+        key.length <= 256
+        ? [key]
+        : [];
+    })
+  ).size;
+  const contentDigests = new Set(
+    rows.flatMap((row) => {
+      const digest = verifiedStoredContentDigest(row);
+      return digest ? [digest] : [];
+    })
+  ).size;
+  return {
+    persisted,
+    idempotencyKeys,
+    contentDigests,
+    storeVerified:
+      Number.isSafeInteger(persisted) &&
+      Number.isSafeInteger(idempotencyKeys) &&
+      Number.isSafeInteger(contentDigests) &&
+      completeBoundedRead &&
+      persisted > 0 &&
+      persisted === idempotencyKeys &&
+      persisted === contentDigests,
+    evidence: MEMORY_STORE_PROOF_EVIDENCE,
+  };
+}
+
 interface IdempotentRow {
   id: string;
   content_hash: string | null;
@@ -453,6 +575,22 @@ function assertIdempotencyMatch(
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+export function canonicalMemoryPayload(input: MemoryIntegrityInput): string {
+  return canonicalJson({
+    tenantId: input.tenantId ?? PUBLIC_DEMO_TENANT_ID,
+    kind: input.kind,
+    company: input.company ?? "_global",
+    period: input.period ?? null,
+    sourceRef: input.sourceRef ?? null,
+    content: input.content,
+    metadata: input.metadata ?? null,
+  });
+}
+
+export function memoryContentDigest(input: MemoryIntegrityInput): string {
+  return sha256(canonicalMemoryPayload(input));
 }
 
 function assertEmbedding(embedding: number[], expectedDimension: number): void {

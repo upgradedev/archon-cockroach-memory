@@ -25,6 +25,20 @@ export function ProofLedger({
   error,
 }: ProofLedgerProps) {
   const memoryCount = proof?.memoryCount ?? auditMemoryCount;
+  const persisted = proof?.memory.persisted ?? memoryCount;
+  const storeProofReported =
+    proof?.memory.storeVerified !== null &&
+    proof?.memory.storeVerified !== undefined;
+  const storeVerified =
+    proof?.memory.storeVerified === true &&
+    persisted !== null &&
+    persisted !== undefined &&
+    persisted > 0 &&
+    proof.memory.idempotencyKeys === persisted &&
+    proof.memory.contentDigests === persisted &&
+    proof.memory.evidence ===
+      "live bounded fixed-scope payload-digest verification" &&
+    proof.database.activeMemories === persisted;
   const cspannVerified = proof?.vectorIndex.enabled === true;
   const company = proof?.scope.company ?? PUBLIC_COMPANY;
 
@@ -79,14 +93,36 @@ export function ProofLedger({
 
           <dl className="mt-8 border-y border-line">
             <div className="grid grid-cols-[6.5rem_1fr] gap-4 border-b border-line py-5">
-              <dt className="text-[9px] font-bold uppercase tracking-[0.17em] text-muted">Memory facts</dt>
+              <dt className="text-[9px] font-bold uppercase tracking-[0.17em] text-muted">Store</dt>
               <dd className="text-right">
-                <span className="font-editorial text-3xl tracking-editorial text-paper">
-                  {memoryCount ?? "—"}
+                <span
+                  className={`font-mono text-xs font-bold uppercase ${
+                    storeVerified ? "text-mint" : "text-paper"
+                  }`}
+                  data-testid="store-proof"
+                >
+                  {!storeProofReported
+                    ? "Not reported"
+                    : storeVerified
+                      ? "Store verified"
+                      : "Not verified"}
                 </span>
-                <span className="mt-1 block text-[10px] uppercase tracking-[0.12em] text-muted">
-                  active synthetic records
+                <span className="mt-2 block font-mono text-[10px] leading-5 text-muted">
+                  {display(persisted)} persistent records
                 </span>
+                <span className="block font-mono text-[10px] leading-5 text-muted">
+                  {display(proof?.memory.idempotencyKeys)}/{display(persisted)} unique idempotency keys
+                  {" · "}
+                  {display(proof?.memory.contentDigests)}/{display(persisted)} payload-bound SHA-256 digests
+                </span>
+                <span className="block font-mono text-[10px] leading-5 text-muted">
+                  public mutation disabled
+                </span>
+                {proof?.memory.evidence && (
+                  <span className="block font-mono text-[10px] leading-5 text-muted">
+                    {proof.memory.evidence}
+                  </span>
+                )}
               </dd>
             </div>
 
