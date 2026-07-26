@@ -1073,6 +1073,24 @@ Resources:
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
                 Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
+              - Sid: ResolveExactCloudFormationExecutionRoles
+                Effect: Allow
+                Action: iam:GetRole
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-staging-cloudformation
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-production-cloudformation
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ResolveExactFoundationAutomationRule
+                Effect: Allow
+                Action: securityhub:ListTagsForResource
+                Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
       Tags:
         - Key: Application
           Value: !Ref AppName

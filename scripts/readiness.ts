@@ -737,6 +737,10 @@ function sourceChecks(): SourceCheck[] {
   );
   const lambdaTemplate = read("aws/template.yaml");
   const deliveryBootstrap = read("aws/bootstrap-oidc.yaml");
+  const foundationPromotionRole =
+    deliveryBootstrap.match(
+      /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u
+    )?.[0] ?? "";
   const apiStageProof = read("aws/prove-api-stage-controls.sh");
   const s3AccessLoggingProof = read(
     "aws/prove-s3-access-logging.sh"
@@ -1309,6 +1313,28 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ExecuteOnlyBootstrapLoggingChangeSets[\s\S]*?cloudformation:ChangeSetName:[\s\S]*?changeSet\/bootstrap-s3-\*\/\*/u.test(
           deliveryBootstrap
         ) &&
+        /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          foundationPromotionRole
+        ) &&
+        /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          foundationPromotionRole
+        ) &&
+        (
+          foundationPromotionRole.match(/Action: iam:GetRole/gmu) ?? []
+        ).length === 1 &&
+        (
+          foundationPromotionRole.match(
+            /Action: securityhub:ListTagsForResource/gmu
+          ) ?? []
+        ).length === 1 &&
+        (
+          foundationPromotionRole.match(
+            /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+          ) ?? []
+        ).length === 2 &&
+        !/iam:(?:ListRoles|ListRolePolicies|GetRolePolicy|ListAttachedRolePolicies|ListRoleTags)|role\/\*|automation-rule\/\*|Resource: "\*"/u.test(
+          foundationPromotionRole
+        ) &&
         (
           deliveryBootstrap.match(
             /Sid: InspectS3AccessLoggingFoundationStack/gmu
@@ -1318,7 +1344,7 @@ function sourceChecks(): SourceCheck[] {
           deliveryBootstrap.match(
             /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
           ) ?? []
-        ).length === 3 &&
+        ).length === 4 &&
         (
           deliveryBootstrap.match(
             /Sid: InspectS3AccessLoggingFoundationRule/gmu
@@ -1395,8 +1421,8 @@ function sourceChecks(): SourceCheck[] {
         /rejects drift and redacts AWS failures/u.test(
           s3AccessLoggingTests
         ),
-      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, live proof, and CI gate are source-controlled.",
-      "The centralized S3 logging archive, narrow exception, activation recovery, proof, or CI/readiness gate is incomplete."
+      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, CloudFormation-only dynamic-reference reads, live proof, and CI gate are source-controlled.",
+      "The centralized S3 logging archive, narrow exception, activation recovery, exact dynamic-reference reads, proof, or CI/readiness gate is incomplete."
     ),
     sourceCheck(
       "product.oidc-promotion-rollback",

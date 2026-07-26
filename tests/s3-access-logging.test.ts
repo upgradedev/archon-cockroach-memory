@@ -161,13 +161,35 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     role,
     /Sid: InspectFoundationAutomationRule[\s\S]*?Action: securityhub:BatchGetAutomationRules[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/u
   );
+  assert.match(
+    role,
+    /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
+  assert.match(
+    role,
+    /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
   assert.equal(
     (role.match(/Action: s3:PutBucketLogging/gmu) ?? []).length,
     1
   );
+  assert.equal((role.match(/Action: iam:GetRole/gmu) ?? []).length, 1);
+  assert.equal(
+    (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
+      .length,
+    1
+  );
   assert.doesNotMatch(
     role,
-    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)/u
+    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass|ListRoles|ListRolePolicies|GetRolePolicy|ListAttachedRolePolicies|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
+  );
+  assert.equal(
+    (
+      role.match(
+        /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+      ) ?? []
+    ).length,
+    2
   );
   assert.match(
     role,
@@ -275,7 +297,7 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
         /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
       ) ?? []
     ).length,
-    3
+    4
   );
   assert.doesNotMatch(
     `${BOOTSTRAP}\n${PROOF_SOURCE}`,
