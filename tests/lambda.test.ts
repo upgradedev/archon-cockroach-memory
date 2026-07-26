@@ -6,10 +6,11 @@ function event(
   method: string,
   path: string,
   body?: string,
-  contentType = "application/json"
+  contentType = "application/json",
+  stage?: string
 ) {
   return {
-    requestContext: { http: { method } },
+    requestContext: { stage, http: { method } },
     rawPath: path,
     headers: { "content-type": contentType },
     body,
@@ -57,4 +58,61 @@ test("Lambda liveness is explicit that dependencies were not checked", async () 
   const body = JSON.parse(result.body) as Record<string, unknown>;
   assert.equal(body.status, "reachable");
   assert.equal(body.dependencies, "unchecked");
+});
+
+test("Lambda adapter strips only the exact trusted named-stage prefix", async () => {
+  const namedStageHealth = await handler(
+    event(
+      "GET",
+      "/live/api/health",
+      undefined,
+      "application/json",
+      "live"
+    )
+  );
+  assert.equal(namedStageHealth.statusCode, 200);
+
+  const alreadyRelativeHealth = await handler(
+    event(
+      "GET",
+      "/api/health",
+      undefined,
+      "application/json",
+      "live"
+    )
+  );
+  assert.equal(alreadyRelativeHealth.statusCode, 200);
+
+  const stagedRecall = await handler(
+    event(
+      "POST",
+      "/live/api/recall",
+      "null",
+      "application/json",
+      "live"
+    )
+  );
+  assert.equal(stagedRecall.statusCode, 400);
+
+  const untrustedPrefix = await handler(
+    event(
+      "GET",
+      "/other/api/health",
+      undefined,
+      "application/json",
+      "live"
+    )
+  );
+  assert.equal(untrustedPrefix.statusCode, 404);
+
+  const defaultStageDoesNotStrip = await handler(
+    event(
+      "GET",
+      "/live/api/health",
+      undefined,
+      "application/json",
+      "$default"
+    )
+  );
+  assert.equal(defaultStageDoesNotStrip.statusCode, 404);
 });
