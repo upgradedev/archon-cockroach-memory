@@ -18,9 +18,38 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseDocument } from "yaml";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
+export const PINNED_NODE_VERSION = "22.23.1";
+export const EXPECTED_WORKFLOW_ACTION_REFS = 55;
+export const EXPECTED_SETUP_NODE_STEPS = 14;
+export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
+export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
+export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
+export const EXPECTED_WORKFLOW_FILES = [
+  "benchmark.yml",
+  "ci.yml",
+  "codeql.yml",
+  "database-release.yml",
+  "deploy-aws.yml",
+  "managed-mcp-audit.yml",
+] as const;
+const ALLOWED_LOCAL_ACTION_REFS = new Set([
+  "./.github/workflows/database-release.yml",
+]);
+export const GENERATED_ARTIFACT_BASENAMES = [
+  "legacy-reconciliation-receipt.json",
+  "api-stage-preflight.json",
+  "api-stage-proof.json",
+  "previous-stack-template.yaml",
+  "previous-stack-parameters.json",
+  "bench-clustered.txt",
+  "bench-uniform.txt",
+  "distribution.txt",
+  "server.pid",
+] as const;
 const CANONICAL_DEMO_URL =
   "https://d2s5v0o0eg2aaw.cloudfront.net";
 
@@ -83,15 +112,18 @@ function read(rel: string): string {
   return has(rel) ? readFileSync(path(rel), "utf8") : "";
 }
 
-function generatedArtifactPaths(): string[] {
+export function generatedArtifactPaths(root = ROOT): string[] {
   const blockedDirectories = new Set([
     ".aws-sam",
     "__pycache__",
+    "build",
     "coverage",
+    "dist",
     "playwright-report",
     "test-results",
   ]);
   const blockedDemoDirectories = new Set(["audio", "clips", "frames"]);
+  const blockedBasenames = new Set<string>(GENERATED_ARTIFACT_BASENAMES);
   const found: string[] = [];
   const visit = (absolute: string, relative: string): void => {
     for (const entry of readdirSync(absolute, { withFileTypes: true })) {
@@ -113,6 +145,7 @@ function generatedArtifactPaths(): string[] {
         }
         visit(join(absolute, entry.name), childRelative);
       } else if (
+        blockedBasenames.has(entry.name) ||
         /\.(?:mp4|pyc)$/iu.test(entry.name) ||
         /^(?:readiness|database-release-receipt|legacy-reconciliation-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
           entry.name
@@ -122,8 +155,555 @@ function generatedArtifactPaths(): string[] {
       }
     }
   };
-  visit(ROOT, "");
+  visit(root, "");
   return found;
+}
+
+export interface WorkflowSource {
+  name: string;
+  source: string;
+}
+
+export function repositoryWorkflowSources(
+  root = ROOT
+): WorkflowSource[] {
+  const directory = join(root, ".github", "workflows");
+  if (!existsSync(directory)) return [];
+  const entries = readdirSync(directory, { withFileTypes: true });
+  if (
+    entries.some(
+      (entry) =>
+        entry.isSymbolicLink() &&
+        /\.(?:yml|yaml)$/iu.test(entry.name)
+    )
+  ) {
+    return [{ name: "__unsafe_workflow_symlink__", source: "" }];
+  }
+  return entries
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        /\.(?:yml|yaml)$/iu.test(entry.name)
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => ({
+      name: entry.name,
+      source: readFileSync(join(directory, entry.name), "utf8"),
+    }));
+}
+
+interface RepositorySource {
+  basename: string;
+  source: string;
+}
+
+function repositorySourceFiles(
+  predicate: (basename: string) => boolean,
+  root = ROOT
+): RepositorySource[] {
+  const matches: Array<{ absolute: string; basename: string }> = [];
+  let unsafeSymlink = false;
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const absolute = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        unsafeSymlink = true;
+      } else if (entry.isDirectory()) {
+        visit(absolute);
+      } else if (entry.isFile() && predicate(entry.name)) {
+        matches.push({ absolute, basename: entry.name });
+      }
+    }
+  };
+  visit(root);
+  if (unsafeSymlink) return [];
+  return matches
+    .sort((left, right) => left.absolute.localeCompare(right.absolute))
+    .map(({ absolute, basename }) => ({
+      basename,
+      source: readFileSync(absolute, "utf8"),
+    }));
+}
+
+function parseYamlMap(
+  source: string
+): Map<unknown, unknown> | undefined {
+  try {
+    const document = parseDocument(source, {
+      schema: "core",
+      strict: true,
+      uniqueKeys: true,
+    });
+    if (
+      document.errors.length > 0 ||
+      document.warnings.length > 0
+    ) {
+      return undefined;
+    }
+    const value: unknown = document.toJS({
+      mapAsMap: true,
+      maxAliasCount: 0,
+    });
+    return value instanceof Map ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function repositoryDockerComposeSources(
+  root = ROOT
+): string[] {
+  return repositorySourceFiles(
+    (basename) => /\.ya?ml$/iu.test(basename),
+    root
+  )
+    .filter(({ basename, source }) => {
+      if (
+        /^(?:docker-compose|compose)(?:\..+)?\.ya?ml$/iu.test(
+          basename
+        )
+      ) {
+        return true;
+      }
+      return parseYamlMap(source)?.get("services") instanceof Map;
+    })
+    .map(({ source }) => source);
+}
+
+export function repositoryDockerfileSources(
+  root = ROOT
+): string[] {
+  return repositorySourceFiles(
+    (basename) =>
+      /^Dockerfile(?:\..+)?$/iu.test(basename) ||
+      /\.Dockerfile$/iu.test(basename),
+    root
+  ).map(({ source }) => source);
+}
+
+interface WorkflowUse {
+  ref: unknown;
+  inputs: unknown;
+}
+
+interface ParsedWorkflow {
+  root: Map<unknown, unknown>;
+  uses: WorkflowUse[];
+  runs: unknown[];
+}
+
+function collectWorkflowSemantics(
+  value: unknown,
+  uses: WorkflowUse[],
+  runs: unknown[]
+): boolean {
+  if (value instanceof Map) {
+    for (const key of value.keys()) {
+      if (typeof key !== "string") return false;
+    }
+    if (value.has("uses")) {
+      uses.push({
+        ref: value.get("uses"),
+        inputs: value.get("with"),
+      });
+    }
+    if (value.has("run")) runs.push(value.get("run"));
+    for (const child of value.values()) {
+      if (!collectWorkflowSemantics(child, uses, runs)) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      if (!collectWorkflowSemantics(child, uses, runs)) return false;
+    }
+    return true;
+  }
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+function parseWorkflow(source: string): ParsedWorkflow | undefined {
+  const root = parseYamlMap(source);
+  if (!root) return undefined;
+  const uses: WorkflowUse[] = [];
+  const runs: unknown[] = [];
+  return collectWorkflowSemantics(root, uses, runs)
+    ? { root, uses, runs }
+    : undefined;
+}
+
+function actionIdentifier(ref: string): string | undefined {
+  const separator = ref.lastIndexOf("@");
+  return separator > 0
+    ? ref.slice(0, separator).toLowerCase()
+    : undefined;
+}
+
+function setupNodeVersionsFromUses(
+  uses: WorkflowUse[]
+): Array<string | undefined> {
+  return uses
+    .filter(
+      ({ ref }) =>
+        typeof ref === "string" &&
+        actionIdentifier(ref) === "actions/setup-node"
+    )
+    .map(({ inputs }) => {
+      if (!(inputs instanceof Map)) return undefined;
+      for (const key of inputs.keys()) {
+        if (typeof key !== "string") return undefined;
+      }
+      const version = inputs.get("node-version");
+      return typeof version === "string" ? version : undefined;
+    });
+}
+
+export function setupNodeVersions(
+  workflowSource: string
+): Array<string | undefined> {
+  const parsed = parseWorkflow(workflowSource);
+  return parsed ? setupNodeVersionsFromUses(parsed.uses) : [];
+}
+
+export function allSetupNodeStepsPinned(
+  sources: string[],
+  expected = PINNED_NODE_VERSION,
+  expectedSteps = EXPECTED_SETUP_NODE_STEPS
+): boolean {
+  const parsed = sources.map(parseWorkflow);
+  if (parsed.some((workflow) => workflow === undefined)) return false;
+  const versions = parsed.flatMap((workflow) =>
+    setupNodeVersionsFromUses(workflow?.uses ?? [])
+  );
+  return (
+    versions.length === expectedSteps &&
+    versions.every((version) => version === expected)
+  );
+}
+
+export function allWorkflowActionsPinned(
+  sources: string[],
+  expectedRefs = EXPECTED_WORKFLOW_ACTION_REFS
+): boolean {
+  const parsed = sources.map(parseWorkflow);
+  if (parsed.some((workflow) => workflow === undefined)) return false;
+  const refs = parsed.flatMap(
+    (workflow) => workflow?.uses.map(({ ref }) => ref) ?? []
+  );
+  return (
+    refs.length === expectedRefs &&
+    refs.every((ref) => {
+      if (typeof ref !== "string") return false;
+      if (ref.startsWith("./")) {
+        return ALLOWED_LOCAL_ACTION_REFS.has(ref);
+      }
+      if (ref.startsWith("docker://")) {
+        return /@sha256:[a-f0-9]{64}$/u.test(ref);
+      }
+      const separator = ref.lastIndexOf("@");
+      return (
+        separator > 0 &&
+        /^[a-f0-9]{40}$/u.test(ref.slice(separator + 1))
+      );
+    })
+  );
+}
+
+function composeImageRefs(
+  source: string
+): Array<unknown> | undefined {
+  const root = parseYamlMap(source);
+  const services = root?.get("services");
+  if (!(services instanceof Map)) return undefined;
+  const images: unknown[] = [];
+  for (const [serviceName, service] of services) {
+    if (
+      typeof serviceName !== "string" ||
+      !(service instanceof Map)
+    ) {
+      return undefined;
+    }
+    for (const key of service.keys()) {
+      if (typeof key !== "string") return undefined;
+    }
+    if (!service.has("image") || service.has("build")) {
+      return undefined;
+    }
+    images.push(service.get("image"));
+  }
+  return images;
+}
+
+export function allComposeImagesPinned(
+  sources: string[],
+  expectedRefs = EXPECTED_COMPOSE_IMAGE_REFS
+): boolean {
+  const parsed = sources.map(composeImageRefs);
+  if (parsed.some((images) => images === undefined)) return false;
+  const refs = parsed.flatMap((images) => images ?? []);
+  return (
+    refs.length === expectedRefs &&
+    refs.every(
+      (ref) =>
+        typeof ref === "string" &&
+        /^[^${}\s]+@sha256:[a-f0-9]{64}$/u.test(ref)
+    )
+  );
+}
+
+function stripShellComment(line: string): string {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (
+      character === "#" &&
+      (index === 0 || /[\s;|&()]/u.test(line[index - 1]))
+    ) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function shellLogicalCommands(source: string): string[] {
+  const commands: string[] = [];
+  let pending = "";
+  for (const rawLine of source.split(/\r?\n/u)) {
+    const line = stripShellComment(rawLine).trim();
+    if (!line && !pending) continue;
+    const continued = /\\\s*$/u.test(line);
+    const fragment = line.replace(/\\\s*$/u, "").trim();
+    pending = `${pending}${pending && fragment ? " " : ""}${fragment}`;
+    if (!continued) {
+      if (pending) commands.push(pending);
+      pending = "";
+    }
+  }
+  if (pending) commands.push(pending);
+  return commands;
+}
+
+function cockroachRefsFromWorkflow(
+  source: string
+): string[] | undefined {
+  const parsed = parseWorkflow(source);
+  if (!parsed) return undefined;
+  const refs: string[] = [];
+  for (const run of parsed.runs) {
+    if (typeof run !== "string") return undefined;
+    for (const command of shellLogicalCommands(run)) {
+      const invocations = [
+        ...command.matchAll(/\bdocker\s+run\b/gu),
+      ].length;
+      if (invocations === 0) continue;
+      if (invocations !== 1) return undefined;
+      const canonical = command.match(
+        /^docker\s+run\s+-d\s+--name\s+crdb\s+-p\s+26257:26257(?:\s+-p\s+8080:8080)?\s+(cockroachdb\/cockroach:[^\s"'\\]+)\s+start-single-node\s+--insecure$/u
+      );
+      if (!canonical) return undefined;
+      refs.push(canonical[1]);
+    }
+  }
+  return refs;
+}
+
+export interface CockroachImageSources {
+  workflows: string[];
+  compose: string[];
+  dockerfiles: string[];
+}
+
+export function allCockroachImagesPinned(
+  sources: CockroachImageSources,
+  expectedRefs = EXPECTED_COCKROACH_IMAGE_REFS
+): boolean {
+  const workflowRefs = sources.workflows.map(
+    cockroachRefsFromWorkflow
+  );
+  const composeRefs = sources.compose.map(composeImageRefs);
+  if (
+    workflowRefs.some((refs) => refs === undefined) ||
+    composeRefs.some((refs) => refs === undefined)
+  ) {
+    return false;
+  }
+  const refs = [
+    ...workflowRefs.flatMap((items) => items ?? []),
+    ...composeRefs
+      .flatMap((items) => items ?? [])
+      .filter((ref): ref is string => typeof ref === "string")
+      .filter((ref) => ref.includes("cockroachdb/cockroach")),
+    ...sources.dockerfiles
+      .flatMap(dockerfileBaseRefs)
+      .filter((ref) => ref.includes("cockroachdb/cockroach")),
+  ];
+  return (
+    refs.length === expectedRefs &&
+    refs.every((ref) =>
+      /^cockroachdb\/cockroach:v26\.2\.3@sha256:[a-f0-9]{64}$/u.test(
+        ref
+      )
+    )
+  );
+}
+
+function dockerfileBaseRefs(source: string): string[] {
+  return [
+    ...source.matchAll(
+      /^\s*FROM(?:\s+--platform=\S+)?\s+(\S+)/gimu
+    ),
+  ].map((match) => match[1]);
+}
+
+export function allDockerfileBasesPinned(
+  sources: string[],
+  expectedRefs = EXPECTED_DOCKERFILE_BASE_REFS
+): boolean {
+  const refs = sources.flatMap(dockerfileBaseRefs);
+  return (
+    sources.length > 0 &&
+    sources.every((source) => dockerfileBaseRefs(source).length > 0) &&
+    refs.length === expectedRefs &&
+    refs.every((ref) => /@sha256:[a-f0-9]{64}$/u.test(ref))
+  );
+}
+
+function workflowTriggerNames(
+  parsed: ParsedWorkflow
+): string[] | undefined {
+  const trigger = parsed.root.get("on");
+  if (typeof trigger === "string") return [trigger];
+  if (
+    Array.isArray(trigger) &&
+    trigger.every((event) => typeof event === "string")
+  ) {
+    return trigger;
+  }
+  if (trigger instanceof Map) {
+    const names = [...trigger.keys()];
+    return names.every((event) => typeof event === "string")
+      ? (names as string[])
+      : undefined;
+  }
+  return undefined;
+}
+
+function hasExactMainPush(trigger: Map<unknown, unknown>): boolean {
+  const push = trigger.get("push");
+  if (!(push instanceof Map) || push.size !== 1) return false;
+  const branches = push.get("branches");
+  return (
+    Array.isArray(branches) &&
+    branches.length === 1 &&
+    branches[0] === "main"
+  );
+}
+
+export function hasExactCiTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 2) return false;
+  return (
+    hasExactMainPush(trigger) &&
+    trigger.get("pull_request") === null
+  );
+}
+
+function hasExactCodeqlTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
+  const schedule = trigger.get("schedule");
+  if (!Array.isArray(schedule) || schedule.length !== 1) return false;
+  const entry = schedule[0];
+  return (
+    hasExactMainPush(trigger) &&
+    trigger.get("pull_request") === null &&
+    entry instanceof Map &&
+    entry.size === 1 &&
+    entry.get("cron") === "27 3 * * 1"
+  );
+}
+
+export function hasUniqueCiTriggerOwnership(
+  workflows: WorkflowSource[]
+): boolean {
+  const names = workflows
+    .map(({ name }) => name)
+    .sort((left, right) => left.localeCompare(right));
+  if (new Set(names).size !== names.length) return false;
+  if (
+    names.length !== EXPECTED_WORKFLOW_FILES.length ||
+    names.some(
+      (name, index) => name !== EXPECTED_WORKFLOW_FILES[index]
+    )
+  ) {
+    return false;
+  }
+  const expectedEvents = new Map<string, string[]>([
+    ["benchmark.yml", ["workflow_dispatch"]],
+    ["ci.yml", ["pull_request", "push"]],
+    ["codeql.yml", ["pull_request", "push", "schedule"]],
+    [
+      "database-release.yml",
+      ["workflow_call", "workflow_dispatch"],
+    ],
+    ["deploy-aws.yml", ["workflow_run"]],
+    ["managed-mcp-audit.yml", ["workflow_dispatch"]],
+  ]);
+  for (const workflow of workflows) {
+    const parsed = parseWorkflow(workflow.source);
+    if (!parsed) return false;
+    const triggers = workflowTriggerNames(parsed);
+    if (!triggers) return false;
+    const expected = expectedEvents.get(workflow.name);
+    const actual = [...triggers].sort((left, right) =>
+      left.localeCompare(right)
+    );
+    if (
+      !expected ||
+      actual.length !== expected.length ||
+      actual.some((event, index) => event !== expected[index])
+    ) {
+      return false;
+    }
+  }
+  const ci = workflows.find(({ name }) => name === "ci.yml");
+  const codeql = workflows.find(({ name }) => name === "codeql.yml");
+  return (
+    ci !== undefined &&
+    codeql !== undefined &&
+    hasExactCiTrigger(ci.source) &&
+    hasExactCodeqlTrigger(codeql.source)
+  );
+}
+
+export function isSubmissionEligible(
+  sourceGatePass: boolean,
+  eligibilityPass: boolean
+): boolean {
+  return sourceGatePass && eligibilityPass;
 }
 
 function contains(rel: string, pattern: RegExp): boolean {
@@ -154,7 +734,8 @@ function sourceChecks(): SourceCheck[] {
   const apiStageProof = read("aws/prove-api-stage-controls.sh");
   const stackRestore = read("aws/restore-cloudformation-stack.sh");
   const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
-  const dockerfile = read("aws/Dockerfile");
+  const gitignore = read(".gitignore");
+  const makefile = read("Makefile");
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
@@ -319,17 +900,15 @@ function sourceChecks(): SourceCheck[] {
     }
   );
   const localArtifacts = generatedArtifactPaths();
-  const workflowSources = [
-    ci,
-    deploy,
-    read(".github/workflows/database-release.yml"),
-    managedMcpWorkflow,
-    read(".github/workflows/benchmark.yml"),
-    read(".github/workflows/codeql.yml"),
-  ].join("\n");
-  const unpinnedActions = [
-    ...workflowSources.matchAll(/uses:\s+\S+@v\d+/gu),
-  ];
+  const workflowEntries = repositoryWorkflowSources();
+  const workflows = workflowEntries.map(({ source }) => source);
+  const composeSources = repositoryDockerComposeSources();
+  const dockerfiles = repositoryDockerfileSources();
+  const cockroachImageSources: CockroachImageSources = {
+    workflows,
+    compose: composeSources,
+    dockerfiles,
+  };
 
   return [
     sourceCheck(
@@ -484,14 +1063,23 @@ function sourceChecks(): SourceCheck[] {
     sourceCheck(
       "tech.immutable-supply-chain",
       "Technological Implementation",
-      unpinnedActions.length === 0 &&
-        /cockroachdb\/cockroach:v26\.2\.3@sha256:/u.test(ci) &&
-        /node-version:\s*22/u.test(ci) &&
-        /^FROM\s+\S+@sha256:[a-f0-9]{64}$/mu.test(dockerfile) &&
+      allWorkflowActionsPinned(workflows) &&
+        allSetupNodeStepsPinned(workflows) &&
+        allComposeImagesPinned(composeSources) &&
+        allCockroachImagesPinned(cockroachImageSources) &&
+        allDockerfileBasesPinned(dockerfiles) &&
         has("package-lock.json") &&
         has("web/package-lock.json"),
       "Actions, CockroachDB image, runtime, and lockfiles are immutable/reproducible.",
       "A mutable Action/image/runtime reference remains."
+    ),
+    sourceCheck(
+      "tech.exact-ci-trigger",
+      "Technological Implementation",
+      hasExactCiTrigger(ci) &&
+        hasUniqueCiTriggerOwnership(workflowEntries),
+      "The CI workflow runs once for main pushes and every pull request; only CI and the explicit CodeQL scan own those repository events.",
+      "CI triggers are duplicated repository-wide, omit main, or filter pull requests."
     ),
     sourceCheck(
       "tech.bedrock-grounding",
@@ -788,9 +1376,30 @@ function sourceChecks(): SourceCheck[] {
       "The AWS canary is not candidate-version scoped, does not exercise both critical paths for the full shift, or lacks an environment-specific full recall/restore gate."
     ),
     sourceCheck(
+      "product.generated-artifact-hygiene",
+      "Product Readiness",
+      GENERATED_ARTIFACT_BASENAMES.every((basename) =>
+        gitignore.split(/\r?\n/u).includes(basename)
+      ) &&
+        ["dist/", "build/"].every((directory) =>
+          gitignore.split(/\r?\n/u).includes(directory)
+        ) &&
+        [
+          ...GENERATED_ARTIFACT_BASENAMES,
+          "dist/nested/generated.js",
+          "build/nested/generated.js",
+        ].every((candidate) => ci.includes(candidate)) &&
+        /for generated_path in "\$\{generated_paths\[@\]\}"; do[\s\S]*?git check-ignore --quiet -- "\$generated_path"/u.test(
+          ci
+        ) &&
+        !/scripts\/build_video\.py/u.test(makefile),
+      "Generated receipts and nested build outputs are recursively detected, ignored, and checked before CI fan-out.",
+      "Generated-output ignore/detection gates or the Makefile cleanup are incomplete."
+    ),
+    sourceCheck(
       "product.no-local-build-products",
       "Product Readiness",
-      localArtifacts.length === 0 && !has("web/dist"),
+      localArtifacts.length === 0,
       "No local build/video products are left in the repository workspace.",
       "Local build or generated video artifacts remain."
     ),
@@ -960,6 +1569,7 @@ export function evaluate(): ReadinessReport {
     (requirement) => requirement.status === "complete"
   ).length;
   const eligibilityPass = eligibilityComplete === requirements.length;
+  const sourceGatePass = pct >= SOURCE_FLOOR;
 
   return {
     generatedAt: new Date().toISOString(),
@@ -970,7 +1580,7 @@ export function evaluate(): ReadinessReport {
       passed,
       total: checks.length,
       pct,
-      pass: pct >= SOURCE_FLOOR,
+      pass: sourceGatePass,
     },
     eligibility: {
       requirements,
@@ -978,7 +1588,10 @@ export function evaluate(): ReadinessReport {
       total: requirements.length,
       pass: eligibilityPass,
     },
-    submissionEligible: eligibilityPass,
+    submissionEligible: isSubmissionEligible(
+      sourceGatePass,
+      eligibilityPass
+    ),
   };
 }
 

@@ -45,7 +45,8 @@
     "@types/pg": "^8.11.10",
     "esbuild": "0.25.6",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.3"
+    "typescript": "^5.5.3",
+    "yaml": "2.9.0"
   },
   "overrides": {
     "@modelcontextprotocol/sdk": {
