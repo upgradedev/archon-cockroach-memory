@@ -341,15 +341,25 @@ jobs:
           npm run build --prefix web
       - name: Validate and build the serverless architecture
         run: |
+          set -euo pipefail
           bash -n aws/prove-api-stage-controls.sh
           bash -n aws/delete-greenfield-stack.sh
           bash -n aws/restore-cloudformation-stack.sh
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region eu-west-1
-          PATH="$PWD/node_modules/.bin:$PATH" sam build \
-            --template-file aws/template.yaml \
-            --build-dir .aws-sam/build \
-            --parallel
+          SAM_BUILD_LOG="${RUNNER_TEMP:?}/sam-build.log"
+          if ! PATH="$PWD/node_modules/.bin:$PATH" sam build \
+              --template-file aws/template.yaml \
+              --build-dir .aws-sam/build \
+              --parallel 2>&1 |
+            tee "$SAM_BUILD_LOG"; then
+            exit 1
+          fi
+          if grep -Eqi 'reserved logical ID|unexpected behaviors' \
+            "$SAM_BUILD_LOG"; then
+            echo "SAM emitted a reserved-logical-ID warning." >&2
+            exit 1
+          fi
           if grep -q "Type: AWS::IAM::" .aws-sam/build/template.yaml; then
             echo "Application stack must not synthesize IAM resources." >&2
             exit 1

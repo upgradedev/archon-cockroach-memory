@@ -19,6 +19,13 @@ interface ProofFixture {
   detailedMetrics?: boolean;
   throttlingRate?: number;
   throttlingBurst?: number;
+  originStageLogicalId?: string;
+  apiEndpoint?: string;
+  directHealthOk?: boolean;
+  deployedOriginPath?: string;
+  deployedOriginDomain?: string;
+  distributionStatus?: string;
+  runtimeLogDestinationArn?: string;
   logStage?: string;
   includeLogEvent?: boolean;
   routeOverride?: boolean;
@@ -30,14 +37,24 @@ function executable(path: string, content: string): void {
   chmodSync(path, 0o755);
 }
 
-function processedTemplate(): string {
+function processedTemplate(
+  originStageLogicalId = "ArchonHttpApiliveStage"
+): string {
   return JSON.stringify({
     TemplateBody: {
+      Parameters: {
+        HttpApiStageName: {
+          Type: "String",
+          Default: "live",
+          AllowedValues: ["live"],
+        },
+      },
       Resources: {
-        ServerlessHttpApiliveStage: {
+        ArchonHttpApiliveStage: {
           Type: "AWS::ApiGatewayV2::Stage",
           Properties: {
-            StageName: "live",
+            ApiId: { Ref: "ArchonHttpApi" },
+            StageName: { Ref: "HttpApiStageName" },
             AutoDeploy: true,
             DefaultRouteSettings: {
               DetailedMetricsEnabled: true,
@@ -50,6 +67,24 @@ function processedTemplate(): string {
               },
               Format:
                 '{"requestId":"$context.requestId","stage":"$context.stage","routeKey":"$context.routeKey","status":"$context.status"}',
+            },
+          },
+        },
+        Distribution: {
+          Type: "AWS::CloudFront::Distribution",
+          Properties: {
+            DistributionConfig: {
+              Origins: [
+                {
+                  Id: "ApiOrigin",
+                  OriginPath: {
+                    "Fn::Join": [
+                      "",
+                      ["/", { Ref: originStageLogicalId }],
+                    ],
+                  },
+                },
+              ],
             },
           },
         },
@@ -67,6 +102,9 @@ function runProof(fixture: ProofFixture = {}) {
 set -euo pipefail
 case "$*" in
   *"cloudformation get-template"*) printf '%s\\n' "$FAKE_PROCESSED_TEMPLATE" ;;
+  *"cloudfront wait distribution-deployed"*) exit 0 ;;
+  *"cloudfront get-distribution-config"*) printf '%s\\n' "$FAKE_CLOUDFRONT_CONFIG" ;;
+  *"cloudfront get-distribution"*) printf '%s\\n' "$FAKE_DISTRIBUTION_STATUS" ;;
   *"apigatewayv2 get-stage"*"\\$default"*)
     if [ "$FAKE_LEGACY_DEFAULT_EXISTS" = "true" ]; then
       printf '%s\\n' '{"StageName":"$default"}'
@@ -83,7 +121,15 @@ esac
     );
     executable(
       join(fakeBin, "curl"),
-      "#!/usr/bin/env bash\nprintf '%s\\n' '{\"ok\":true}'\n"
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"execute-api"* ]] &&
+   [ "$FAKE_DIRECT_HEALTH_OK" != "true" ]; then
+  echo "Direct named-stage health failed." >&2
+  exit 22
+fi
+printf '%s\\n' '{"ok":true,"status":"reachable"}'
+`
     );
     executable(join(fakeBin, "seq"), "#!/usr/bin/env bash\nprintf '1\\n'\n");
     executable(join(fakeBin, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
@@ -101,7 +147,8 @@ esac
       },
       AccessLogSettings: {
         DestinationArn:
-          "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging:*",
+          fixture.runtimeLogDestinationArn ??
+          "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging",
         Format:
           '{"requestId":"$context.requestId","stage":"$context.stage","routeKey":"$context.routeKey","status":"$context.status"}',
       },
@@ -138,12 +185,37 @@ esac
         STACK_NAME: "archon-memory-staging",
         API_ID: "api123",
         API_STAGE_NAME: "live",
+        API_ENDPOINT:
+          fixture.apiEndpoint ??
+          "https://api123.execute-api.eu-west-1.amazonaws.com/live",
         API_ACCESS_LOG_GROUP:
           "/aws/vendedlogs/apigateway/archon-memory-staging",
         APPLICATION_URL: "https://example.invalid",
+        DISTRIBUTION_ID: "EDISTRIBUTION123",
         AWS_ACCOUNT_ID: "123456789012",
         AWS_REGION: "eu-west-1",
-        FAKE_PROCESSED_TEMPLATE: processedTemplate(),
+        FAKE_PROCESSED_TEMPLATE: processedTemplate(
+          fixture.originStageLogicalId
+        ),
+        FAKE_DIRECT_HEALTH_OK: String(fixture.directHealthOk ?? true),
+        FAKE_DISTRIBUTION_STATUS:
+          fixture.distributionStatus ?? "Deployed",
+        FAKE_CLOUDFRONT_CONFIG: JSON.stringify({
+          DistributionConfig: {
+            Origins: {
+              Items: [
+                {
+                  Id: "ApiOrigin",
+                  OriginPath:
+                    fixture.deployedOriginPath ?? "/live",
+                  DomainName:
+                    fixture.deployedOriginDomain ??
+                    "api123.execute-api.eu-west-1.amazonaws.com",
+                },
+              ],
+            },
+          },
+        }),
         FAKE_LIVE_STAGE: JSON.stringify(liveStage),
         FAKE_LEGACY_DEFAULT_EXISTS: String(
           fixture.legacyDefaultExists ?? false
@@ -203,6 +275,8 @@ set -euo pipefail
 case "$*" in
   *"cloudformation describe-stacks"*) printf '%s\\n' "$FAKE_CURRENT_STACK" ;;
   *"cloudformation get-template"*) printf '%s\\n' '{"TemplateBody":{}}' ;;
+  *"cloudfront get-distribution-config"*) printf '%s\\n' '{"DistributionConfig":{}}' ;;
+  *"cloudfront get-distribution"*) printf '%s\\n' '{"Distribution":{"Status":"Deployed"}}' ;;
   *"apigatewayv2 get-stage"*"stage-name live"*)
     if [ -n "$FAKE_LIVE_STAGE_ERROR" ]; then
       printf '%s\\n' "$FAKE_LIVE_STAGE_ERROR" >&2
@@ -225,6 +299,10 @@ esac
               OutputKey: "ApiEndpoint",
               OutputValue:
                 "https://api123.execute-api.eu-west-1.amazonaws.com/live",
+            },
+            {
+              OutputKey: "DistributionId",
+              OutputValue: "EDISTRIBUTION123",
             },
             ...(includeVendedLogOutput
               ? [
@@ -270,6 +348,10 @@ test(
       detailedMetrics: true,
       throttlingRate: 5,
       throttlingBurst: 10,
+      cloudFrontStatus: "Deployed",
+      cloudFrontOriginPath: "/live",
+      directStageHealth: "GET /live/api/health 200",
+      sameOriginHealth: "GET /api/health 200",
       accessLogGroup: "/aws/vendedlogs/apigateway/archon-memory-staging",
       accessLogEvent: "GET /api/health 200",
     });
@@ -312,6 +394,43 @@ for (const [name, fixture] of [
   ["missing detailed metrics", { detailedMetrics: false }],
   ["wrong throttle rate", { throttlingRate: 6 }],
   ["wrong throttle burst", { throttlingBurst: 11 }],
+  [
+    "the legacy CloudFront origin stage",
+    {
+      originStageLogicalId:
+        "ServerlessHttpApiApiGatewayDefaultStage",
+    },
+  ],
+  [
+    "an API endpoint without the named stage",
+    {
+      apiEndpoint:
+        "https://api123.execute-api.eu-west-1.amazonaws.com",
+    },
+  ],
+  ["an unreachable direct named stage", { directHealthOk: false }],
+  [
+    "a deployed legacy CloudFront origin path",
+    { deployedOriginPath: "/$default" },
+  ],
+  [
+    "a CloudFront origin bound to another API",
+    {
+      deployedOriginDomain:
+        "other.execute-api.eu-west-1.amazonaws.com",
+    },
+  ],
+  [
+    "a non-deployed CloudFront distribution",
+    { distributionStatus: "InProgress" },
+  ],
+  [
+    "a runtime access-log ARN with the CloudFormation resource wildcard",
+    {
+      runtimeLogDestinationArn:
+        "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging:*",
+    },
+  ],
   ["missing access-log event", { includeLogEvent: false }],
   ["access log from the wrong stage", { logStage: "$default" }],
   ["a per-route control override", { routeOverride: true }],
@@ -360,6 +479,8 @@ test(
       permissions: [
         "cloudformation:GetTemplate",
         "apigateway:GET",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
         "logs:DescribeLogStreams",
         "logs:FilterLogEvents",
       ],

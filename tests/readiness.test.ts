@@ -575,6 +575,10 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
     "utf8"
   );
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
   const bootstrap = readFileSync(
     new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
     "utf8"
@@ -592,10 +596,16 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     "utf8"
   );
 
-  assert.match(template, /StageName:\s+live/u);
+  assert.match(template, /^  ArchonHttpApi:$/mu);
+  assert.doesNotMatch(template, /^  ServerlessHttpApi:$/mu);
   assert.match(
     template,
-    /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ServerlessHttpApi\.Stage\]\]/u
+    /HttpApiStageName:\s+Type:\s+String\s+Default:\s+live\s+AllowedValues:\s+- live/u
+  );
+  assert.match(template, /StageName:\s+!Ref HttpApiStageName/u);
+  assert.match(
+    template,
+    /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ArchonHttpApi\.Stage\]\]/u
   );
   assert.match(
     template,
@@ -618,13 +628,19 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.equal(
     (
       workflow.match(
-        /name: Prove transformed and live API stage controls/gu
+        /name: Prove transformed and live API stage routing before frontend mutation/gu
       ) ?? []
     ).length,
     2
   );
   assert.match(proof, /--template-stage Processed/u);
   assert.match(proof, /aws apigatewayv2 get-stage/u);
+  assert.match(proof, /aws cloudfront wait distribution-deployed/u);
+  assert.match(proof, /aws cloudfront get-distribution-config/u);
+  assert.match(proof, /cloudFrontStatus: "Deployed"/u);
+  assert.match(proof, /cloudFrontOriginPath: "\/live"/u);
+  assert.match(proof, /directStageHealth: "GET \/live\/api\/health 200"/u);
+  assert.match(proof, /sameOriginHealth: "GET \/api\/health 200"/u);
   assert.match(proof, /\.DetailedMetricsEnabled == true/u);
   assert.match(proof, /\.ThrottlingRateLimit == 5/u);
   assert.match(proof, /\.ThrottlingBurstLimit == 10/u);
@@ -636,9 +652,11 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.match(proof, /legacyDefaultStageAbsent: true/u);
   assert.match(proof, /\.routeKey == "GET \/api\/health"/u);
   for (const output of [
+    "ApiEndpoint",
     "ApiId",
     "ApiStageName",
     "ApiAccessLogGroupName",
+    "DistributionId",
   ]) {
     assert.match(template, new RegExp(`^  ${output}:$`, "mu"));
   }
@@ -653,6 +671,27 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.equal(
     (workflow.match(/API_ID="\$\(jq -er/gu) ?? []).length,
     2
+  );
+  assert.equal(
+    (workflow.match(/API_ENDPOINT="\$\(jq -er/gu) ?? []).length,
+    2
+  );
+  const stageProofPositions = [
+    ...workflow.matchAll(
+      /name: Prove transformed and live API stage routing before frontend mutation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const frontendPositions = [
+    ...workflow.matchAll(
+      /name: Publish the frontend and invalidate CloudFront/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  assert.equal(stageProofPositions.length, 2);
+  assert.equal(frontendPositions.length, 2);
+  assert.ok(
+    stageProofPositions.every(
+      (position, index) => position < frontendPositions[index]
+    )
   );
   assert.equal(
     (workflow.match(/--slurpfile apiStage api-stage-proof\.json/gu) ?? [])
@@ -722,8 +761,35 @@ test("readiness: named HTTP API stage controls are proved from transform to live
       .length >= 4
   );
   assert.equal(
+    (workflow.match(/cloudFrontStatus == "Deployed"/gu) ?? []).length,
+    4
+  );
+  assert.equal(
+    (workflow.match(/directStageHealth == "GET \/live\/api\/health 200"/gu) ?? [])
+      .length,
+    4
+  );
+  assert.equal(
+    (ci.match(/reserved logical ID\|unexpected behaviors/gu) ?? []).length,
+    1
+  );
+  assert.equal(
+    (workflow.match(/reserved logical ID\|unexpected behaviors/gu) ?? [])
+      .length,
+    1
+  );
+  assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
     2
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudfront:GetDistribution$/gmu) ?? []).length,
+    3
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudfront:GetDistributionConfig$/gmu) ?? [])
+      .length,
+    3
   );
   for (const action of [
     "logs:CreateLogDelivery",

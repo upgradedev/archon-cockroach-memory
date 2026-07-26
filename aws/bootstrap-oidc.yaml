@@ -863,6 +863,8 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
                   - cloudfront:GetInvalidation
                 Resource: "*"
               - Effect: Allow
@@ -970,6 +972,8 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
                   - cloudfront:GetInvalidation
                 Resource: "*"
               - Effect: Allow

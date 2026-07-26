@@ -206,6 +206,22 @@ function sourceChecks(): SourceCheck[] {
       /- name: Deploy production with recovery-safe SAM canary[\s\S]*?(?=\r?\n      - name: Resolve public, non-secret stack outputs)/u
     )?.[0] ?? "",
   ];
+  const stageRoutingProofPositions = [
+    ...deploy.matchAll(
+      /name: Prove transformed and live API stage routing before frontend mutation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const frontendPublishPositions = [
+    ...deploy.matchAll(
+      /name: Publish the frontend and invalidate CloudFront/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const stageRoutingProofsPrecedeFrontend =
+    stageRoutingProofPositions.length === 2 &&
+    frontendPublishPositions.length === 2 &&
+    stageRoutingProofPositions.every(
+      (position, index) => position < frontendPublishPositions[index]
+    );
   const fullRecallSmokeBlocks = [
     deploy.match(
       /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
@@ -613,8 +629,13 @@ function sourceChecks(): SourceCheck[] {
         /AWS::Serverless::Function/u.test(lambdaTemplate) &&
         /AWS::S3::Bucket/u.test(lambdaTemplate) &&
         /DATABASE_SECRET_ID/u.test(lambdaTemplate) &&
-        /StageName:\s*live/u.test(lambdaTemplate) &&
-        /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ServerlessHttpApi\.Stage\]\]/u.test(
+        /^  ArchonHttpApi:$/mu.test(lambdaTemplate) &&
+        !/^  ServerlessHttpApi:$/mu.test(lambdaTemplate) &&
+        /HttpApiStageName:\s*Type:\s*String\s*Default:\s*live\s*AllowedValues:\s*- live/u.test(
+          lambdaTemplate
+        ) &&
+        /StageName:\s*!Ref HttpApiStageName/u.test(lambdaTemplate) &&
+        /OriginPath:\s*!Join\s*\["",\s*\["\/",\s*!Ref ArchonHttpApi\.Stage\]\]/u.test(
           lambdaTemplate
         ) &&
         /DetailedMetricsEnabled:\s*true/u.test(lambdaTemplate) &&
@@ -631,6 +652,8 @@ function sourceChecks(): SourceCheck[] {
           []
         ).length === 3 &&
         /cloudformation:GetTemplate/u.test(deliveryBootstrap) &&
+        /cloudfront:GetDistribution/u.test(deliveryBootstrap) &&
+        /cloudfront:GetDistributionConfig/u.test(deliveryBootstrap) &&
         /logs:CreateLogDelivery/u.test(deliveryBootstrap) &&
         /logs:PutResourcePolicy/u.test(deliveryBootstrap) &&
         /logs:UpdateLogDelivery/u.test(deliveryBootstrap) &&
@@ -649,13 +672,16 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /--template-stage Processed/u.test(apiStageProof) &&
         /apigatewayv2 get-stage/u.test(apiStageProof) &&
+        /cloudfront wait distribution-deployed/u.test(apiStageProof) &&
+        /cloudfront get-distribution-config/u.test(apiStageProof) &&
+        /directStageHealth: "GET \/live\/api\/health 200"/u.test(
+          apiStageProof
+        ) &&
         /logs filter-log-events/u.test(apiStageProof) &&
-        (
-          deploy.match(
-            /name: Prove transformed and live API stage controls/gu
-          ) ?? []
-        ).length === 2,
-      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves named-stage throttling, detailed metrics, and a real API access-log event in both environments.",
+        stageRoutingProofsPrecedeFrontend &&
+        ci.includes("reserved logical ID|unexpected behaviors") &&
+        deploy.includes("reserved logical ID|unexpected behaviors"),
+      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
       "The deployable AWS architecture or its live API stage-control proof is incomplete."
     ),
     sourceCheck(
