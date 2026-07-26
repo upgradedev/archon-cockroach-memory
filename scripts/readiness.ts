@@ -45,6 +45,9 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "api-stage-preflight.json",
   "api-stage-proof.json",
   "foundation-s3-access-logging-receipt.json",
+  "application-s3-access-logging-preflight.json",
+  "application-s3-access-logging-proof.json",
+  "application-s3-access-logging-recovery.json",
   "previous-stack-template.yaml",
   "previous-stack-parameters.json",
   "bench-clustered.txt",
@@ -745,6 +748,9 @@ function sourceChecks(): SourceCheck[] {
   const s3AccessLoggingProof = read(
     "aws/prove-s3-access-logging.sh"
   );
+  const applicationS3AccessLoggingProof = read(
+    "aws/prove-application-s3-access-logging.sh"
+  );
   const bootstrapStackPolicy = read(
     "aws/bootstrap-stack-policy.json"
   );
@@ -821,6 +827,43 @@ function sourceChecks(): SourceCheck[] {
     frontendPublishPositions.length === 2 &&
     stageRoutingProofPositions.every(
       (position, index) => position < frontendPublishPositions[index]
+    );
+  const applicationS3PreflightPositions = [
+    ...deploy.matchAll(
+      /name: Preflight application S3 access logging before stack mutation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const applicationS3RecheckPositions = [
+    ...deploy.matchAll(
+      /name: Re-prove the application S3 preflight immediately before SAM/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const applicationDeployPositions = [
+    ...deploy.matchAll(
+      /name: Deploy (?:staging|production) with recovery-safe SAM canary/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const applicationS3VerifyPositions = [
+    ...deploy.matchAll(
+      /name: Prove live application S3 access logging before frontend mutation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const applicationS3ProofsOrdered =
+    applicationS3PreflightPositions.length === 2 &&
+    applicationS3RecheckPositions.length === 2 &&
+    applicationDeployPositions.length === 2 &&
+    applicationS3VerifyPositions.length === 2 &&
+    applicationS3PreflightPositions.every(
+      (position, index) =>
+        position < applicationS3RecheckPositions[index] &&
+        applicationS3RecheckPositions[index] <
+          applicationDeployPositions[index] &&
+        applicationDeployPositions[index] <
+          applicationS3VerifyPositions[index] &&
+        applicationS3VerifyPositions[index] <
+          stageRoutingProofPositions[index] &&
+        applicationS3VerifyPositions[index] <
+          frontendPublishPositions[index]
     );
   const fullRecallSmokeBlocks = [
     deploy.match(
@@ -1434,6 +1477,115 @@ function sourceChecks(): SourceCheck[] {
         ),
       "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow with unverified-plan cleanup, CloudFormation-only dynamic-reference reads, live proof, and CI gate are source-controlled.",
       "The centralized S3 logging archive, narrow exception, activation recovery, exact dynamic-reference reads, proof, or CI/readiness gate is incomplete."
+    ),
+    sourceCheck(
+      "product.application-s3-access-logging-live",
+      "Product Readiness",
+      /SpaBucket:[\s\S]*?LoggingConfiguration:[\s\S]*?DestinationBucketName: !Sub "\$\{AppName\}-s3-access-logs-\$\{AWS::AccountId\}-\$\{AWS::Region\}"[\s\S]*?LogFilePrefix: !Sub "\$\{Environment\}-web\/"[\s\S]*?PartitionDateSource: EventTime/u.test(
+        lambdaTemplate
+      ) &&
+        /preflight\|verify\|recover/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /bash aws\/prove-s3-access-logging\.sh verify/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /archon\.application-s3-access-logging\.preflight/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /canonicalization: "jq-cS-v1"/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /NoSuchBucket/u.test(applicationS3AccessLoggingProof) &&
+        /--template-stage Processed/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /processedTemplateManaged: true/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /foundationVerified: true/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /EXPECTED_STACK_STATE/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /greenfield:absent\|existing:disabled\|existing:enabled/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /CREATE_COMPLETE/u.test(applicationS3AccessLoggingProof) &&
+        /UPDATE_COMPLETE/u.test(applicationS3AccessLoggingProof) &&
+        /type == "string" then[\s\S]*?fromjson/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        applicationS3ProofsOrdered &&
+        (
+          deploy.match(
+            /EXPECTED_STACK_STATE: \$\{\{ steps\.api_preflight\.outputs\.stack_state \}\}/gu
+          ) ?? []
+        ).length === 4 &&
+        (
+          deploy.match(/id: application_s3_verify/gu) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /EXPECTED_PROOF_SHA256: \$\{\{ steps\.application_s3_verify\.outputs\.receipt_sha256 \}\}/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /sha256sum application-s3-access-logging-proof\.json/gu
+          ) ?? []
+        ).length === 4 &&
+        (
+          deploy.match(
+            /prove-application-s3-access-logging\.sh preflight/gu
+          ) ?? []
+        ).length === 4 &&
+        (
+          deploy.match(
+            /prove-application-s3-access-logging\.sh verify/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /prove-application-s3-access-logging\.sh recover/gu
+          ) ?? []
+        ).length === 2 &&
+        recoveryBlocks.every(
+          (block) =>
+            /prove_application_s3_recovery/u.test(block) &&
+            /application-s3-access-logging-recovery\.json/u.test(block) &&
+            /EXPECTED_STACK_STATE/u.test(block) &&
+            /sha256sum application-s3-access-logging-preflight\.json/u.test(
+              block
+            )
+        ) &&
+        (
+          deploy.match(
+            /--slurpfile s3Preflight application-s3-access-logging-preflight\.json/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /--slurpfile s3Proof application-s3-access-logging-proof\.json/gu
+          ) ?? []
+        ).length === 2 &&
+        (deploy.match(/s3AccessLogging: \{/gu) ?? []).length === 2 &&
+        (
+          deploy.match(
+            /preMutationReproved: true[\s\S]*?loggingEnabled: true[\s\S]*?targetPrefix:[\s\S]*?partitionDateSource:[\s\S]*?processedTemplateManaged: true[\s\S]*?liveControlPlaneVerified: true/gu
+          ) ?? []
+        ).length === 2 &&
+        /bash -n aws\/prove-application-s3-access-logging\.sh/u.test(ci) &&
+        /prove-application-s3-access-logging\.sh/u.test(
+          s3AccessLoggingTests
+        ) &&
+        /greenfield[\s\S]*?CREATE_COMPLETE/u.test(
+          s3AccessLoggingTests
+        ) &&
+        /stringTemplateBody/u.test(s3AccessLoggingTests),
+      "Both application web buckets are source-controlled for exact EventTime S3 logging, cross-bound to stack state, re-proved immediately before mutation, verified in the processed template and live control plane before frontend publication, restored fail-closed, and hash-bound through sanitized receipts.",
+      "Application S3 access logging lacks exact template/live proof, stack-state binding, immutable receipt evidence, pre-mutation replay protection, recovery verification, or CI regression coverage."
     ),
     sourceCheck(
       "product.oidc-promotion-rollback",

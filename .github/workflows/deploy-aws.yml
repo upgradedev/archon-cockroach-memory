@@ -252,6 +252,60 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
+      - name: Preflight application S3 access logging before stack mutation
+        id: application_s3_preflight
+        env:
+          ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          bash aws/prove-application-s3-access-logging.sh preflight |
+            tee application-s3-access-logging-preflight.json
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              .ok == true
+              and .schema == "archon.application-s3-access-logging.preflight"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .environment == $environment
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and (
+                .priorState == "absent"
+                or .priorState == "disabled"
+                or .priorState == "enabled"
+              )
+              and .expected == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+              and .integrity.algorithm == "sha256"
+              and .integrity.canonicalization == "jq-cS-v1"
+              and (
+                .integrity.payloadSha256
+                | type == "string"
+                and test("^[0-9a-f]{64}$")
+              )
+            ' application-s3-access-logging-preflight.json >/dev/null
+          receipt_sha256="$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
+
       - name: Preflight API stage-proof permissions before stack mutation
         id: api_preflight
         env:
@@ -361,6 +415,46 @@ jobs:
             echo "has_previous_stack=$HAS_PREVIOUS_STACK"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Re-prove the application S3 preflight immediately before SAM
+        id: application_s3_recheck
+        env:
+          ENVIRONMENT: staging
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.json"
+          canonical_before="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-before.canonical.json"
+          canonical_recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.canonical.json"
+          bash aws/prove-application-s3-access-logging.sh preflight >"$recheck"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          jq -cS . application-s3-access-logging-preflight.json \
+            >"$canonical_before"
+          jq -cS . "$recheck" >"$canonical_recheck"
+          cmp --silent "$canonical_before" "$canonical_recheck"
+          jq -e \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            '
+              (
+                $stackState == "greenfield"
+                and .priorState == "absent"
+              )
+              or (
+                $stackState == "existing"
+                and (
+                  .priorState == "disabled"
+                  or .priorState == "enabled"
+                )
+              )
+            ' "$recheck" >/dev/null
+          {
+            echo "reproved=true"
+            echo "stack_state=$EXPECTED_STACK_STATE"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Deploy staging with recovery-safe SAM canary
         id: deploy
         env:
@@ -458,6 +552,76 @@ jobs:
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove live application S3 access logging before frontend mutation
+        id: application_s3_verify
+        env:
+          ENVIRONMENT: staging
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh verify |
+            tee application-s3-access-logging-proof.json
+          jq -e \
+            --slurpfile preflight application-s3-access-logging-preflight.json \
+            --arg environment "$ENVIRONMENT" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              ($preflight | length) == 1
+              and .ok == true
+              and .schema == "archon.application-s3-access-logging.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .processedTemplateManaged == true
+              and .environment == $environment
+              and .stackState == $stackState
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .stackStatus == "CREATE_COMPLETE"
+                )
+                or (
+                  $stackState == "existing"
+                  and (
+                    .stackStatus == "CREATE_COMPLETE"
+                    or .stackStatus == "UPDATE_COMPLETE"
+                  )
+                )
+              )
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and .liveState == "enabled"
+              and .preflightIntegrity == $preflight[0].integrity
+              and .expected == .liveConfiguration
+              and .liveConfiguration == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+            ' application-s3-access-logging-proof.json >/dev/null
+          proof_sha256="$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )"
+          [[ "$proof_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$proof_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Prove transformed and live API stage routing before frontend mutation
         env:
@@ -630,13 +794,66 @@ jobs:
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
           PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          ENVIRONMENT: staging
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
           set -euo pipefail
           RECOVERY_FAILED=0
+          prove_application_s3_recovery() {
+            if ! test "$(
+              sha256sum application-s3-access-logging-preflight.json |
+                awk '{print $1}'
+            )" = "$EXPECTED_PREFLIGHT_SHA256"; then
+              return 1
+            fi
+            if ! bash aws/prove-application-s3-access-logging.sh recover |
+                tee application-s3-access-logging-recovery.json; then
+              return 1
+            fi
+            jq -e \
+              --slurpfile preflight application-s3-access-logging-preflight.json \
+              --arg stackState "$EXPECTED_STACK_STATE" \
+              '
+                ($preflight | length) == 1
+                and .ok == true
+                and .schema == "archon.application-s3-access-logging.recovery"
+                and .version == 1
+                and .mode == "recover"
+                and .evidence == "live-control-plane"
+                and .foundationVerified == true
+                and .environment == $preflight[0].environment
+                and .stackState == $stackState
+                and .sourceBucket == $preflight[0].sourceBucket
+                and .destinationBucket == $preflight[0].destinationBucket
+                and .priorState == $preflight[0].priorState
+                and .restoredState == $preflight[0].priorState
+                and .preflightIntegrity == $preflight[0].integrity
+                and (
+                  (
+                    .restoredState == "absent"
+                    and .restoredConfiguration == null
+                  )
+                  or (
+                    .restoredState == "disabled"
+                    and .restoredConfiguration == {}
+                  )
+                  or (
+                    .restoredState == "enabled"
+                    and .restoredConfiguration == .expected
+                  )
+                )
+              ' application-s3-access-logging-recovery.json >/dev/null
+          }
           if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
             if ! ENVIRONMENT=staging \
               bash aws/delete-greenfield-stack.sh; then
               echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            if ! prove_application_s3_recovery; then
+              echo "Failed to prove greenfield S3 logging recovery." >&2
               RECOVERY_FAILED=1
             fi
             test "$RECOVERY_FAILED" -eq 0
@@ -644,6 +861,10 @@ jobs:
           fi
           if ! bash aws/restore-cloudformation-stack.sh; then
             echo "Failed to restore the exact previous CloudFormation stack." >&2
+            RECOVERY_FAILED=1
+          fi
+          if ! prove_application_s3_recovery; then
+            echo "Failed to prove the restored S3 logging state." >&2
             RECOVERY_FAILED=1
           fi
           RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
@@ -742,14 +963,32 @@ jobs:
         if: success()
         env:
           APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          test "$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PROOF_SHA256"
           jq -e \
             --slurpfile apiStage api-stage-proof.json \
+            --slurpfile s3Preflight application-s3-access-logging-preflight.json \
+            --slurpfile s3Proof application-s3-access-logging-proof.json \
             --arg environment staging \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
+            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
             --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             'if (($apiStage | length) == 1 and
+                 ($s3Preflight | length) == 1 and
+                 ($s3Proof | length) == 1 and
                  $apiStage[0].ok == true and
                  $apiStage[0].stage == "live" and
                  $apiStage[0].legacyDefaultStageAbsent == true and
@@ -760,7 +999,29 @@ jobs:
                  $apiStage[0].cloudFrontOriginPath == "/live" and
                  $apiStage[0].directStageHealth == "GET /live/api/health 200" and
                  $apiStage[0].sameOriginHealth == "GET /api/health 200" and
-                 $apiStage[0].accessLogEvent == "GET /api/health 200")
+                 $apiStage[0].accessLogEvent == "GET /api/health 200" and
+                 $s3Preflight[0].ok == true and
+                 $s3Preflight[0].mode == "preflight" and
+                 $s3Preflight[0].foundationVerified == true and
+                 $s3Preflight[0].environment == $environment and
+                 $s3Proof[0].ok == true and
+                 $s3Proof[0].mode == "verify" and
+                 $s3Proof[0].environment == $environment and
+                 $s3Proof[0].stackState == $stackState and
+                 (($stackState == "greenfield" and
+                   $s3Preflight[0].priorState == "absent" and
+                   $s3Proof[0].stackStatus == "CREATE_COMPLETE") or
+                  ($stackState == "existing" and
+                   ($s3Preflight[0].priorState == "disabled" or
+                    $s3Preflight[0].priorState == "enabled") and
+                   ($s3Proof[0].stackStatus == "CREATE_COMPLETE" or
+                    $s3Proof[0].stackStatus == "UPDATE_COMPLETE"))) and
+                 $s3Proof[0].foundationVerified == true and
+                 $s3Proof[0].processedTemplateManaged == true and
+                 $s3Proof[0].liveState == "enabled" and
+                 $s3Proof[0].preflightIntegrity ==
+                   $s3Preflight[0].integrity and
+                 $preMutationReproved == "true")
              then . + {deployment: {
               environment: $environment,
               stackName: $stackName,
@@ -771,9 +1032,29 @@ jobs:
               canaryTrafficProbe: "weighted-alias-proof-and-recall",
               deployAlarm: "candidate-executed-version-errors",
               recallGate: "post-promotion-with-explicit-restore",
-              apiStage: $apiStage[0]
+              apiStage: $apiStage[0],
+              s3AccessLogging: {
+                preflight: {
+                  foundationVerified: true,
+                  beforeState: $s3Preflight[0].priorState,
+                  preMutationReproved: true,
+                  stackState: $s3Proof[0].stackState
+                },
+                verified: {
+                  loggingEnabled: true,
+                  targetPrefix:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled.TargetPrefix,
+                  partitionDateSource:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled
+                      .TargetObjectKeyFormat.PartitionedPrefix
+                      .PartitionDateSource,
+                  stackStatus: $s3Proof[0].stackStatus,
+                  processedTemplateManaged: true,
+                  liveControlPlaneVerified: true
+                }
+              }
             }}
-             else error("invalid API stage proof")
+             else error("invalid deployment control proof")
              end' deployment-receipt.json > staging-deployment-receipt.json
 
       - name: Upload staging receipt
@@ -862,6 +1143,60 @@ jobs:
           role-session-name: archon-production-${{ github.run_id }}
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Preflight application S3 access logging before stack mutation
+        id: application_s3_preflight
+        env:
+          ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          bash aws/prove-application-s3-access-logging.sh preflight |
+            tee application-s3-access-logging-preflight.json
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              .ok == true
+              and .schema == "archon.application-s3-access-logging.preflight"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .environment == $environment
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and (
+                .priorState == "absent"
+                or .priorState == "disabled"
+                or .priorState == "enabled"
+              )
+              and .expected == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+              and .integrity.algorithm == "sha256"
+              and .integrity.canonicalization == "jq-cS-v1"
+              and (
+                .integrity.payloadSha256
+                | type == "string"
+                and test("^[0-9a-f]{64}$")
+              )
+            ' application-s3-access-logging-preflight.json >/dev/null
+          receipt_sha256="$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Preflight API stage-proof permissions before stack mutation
         id: api_preflight
@@ -972,6 +1307,46 @@ jobs:
             echo "has_previous_stack=$HAS_PREVIOUS_STACK"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Re-prove the application S3 preflight immediately before SAM
+        id: application_s3_recheck
+        env:
+          ENVIRONMENT: production
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.json"
+          canonical_before="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-before.canonical.json"
+          canonical_recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.canonical.json"
+          bash aws/prove-application-s3-access-logging.sh preflight >"$recheck"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          jq -cS . application-s3-access-logging-preflight.json \
+            >"$canonical_before"
+          jq -cS . "$recheck" >"$canonical_recheck"
+          cmp --silent "$canonical_before" "$canonical_recheck"
+          jq -e \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            '
+              (
+                $stackState == "greenfield"
+                and .priorState == "absent"
+              )
+              or (
+                $stackState == "existing"
+                and (
+                  .priorState == "disabled"
+                  or .priorState == "enabled"
+                )
+              )
+            ' "$recheck" >/dev/null
+          {
+            echo "reproved=true"
+            echo "stack_state=$EXPECTED_STACK_STATE"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Deploy production with recovery-safe SAM canary
         id: deploy
         env:
@@ -1069,6 +1444,76 @@ jobs:
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove live application S3 access logging before frontend mutation
+        id: application_s3_verify
+        env:
+          ENVIRONMENT: production
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh verify |
+            tee application-s3-access-logging-proof.json
+          jq -e \
+            --slurpfile preflight application-s3-access-logging-preflight.json \
+            --arg environment "$ENVIRONMENT" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              ($preflight | length) == 1
+              and .ok == true
+              and .schema == "archon.application-s3-access-logging.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .processedTemplateManaged == true
+              and .environment == $environment
+              and .stackState == $stackState
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .stackStatus == "CREATE_COMPLETE"
+                )
+                or (
+                  $stackState == "existing"
+                  and (
+                    .stackStatus == "CREATE_COMPLETE"
+                    or .stackStatus == "UPDATE_COMPLETE"
+                  )
+                )
+              )
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and .liveState == "enabled"
+              and .preflightIntegrity == $preflight[0].integrity
+              and .expected == .liveConfiguration
+              and .liveConfiguration == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+            ' application-s3-access-logging-proof.json >/dev/null
+          proof_sha256="$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )"
+          [[ "$proof_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$proof_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Prove transformed and live API stage routing before frontend mutation
         env:
@@ -1239,13 +1684,66 @@ jobs:
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
           PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          ENVIRONMENT: production
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
           set -euo pipefail
           RECOVERY_FAILED=0
+          prove_application_s3_recovery() {
+            if ! test "$(
+              sha256sum application-s3-access-logging-preflight.json |
+                awk '{print $1}'
+            )" = "$EXPECTED_PREFLIGHT_SHA256"; then
+              return 1
+            fi
+            if ! bash aws/prove-application-s3-access-logging.sh recover |
+                tee application-s3-access-logging-recovery.json; then
+              return 1
+            fi
+            jq -e \
+              --slurpfile preflight application-s3-access-logging-preflight.json \
+              --arg stackState "$EXPECTED_STACK_STATE" \
+              '
+                ($preflight | length) == 1
+                and .ok == true
+                and .schema == "archon.application-s3-access-logging.recovery"
+                and .version == 1
+                and .mode == "recover"
+                and .evidence == "live-control-plane"
+                and .foundationVerified == true
+                and .environment == $preflight[0].environment
+                and .stackState == $stackState
+                and .sourceBucket == $preflight[0].sourceBucket
+                and .destinationBucket == $preflight[0].destinationBucket
+                and .priorState == $preflight[0].priorState
+                and .restoredState == $preflight[0].priorState
+                and .preflightIntegrity == $preflight[0].integrity
+                and (
+                  (
+                    .restoredState == "absent"
+                    and .restoredConfiguration == null
+                  )
+                  or (
+                    .restoredState == "disabled"
+                    and .restoredConfiguration == {}
+                  )
+                  or (
+                    .restoredState == "enabled"
+                    and .restoredConfiguration == .expected
+                  )
+                )
+              ' application-s3-access-logging-recovery.json >/dev/null
+          }
           if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
             if ! ENVIRONMENT=production \
               bash aws/delete-greenfield-stack.sh; then
               echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            if ! prove_application_s3_recovery; then
+              echo "Failed to prove greenfield S3 logging recovery." >&2
               RECOVERY_FAILED=1
             fi
             test "$RECOVERY_FAILED" -eq 0
@@ -1253,6 +1751,10 @@ jobs:
           fi
           if ! bash aws/restore-cloudformation-stack.sh; then
             echo "Failed to restore the exact previous CloudFormation stack." >&2
+            RECOVERY_FAILED=1
+          fi
+          if ! prove_application_s3_recovery; then
+            echo "Failed to prove the restored S3 logging state." >&2
             RECOVERY_FAILED=1
           fi
           RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
@@ -1351,14 +1853,32 @@ jobs:
         if: success()
         env:
           APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          test "$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PROOF_SHA256"
           jq -e \
             --slurpfile apiStage api-stage-proof.json \
+            --slurpfile s3Preflight application-s3-access-logging-preflight.json \
+            --slurpfile s3Proof application-s3-access-logging-proof.json \
             --arg environment production \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
+            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
             --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             'if (($apiStage | length) == 1 and
+                 ($s3Preflight | length) == 1 and
+                 ($s3Proof | length) == 1 and
                  $apiStage[0].ok == true and
                  $apiStage[0].stage == "live" and
                  $apiStage[0].legacyDefaultStageAbsent == true and
@@ -1369,7 +1889,29 @@ jobs:
                  $apiStage[0].cloudFrontOriginPath == "/live" and
                  $apiStage[0].directStageHealth == "GET /live/api/health 200" and
                  $apiStage[0].sameOriginHealth == "GET /api/health 200" and
-                 $apiStage[0].accessLogEvent == "GET /api/health 200")
+                 $apiStage[0].accessLogEvent == "GET /api/health 200" and
+                 $s3Preflight[0].ok == true and
+                 $s3Preflight[0].mode == "preflight" and
+                 $s3Preflight[0].foundationVerified == true and
+                 $s3Preflight[0].environment == $environment and
+                 $s3Proof[0].ok == true and
+                 $s3Proof[0].mode == "verify" and
+                 $s3Proof[0].environment == $environment and
+                 $s3Proof[0].stackState == $stackState and
+                 (($stackState == "greenfield" and
+                   $s3Preflight[0].priorState == "absent" and
+                   $s3Proof[0].stackStatus == "CREATE_COMPLETE") or
+                  ($stackState == "existing" and
+                   ($s3Preflight[0].priorState == "disabled" or
+                    $s3Preflight[0].priorState == "enabled") and
+                   ($s3Proof[0].stackStatus == "CREATE_COMPLETE" or
+                    $s3Proof[0].stackStatus == "UPDATE_COMPLETE"))) and
+                 $s3Proof[0].foundationVerified == true and
+                 $s3Proof[0].processedTemplateManaged == true and
+                 $s3Proof[0].liveState == "enabled" and
+                 $s3Proof[0].preflightIntegrity ==
+                   $s3Preflight[0].integrity and
+                 $preMutationReproved == "true")
              then . + {deployment: {
               environment: $environment,
               stackName: $stackName,
@@ -1380,9 +1922,29 @@ jobs:
               canaryTrafficProbe: "weighted-alias-proof-and-recall",
               deployAlarm: "candidate-executed-version-errors",
               recallGate: "post-promotion-with-explicit-restore",
-              apiStage: $apiStage[0]
+              apiStage: $apiStage[0],
+              s3AccessLogging: {
+                preflight: {
+                  foundationVerified: true,
+                  beforeState: $s3Preflight[0].priorState,
+                  preMutationReproved: true,
+                  stackState: $s3Proof[0].stackState
+                },
+                verified: {
+                  loggingEnabled: true,
+                  targetPrefix:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled.TargetPrefix,
+                  partitionDateSource:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled
+                      .TargetObjectKeyFormat.PartitionedPrefix
+                      .PartitionDateSource,
+                  stackStatus: $s3Proof[0].stackStatus,
+                  processedTemplateManaged: true,
+                  liveControlPlaneVerified: true
+                }
+              }
             }}
-             else error("invalid API stage proof")
+             else error("invalid deployment control proof")
              end' deployment-receipt.json > production-deployment-receipt.json
 
       - name: Upload production receipt

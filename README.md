@@ -180,17 +180,19 @@ secret scan
   → build once
   → cryptographic candidate receipt
   → protected database release (exact legacy supersession + payload-digest proof + fail-closed RLS + two-principal C-SPANN probes)
-  → pre-mutation proof of the scoped delivery-role read permissions
+  → exact, integrity-bound application S3 logging preflight and scoped delivery-role read proof
+  → identical preflight replay immediately before any SAM mutation
   → OIDC staging deploy + candidate-scoped 10%/5m proof-and-recall canary
+  → processed-template + live EventTime S3 logging proof before frontend mutation
   → processed-template + live named-stage throttle/metrics/vended-log proof
   → full real recall smoke + hosted Playwright
   → identical-candidate production promotion
   → candidate-scoped canary + named-stage proof + full recall + hosted Playwright
-  → recover the exact previous CloudFormation template/JSON parameters,
-    traffic alias, versioned S3 index, and verified public health/proof on any
-    post-deploy failure; `RetainExceptOnCreate` prevents initial-rollback
-    debris, and the retry-safe greenfield cleanup deletes its stack plus
-    bounded retained bucket versions/log groups
+  → recover and re-prove the exact previous S3 logging state, CloudFormation
+    template/JSON parameters, traffic alias, versioned S3 index, and public
+    health/proof on any post-deploy failure; `RetainExceptOnCreate` prevents
+    initial-rollback debris, and the retry-safe greenfield cleanup deletes its
+    stack plus bounded retained bucket versions/log groups
 ```
 
 Supply-chain references are immutable commit/image digests. Staging, production,
@@ -215,12 +217,18 @@ cannot mutate IAM/Security Hub, delete a stack, or directly call
 to `cloudformation.amazonaws.com`. CloudFormation's in-place update can resolve
 only the ten exact role ARNs referenced through foundation `GetAtt`
 expressions and the exact Security Hub automation-rule tags; those read actions
-are also FAS-bound to
-`cloudformation.amazonaws.com`. The Phase-2 application logging release is
-blocked until the stored bootstrap parameter and live EventTime configuration
-agree. Staging and production deploy identities have only the narrow read
-permissions needed to re-prove that bootstrap/S3/Security Hub foundation before
-any Phase-2 application mutation.
+are also FAS-bound to `cloudformation.amazonaws.com`.
+
+The Phase-2 application release refuses to
+mutate either stack until the stored bootstrap parameter, live EventTime
+foundation, and an integrity-bound source-bucket preflight all agree. It repeats
+that preflight immediately before SAM, cross-binds greenfield/existing stack
+state to absent/enabled bucket state, then proves the processed template and
+exact live source configuration before any frontend mutation. Raw preflight and
+proof hashes remain bound through receipt publication; recovery proves the
+restored enabled, disabled, or greenfield-absent state. Staging and production
+deploy identities retain only the narrow read permissions needed for those
+proofs.
 
 Each environment preflights its permissions before SAM is allowed to mutate its
 stack. HTTP API delivery uses

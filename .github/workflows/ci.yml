@@ -41,6 +41,9 @@ jobs:
             api-stage-preflight.json
             api-stage-proof.json
             foundation-s3-access-logging-receipt.json
+            application-s3-access-logging-preflight.json
+            application-s3-access-logging-proof.json
+            application-s3-access-logging-recovery.json
             previous-stack-template.yaml
             previous-stack-parameters.json
             bench-clustered.txt
@@ -371,6 +374,7 @@ jobs:
           set -euo pipefail
           bash -n aws/prove-api-stage-controls.sh
           bash -n aws/prove-s3-access-logging.sh
+          bash -n aws/prove-application-s3-access-logging.sh
           bash -n aws/delete-greenfield-stack.sh
           bash -n aws/restore-cloudformation-stack.sh
           jq -e '.Statement | length == 2' aws/bootstrap-stack-policy.json >/dev/null

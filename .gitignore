@@ -43,6 +43,9 @@ legacy-reconciliation-receipt.json
 api-stage-preflight.json
 api-stage-proof.json
 foundation-s3-access-logging-receipt.json
+application-s3-access-logging-preflight.json
+application-s3-access-logging-proof.json
+application-s3-access-logging-recovery.json
 previous-stack-template.yaml
 previous-stack-parameters.json
 bench-clustered.txt

@@ -138,6 +138,12 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Sub "${AppName}-s3-access-logs-${AWS::AccountId}-${AWS::Region}"
+        LogFilePrefix: !Sub "${Environment}-web/"
+        TargetObjectKeyFormat:
+          PartitionedPrefix:
+            PartitionDateSource: EventTime
       LifecycleConfiguration:
         Rules:
           - Id: RemoveOldNoncurrentVersions
