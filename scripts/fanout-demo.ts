@@ -51,6 +51,7 @@ import {
 } from "../src/db/client.js";
 
 const DIM = EMBED_DIM;
+const PRIMARY_IDX = "agent_memory@agent_memory_pkey";
 const IDX = "agent_memory@idx_agent_memory_embedding";
 
 // Three enforced split points at the quarter boundaries of the UUID space → 4 primary ranges.
@@ -394,7 +395,7 @@ async function exactUnsplit(log: (line: string) => void): Promise<number> {
   }
   const enforced = await query<{ n: string }>(
     `SELECT count(*) AS n
-       FROM [SHOW RANGES FROM TABLE agent_memory]
+       FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX}]
       WHERE split_enforced_until IS NOT NULL`
   );
   if (Number(enforced[0]?.n) !== 0) {
@@ -446,15 +447,16 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
     ) {
       throw new Error("Exact fan-out SPLIT did not return all three points.");
     }
-    const unowned = await query<{ n: string }>(
-      `SELECT count(*) AS n
-         FROM crdb_internal.ranges
-        WHERE table_name = 'agent_memory'
-          AND split_enforced_until IS NOT NULL
-          AND NOT (start_pretty = ANY($1::STRING[]))`,
-      [ownedPrettyKeys]
+    const enforcedRows = await query<{ start_pretty: string }>(
+      `SELECT start_pretty
+         FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX}]
+        WHERE split_enforced_until IS NOT NULL`
     );
-    if (Number(unowned[0]?.n) !== 0) {
+    const enforcedPrettyKeys = enforcedRows.map((row) => row.start_pretty);
+    if (
+      enforcedPrettyKeys.length !== FANOUT_SPLIT_POINTS.length ||
+      enforcedPrettyKeys.some((key) => !ownedPrettyKeys.includes(key))
+    ) {
       throw new Error(
         "Refusing fan-out work while an unrelated enforced split exists."
       );
@@ -493,11 +495,11 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
   log(`Loaded ${n} memories in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
 
   // 2. Prove the exact enforced split points created multiple table ranges.
-  const tableRanges = await rangeCount("TABLE agent_memory");
+  const tableRanges = await rangeCount(`INDEX ${PRIMARY_IDX}`);
   const indexRanges = await rangeCount(`INDEX ${IDX}`);
   const detail = await query<{ range_id: string; lease_holder: string; replicas: number[] }>(
     `SELECT range_id, lease_holder, replicas
-       FROM [SHOW RANGES FROM TABLE agent_memory WITH DETAILS] ORDER BY range_id`
+       FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX} WITH DETAILS] ORDER BY range_id`
   );
   log(`\nMemory table spans ${tableRanges} KV range(s) (vector index: ${indexRanges} range(s) at this scale):`);
   log("  range_id | lease_holder | replicas");

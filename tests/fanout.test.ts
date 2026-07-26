@@ -369,7 +369,7 @@ test(
     assert.equal(Number(remaining[0]?.n), 0);
     const enforced = await query<{ n: string }>(
       `SELECT count(*) AS n
-         FROM [SHOW RANGES FROM TABLE agent_memory]
+         FROM [SHOW RANGES FROM INDEX agent_memory@agent_memory_pkey]
         WHERE split_enforced_until IS NOT NULL`
     );
     assert.equal(Number(enforced[0]?.n), 0);
