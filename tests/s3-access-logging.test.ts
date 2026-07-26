@@ -22,6 +22,7 @@ const WORKFLOW = readFileSync(
   "utf8"
 );
 const PROOF_SCRIPT = join(ROOT, "aws", "prove-s3-access-logging.sh");
+const PROOF_SOURCE = readFileSync(PROOF_SCRIPT, "utf8");
 const STACK_POLICY = JSON.parse(
   readFileSync(join(ROOT, "aws", "bootstrap-stack-policy.json"), "utf8")
 );
@@ -156,13 +157,17 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     /"ForAnyValue:StringEquals":[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(role, /cloudformation:GetStackPolicy/u);
+  assert.match(
+    role,
+    /Sid: InspectFoundationAutomationRule[\s\S]*?Action: securityhub:BatchGetAutomationRules[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/u
+  );
   assert.equal(
     (role.match(/Action: s3:PutBucketLogging/gmu) ?? []).length,
     1
   );
   assert.doesNotMatch(
     role,
-    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass)|securityhub:(?:Create|BatchUpdate|BatchDelete)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)/u
+    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)/u
   );
   assert.match(
     role,
@@ -252,6 +257,40 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   ]);
 });
 
+test("environment deploy roles can prove but cannot mutate the logging foundation", () => {
+  assert.equal(
+    (
+      BOOTSTRAP.match(
+        /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+      ) ?? []
+    ).length,
+    3
+  );
+  assert.doesNotMatch(
+    `${BOOTSTRAP}\n${PROOF_SOURCE}`,
+    /ListAutomationRules|list-automation-rules|automation-rule\/\*/u
+  );
+  for (const logicalId of ["StagingDeployRole", "ProductionDeployRole"]) {
+    const role = resourceBlock(logicalId);
+    assert.match(
+      role,
+      /Sid: InspectS3AccessLoggingFoundationStack[\s\S]*?Action: cloudformation:DescribeStacks[\s\S]*?stack\/\$\{AppName\}-delivery-bootstrap\/\*/u
+    );
+    assert.match(
+      role,
+      /Sid: InspectS3AccessLoggingFoundationRule[\s\S]*?Action: securityhub:BatchGetAutomationRules[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/u
+    );
+    assert.match(
+      role,
+      /Sid: AuditS3AccessLogArchive[\s\S]*?Action:\s+- s3:GetBucketLocation\s+- s3:GetBucketLogging\s+- s3:GetBucketOwnershipControls\s+- s3:GetBucketPolicy\s+- s3:GetBucketPublicAccessBlock\s+- s3:GetBucketVersioning\s+- s3:GetEncryptionConfiguration\s+- s3:GetLifecycleConfiguration\s+Resource: !GetAtt S3AccessLogArchive\.Arn/u
+    );
+    assert.doesNotMatch(
+      role,
+      /securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:GetStackPolicy|SetStackPolicy)|s3:PutBucketLogging/u
+    );
+  }
+});
+
 interface ProofFixture {
   mode?: "baseline" | "verify";
   parameter?: "false" | "true";
@@ -261,6 +300,7 @@ interface ProofFixture {
   archiveLogging?: Record<string, unknown>;
   artifactLogging?: Record<string, unknown>;
   ruleControlId?: string;
+  ruleName?: string;
   policyArtifactSource?: string;
   failCommand?: string;
 }
@@ -409,7 +449,6 @@ case "$*" in
   *"s3api get-bucket-policy"*) printf '%s\\n' "$FAKE_POLICY" ;;
   *"s3api get-bucket-logging"*"$FAKE_ARCHIVE"*) printf '%s\\n' "$FAKE_ARCHIVE_LOGGING" ;;
   *"s3api get-bucket-logging"*"$FAKE_ARTIFACT"*) printf '%s\\n' "$FAKE_ARTIFACT_LOGGING" ;;
-  *"securityhub list-automation-rules"*) printf '%s\\n' "$FAKE_RULE_LIST" ;;
   *"securityhub batch-get-automation-rules"*) printf '%s\\n' "$FAKE_RULE" ;;
   *) echo "Unexpected aws invocation" >&2; exit 97 ;;
 esac
@@ -484,21 +523,13 @@ esac
           fixture.artifactLogging ??
             (mode === "baseline" ? {} : exactArtifactLogging)
         ),
-        FAKE_RULE_LIST: JSON.stringify({
-          AutomationRulesMetadata: [
-            {
-              RuleArn: RULE_ARN,
-              RuleName: `${APP}-intentional-s3-log-archive-s39`,
-              RuleOrder: 1,
-              RuleStatus: "ENABLED",
-              IsTerminal: true,
-            },
-          ],
-        }),
         FAKE_RULE: JSON.stringify({
           Rules: [
             {
               RuleArn: RULE_ARN,
+              RuleName:
+                fixture.ruleName ??
+                `${APP}-intentional-s3-log-archive-s39`,
               RuleOrder: 1,
               RuleStatus: "ENABLED",
               IsTerminal: true,
@@ -548,6 +579,7 @@ test("S3 access-logging proof rejects drift and redacts AWS failures", () => {
     { parameter: "false" },
     { stackStatus: "UPDATE_ROLLBACK_COMPLETE" },
     { ruleControlId: "S3.8" },
+    { ruleName: "wrong-rule" },
     { policyArtifactSource: "arn:aws:s3:::wrong-source" },
   ] satisfies ProofFixture[]) {
     const result = runProof(fixture);
