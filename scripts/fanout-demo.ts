@@ -42,7 +42,13 @@
 import { pathToFileURL } from "node:url";
 import type { PoolClient } from "pg";
 import { unitGaussianVector, normalize, EMBED_DIM } from "../src/memory/embeddings.js";
-import { query, closePool, withClient, toVectorLiteral } from "../src/db/client.js";
+import {
+  query,
+  closePool,
+  withClient,
+  toVectorLiteral,
+  isRetryableSerializationError,
+} from "../src/db/client.js";
 
 const DIM = EMBED_DIM;
 const IDX = "agent_memory@idx_agent_memory_embedding";
@@ -57,6 +63,7 @@ export const FANOUT_SPLIT_POINTS = [
 export const FANOUT_CLEANUP_BATCH_SIZE = 100;
 export const FANOUT_CLEANUP_STATEMENT_TIMEOUT_MS = 30_000;
 export const FANOUT_CLEANUP_DEADLINE_MS = 240_000;
+export const FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS = 8;
 
 function uuidBucket(uuid: string): number {
   const v = parseInt(uuid[0]!, 16);
@@ -159,46 +166,86 @@ function cleanupLimit(value: number | undefined, maximum: number): number {
   );
 }
 
+// CockroachDB may surface a SERIALIZABLE restart at COMMIT even for this
+// primary-key-bounded DELETE. Replaying the whole batch is safe because the
+// cursor advances only after a successful COMMIT. Retry only SQLSTATE 40001;
+// every other statement/transport/rollback failure remains fail-closed.
 async function cleanupTransaction<T>(
   deadlineAt: number,
   statementTimeoutMs: number,
   work: (client: PoolClient) => Promise<T>
 ): Promise<T> {
-  return withClient(async (client) => {
-    const remainingMs = Math.floor(deadlineAt - performance.now());
-    if (remainingMs <= 0) {
-      throw new FanoutCleanupDeadlineError(
-        "Fan-out cleanup deadline exceeded."
-      );
-    }
-    const timeoutMs = Math.max(
-      1,
-      Math.min(statementTimeoutMs, remainingMs)
-    );
-    let transactionStarted = false;
+  let serializationError: unknown;
+  for (
+    let attempt = 1;
+    attempt <= FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS;
+    attempt++
+  ) {
     try {
-      await client.query("BEGIN");
-      transactionStarted = true;
-      await client.query(
-        `SET LOCAL statement_timeout = '${timeoutMs}ms'`
-      );
-      const result = await work(client);
-      await client.query("COMMIT");
-      transactionStarted = false;
-      return result;
+      return await withClient(async (client) => {
+        const remainingMs = Math.floor(deadlineAt - performance.now());
+        if (remainingMs <= 0) {
+          throw new FanoutCleanupDeadlineError(
+            "Fan-out cleanup deadline exceeded."
+          );
+        }
+        const timeoutMs = Math.max(
+          1,
+          Math.min(statementTimeoutMs, remainingMs)
+        );
+        let transactionStarted = false;
+        try {
+          await client.query("BEGIN");
+          transactionStarted = true;
+          await client.query(
+            `SET LOCAL statement_timeout = '${timeoutMs}ms'`
+          );
+          const result = await work(client);
+          await client.query("COMMIT");
+          transactionStarted = false;
+          return result;
+        } catch (error) {
+          if (!transactionStarted) throw error;
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              "Fan-out cleanup statement and rollback both failed."
+            );
+          }
+          throw error;
+        }
+      });
     } catch (error) {
-      if (!transactionStarted) throw error;
-      try {
-        await client.query("ROLLBACK");
-      } catch (rollbackError) {
-        throw new AggregateError(
-          [error, rollbackError],
-          "Fan-out cleanup statement and rollback both failed."
+      if (
+        !isRetryableSerializationError(error) ||
+        attempt === FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS
+      ) {
+        throw error;
+      }
+      serializationError = error;
+      const remainingMs = Math.floor(deadlineAt - performance.now());
+      if (remainingMs <= 0) {
+        throw new FanoutCleanupDeadlineError(
+          "Fan-out cleanup deadline exceeded while retrying a serialization conflict.",
+          { cause: serializationError }
         );
       }
-      throw error;
+      const backoffMs = Math.min(
+        25 * 2 ** (attempt - 1),
+        500
+      );
+      if (remainingMs <= backoffMs) {
+        throw new FanoutCleanupDeadlineError(
+          "Fan-out cleanup deadline cannot accommodate the next serialization retry.",
+          { cause: serializationError }
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
     }
-  });
+  }
+  throw serializationError;
 }
 
 export async function deleteFanoutRowsInBatches(

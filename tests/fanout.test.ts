@@ -228,20 +228,22 @@ test(
 );
 
 test(
-  "3. real cleanup surfaces a lock-induced statement timeout without retry",
+  "3. real cleanup does not retry a lock-induced statement timeout",
   { skip: REAL_DB ? false : "requires a real CockroachDB" },
   async () => {
+    await deleteFanoutRowsInBatches({ phase: "lock-test-reset" });
+    const lockedId = "00000000-0000-0000-0000-000000000001";
     const vector = toVectorLiteral(unitGaussianVector(88_002, DIM));
     const inserted = await query<{ id: string }>(
       `INSERT INTO agent_memory
-         (kind, company, source_ref, content, embedding, embed_model)
-       VALUES ('insight', '_fanout-lock', 'lock-row', 'lock row',
-               $1::VECTOR, 'fanout-lock')
+         (id, kind, company, source_ref, content, embedding, embed_model)
+       VALUES ($1::UUID, 'insight', '_fanout-lock', 'lock-row', 'lock row',
+               $2::VECTOR, 'fanout-lock')
        RETURNING id`,
-      [vector]
+      [lockedId, vector]
     );
     const id = inserted[0]?.id;
-    assert.ok(id);
+    assert.equal(id, lockedId);
 
     const locker = new Client({
       connectionString: process.env.DATABASE_URL,
@@ -249,10 +251,11 @@ test(
     await locker.connect();
     try {
       await locker.query("BEGIN");
-      await locker.query(
+      const locked = await locker.query(
         "SELECT id FROM agent_memory WHERE id = $1::UUID FOR UPDATE",
         [id]
       );
+      assert.equal(locked.rowCount, 1);
       await assert.rejects(
         () =>
           deleteFanoutRowsInBatches({
@@ -260,7 +263,18 @@ test(
             statementTimeoutMs: 250,
             deadlineMs: 2_000,
           }),
-        /statement timeout|canceling statement|query execution canceled/iu
+        (error: unknown) => {
+          const code =
+            typeof error === "object" && error !== null && "code" in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+          assert.notEqual(code, "40001");
+          assert.match(
+            error instanceof Error ? error.message : String(error),
+            /statement timeout|canceling statement|query execution canceled/iu
+          );
+          return true;
+        }
       );
     } finally {
       try {
