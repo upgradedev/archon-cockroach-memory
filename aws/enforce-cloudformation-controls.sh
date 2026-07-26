@@ -269,7 +269,11 @@ validate_stack_document() {
   )"
   observed_termination_protection="$(
     jq -er \
-      '.Stacks[0].EnableTerminationProtection' \
+      '.Stacks[0].EnableTerminationProtection
+       | if type == "boolean"
+         then tostring
+         else error("invalid termination-protection state")
+         end' \
       <<<"$stack_json" \
       2>/dev/null
   )"

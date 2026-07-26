@@ -1261,8 +1261,11 @@ function shellInvocationBlocks(
 }
 
 function describeChangeSetValidationBlocks(source: string): string[] {
-  const startToken = "aws cloudformation describe-change-set";
-  const endToken = '<<<"$change_set"';
+  const startToken = "cloudformation describe-change-set";
+  const endTokens = [
+    '<<<"$response"',
+    '<<<"$change_set"',
+  ];
   const blocks: string[] = [];
   let cursor = 0;
   while (cursor < source.length) {
@@ -1270,10 +1273,16 @@ function describeChangeSetValidationBlocks(source: string): string[] {
     if (start < 0) {
       break;
     }
-    const end = source.indexOf(endToken, start);
-    assert.notEqual(end, -1, "DescribeChangeSet validation is incomplete");
-    blocks.push(source.slice(start, end + endToken.length));
-    cursor = end + endToken.length;
+    const endCandidates = endTokens
+      .map((token) => source.indexOf(token, start))
+      .filter((candidate) => candidate >= 0);
+    assert.ok(
+      endCandidates.length > 0,
+      "DescribeChangeSet validation is incomplete"
+    );
+    const end = Math.min(...endCandidates);
+    blocks.push(source.slice(start, end));
+    cursor = end + 1;
   }
   return blocks;
 }

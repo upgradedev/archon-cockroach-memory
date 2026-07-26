@@ -148,13 +148,17 @@ authenticated ccloud receipt is produced.
 
 ### Durable delivery recovery control plane — checked-in source, live activation pending
 
-This control plane is represented in source but is **not hosted-CI or deployed
-evidence for the current revision**. It deliberately uses the private,
-versioned artifact bucket and the `candidates/*` object permissions modeled for
-the environment delivery roles, so it does not require a new recovery
-database. The bootstrap template also models the required `Recover AWS` OIDC
-trust and least-privilege recovery actions, but the live foundation roles have
-not been proved promoted to that template state.
+This control plane is represented in source but source alone is **not deployed
+evidence**. Exact-revision hosted CI is required for source readiness; an
+authorized live promotion and post-promotion proof are additionally required
+for deployed evidence. It deliberately uses the private, versioned artifact
+bucket with environment-isolated deployment objects under
+`candidates/deployments/<environment>/` and recovery objects under
+`candidates/recovery/<environment>/`, so it does not require a new recovery
+database or cross-environment object authority. The bootstrap template also
+models the required `Recover AWS` OIDC trust and least-privilege recovery
+actions, but the live foundation roles have not been proved promoted to that
+template state.
 
 - Private, encrypted, versioned Amazon S3 stores data-only, intent-bound
   archives and checksum-addressed receipts under

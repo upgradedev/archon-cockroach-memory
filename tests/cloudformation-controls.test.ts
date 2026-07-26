@@ -245,7 +245,7 @@ case "$*" in
       --arg stackId "$FAKE_STACK_ID" \
       --arg detectionStatus "$detection_status" \
       --arg stackDriftStatus "$stack_drift_status" \
-      --arg reason "$SECRET_MARKER" \
+      --arg reason "$FAKE_SECRET_MARKER" \
       --argjson driftedCount "$drifted_count" \
       '{
         DetectionStatus: $detectionStatus,
@@ -266,7 +266,7 @@ case "$*" in
     fi
     jq -n \
       --arg resourceStatus "$resource_status" \
-      --arg secret "$SECRET_MARKER" \
+      --arg secret "$FAKE_SECRET_MARKER" \
       '{
         StackResourceDrifts: [{
           ActualProperties: $secret,
@@ -312,6 +312,7 @@ esac
     FAKE_POLL_COUNT_FILE: pollCountFile,
     FAKE_PROTECTION_FILE: protectionFile,
     FAKE_PROTECTION_UPDATE: fixture.protectionUpdate ?? "success",
+    FAKE_SECRET_MARKER: SECRET_MARKER,
     FAKE_STACK_ABSENT: String(fixture.absent ?? false),
     FAKE_STACK_ID: stackId,
     FAKE_STACK_REVISION: stackRevision,

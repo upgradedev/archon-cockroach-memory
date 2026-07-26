@@ -1125,6 +1125,15 @@ jobs:
               and .archiveVersionId == $version
             ' "${RUNNER_TEMP:?}/staging-recovery-ledger-armed.json" \
             >/dev/null
+          had_previous_index="$(
+            jq -er \
+              '.hadPreviousIndex
+               | if type == "boolean"
+                 then tostring
+                 else error("invalid previous-index state")
+                 end' \
+              "$bundle_proof"
+          )"
           {
             echo "armed=true"
             echo "intent_id=$RECOVERY_INTENT_ID"
@@ -1133,7 +1142,7 @@ jobs:
             echo "archive_version_id=$RECOVERY_ARCHIVE_VERSION_ID"
             echo "archive_sha256=$RECOVERY_ARCHIVE_SHA256"
             echo "manifest_sha256=$RECOVERY_MANIFEST_SHA256"
-            echo "had_previous_index=$(jq -er '.hadPreviousIndex' "$bundle_proof")"
+            echo "had_previous_index=$had_previous_index"
             echo "previous_index_version=$(jq -r '.previousIndexVersionId // ""' "$bundle_proof")"
             echo "previous_index_sha256=$(jq -r '.previousIndexSha256 // ""' "$bundle_proof")"
           } >>"$GITHUB_OUTPUT"
@@ -1302,7 +1311,7 @@ jobs:
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/staging/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "${PARAMETERS[@]}" \
             "${SAM_TAGS[@]}" \
@@ -1991,7 +2000,7 @@ jobs:
           EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           EXPECTED_FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
           ENVIRONMENT: staging
-          RECOVERY_CANCELLED: ${{ cancelled() }}
+          RECOVERY_CANCELLED: ${{ job.status == 'cancelled' }}
           RECOVERY_ENVIRONMENT: staging
           RECOVERY_EXECUTION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
           RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
@@ -3290,6 +3299,15 @@ jobs:
               and .archiveVersionId == $version
             ' "${RUNNER_TEMP:?}/production-recovery-ledger-armed.json" \
             >/dev/null
+          had_previous_index="$(
+            jq -er \
+              '.hadPreviousIndex
+               | if type == "boolean"
+                 then tostring
+                 else error("invalid previous-index state")
+                 end' \
+              "$bundle_proof"
+          )"
           {
             echo "armed=true"
             echo "intent_id=$RECOVERY_INTENT_ID"
@@ -3298,7 +3316,7 @@ jobs:
             echo "archive_version_id=$RECOVERY_ARCHIVE_VERSION_ID"
             echo "archive_sha256=$RECOVERY_ARCHIVE_SHA256"
             echo "manifest_sha256=$RECOVERY_MANIFEST_SHA256"
-            echo "had_previous_index=$(jq -er '.hadPreviousIndex' "$bundle_proof")"
+            echo "had_previous_index=$had_previous_index"
             echo "previous_index_version=$(jq -r '.previousIndexVersionId // ""' "$bundle_proof")"
             echo "previous_index_sha256=$(jq -r '.previousIndexSha256 // ""' "$bundle_proof")"
           } >>"$GITHUB_OUTPUT"
@@ -3467,7 +3485,7 @@ jobs:
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/production/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "${PARAMETERS[@]}" \
             "${SAM_TAGS[@]}" \
@@ -4156,7 +4174,7 @@ jobs:
           EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           EXPECTED_FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
           ENVIRONMENT: production
-          RECOVERY_CANCELLED: ${{ cancelled() }}
+          RECOVERY_CANCELLED: ${{ job.status == 'cancelled' }}
           RECOVERY_ENVIRONMENT: production
           RECOVERY_EXECUTION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
           RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}

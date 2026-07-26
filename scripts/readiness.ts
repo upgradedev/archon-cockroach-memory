@@ -1878,11 +1878,50 @@ function sourceChecks(): SourceCheck[] {
     (packageSource.match(/tests\/recovery-watchdog\.test\.ts/gu) ?? [])
       .length === 2;
   const durableRecoveryIamContract =
-    (
-      deliveryBootstrap.match(
-        /Sid: Publish(?:Staging|Production)Candidate[\s\S]*?- s3:GetObject\r?\n\s+- s3:GetObjectVersion\r?\n\s+- s3:PutObject[\s\S]*?Resource: !Sub "\$\{ArtifactBucket\.Arn\}\/candidates\/\*"/gu
-      ) ?? []
-    ).length === 2 &&
+    (["staging", "production"] as const).every((environment) => {
+      const title =
+        environment === "staging" ? "Staging" : "Production";
+      return (
+        new RegExp(
+          `Sid: Publish${title}DeploymentArtifacts[\\s\\S]*?` +
+            "- s3:GetObject\\r?\\n\\s+- s3:GetObjectVersion\\r?\\n" +
+            `\\s+- s3:PutObject[\\s\\S]*?candidates/deployments/${environment}/\\*`,
+          "u"
+        ).test(deliveryBootstrap) &&
+        new RegExp(
+          `Sid: Manage${title}RecoveryArtifacts[\\s\\S]*?` +
+            "- s3:GetObject\\r?\\n\\s+- s3:GetObjectVersion\\r?\\n" +
+            `\\s+- s3:PutObject[\\s\\S]*?candidates/recovery/${environment}/\\*`,
+          "u"
+        ).test(deliveryBootstrap) &&
+        new RegExp(
+          `Sid: List${title}ArtifactNamespaces[\\s\\S]*?` +
+            `candidates/deployments/${environment}/\\*[\\s\\S]*?` +
+            `candidates/recovery/${environment}/\\*`,
+          "u"
+        ).test(deliveryBootstrap) &&
+        deploy.includes(
+          `--s3-prefix "candidates/deployments/${environment}/\${{ github.event.workflow_run.head_sha }}"`
+        ) &&
+        (
+          deliveryBootstrap.match(
+            new RegExp(
+              `\\$\\{ArtifactBucket\\.Arn\\}/candidates/deployments/${environment}/\\*`,
+              "gu"
+            )
+          ) ?? []
+        ).length === 3 &&
+        (
+          deliveryBootstrap.match(
+            new RegExp(
+              `\\$\\{ArtifactBucket\\.Arn\\}/candidates/recovery/${environment}/\\*`,
+              "gu"
+            )
+          ) ?? []
+        ).length === 1
+      );
+    }) &&
+    !deliveryBootstrap.includes("${ArtifactBucket.Arn}/candidates/*") &&
     ![
       lambdaTemplate,
       deliveryBootstrap,
@@ -2868,6 +2907,9 @@ function sourceChecks(): SourceCheck[] {
             block.includes('"$PREVIOUS_APPLICATION_URL/api/health"') &&
             block.includes('"$PREVIOUS_APPLICATION_URL/api/proof"') &&
             block.includes("set -euo pipefail") &&
+            /RECOVERY_CANCELLED: \$\{\{ job\.status == 'cancelled' \}\}/u.test(
+              block
+            ) &&
             (
               block.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []
             ).length === 3
@@ -2915,9 +2957,9 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /REVIEW_IN_PROGRESS/u.test(greenfieldCleanup) &&
         /DELETE_FAILED/u.test(greenfieldCleanup) &&
-        /archon-delete-retry-/u.test(greenfieldCleanup) &&
+        /archon-retry-/u.test(greenfieldCleanup) &&
         !/NoSuchBucket\|Not Found\|\\\(404\\\)/u.test(greenfieldCleanup) &&
-        /state: "greenfield-stack-absent"/u.test(greenfieldCleanup) &&
+        /result_state="greenfield-stack-absent"/u.test(greenfieldCleanup) &&
         /cloudformation:DescribeStackResources/u.test(deliveryBootstrap) &&
         /s3:GetBucketTagging/u.test(deliveryBootstrap) &&
         /logs:ListTagsForResource/u.test(deliveryBootstrap) &&

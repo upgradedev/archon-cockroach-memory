@@ -368,7 +368,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   );
   assert.equal(
     (deploy.match(/\.state == "COMMITTED"/gu) ?? []).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -1828,7 +1828,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     2
   );
   assert.equal(
-    (workflow.match(/else error\("invalid API stage proof"\)/gu) ?? [])
+    (workflow.match(/else error\("invalid deployment control proof"\)/gu) ?? [])
       .length,
     2
   );
@@ -1865,6 +1865,14 @@ test("readiness: named HTTP API stage controls are proved from transform to live
       ) ?? []
     ).length,
     4
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /RECOVERY_CANCELLED: \$\{\{ job\.status == 'cancelled' \}\}/gu
+      ) ?? []
+    ).length,
+    2
   );
   assert.equal(
     (
@@ -2035,7 +2043,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.match(cleanup, /--expected-bucket-owner "\$AWS_ACCOUNT_ID"/u);
   assert.match(cleanup, /REVIEW_IN_PROGRESS/u);
   assert.match(cleanup, /DELETE_FAILED/u);
-  assert.match(cleanup, /archon-delete-retry-/u);
+  assert.match(cleanup, /archon-retry-/u);
   assert.match(bootstrap, /cloudformation:DescribeStackResources/u);
   assert.match(bootstrap, /logs:ListTagsForResource/u);
   const retainedLogDeleteIamBlocks = [

@@ -295,7 +295,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.equal(
     (WORKFLOW.match(/--include-property-values/gmu) ?? []).length,
-    6
+    4
   );
   assert.equal(
     (WORKFLOW.match(/--change-set-type UPDATE/gmu) ?? []).length,
@@ -372,6 +372,15 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
         "u"
       )
     );
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: List${title}ArtifactNamespaces[\\s\\S]*?` +
+          `s3:prefix:[\\s\\S]*?candidates/deployments/${environment}/\\*` +
+          `[\\s\\S]*?candidates/recovery/${environment}/\\*`,
+        "u"
+      )
+    );
     assert.match(role, /cloudformation:ContinueUpdateRollback/u);
     assert.doesNotMatch(
       role,
@@ -397,8 +406,9 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
       role,
       new RegExp(
         `Sid: DeleteFailed${title}GreenfieldRetainedLogs[\\s\\S]*?` +
-          `log-group:/aws/apigateway/\\$\\{AppName\\}-${environment}:\\*[\\s\\S]*?` +
-          `log-group:/aws/lambda/\\$\\{AppName\\}-${environment}-api:\\*`,
+          `log-group:/aws/apigateway/\\$\\{AppName\\}-${environment}"[\\s\\S]*?` +
+          `log-group:/aws/vendedlogs/apigateway/\\$\\{AppName\\}-${environment}"[\\s\\S]*?` +
+          `log-group:/aws/lambda/\\$\\{AppName\\}-${environment}-api"`,
         "u"
       )
     );
@@ -413,8 +423,62 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
     );
     assert.match(
       role,
+      new RegExp(
+        `Sid: Publish${title}DeploymentArtifacts[\\s\\S]*?` +
+          `candidates/deployments/${environment}/\\*`,
+        "u"
+      )
+    );
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: Manage${title}RecoveryArtifacts[\\s\\S]*?` +
+          `candidates/recovery/${environment}/\\*`,
+        "u"
+      )
+    );
+    const oppositeEnvironment =
+      environment === "staging" ? "production" : "staging";
+    assert.doesNotMatch(
+      role,
+      new RegExp(
+        `candidates/(?:deployments|recovery)/${oppositeEnvironment}/`,
+        "u"
+      )
+    );
+    assert.doesNotMatch(role, /ArtifactBucket\.Arn\}\/candidates\/\*/u);
+    assert.match(
+      role,
       /Resource: !Sub "arn:\$\{AWS::Partition\}:cloudfront::\$\{AWS::AccountId\}:distribution\/\*"/u
     );
+  }
+
+  for (const environment of ["staging", "production"] as const) {
+    const title = environment === "staging" ? "Staging" : "Production";
+    const oppositeEnvironment =
+      environment === "staging" ? "production" : "staging";
+    for (const logicalId of [
+      `${title}CodeDeployRole`,
+      `${title}CloudFormationResourcePolicy`,
+    ]) {
+      const policy = resourceBlock(logicalId);
+      assert.match(
+        policy,
+        new RegExp(
+          `candidates/deployments/${environment}/\\*`,
+          "u"
+        )
+      );
+      assert.doesNotMatch(policy, /candidates\/recovery\//u);
+      assert.doesNotMatch(
+        policy,
+        new RegExp(`candidates/deployments/${oppositeEnvironment}/`, "u")
+      );
+      assert.doesNotMatch(
+        policy,
+        /ArtifactBucket\.Arn\}\/candidates\/\*/u
+      );
+    }
   }
 });
 
@@ -1022,7 +1086,7 @@ test("application logging workflow cross-binds stack state and immutable receipt
         /EXPECTED_STACK_STATE: \$\{\{ steps\.api_preflight\.outputs\.stack_state \}\}/gmu
       ) ?? []
     ).length,
-    4
+    10
   );
   assert.equal(
     (DEPLOY_WORKFLOW.match(/id: application_s3_verify/gmu) ?? []).length,
@@ -1194,8 +1258,14 @@ test("recovery helpers bind immutable snapshots and greenfield ownership", () =>
   const tagIntegrity = STACK_RESTORE_SOURCE.indexOf(
     'sha256sum "$immutable_tags_file"'
   );
+  const latestIntegrityCheck = Math.max(
+    templateIntegrity,
+    parameterIntegrity,
+    tagIntegrity
+  );
   const describeStack = STACK_RESTORE_SOURCE.indexOf(
-    "cloudformation describe-stacks"
+    "cloudformation describe-stacks",
+    latestIntegrityCheck
   );
   const createChangeSet = STACK_RESTORE_SOURCE.indexOf(
     "cloudformation create-change-set"
@@ -1220,7 +1290,7 @@ test("recovery helpers bind immutable snapshots and greenfield ownership", () =>
     "GREENFIELD_OWNER",
     "ArchonGreenfieldOwner",
     ".EnableTerminationProtection == false",
-    'state: "greenfield-stack-absent"',
+    'result_state="greenfield-stack-absent"',
     '--stack-name "$stack_id"',
   ]) {
     assert.ok(GREENFIELD_CLEANUP_SOURCE.includes(expected), expected);

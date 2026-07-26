@@ -251,7 +251,15 @@ for relative_path in "${declared_paths[@]}"; do
 done
 
 stack_state="$(jq -er '.stackState' "$manifest_file")"
-has_previous_stack="$(jq -er '.hasPreviousStack' "$manifest_file")"
+has_previous_stack="$(
+  jq -er \
+    '.hasPreviousStack
+     | if type == "boolean"
+       then tostring
+       else error("invalid previous-stack state")
+       end' \
+    "$manifest_file"
+)"
 case "$stack_state:$has_previous_stack" in
   existing:true)
     expected_existing=(
@@ -264,7 +272,13 @@ case "$stack_state:$has_previous_stack" in
       recovery-snapshot-proof.json
     )
     had_previous_index="$(
-      jq -er '.hadPreviousIndex' "$bundle_dir/frontend-prestate.json"
+      jq -er \
+        '.hadPreviousIndex
+         | if type == "boolean"
+           then tostring
+           else error("invalid previous-index state")
+           end' \
+        "$bundle_dir/frontend-prestate.json"
     )"
     if [ "$had_previous_index" = "true" ]; then
       expected_existing+=(previous-index.html)

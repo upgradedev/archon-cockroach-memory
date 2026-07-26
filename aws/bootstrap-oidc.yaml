@@ -486,7 +486,8 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/staging/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -535,7 +536,8 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/production/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -659,7 +661,8 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+            Resource: !Sub >-
+              ${ArtifactBucket.Arn}/candidates/deployments/staging/*
           - Sid: StagingLambda
             Effect: Allow
             Action:
@@ -738,7 +741,8 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+            Resource: !Sub >-
+              ${ArtifactBucket.Arn}/candidates/deployments/production/*
           - Sid: ProductionLambda
             Effect: Allow
             Action:
@@ -1196,14 +1200,27 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
-              - Effect: Allow
+              - Sid: InspectStagingArtifactAndApplicationBuckets
+                Effect: Allow
                 Action:
                   - s3:GetBucketLocation
                   - s3:GetBucketLogging
-                  - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: ListStagingArtifactNamespaces
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - candidates/deployments/staging/*
+                      - candidates/recovery/staging/*
+              - Sid: ListStagingApplicationBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: AuditS3AccessLogArchive
                 Effect: Allow
                 Action:
@@ -1225,13 +1242,22 @@ Resources:
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
                 Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
-              - Sid: PublishStagingCandidate
+              - Sid: PublishStagingDeploymentArtifacts
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Effect: Allow
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+              - Sid: ManageStagingRecoveryArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/recovery/staging/*
               - Sid: PublishAndRecoverStagingFrontend
                 Action:
                   - s3:DeleteObject
@@ -1371,14 +1397,27 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
-              - Effect: Allow
+              - Sid: InspectProductionArtifactAndApplicationBuckets
+                Effect: Allow
                 Action:
                   - s3:GetBucketLocation
                   - s3:GetBucketLogging
-                  - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: ListProductionArtifactNamespaces
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - candidates/deployments/production/*
+                      - candidates/recovery/production/*
+              - Sid: ListProductionApplicationBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: AuditS3AccessLogArchive
                 Effect: Allow
                 Action:
@@ -1400,13 +1439,22 @@ Resources:
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
                 Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
-              - Sid: PublishProductionCandidate
+              - Sid: PublishProductionDeploymentArtifacts
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Effect: Allow
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/production/*
+              - Sid: ManageProductionRecoveryArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/recovery/production/*
               - Sid: PublishAndRecoverProductionFrontend
                 Action:
                   - s3:DeleteObject

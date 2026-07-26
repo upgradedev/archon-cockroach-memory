@@ -171,12 +171,15 @@ The deployment follows the AWS serverless web application reference pattern:
 
 The repository now contains the source-controlled workflow, scripts, strict
 receipt validators, finalizer, tests, and readiness rules for surviving loss or
-cancellation of the original GitHub Actions runner. That source state is
-deliberately **not** claimed as deployed evidence: the current revision has not
-yet completed hosted CI, an authorized live IAM promotion, or a live
-staging/production recovery proof. Its S3 CAS data plane uses the private,
-versioned artifact bucket and the `candidates/*` object permissions modeled for
-each environment delivery role, so no new recovery database is required.
+cancellation of the original GitHub Actions runner. That source state alone is
+deliberately **not** claimed as deployed evidence: exact-revision hosted CI is
+required for source readiness, while an authorized live IAM promotion and live
+staging/production recovery proofs remain required for deployed evidence. Its
+S3 CAS data plane uses the private, versioned artifact bucket. Deployment
+objects are isolated under
+`candidates/deployments/<environment>/`, while each delivery role can access
+only its own `candidates/recovery/<environment>/` objects, so no new recovery
+database or cross-environment object authority is required.
 
 The bootstrap template also contains the required `Recover AWS` OIDC trust and
 least-privilege CloudFormation, S3, Logs, Lambda, and CloudFront actions.

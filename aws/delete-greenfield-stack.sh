@@ -582,7 +582,13 @@ if stack_state="$(
   stack_id="$(jq -er '.stackId' <<<"$stack_identity")"
   stack_status="$(jq -er '.stackStatus' <<<"$stack_identity")"
   termination_protection="$(
-    jq -er '.terminationProtection' <<<"$stack_identity"
+    jq -er \
+      '.terminationProtection
+       | if type == "boolean"
+         then tostring
+         else error("invalid termination-protection state")
+         end' \
+      <<<"$stack_identity"
   )"
   greenfield_wait_attempt="${ARCHON_GREENFIELD_WAIT_ATTEMPT:-0}"
   if ! [[ "$greenfield_wait_attempt" =~ ^[0-4]$ ]]; then
@@ -652,7 +658,7 @@ if stack_state="$(
                 | sort_by(.Key)
               )
             )
-            then $candidate.EnableTerminationProtection
+            then ($candidate.EnableTerminationProtection | tostring)
             else error("invalid protected greenfield stack identity")
             end
         ' <<<"$live_stack"
