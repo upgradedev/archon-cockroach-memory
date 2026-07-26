@@ -1902,7 +1902,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/EXPECTED_STACK_STATE:/gu) ?? []).length,
-    18
+    20
   );
   assert.equal(
     (workflow.match(/Stack state changed after the greenfield preflight/gu) ?? [])
@@ -1923,7 +1923,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []).length,
-    4
+    6
   );
   assert.equal(
     (

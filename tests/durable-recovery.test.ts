@@ -2175,7 +2175,7 @@ exit 97
     version: 2,
   });
 
-  const verificationEnv = {
+  const verificationEnv: NodeJS.ProcessEnv = {
     ...base.verificationEnv,
     FAKE_ARTIFACT_BUCKET: ARTIFACT_BUCKET,
     FAKE_CONTROL_PROOF_KEY: controlProofKey,

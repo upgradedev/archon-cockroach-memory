@@ -2737,7 +2737,7 @@ function sourceChecks(): SourceCheck[] {
           deploy.match(
             /EXPECTED_STACK_STATE: \$\{\{ steps\.api_preflight\.outputs\.stack_state \}\}/gu
           ) ?? []
-        ).length === 8 &&
+        ).length === 10 &&
         (
           deploy.match(/id: application_s3_verify/gu) ?? []
         ).length === 2 &&
@@ -2870,7 +2870,7 @@ function sourceChecks(): SourceCheck[] {
             block.includes("set -euo pipefail") &&
             (
               block.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []
-            ).length === 2
+            ).length === 3
         ) &&
         (
           deploy.match(
