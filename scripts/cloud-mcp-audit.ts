@@ -57,13 +57,17 @@ export const MANAGED_MCP_REDACTIONS = [
 // that Managed MCP can return at most one aggregate row.
 export const MANAGED_MCP_AGGREGATE_QUERY = `
 SELECT
-  count(*)::INT AS persisted,
-  count(DISTINCT idempotency_key) FILTER (
-    WHERE length(idempotency_key) BETWEEN 1 AND 256
-  )::INT AS idempotency_keys,
-  count(DISTINCT content_hash) FILTER (
-    WHERE content_hash ~ '^[a-f0-9]{64}$'
-  )::INT AS content_digests
+  count(*)::INT4 AS persisted,
+  (
+    count(DISTINCT idempotency_key) FILTER (
+      WHERE length(idempotency_key) BETWEEN 1 AND 256
+    )
+  )::INT4 AS idempotency_keys,
+  (
+    count(DISTINCT content_hash) FILTER (
+      WHERE content_hash ~ '^[a-f0-9]{64}$'
+    )
+  )::INT4 AS content_digests
 FROM (
   SELECT idempotency_key, content_hash
   FROM agent_memory@{FORCE_INDEX=idx_agent_memory_active_scope}
@@ -171,11 +175,26 @@ function safeCount(value: unknown, label: string): number {
 }
 
 function assertExpectedAggregate(aggregate: ManagedMcpAggregate): void {
+  const row = object(aggregate);
+  if (!row) {
+    throw new Error("Managed MCP receipt aggregate must be an object.");
+  }
+  assertExactKeys(
+    row,
+    ["persisted", "idempotencyKeys", "contentDigests"],
+    "Managed MCP receipt aggregate"
+  );
+  const persisted = safeCount(row.persisted, "persisted");
+  const idempotencyKeys = safeCount(
+    row.idempotencyKeys,
+    "idempotencyKeys"
+  );
+  const contentDigests = safeCount(row.contentDigests, "contentDigests");
   if (
-    aggregate.persisted !== EXPECTED_MANAGED_MCP_AGGREGATE.persisted ||
-    aggregate.idempotencyKeys !==
+    persisted !== EXPECTED_MANAGED_MCP_AGGREGATE.persisted ||
+    idempotencyKeys !==
       EXPECTED_MANAGED_MCP_AGGREGATE.idempotencyKeys ||
-    aggregate.contentDigests !==
+    contentDigests !==
       EXPECTED_MANAGED_MCP_AGGREGATE.contentDigests
   ) {
     throw new Error("Managed MCP fixed-scope aggregate must be exactly 9/9/9.");
@@ -268,10 +287,14 @@ function safeDatabaseName(value: string): string {
 }
 
 function validIsoTimestamp(value: string): boolean {
-  return (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) &&
-    new Date(value).toISOString() === value
-  );
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) {
+    return false;
+  }
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
 }
 
 /**

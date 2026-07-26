@@ -64,6 +64,10 @@ test("managed MCP aggregate SQL is immutable, fixed-scope, index-forced, and bou
     MANAGED_MCP_AGGREGATE_QUERY.match(/\bLIMIT 1\b/gu)?.length,
     1
   );
+  assert.equal(
+    MANAGED_MCP_AGGREGATE_QUERY.match(/::INT4\b/gu)?.length,
+    3
+  );
   assert.doesNotMatch(
     MANAGED_MCP_AGGREGATE_QUERY,
     /\b(?:INSERT|UPSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b/iu
@@ -257,6 +261,14 @@ test("managed MCP receipt builder fails closed on non-exact metadata and sequenc
       ],
     },
     { ...base, aggregate: { ...base.aggregate, persisted: 10 } },
+    {
+      ...base,
+      aggregate: { ...base.aggregate, persisted: "9" },
+    },
+    {
+      ...base,
+      aggregate: { ...base.aggregate, rawResponse: "must-not-be-copied" },
+    },
   ];
 
   for (const candidate of invalid) {

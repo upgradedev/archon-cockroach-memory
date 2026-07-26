@@ -1377,7 +1377,15 @@ jobs:
           set -euo pipefail
           test -n "$CCLOUD_API_KEY"
           test -n "$COCKROACH_CLUSTER_ID"
-          npm run --silent mcp:cloud:audit | tee managed-mcp-production-receipt.json
+          npm run --silent mcp:cloud:audit > managed-mcp-production-receipt.json
+          if grep -Fq -- "$CCLOUD_API_KEY" managed-mcp-production-receipt.json; then
+            echo "Managed MCP receipt leaked the API key." >&2
+            exit 1
+          fi
+          if grep -Fq -- "$COCKROACH_CLUSTER_ID" managed-mcp-production-receipt.json; then
+            echo "Managed MCP receipt leaked the cluster identifier." >&2
+            exit 1
+          fi
           jq -e --arg database "$COCKROACH_DATABASE" \
             'type == "object" and
              keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"] and
@@ -1405,6 +1413,28 @@ jobs:
              } and
              .calledTools == ["get_cluster","list_tables","get_table_schema","select_query"] and
              (.toolsAdvertised | type == "number" and floor == . and . >= 4) and
+             .proofs == [
+               {
+                 "name":"get_cluster",
+                 "ok":true,
+                 "detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."
+               },
+               {
+                 "name":"list_tables",
+                 "ok":true,
+                 "detail":"`agent_memory` is present in the configured application database."
+               },
+               {
+                 "name":"get_table_schema",
+                 "ok":true,
+                 "detail":"Live schema exposes VECTOR(1024) and a native vector index."
+               },
+               {
+                 "name":"select_query",
+                 "ok":true,
+                 "detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."
+               }
+             ] and
              (.proofs |
                type == "array" and
                length == 4 and
@@ -1417,14 +1447,6 @@ jobs:
              ) and
              .redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]' \
             managed-mcp-production-receipt.json
-          if grep -Fq -- "$CCLOUD_API_KEY" managed-mcp-production-receipt.json; then
-            echo "Managed MCP receipt leaked the API key." >&2
-            exit 1
-          fi
-          if grep -Fq -- "$COCKROACH_CLUSTER_ID" managed-mcp-production-receipt.json; then
-            echo "Managed MCP receipt leaked the cluster identifier." >&2
-            exit 1
-          fi
       - name: Upload sanitized Managed MCP receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

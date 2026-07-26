@@ -90,7 +90,7 @@ Implementation:
   `production-audit` environment, exact-gates every v2 field, checks that secret
   values are absent, and uploads the sanitized receipt.
 
-Live proof:
+Evidence status:
 
 - [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
   historical live read-only proof from the hardened v2 contract. Deploy AWS run

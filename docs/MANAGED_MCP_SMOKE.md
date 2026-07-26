@@ -64,9 +64,10 @@ The receipt contains only:
 
 It contains no API-key value, cluster identifier, SQL credential or connection
 URL, memory content, embedding, or raw Managed MCP response. Both protected
-workflows enforce the complete top-level JSON key set, every fixed nested value,
-the four proof names/order, and absence of the actual API-key and cluster-ID
-values before uploading a receipt.
+workflows capture stdout without streaming the unvalidated file, check for the
+actual API-key and cluster-ID values, enforce the complete top-level JSON key
+set, every fixed nested value, and the four exact proof objects, and only then
+upload a receipt.
 
 ## Historical live evidence — pre-hardening
 

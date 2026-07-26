@@ -264,6 +264,11 @@ function sourceChecks(): SourceCheck[] {
     '"idempotencyKeys":9',
     '"contentDigests":9',
     '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
+    ".proofs == [",
+    '"detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
+    '"detail":"`agent_memory` is present in the configured application database."',
+    '"detail":"Live schema exposes VECTOR(1024) and a native vector index."',
+    '"detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
     "length == 4",
     'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
     '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
@@ -274,6 +279,29 @@ function sourceChecks(): SourceCheck[] {
     managedMcpWorkflow,
     managedMcpDeployJob,
   ];
+  const managedMcpLeakChecksPrecedeJq = managedMcpGateBlocks.every(
+    (block) => {
+      const receipt = block.indexOf(
+        "npm run --silent mcp:cloud:audit"
+      );
+      const apiKeyCheck = block.indexOf(
+        'grep -Fq -- "$CCLOUD_API_KEY"'
+      );
+      const clusterIdCheck = block.indexOf(
+        'grep -Fq -- "$COCKROACH_CLUSTER_ID"'
+      );
+      const exactJqGate = block.indexOf(
+        'jq -e --arg database "$COCKROACH_DATABASE"'
+      );
+      return (
+        receipt >= 0 &&
+        receipt < apiKeyCheck &&
+        receipt < clusterIdCheck &&
+        apiKeyCheck < exactJqGate &&
+        clusterIdCheck < exactJqGate
+      );
+    }
+  );
   const localArtifacts = generatedArtifactPaths();
   const workflowSources = [
     ci,
@@ -413,7 +441,11 @@ function sourceChecks(): SourceCheck[] {
           managedMcpGateFragments.every((fragment) =>
             block.includes(fragment)
           )
-      ),
+      ) &&
+        managedMcpLeakChecksPrecedeJq &&
+        /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u.test(
+          managedMcpWorkflow
+        ),
       "Both protected Managed MCP paths enforce the exact v2 receipt shape, scope, bounds, 9/9/9 aggregate, four proof calls, and secret-value exclusions.",
       "A Managed MCP workflow does not fail closed on the exact sanitized v2 receipt contract."
     ),
