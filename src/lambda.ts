@@ -20,7 +20,10 @@ import type { MemoryAgent } from "./agents/memory-agent.js";
 // Minimal API Gateway HTTP API v2 event/result shapes (only the fields we read),
 // so we need no @types/aws-lambda dependency.
 interface HttpApiEvent {
-  requestContext?: { http?: { method?: string } };
+  requestContext?: {
+    stage?: string;
+    http?: { method?: string };
+  };
   rawPath?: string;
   queryStringParameters?: Record<string, string | undefined>;
   headers?: Record<string, string | undefined>;
@@ -52,9 +55,21 @@ export function createHandler(
     try {
       const method = event.requestContext?.http?.method ?? "GET";
       const rawPath = event.rawPath ?? "/";
-      const pathname = rawPath.startsWith("/api/")
-        ? rawPath.slice(4)
-        : rawPath;
+      const stage = event.requestContext?.stage;
+      // Execute-api URLs for a named HTTP API stage can expose that trusted
+      // stage prefix in rawPath. Strip only the exact request-context stage;
+      // never treat an arbitrary first path segment as a routing prefix.
+      const stagePrefix =
+        stage && stage !== "$default" ? `/${stage}` : "";
+      const routePath =
+        stagePrefix &&
+        (rawPath === stagePrefix ||
+          rawPath.startsWith(`${stagePrefix}/`))
+          ? rawPath.slice(stagePrefix.length) || "/"
+          : rawPath;
+      const pathname = routePath.startsWith("/api/")
+        ? routePath.slice(4)
+        : routePath;
       const query = event.queryStringParameters ?? {};
       if (method === "GET" && pathname === "/") {
         const result = handleHealth();
