@@ -229,9 +229,13 @@ elif ! grep -Eqi 'NotFoundException|not found' <<<"$legacy_stage"; then
   echo "Unable to prove that the legacy default API stage is absent." >&2
   exit 1
 fi
-expected_log_arn="arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${API_ACCESS_LOG_GROUP}:*"
+#
+# AWS::Logs::LogGroup.Arn includes a trailing ":*" for CloudFormation
+# references, but API Gateway V2 normalizes DestinationArn and returns the
+# log-group ARN without that resource wildcard from GetStage.
+expected_log_arn="arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${API_ACCESS_LOG_GROUP}"
 
-jq -e \
+if ! jq -e \
   --arg stage "$API_STAGE_NAME" \
   --arg logArn "$expected_log_arn" \
   '
@@ -246,7 +250,10 @@ jq -e \
       and (.AccessLogSettings.Format | contains("$context.stage"))
       and (.AccessLogSettings.Format | contains("$context.routeKey"))
       and (.AccessLogSettings.Format | contains("$context.status"))
-  ' <<<"$live_stage" >/dev/null
+  ' <<<"$live_stage" >/dev/null; then
+  echo "The live API stage does not match the protected runtime control and access-log contract." >&2
+  exit 1
+fi
 
 aws cloudfront wait distribution-deployed \
   --id "$DISTRIBUTION_ID"

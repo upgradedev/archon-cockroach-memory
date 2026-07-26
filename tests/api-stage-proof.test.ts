@@ -25,6 +25,7 @@ interface ProofFixture {
   deployedOriginPath?: string;
   deployedOriginDomain?: string;
   distributionStatus?: string;
+  runtimeLogDestinationArn?: string;
   logStage?: string;
   includeLogEvent?: boolean;
   routeOverride?: boolean;
@@ -146,7 +147,8 @@ printf '%s\\n' '{"ok":true,"status":"reachable"}'
       },
       AccessLogSettings: {
         DestinationArn:
-          "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging:*",
+          fixture.runtimeLogDestinationArn ??
+          "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging",
         Format:
           '{"requestId":"$context.requestId","stage":"$context.stage","routeKey":"$context.routeKey","status":"$context.status"}',
       },
@@ -421,6 +423,13 @@ for (const [name, fixture] of [
   [
     "a non-deployed CloudFront distribution",
     { distributionStatus: "InProgress" },
+  ],
+  [
+    "a runtime access-log ARN with the CloudFormation resource wildcard",
+    {
+      runtimeLogDestinationArn:
+        "arn:aws:logs:eu-west-1:123456789012:log-group:/aws/vendedlogs/apigateway/archon-memory-staging:*",
+    },
   ],
   ["missing access-log event", { includeLogEvent: false }],
   ["access log from the wrong stage", { logStage: "$default" }],
