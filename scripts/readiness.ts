@@ -23,13 +23,14 @@ import { parseDocument } from "yaml";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 55;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 59;
 export const EXPECTED_SETUP_NODE_STEPS = 14;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
 export const EXPECTED_WORKFLOW_FILES = [
   "benchmark.yml",
+  "bootstrap-aws.yml",
   "ci.yml",
   "codeql.yml",
   "database-release.yml",
@@ -43,6 +44,7 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "legacy-reconciliation-receipt.json",
   "api-stage-preflight.json",
   "api-stage-proof.json",
+  "foundation-s3-access-logging-receipt.json",
   "previous-stack-template.yaml",
   "previous-stack-parameters.json",
   "bench-clustered.txt",
@@ -663,6 +665,7 @@ export function hasUniqueCiTriggerOwnership(
   }
   const expectedEvents = new Map<string, string[]>([
     ["benchmark.yml", ["workflow_dispatch"]],
+    ["bootstrap-aws.yml", ["workflow_dispatch"]],
     ["ci.yml", ["pull_request", "push"]],
     ["codeql.yml", ["pull_request", "push", "schedule"]],
     [
@@ -729,9 +732,21 @@ function sourceChecks(): SourceCheck[] {
   const schema = read("src/db/schema.sql");
   const ci = read(".github/workflows/ci.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
+  const foundationWorkflow = read(
+    ".github/workflows/bootstrap-aws.yml"
+  );
   const lambdaTemplate = read("aws/template.yaml");
   const deliveryBootstrap = read("aws/bootstrap-oidc.yaml");
   const apiStageProof = read("aws/prove-api-stage-controls.sh");
+  const s3AccessLoggingProof = read(
+    "aws/prove-s3-access-logging.sh"
+  );
+  const bootstrapStackPolicy = read(
+    "aws/bootstrap-stack-policy.json"
+  );
+  const s3AccessLoggingTests = read(
+    "tests/s3-access-logging.test.ts"
+  );
   const stackRestore = read("aws/restore-cloudformation-stack.sh");
   const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
   const gitignore = read(".gitignore");
@@ -1271,6 +1286,86 @@ function sourceChecks(): SourceCheck[] {
         deploy.includes("reserved logical ID|unexpected behaviors"),
       "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
       "The deployable AWS architecture or its live API stage-control proof is incomplete."
+    ),
+    sourceCheck(
+      "product.s3-access-logging-foundation",
+      "Product Readiness",
+      /S3AccessLogArchiveS39Suppression:[\s\S]*?Type: AWS::SecurityHub::AutomationRule/u.test(
+        deliveryBootstrap
+      ) &&
+        /S3AccessLogArchive:[\s\S]*?DeletionPolicy: RetainExceptOnCreate[\s\S]*?ObjectOwnership: BucketOwnerEnforced/u.test(
+          deliveryBootstrap
+        ) &&
+        /AllowArtifactBucketServerAccessLogs[\s\S]*?\/artifacts\/\*[\s\S]*?AllowStagingWebBucketServerAccessLogs[\s\S]*?\/staging-web\/\*[\s\S]*?AllowProductionWebBucketServerAccessLogs[\s\S]*?\/production-web\/\*/u.test(
+          deliveryBootstrap
+        ) &&
+        /LoggingConfiguration: !If[\s\S]*?EnableArtifactAccessLogging[\s\S]*?PartitionDateSource: EventTime[\s\S]*?!Ref AWS::NoValue/u.test(
+          deliveryBootstrap
+        ) &&
+        /cloudformation:GetStackPolicy/u.test(deliveryBootstrap) &&
+        /aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          deliveryBootstrap
+        ) &&
+        /Sid: ExecuteOnlyBootstrapLoggingChangeSets[\s\S]*?cloudformation:ChangeSetName:[\s\S]*?changeSet\/bootstrap-s3-\*\/\*/u.test(
+          deliveryBootstrap
+        ) &&
+        /name: Bootstrap AWS Foundation/u.test(foundationWorkflow) &&
+        /operation:[\s\S]*?- plan[\s\S]*?- apply/u.test(
+          foundationWorkflow
+        ) &&
+        /cloudformation get-stack-policy/u.test(foundationWorkflow) &&
+        /StackPolicyBody \| fromjson/u.test(foundationWorkflow) &&
+        /cloudformation get-template[\s\S]*?--template-stage Original/u.test(
+          foundationWorkflow
+        ) &&
+        /foundation-change-set-template\.yaml[\s\S]*?TEMPLATE_DIGEST/u.test(
+          foundationWorkflow
+        ) &&
+        /CHANGE_SET_ID/u.test(foundationWorkflow) &&
+        /\.ChangeSetId == \$id/u.test(foundationWorkflow) &&
+        /--change-set-name "\$CHANGE_SET_ID"/u.test(
+          foundationWorkflow
+        ) &&
+        /wait_for_change_set_available/u.test(foundationWorkflow) &&
+        /wait_for_rollback_change_set/u.test(foundationWorkflow) &&
+        !/cloudformation wait change-set-create-complete/u.test(
+          foundationWorkflow
+        ) &&
+        /ResourceChange\.LogicalResourceId == "ArtifactBucket"/u.test(
+          foundationWorkflow
+        ) &&
+        /ResourceChange\.Replacement == "False"/u.test(
+          foundationWorkflow
+        ) &&
+        /recover_to_baseline/u.test(foundationWorkflow) &&
+        /poll_activation_outcome/u.test(foundationWorkflow) &&
+        /wait_for_recovery_outcome/u.test(foundationWorkflow) &&
+        !/stack-update-rollback-complete/u.test(foundationWorkflow) &&
+        /live-proof-failed-rolled-back/u.test(foundationWorkflow) &&
+        /prove-s3-access-logging\.sh baseline/u.test(
+          foundationWorkflow
+        ) &&
+        /prove-s3-access-logging\.sh verify/u.test(
+          foundationWorkflow
+        ) &&
+        /mode="\$\{1:-verify\}"/u.test(s3AccessLoggingProof) &&
+        /PartitionDateSource": "EventTime"/u.test(
+          s3AccessLoggingProof
+        ) &&
+        /"Update:Delete"[\s\S]*?"Update:Replace"/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/S3AccessLogArchiveS39Suppression/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /bash -n aws\/prove-s3-access-logging\.sh/u.test(ci) &&
+        /foundation-s3-access-logging-receipt\.json/u.test(ci) &&
+        /tests\/s3-access-logging\.test\.ts/u.test(packageSource) &&
+        /rejects drift and redacts AWS failures/u.test(
+          s3AccessLoggingTests
+        ),
+      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, live proof, and CI gate are source-controlled.",
+      "The centralized S3 logging archive, narrow exception, activation recovery, proof, or CI/readiness gate is incomplete."
     ),
     sourceCheck(
       "product.oidc-promotion-rollback",

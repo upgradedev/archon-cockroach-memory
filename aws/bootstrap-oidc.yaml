@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   One-time eu-west-1 delivery bootstrap for Archon Memory: GitHub OIDC trust,
   environment-bound deploy roles, CloudFormation execution roles, and a private
-  immutable-artifact bucket.
+  immutable-artifact bucket with centralized S3 server access logging.
 
 Parameters:
   AppName:
@@ -17,12 +17,32 @@ Parameters:
     Type: String
     Default: archon-cockroach-memory
     AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepositoryId:
+    Type: String
+    Default: "1285750381"
+    AllowedPattern: "^[0-9]{1,20}$"
+    Description: Immutable GitHub repository id used by the foundation OIDC trust.
+  GitHubRepositoryOwnerId:
+    Type: String
+    Default: "25751981"
+    AllowedPattern: "^[0-9]{1,20}$"
+    Description: Immutable GitHub repository-owner id used by the foundation OIDC trust.
   ExistingGitHubOidcProviderArn:
     Type: String
     Default: ""
     Description: >-
       Existing account-wide token.actions.githubusercontent.com provider ARN.
       Leave empty only when this account does not already have that provider.
+  ArtifactAccessLoggingEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Fail-closed two-phase migration switch. The initial archive and
+      destination-policy deployment remains false until the protected
+      activation workflow permanently enables it.
 
 Rules:
   EuWestOneOnly:
@@ -32,6 +52,7 @@ Rules:
 
 Conditions:
   CreateGitHubOidcProvider: !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
+  EnableArtifactAccessLogging: !Equals [!Ref ArtifactAccessLoggingEnabled, "true"]
 
 Resources:
   GitHubOidcProvider:
@@ -49,8 +70,157 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
+  S3AccessLogArchiveS39Suppression:
+    Type: AWS::SecurityHub::AutomationRule
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RuleName: !Sub "${AppName}-intentional-s3-log-archive-s39"
+      Description: >-
+        Suppress only S3.9 for the intentionally unlogged server-access-log
+        archive, preventing recursive logging while retaining all source logs.
+      RuleOrder: 1
+      RuleStatus: ENABLED
+      IsTerminal: true
+      Criteria:
+        AwsAccountId:
+          - Comparison: EQUALS
+            Value: !Ref AWS::AccountId
+        ComplianceSecurityControlId:
+          - Comparison: EQUALS
+            Value: S3.9
+        ComplianceStatus:
+          - Comparison: EQUALS
+            Value: FAILED
+        ProductArn:
+          - Comparison: EQUALS
+            Value: !Sub >-
+              arn:${AWS::Partition}:securityhub:${AWS::Region}::product/aws/securityhub
+        RecordState:
+          - Comparison: EQUALS
+            Value: ACTIVE
+        ResourceId:
+          - Comparison: EQUALS
+            Value: !Sub >-
+              arn:${AWS::Partition}:s3:::${AppName}-s3-access-logs-${AWS::AccountId}-${AWS::Region}
+        ResourceRegion:
+          - Comparison: EQUALS
+            Value: !Ref AWS::Region
+        ResourceType:
+          - Comparison: EQUALS
+            Value: AwsS3Bucket
+      Actions:
+        - Type: FINDING_FIELDS_UPDATE
+          FindingFieldsUpdate:
+            Workflow:
+              Status: SUPPRESSED
+            Note:
+              Text: >-
+                Intentional exception: an S3 server-access-log destination must
+                not log to itself because that causes recursive log growth.
+              UpdatedBy: !Sub "${AppName}-delivery-bootstrap"
+      Tags:
+        Application: !Ref AppName
+        ManagedBy: CloudFormation
+
+  S3AccessLogArchive:
+    Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogArchiveS39Suppression
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AppName}-s3-access-logs-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetireServerAccessLogs
+            Status: Enabled
+            Prefix: ""
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: access-logs
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  S3AccessLogArchivePolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref S3AccessLogArchive
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt S3AccessLogArchive.Arn
+              - !Sub "${S3AccessLogArchive.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: AllowArtifactBucketServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${S3AccessLogArchive.Arn}/artifacts/*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:s3:::${AppName}-artifacts-${AWS::AccountId}-${AWS::Region}
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowStagingWebBucketServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${S3AccessLogArchive.Arn}/staging-web/*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowProductionWebBucketServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${S3AccessLogArchive.Arn}/production-web/*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
   ArtifactBucket:
     Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogArchivePolicy
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -77,6 +247,23 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
               NewerNoncurrentVersions: 5
+          - Id: RetireFoundationTemplates
+            Status: Enabled
+            Prefix: foundation/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+              NewerNoncurrentVersions: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      LoggingConfiguration: !If
+        - EnableArtifactAccessLogging
+        - DestinationBucketName: !Ref S3AccessLogArchive
+          LogFilePrefix: artifacts/
+          TargetObjectKeyFormat:
+            PartitionedPrefix:
+              PartitionDateSource: EventTime
+        - !Ref AWS::NoValue
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -440,6 +627,7 @@ Resources:
               - s3:DeleteBucketPolicy
               - s3:GetBucketAcl
               - s3:GetBucketLocation
+              - s3:GetBucketLogging
               - s3:GetBucketPolicy
               - s3:GetBucketPolicyStatus
               - s3:GetBucketPublicAccessBlock
@@ -452,6 +640,7 @@ Resources:
               - s3:PutEncryptionConfiguration
               - s3:PutLifecycleConfiguration
               - s3:PutBucketOwnershipControls
+              - s3:PutBucketLogging
               - s3:PutBucketPolicy
               - s3:PutBucketPublicAccessBlock
               - s3:PutBucketTagging
@@ -517,6 +706,7 @@ Resources:
               - s3:DeleteBucketPolicy
               - s3:GetBucketAcl
               - s3:GetBucketLocation
+              - s3:GetBucketLogging
               - s3:GetBucketPolicy
               - s3:GetBucketPolicyStatus
               - s3:GetBucketPublicAccessBlock
@@ -529,6 +719,7 @@ Resources:
               - s3:PutEncryptionConfiguration
               - s3:PutLifecycleConfiguration
               - s3:PutBucketOwnershipControls
+              - s3:PutBucketLogging
               - s3:PutBucketPolicy
               - s3:PutBucketPublicAccessBlock
               - s3:PutBucketTagging
@@ -780,6 +971,121 @@ Resources:
         - Key: Environment
           Value: production
 
+  FoundationPromotionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-foundation-promotion"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:bootstrap
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: bootstrap
+                token.actions.githubusercontent.com:workflow: Bootstrap AWS Foundation
+      Policies:
+        - PolicyName: promote-foundation-logging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreatePinnedBootstrapChangeSet
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                Condition:
+                  StringLike:
+                    cloudformation:ChangeSetName: bootstrap-s3-*
+                    cloudformation:TemplateUrl: !Sub >-
+                      https://${AppName}-artifacts-${AWS::AccountId}-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/foundation/*
+                  "Null":
+                    cloudformation:RoleArn: "true"
+                    cloudformation:StackPolicyUrl: "true"
+              - Sid: ExecuteOnlyBootstrapLoggingChangeSets
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                Condition:
+                  StringLike:
+                    cloudformation:ChangeSetName:
+                      - bootstrap-s3-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/bootstrap-s3-*/*
+              - Sid: InspectBootstrapStackAndChangeSets
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:GetTemplate
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+              - Sid: PublishImmutableFoundationTemplate
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub "${ArtifactBucket.Arn}/foundation/*"
+              - Sid: InspectArtifactAndArchiveBuckets
+                Effect: Allow
+                Action:
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                  - s3:GetBucketLogging
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketTagging
+                  - s3:GetBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetLifecycleConfiguration
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !GetAtt S3AccessLogArchive.Arn
+              - Sid: ActivateArtifactBucketLoggingWithoutReplacement
+                Effect: Allow
+                Action: s3:PutBucketLogging
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ListFoundationAutomationRules
+                Effect: Allow
+                Action: securityhub:ListAutomationRules
+                Resource: "*"
+              - Sid: InspectFoundationAutomationRule
+                Effect: Allow
+                Action: securityhub:BatchGetAutomationRules
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:securityhub:${AWS::Region}:${AWS::AccountId}:automation-rule/*
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: bootstrap
+        - Key: ManagedBy
+          Value: CloudFormation
+
   StagingDeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -829,10 +1135,23 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetBucketLocation
+                  - s3:GetBucketLogging
                   - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: AuditS3AccessLogArchive
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketLogging
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetLifecycleConfiguration
+                Resource: !GetAtt S3AccessLogArchive.Arn
               - Effect: Allow
                 Action:
                   - s3:DeleteObject
@@ -938,10 +1257,23 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetBucketLocation
+                  - s3:GetBucketLogging
                   - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: AuditS3AccessLogArchive
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketLogging
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetLifecycleConfiguration
+                Resource: !GetAtt S3AccessLogArchive.Arn
               - Effect: Allow
                 Action:
                   - s3:DeleteObject
@@ -1001,6 +1333,14 @@ Resources:
 Outputs:
   ArtifactBucketName:
     Value: !Ref ArtifactBucket
+  S3AccessLogArchiveName:
+    Value: !Ref S3AccessLogArchive
+  S3AccessLogArchiveArn:
+    Value: !GetAtt S3AccessLogArchive.Arn
+  S3AccessLogArchiveSuppressionRuleArn:
+    Value: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
+  FoundationPromotionRoleArn:
+    Value: !GetAtt FoundationPromotionRole.Arn
   StagingDeployRoleArn:
     Value: !GetAtt StagingDeployRole.Arn
   StagingExecutionRoleArn:

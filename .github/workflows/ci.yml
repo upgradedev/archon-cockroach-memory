@@ -40,6 +40,7 @@ jobs:
             legacy-reconciliation-receipt.json
             api-stage-preflight.json
             api-stage-proof.json
+            foundation-s3-access-logging-receipt.json
             previous-stack-template.yaml
             previous-stack-parameters.json
             bench-clustered.txt
@@ -369,8 +370,10 @@ jobs:
         run: |
           set -euo pipefail
           bash -n aws/prove-api-stage-controls.sh
+          bash -n aws/prove-s3-access-logging.sh
           bash -n aws/delete-greenfield-stack.sh
           bash -n aws/restore-cloudformation-stack.sh
+          jq -e '.Statement | length == 2' aws/bootstrap-stack-policy.json >/dev/null
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region eu-west-1
           SAM_BUILD_LOG="${RUNNER_TEMP:?}/sam-build.log"

@@ -1,0 +1,1077 @@
+name: Bootstrap AWS Foundation
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Create an inspected plan or apply that exact existing plan.
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+      target_sha:
+        description: Exact 40-character main SHA already green in CI and CodeQL.
+        required: true
+        type: string
+      confirmation:
+        description: For apply, enter ENABLE-ARTIFACT-S3-ACCESS-LOGGING.
+        required: false
+        type: string
+
+concurrency:
+  group: aws-production-delivery
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  APP_NAME: ${{ vars.AWS_APP_NAME || 'archon-memory' }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+  TARGET_SHA: ${{ inputs.target_sha }}
+  OPERATION: ${{ inputs.operation }}
+
+jobs:
+  authorize:
+    name: Authorize exact green main SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+
+      - name: Fail closed unless the dispatch targets current green main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$AWS_REGION" = "eu-west-1"
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+
+          if [ "$OPERATION" = "apply" ]; then
+            test "$CONFIRMATION" = "ENABLE-ARTIFACT-S3-ACCESS-LOGGING"
+          else
+            test "$OPERATION" = "plan"
+            test -z "$CONFIRMATION"
+          fi
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          for workflow in ci.yml codeql.yml; do
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er --arg sha "$TARGET_SHA" '
+                  [.workflow_runs[] | select(.head_sha == $sha)]
+                  | max_by([.run_number, .run_attempt])
+                  | select(.head_sha == $sha)
+                  | .conclusion
+                '
+            )"
+            test "$state" = "success"
+          done
+
+  foundation:
+    name: ${{ inputs.operation == 'plan' && 'Plan artifact logging activation' || 'Apply artifact logging activation' }}
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment: bootstrap
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+
+      - name: Configure narrow foundation credentials
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.APP_NAME }}-github-foundation-promotion
+          role-session-name: archon-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Re-prove identity, current main, and exact bootstrap stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="$(aws sts get-caller-identity --output json)"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg role "${APP_NAME}-github-foundation-promotion" \
+            '
+              .Account == $account
+              and (.Arn | contains(":assumed-role/" + $role + "/"))
+            ' <<<"$identity" >/dev/null
+
+          test "$AWS_REGION" = "eu-west-1"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          current_stack="${RUNNER_TEMP:?}/foundation-current-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$current_stack"
+          jq -e \
+            --arg stack "${APP_NAME}-delivery-bootstrap" \
+            '
+              .Stacks[0] as $current
+              | (.Stacks | length) == 1
+              and $current.StackName == $stack
+              and (
+                $current.StackStatus == "UPDATE_COMPLETE"
+                or (
+                  $current.StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  and (
+                    [$current.Parameters[]
+                      | select(.ParameterKey == "ArtifactAccessLoggingEnabled")
+                      | .ParameterValue] == ["false"]
+                  )
+                )
+              )
+              and (($current.RoleARN // null) == null)
+            ' "$current_stack" >/dev/null
+
+          live_policy="${RUNNER_TEMP:?}/foundation-live-stack-policy.json"
+          aws cloudformation get-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$live_policy"
+          jq -e \
+            --slurpfile expected aws/bootstrap-stack-policy.json \
+            '
+              (.StackPolicyBody | fromjson) == $expected[0]
+            ' "$live_policy" >/dev/null
+          echo "CURRENT_STACK_FILE=$current_stack" >>"$GITHUB_ENV"
+
+      - name: Prove the exact baseline or idempotent active state
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/foundation-s3-access-logging-receipt.json"
+          stored="$(
+            jq -er '
+              [.Stacks[0].Parameters[]
+                | select(.ParameterKey == "ArtifactAccessLoggingEnabled")
+                | .ParameterValue]
+              | if length == 1 then .[0] else error("missing parameter") end
+            ' "$CURRENT_STACK_FILE"
+          )"
+
+          case "$stored" in
+            false)
+              baseline="${RUNNER_TEMP:?}/foundation-baseline-proof.json"
+              bash aws/prove-s3-access-logging.sh baseline >"$baseline"
+              jq -n \
+                --arg operation "$OPERATION" \
+                --arg commit "$TARGET_SHA" \
+                --slurpfile baseline "$baseline" \
+                '{
+                  ok: false,
+                  operation: $operation,
+                  result: ($operation + "-pending"),
+                  commit: $commit,
+                  baseline: $baseline[0]
+                }' >"$receipt"
+              echo "BASELINE_PROOF_FILE=$baseline" >>"$GITHUB_ENV"
+              echo "ALREADY_ACTIVE=false" >>"$GITHUB_ENV"
+              ;;
+            true)
+              bash aws/prove-s3-access-logging.sh verify >"$receipt"
+              updated="${RUNNER_TEMP:?}/foundation-idempotent-receipt.json"
+              jq \
+                --arg operation "$OPERATION" \
+                --arg commit "$TARGET_SHA" \
+                '. + {
+                  operation: $operation,
+                  commit: $commit,
+                  result: "already-active"
+                }' "$receipt" >"$updated"
+              mv "$updated" "$receipt"
+              echo "ALREADY_ACTIVE=true" >>"$GITHUB_ENV"
+              ;;
+            *)
+              echo "The bootstrap migration parameter is invalid." >&2
+              exit 1
+              ;;
+          esac
+          echo "RECEIPT_FILE=$receipt" >>"$GITHUB_ENV"
+
+      - name: Resolve the immutable versioned template
+        if: env.ALREADY_ACTIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          template="aws/bootstrap-oidc.yaml"
+          digest="$(sha256sum "$template" | awk '{print $1}')"
+          checksum="$(
+            openssl dgst -sha256 -binary "$template" |
+              base64 -w 0
+          )"
+          key="foundation/templates/${TARGET_SHA}/${digest}.yaml"
+          bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          head="${RUNNER_TEMP:?}/foundation-template-head.json"
+
+          if ! aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head" 2>/dev/null; then
+            aws s3api put-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --body "$template" \
+              --server-side-encryption AES256 \
+              --checksum-algorithm SHA256 \
+              --metadata "commit=$TARGET_SHA,sha256=$digest" \
+              --if-none-match "*" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >/dev/null
+            aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head"
+          fi
+
+          size="$(wc -c <"$template" | tr -d ' ')"
+          jq -e \
+            --arg commit "$TARGET_SHA" \
+            --arg digest "$digest" \
+            --arg checksum "$checksum" \
+            --argjson size "$size" \
+            '
+              .ContentLength == $size
+              and .ServerSideEncryption == "AES256"
+              and .ChecksumSHA256 == $checksum
+              and .Metadata == {commit:$commit, sha256:$digest}
+              and (.VersionId | type == "string" and length > 0)
+            ' "$head" >/dev/null
+
+          version_id="$(jq -er '.VersionId' "$head")"
+          encoded_version="$(
+            jq -nr --arg value "$version_id" '$value | @uri'
+          )"
+          template_url="https://${bucket}.s3.${AWS_REGION}.amazonaws.com/${key}?versionId=${encoded_version}"
+          change_set="bootstrap-s3-${TARGET_SHA:0:12}-${digest:0:12}"
+          description="operation=enable-artifact-logging commit=${TARGET_SHA} template_sha256=${digest} version_id=${version_id}"
+
+          {
+            echo "TEMPLATE_DIGEST=$digest"
+            echo "TEMPLATE_VERSION_ID=$version_id"
+            echo "TEMPLATE_URL=$template_url"
+            echo "CHANGE_SET_NAME=$change_set"
+            echo "CHANGE_SET_DESCRIPTION=$description"
+          } >>"$GITHUB_ENV"
+
+      - name: Create or reuse the inspected activation plan
+        if: env.ALREADY_ACTIVE != 'true' && inputs.operation == 'plan'
+        shell: bash
+        run: |
+          set -euo pipefail
+          parameters="${RUNNER_TEMP:?}/foundation-parameters-enable.json"
+          jq -e '
+            [.Stacks[0].Parameters[].ParameterKey] | sort
+            == [
+              "AppName",
+              "ArtifactAccessLoggingEnabled",
+              "ExistingGitHubOidcProviderArn",
+              "GitHubOrganization",
+              "GitHubRepository",
+              "GitHubRepositoryId",
+              "GitHubRepositoryOwnerId"
+            ]
+          ' "$CURRENT_STACK_FILE" >/dev/null
+          jq '
+            [.Stacks[0].Parameters[]
+              | if .ParameterKey == "ArtifactAccessLoggingEnabled"
+                then {
+                  ParameterKey: .ParameterKey,
+                  ParameterValue: "true"
+                }
+                else {
+                  ParameterKey: .ParameterKey,
+                  UsePreviousValue: true
+                }
+                end]
+          ' "$CURRENT_STACK_FILE" >"$parameters"
+
+          change_set_file="${RUNNER_TEMP:?}/foundation-change-set.json"
+          wait_for_change_set_available() {
+            local attempt execution_status output status target
+            target="$1"
+            output="$2"
+            for attempt in $(seq 1 60); do
+              if aws cloudformation describe-change-set \
+                  --stack-name "${APP_NAME}-delivery-bootstrap" \
+                  --change-set-name "$target" \
+                  --region "$AWS_REGION" \
+                  --output json >"$output" 2>/dev/null; then
+                status="$(jq -er '.Status' "$output")"
+                execution_status="$(jq -er '.ExecutionStatus' "$output")"
+                case "$status:$execution_status" in
+                  CREATE_COMPLETE:AVAILABLE)
+                    return 0
+                    ;;
+                  CREATE_PENDING:*|CREATE_IN_PROGRESS:*)
+                    ;;
+                  FAILED:*|DELETE_PENDING:*|DELETE_IN_PROGRESS:*|\
+                  DELETE_COMPLETE:*|DELETE_FAILED:*|CREATE_COMPLETE:*)
+                    return 1
+                    ;;
+                  *)
+                    return 1
+                    ;;
+                esac
+              fi
+              if [ "$attempt" -lt 60 ]; then
+                sleep 5
+              fi
+            done
+            return 1
+          }
+
+          create_required=true
+          if aws cloudformation describe-change-set \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$change_set_file" 2>/dev/null; then
+            test "$(jq -r '.Description' "$change_set_file")" = \
+              "$CHANGE_SET_DESCRIPTION"
+            if jq -e '
+                .Status == "CREATE_COMPLETE"
+                and .ExecutionStatus == "AVAILABLE"
+              ' "$change_set_file" >/dev/null; then
+              create_required=false
+            else
+              aws cloudformation delete-change-set \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --change-set-name "$CHANGE_SET_NAME" \
+                --region "$AWS_REGION"
+              for attempt in $(seq 1 30); do
+                if ! aws cloudformation describe-change-set \
+                    --stack-name "${APP_NAME}-delivery-bootstrap" \
+                    --change-set-name "$CHANGE_SET_NAME" \
+                    --region "$AWS_REGION" \
+                    --output json >/dev/null 2>&1; then
+                  break
+                fi
+                test "$attempt" -lt 30
+                sleep 2
+              done
+            fi
+          fi
+          if [ "$create_required" = "true" ]; then
+            create_response="${RUNNER_TEMP:?}/foundation-change-set-created.json"
+            aws cloudformation create-change-set \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --change-set-type UPDATE \
+              --description "$CHANGE_SET_DESCRIPTION" \
+              --template-url "$TEMPLATE_URL" \
+              --parameters "file://$parameters" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --region "$AWS_REGION" \
+              --output json >"$create_response"
+            created_change_set_id="$(jq -er '.Id' "$create_response")"
+            wait_for_change_set_available \
+              "$created_change_set_id" \
+              "$change_set_file"
+          fi
+          change_set_id="$(
+            jq -er \
+              --arg prefix "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/" \
+              '
+                .ChangeSetId
+                | select(startswith($prefix) and length > ($prefix | length))
+              ' "$change_set_file"
+          )"
+          {
+            echo "CHANGE_SET_FILE=$change_set_file"
+            echo "CHANGE_SET_ID=$change_set_id"
+          } >>"$GITHUB_ENV"
+
+      - name: Load the existing activation plan
+        if: env.ALREADY_ACTIVE != 'true' && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          change_set_file="${RUNNER_TEMP:?}/foundation-change-set.json"
+          aws cloudformation describe-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$change_set_file"
+          change_set_id="$(
+            jq -er \
+              --arg prefix "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/" \
+              '
+                .ChangeSetId
+                | select(startswith($prefix) and length > ($prefix | length))
+              ' "$change_set_file"
+          )"
+          {
+            echo "CHANGE_SET_FILE=$change_set_file"
+            echo "CHANGE_SET_ID=$change_set_id"
+          } >>"$GITHUB_ENV"
+
+      - name: Require the exact non-replacement ArtifactBucket change
+        if: env.ALREADY_ACTIVE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved_template_response="${RUNNER_TEMP:?}/foundation-change-set-template.json"
+          resolved_template="${RUNNER_TEMP:?}/foundation-change-set-template.yaml"
+          aws cloudformation get-template \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$resolved_template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$resolved_template_response" |
+            base64 --decode >"$resolved_template"
+          test "$(sha256sum "$resolved_template" | awk '{print $1}')" = \
+            "$TEMPLATE_DIGEST"
+
+          jq -e \
+            --arg id "$CHANGE_SET_ID" \
+            --arg name "$CHANGE_SET_NAME" \
+            --arg description "$CHANGE_SET_DESCRIPTION" \
+            --slurpfile current "$CURRENT_STACK_FILE" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              ($current[0].Stacks[0].Parameters | parameter_map) as $before
+              | (.Parameters | parameter_map) as $after
+              | .ChangeSetId == $id
+                and .StackId == $current[0].Stacks[0].StackId
+                and .ChangeSetName == $name
+                and .Description == $description
+                and .Status == "CREATE_COMPLETE"
+                and .ExecutionStatus == "AVAILABLE"
+                and .ChangeSetType == "UPDATE"
+                and ((.IncludeNestedStacks // false) == false)
+                and ((.RoleARN // null) == null)
+                and .Capabilities == ["CAPABILITY_NAMED_IAM"]
+                and ($before | keys | sort) == ($after | keys | sort)
+                and $before.ArtifactAccessLoggingEnabled == "false"
+                and $after.ArtifactAccessLoggingEnabled == "true"
+                and (
+                  $before | del(.ArtifactAccessLoggingEnabled)
+                ) == (
+                  $after | del(.ArtifactAccessLoggingEnabled)
+                )
+                and (.Changes | length) == 1
+                and .Changes[0].ResourceChange.Action == "Modify"
+                and .Changes[0].ResourceChange.LogicalResourceId == "ArtifactBucket"
+                and .Changes[0].ResourceChange.ResourceType == "AWS::S3::Bucket"
+                and .Changes[0].ResourceChange.Replacement == "False"
+                and .Changes[0].ResourceChange.Scope == ["Properties"]
+                and (.Changes[0].ResourceChange.Details | length) >= 1
+                and all(
+                  .Changes[0].ResourceChange.Details[];
+                  .Target.Attribute == "Properties"
+                  and .Target.Name == "LoggingConfiguration"
+                  and .Target.RequiresRecreation == "Never"
+                  and .Evaluation == "Static"
+                )
+            ' "$CHANGE_SET_FILE" >/dev/null
+
+          receipt_next="${RUNNER_TEMP:?}/foundation-plan-receipt.json"
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg commit "$TARGET_SHA" \
+            --arg digest "$TEMPLATE_DIGEST" \
+            --arg version "$TEMPLATE_VERSION_ID" \
+            --arg changeSet "$CHANGE_SET_NAME" \
+            --arg changeSetId "$CHANGE_SET_ID" \
+            --slurpfile baseline "$BASELINE_PROOF_FILE" \
+            '{
+              ok: ($operation == "plan"),
+              operation: $operation,
+              result: (
+                if $operation == "plan"
+                then "inspected-plan"
+                else "apply-pending"
+                end
+              ),
+              commit: $commit,
+              template: {
+                sha256: $digest,
+                versionId: $version
+              },
+              changeSet: {
+                name: $changeSet,
+                id: $changeSetId,
+                changes: [{
+                  action: "Modify",
+                  logicalResourceId: "ArtifactBucket",
+                  resourceType: "AWS::S3::Bucket",
+                  replacement: false,
+                  property: "LoggingConfiguration"
+                }]
+              },
+              baseline: $baseline[0]
+            }' >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Re-prove main and execute the inspected plan
+        if: env.ALREADY_ACTIVE != 'true' && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+          client_token="foundation-activate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA:0:12}"
+          execute_accepted=true
+          if ! aws cloudformation execute-change-set \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --change-set-name "$CHANGE_SET_ID" \
+              --client-request-token "$client_token" \
+              --region "$AWS_REGION" >/dev/null 2>&1; then
+            execute_accepted=false
+          fi
+
+          poll_activation_outcome() {
+            local attempt current execution_status saw_progress status stored
+            current="${RUNNER_TEMP:?}/foundation-activation-state.json"
+            saw_progress=false
+            for attempt in $(seq 1 90); do
+              if ! aws cloudformation describe-stacks \
+                  --stack-name "${APP_NAME}-delivery-bootstrap" \
+                  --region "$AWS_REGION" \
+                  --output json >"$current" 2>/dev/null; then
+                if [ "$attempt" -lt 90 ]; then
+                  sleep 10
+                  continue
+                fi
+                printf 'timeout:UNKNOWN\n'
+                return 0
+              fi
+              if ! status="$(jq -er '.Stacks[0].StackStatus' "$current")" ||
+                  ! stored="$(
+                    jq -er '
+                      [.Stacks[0].Parameters[]
+                        | select(.ParameterKey == "ArtifactAccessLoggingEnabled")
+                        | .ParameterValue]
+                      | if length == 1
+                        then .[0]
+                        else error("missing parameter")
+                        end
+                    ' "$current"
+                  )"; then
+                printf 'invalid:UNKNOWN\n'
+                return 0
+              fi
+
+              case "$status:$stored" in
+                UPDATE_COMPLETE:true)
+                  printf 'activated:%s\n' "$status"
+                  return 0
+                  ;;
+                UPDATE_ROLLBACK_COMPLETE:false)
+                  execution_status="$(
+                    aws cloudformation describe-change-set \
+                      --stack-name "${APP_NAME}-delivery-bootstrap" \
+                      --change-set-name "$CHANGE_SET_ID" \
+                      --region "$AWS_REGION" \
+                      --query ExecutionStatus \
+                      --output text 2>/dev/null || printf 'UNKNOWN'
+                  )"
+                  if [ "$saw_progress" = "true" ] ||
+                      [ "$execution_status" = "EXECUTE_COMPLETE" ]; then
+                    printf 'rolled-back:%s\n' "$status"
+                    return 0
+                  fi
+                  if [ "$execution_status" = "AVAILABLE" ] &&
+                      [ "$attempt" -ge 12 ]; then
+                    printf 'rejected:%s\n' "$status"
+                    return 0
+                  fi
+                  ;;
+                UPDATE_COMPLETE:false)
+                  execution_status="$(
+                    aws cloudformation describe-change-set \
+                      --stack-name "${APP_NAME}-delivery-bootstrap" \
+                      --change-set-name "$CHANGE_SET_ID" \
+                      --region "$AWS_REGION" \
+                      --query ExecutionStatus \
+                      --output text 2>/dev/null || printf 'UNKNOWN'
+                  )"
+                  if [ "$execution_status" = "AVAILABLE" ] &&
+                      [ "$attempt" -ge 12 ]; then
+                    printf 'rejected:%s\n' "$status"
+                    return 0
+                  fi
+                  ;;
+                UPDATE_IN_PROGRESS:false|UPDATE_IN_PROGRESS:true|\
+                UPDATE_COMPLETE_CLEANUP_IN_PROGRESS:false|\
+                UPDATE_COMPLETE_CLEANUP_IN_PROGRESS:true|\
+                UPDATE_ROLLBACK_IN_PROGRESS:false|UPDATE_ROLLBACK_IN_PROGRESS:true|\
+                UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS:false|\
+                UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS:true)
+                  saw_progress=true
+                  ;;
+                UPDATE_FAILED:*|UPDATE_ROLLBACK_FAILED:*)
+                  printf 'failed:%s\n' "$status"
+                  return 0
+                  ;;
+                *)
+                  printf 'invalid:%s\n' "$status"
+                  return 0
+                  ;;
+              esac
+
+              if [ "$attempt" -lt 90 ]; then
+                sleep 10
+              fi
+            done
+            printf 'timeout:%s\n' "${status:-UNKNOWN}"
+          }
+
+          outcome="$(poll_activation_outcome)"
+          outcome_kind="${outcome%%:*}"
+          status="${outcome#*:}"
+          if [ "$outcome_kind" = "activated" ]; then
+            exit 0
+          fi
+
+          recovery_proof="${RUNNER_TEMP:?}/foundation-native-rollback-proof.json"
+          recovered=false
+          if bash aws/prove-s3-access-logging.sh baseline >"$recovery_proof"; then
+            recovered=true
+          else
+            printf '{}\n' >"$recovery_proof"
+          fi
+
+          result="activation-update-recovery-incomplete"
+          if [ "$outcome_kind" = "rolled-back" ] &&
+              [ "$recovered" = "true" ]; then
+            result="activation-update-rolled-back"
+          elif [ "$outcome_kind" = "rejected" ] &&
+              [ "$recovered" = "true" ]; then
+            result="activation-execution-rejected-baseline-intact"
+          elif [ "$recovered" = "true" ]; then
+            result="activation-not-applied-baseline-intact"
+          fi
+
+          receipt_next="${RUNNER_TEMP:?}/foundation-native-rollback-receipt.json"
+          jq -n \
+            --arg commit "$TARGET_SHA" \
+            --arg changeSet "$CHANGE_SET_NAME" \
+            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg clientToken "$client_token" \
+            --arg result "$result" \
+            --arg outcome "$outcome_kind" \
+            --arg stackStatus "$status" \
+            --argjson executeAccepted "$execute_accepted" \
+            --argjson recovered "$recovered" \
+            --slurpfile recovery "$recovery_proof" \
+            '{
+              ok: false,
+              operation: "apply",
+              result: $result,
+              commit: $commit,
+              changeSet: {
+                name: $changeSet,
+                id: $changeSetId,
+                clientRequestToken: $clientToken,
+                executeApiAccepted: $executeAccepted
+              },
+              recovery: {
+                outcome: $outcome,
+                recovered: $recovered,
+                stackStatus: $stackStatus,
+                proof: (
+                  if $recovered then $recovery[0] else null end
+                )
+              }
+            }' >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+          echo "The activation did not reach the verified live state; recovery evidence was captured." >&2
+          exit 1
+
+      - name: Prove the activated live state
+        if: env.ALREADY_ACTIVE != 'true' && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="${RUNNER_TEMP:?}/foundation-activated-proof.json"
+          proved=false
+          for attempt in 1 2 3 4 5; do
+            if bash aws/prove-s3-access-logging.sh verify >"$proof"; then
+              proved=true
+              break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              sleep 10
+            fi
+          done
+          if [ "$proved" != "true" ]; then
+            recovery_proof="${RUNNER_TEMP:?}/foundation-proof-failure-recovery.json"
+            recovery_change_set_id=""
+
+            recover_to_baseline() {
+              local active_stack parameters rollback_file rollback_name rollback_description
+              local recovery_client_token rollback_create_response rollback_id
+              local rollback_template_response rollback_template
+              active_stack="${RUNNER_TEMP:?}/foundation-active-stack.json"
+              parameters="${RUNNER_TEMP:?}/foundation-parameters-disable.json"
+              rollback_file="${RUNNER_TEMP:?}/foundation-rollback-change-set.json"
+              rollback_create_response="${RUNNER_TEMP:?}/foundation-rollback-created.json"
+              rollback_template_response="${RUNNER_TEMP:?}/foundation-rollback-template.json"
+              rollback_template="${RUNNER_TEMP:?}/foundation-rollback-template.yaml"
+              rollback_name="bootstrap-s3-rollback-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              rollback_description="recovery=disable-artifact-logging commit=${TARGET_SHA} failed_change_set=${CHANGE_SET_NAME}"
+
+              aws cloudformation describe-stacks \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --region "$AWS_REGION" \
+                --output json >"$active_stack" || return 1
+              jq -e '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                and ((.Stacks[0].RoleARN // null) == null)
+                and (
+                  [.Stacks[0].Parameters[]
+                    | select(.ParameterKey == "ArtifactAccessLoggingEnabled")
+                    | .ParameterValue] == ["true"]
+                )
+              ' "$active_stack" >/dev/null || return 1
+              jq '
+                [.Stacks[0].Parameters[]
+                  | if .ParameterKey == "ArtifactAccessLoggingEnabled"
+                    then {
+                      ParameterKey: .ParameterKey,
+                      ParameterValue: "false"
+                    }
+                    else {
+                      ParameterKey: .ParameterKey,
+                      UsePreviousValue: true
+                    }
+                    end]
+              ' "$active_stack" >"$parameters" || return 1
+
+              aws cloudformation create-change-set \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --change-set-name "$rollback_name" \
+                --change-set-type UPDATE \
+                --description "$rollback_description" \
+                --template-url "$TEMPLATE_URL" \
+                --parameters "file://$parameters" \
+                --capabilities CAPABILITY_NAMED_IAM \
+                --region "$AWS_REGION" \
+                --output json >"$rollback_create_response" || return 1
+              rollback_id="$(
+                jq -er \
+                  --arg prefix "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:changeSet/${rollback_name}/" \
+                  '
+                    .Id
+                    | select(startswith($prefix) and length > ($prefix | length))
+                  ' "$rollback_create_response"
+              )" || return 1
+              recovery_change_set_id="$rollback_id"
+
+              wait_for_rollback_change_set() {
+                local attempt execution_status status
+                for attempt in $(seq 1 60); do
+                  if aws cloudformation describe-change-set \
+                      --stack-name "${APP_NAME}-delivery-bootstrap" \
+                      --change-set-name "$rollback_id" \
+                      --region "$AWS_REGION" \
+                      --output json >"$rollback_file" 2>/dev/null; then
+                    status="$(jq -er '.Status' "$rollback_file")" || return 1
+                    execution_status="$(
+                      jq -er '.ExecutionStatus' "$rollback_file"
+                    )" || return 1
+                    case "$status:$execution_status" in
+                      CREATE_COMPLETE:AVAILABLE)
+                        return 0
+                        ;;
+                      CREATE_PENDING:*|CREATE_IN_PROGRESS:*)
+                        ;;
+                      FAILED:*|DELETE_PENDING:*|DELETE_IN_PROGRESS:*|\
+                      DELETE_COMPLETE:*|DELETE_FAILED:*|CREATE_COMPLETE:*)
+                        return 1
+                        ;;
+                      *)
+                        return 1
+                        ;;
+                    esac
+                  fi
+                  if [ "$attempt" -lt 60 ]; then
+                    sleep 5
+                  fi
+                done
+                return 1
+              }
+
+              wait_for_rollback_change_set || return 1
+              aws cloudformation get-template \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --change-set-name "$rollback_id" \
+                --template-stage Original \
+                --region "$AWS_REGION" \
+                --output json >"$rollback_template_response" || return 1
+              jq -er '
+                .TemplateBody
+                | select(type == "string" and length > 0)
+                | @base64
+              ' "$rollback_template_response" |
+                base64 --decode >"$rollback_template" || return 1
+              test "$(sha256sum "$rollback_template" | awk '{print $1}')" = \
+                "$TEMPLATE_DIGEST" || return 1
+              jq -e \
+                --arg id "$rollback_id" \
+                --arg name "$rollback_name" \
+                --arg description "$rollback_description" \
+                --slurpfile current "$active_stack" \
+                '
+                  def parameter_map:
+                    map({key:.ParameterKey, value:.ParameterValue})
+                    | from_entries;
+                  ($current[0].Stacks[0].Parameters | parameter_map) as $before
+                  | (.Parameters | parameter_map) as $after
+                  | .ChangeSetId == $id
+                    and .StackId == $current[0].Stacks[0].StackId
+                    and .ChangeSetName == $name
+                    and .Description == $description
+                    and .Status == "CREATE_COMPLETE"
+                    and .ExecutionStatus == "AVAILABLE"
+                    and .ChangeSetType == "UPDATE"
+                    and ((.IncludeNestedStacks // false) == false)
+                    and ((.RoleARN // null) == null)
+                    and .Capabilities == ["CAPABILITY_NAMED_IAM"]
+                    and ($before | keys | sort) == ($after | keys | sort)
+                    and $before.ArtifactAccessLoggingEnabled == "true"
+                    and $after.ArtifactAccessLoggingEnabled == "false"
+                    and (
+                      $before | del(.ArtifactAccessLoggingEnabled)
+                    ) == (
+                      $after | del(.ArtifactAccessLoggingEnabled)
+                    )
+                    and (.Changes | length) == 1
+                    and .Changes[0].ResourceChange.Action == "Modify"
+                    and .Changes[0].ResourceChange.LogicalResourceId == "ArtifactBucket"
+                    and .Changes[0].ResourceChange.ResourceType == "AWS::S3::Bucket"
+                    and .Changes[0].ResourceChange.Replacement == "False"
+                    and .Changes[0].ResourceChange.Scope == ["Properties"]
+                    and (.Changes[0].ResourceChange.Details | length) >= 1
+                    and all(
+                      .Changes[0].ResourceChange.Details[];
+                      .Target.Attribute == "Properties"
+                      and .Target.Name == "LoggingConfiguration"
+                      and .Target.RequiresRecreation == "Never"
+                      and .Evaluation == "Static"
+                    )
+                ' "$rollback_file" >/dev/null || return 1
+
+              recovery_client_token="foundation-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA:0:12}"
+              if ! aws cloudformation execute-change-set \
+                  --stack-name "${APP_NAME}-delivery-bootstrap" \
+                  --change-set-name "$rollback_id" \
+                  --client-request-token "$recovery_client_token" \
+                  --region "$AWS_REGION" >/dev/null 2>&1; then
+                :
+              fi
+
+              wait_for_recovery_outcome() {
+                local attempt current execution_status status stored
+                current="${RUNNER_TEMP:?}/foundation-recovery-state.json"
+                for attempt in $(seq 1 90); do
+                  if ! aws cloudformation describe-stacks \
+                      --stack-name "${APP_NAME}-delivery-bootstrap" \
+                      --region "$AWS_REGION" \
+                      --output json >"$current" 2>/dev/null; then
+                    if [ "$attempt" -lt 90 ]; then
+                      sleep 10
+                      continue
+                    fi
+                    return 1
+                  fi
+                  if ! status="$(jq -er '.Stacks[0].StackStatus' "$current")" ||
+                      ! stored="$(
+                        jq -er '
+                          [.Stacks[0].Parameters[]
+                            | select(.ParameterKey == "ArtifactAccessLoggingEnabled")
+                            | .ParameterValue]
+                          | if length == 1
+                            then .[0]
+                            else error("missing parameter")
+                            end
+                        ' "$current"
+                      )"; then
+                    return 1
+                  fi
+
+                  case "$status:$stored" in
+                    UPDATE_COMPLETE:false)
+                      return 0
+                      ;;
+                    UPDATE_COMPLETE:true)
+                      execution_status="$(
+                        aws cloudformation describe-change-set \
+                          --stack-name "${APP_NAME}-delivery-bootstrap" \
+                          --change-set-name "$rollback_id" \
+                          --region "$AWS_REGION" \
+                          --query ExecutionStatus \
+                          --output text 2>/dev/null || printf 'UNKNOWN'
+                      )"
+                      if [ "$execution_status" = "AVAILABLE" ] &&
+                          [ "$attempt" -ge 12 ]; then
+                        return 1
+                      fi
+                      ;;
+                    UPDATE_IN_PROGRESS:false|UPDATE_IN_PROGRESS:true|\
+                    UPDATE_COMPLETE_CLEANUP_IN_PROGRESS:false|\
+                    UPDATE_COMPLETE_CLEANUP_IN_PROGRESS:true|\
+                    UPDATE_ROLLBACK_IN_PROGRESS:false|UPDATE_ROLLBACK_IN_PROGRESS:true|\
+                    UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS:false|\
+                    UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS:true)
+                      ;;
+                    UPDATE_ROLLBACK_COMPLETE:*|UPDATE_FAILED:*|\
+                    UPDATE_ROLLBACK_FAILED:*)
+                      return 1
+                      ;;
+                    *)
+                      return 1
+                      ;;
+                  esac
+                  if [ "$attempt" -lt 90 ]; then
+                    sleep 10
+                  fi
+                done
+                return 1
+              }
+
+              wait_for_recovery_outcome || return 1
+              bash aws/prove-s3-access-logging.sh baseline \
+                >"$recovery_proof" || return 1
+            }
+
+            recovery_result="live-proof-failed-recovery-incomplete"
+            recovered=false
+            if recover_to_baseline; then
+              recovery_result="live-proof-failed-rolled-back"
+              recovered=true
+            else
+              printf '{}\n' >"$recovery_proof"
+            fi
+
+            recovery_status="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --region "$AWS_REGION" \
+                --query 'Stacks[0].StackStatus' \
+                --output text 2>/dev/null || printf 'UNKNOWN'
+            )"
+            receipt_next="${RUNNER_TEMP:?}/foundation-proof-failure-receipt.json"
+            jq -n \
+              --arg commit "$TARGET_SHA" \
+              --arg changeSet "$CHANGE_SET_NAME" \
+              --arg changeSetId "$CHANGE_SET_ID" \
+              --arg result "$recovery_result" \
+              --arg stackStatus "$recovery_status" \
+              --arg recoveryChangeSetId "$recovery_change_set_id" \
+              --argjson recovered "$recovered" \
+              --slurpfile recovery "$recovery_proof" \
+              '{
+                ok: false,
+                operation: "apply",
+                result: $result,
+                commit: $commit,
+                changeSet: {
+                  name: $changeSet,
+                  id: $changeSetId
+                },
+                recovery: {
+                  recovered: $recovered,
+                  stackStatus: $stackStatus,
+                  changeSetId: (
+                    if $recoveryChangeSetId == ""
+                    then null
+                    else $recoveryChangeSetId
+                    end
+                  ),
+                  proof: (
+                    if $recovered then $recovery[0] else null end
+                  )
+                }
+              }' >"$receipt_next"
+            mv "$receipt_next" "$RECEIPT_FILE"
+            echo "The live S3 logging proof failed; recovery evidence was captured." >&2
+            exit 1
+          fi
+
+          receipt_next="${RUNNER_TEMP:?}/foundation-apply-receipt.json"
+          jq -n \
+            --arg commit "$TARGET_SHA" \
+            --arg digest "$TEMPLATE_DIGEST" \
+            --arg version "$TEMPLATE_VERSION_ID" \
+            --arg changeSet "$CHANGE_SET_NAME" \
+            --arg changeSetId "$CHANGE_SET_ID" \
+            --slurpfile proof "$proof" \
+            '{
+              ok: true,
+              operation: "apply",
+              result: "activated",
+              commit: $commit,
+              template: {
+                sha256: $digest,
+                versionId: $version
+              },
+              changeSet: {
+                name: $changeSet,
+                id: $changeSetId,
+                action: "Modify",
+                logicalResourceId: "ArtifactBucket",
+                replacement: false
+              },
+              proof: $proof[0]
+            }' >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Upload the sanitized foundation receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: foundation-s3-access-logging-${{ inputs.operation }}-${{ inputs.target_sha }}
+          path: ${{ runner.temp }}/foundation-s3-access-logging-receipt.json
+          if-no-files-found: error
+          retention-days: 30

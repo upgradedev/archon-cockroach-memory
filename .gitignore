@@ -42,6 +42,7 @@ managed-mcp-receipt.json
 legacy-reconciliation-receipt.json
 api-stage-preflight.json
 api-stage-proof.json
+foundation-s3-access-logging-receipt.json
 previous-stack-template.yaml
 previous-stack-parameters.json
 bench-clustered.txt
