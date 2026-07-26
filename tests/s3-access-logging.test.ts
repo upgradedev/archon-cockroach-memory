@@ -201,6 +201,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     ".ChangeSetId == $id",
     "wait_for_change_set_available",
     "wait_for_rollback_change_set",
+    "--include-property-values",
     "--template-stage Original",
     "foundation-change-set-template.yaml",
     'ResourceChange.LogicalResourceId == "ArtifactBucket"',
@@ -221,6 +222,16 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     WORKFLOW,
     /cloudformation wait change-set-create-complete/u
   );
+  assert.equal(
+    (WORKFLOW.match(/--include-property-values/gmu) ?? []).length,
+    4
+  );
+  assert.equal(
+    (WORKFLOW.match(/--change-set-type UPDATE/gmu) ?? []).length,
+    2
+  );
+  assert.doesNotMatch(WORKFLOW, /\.ChangeSetType/u);
+  assert.equal((WORKFLOW.match(/RoleARN \/\/ null/gmu) ?? []).length, 2);
   assert.ok(
     (
       WORKFLOW.match(

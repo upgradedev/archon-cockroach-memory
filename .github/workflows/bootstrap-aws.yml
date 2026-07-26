@@ -333,6 +333,7 @@ jobs:
               if aws cloudformation describe-change-set \
                   --stack-name "${APP_NAME}-delivery-bootstrap" \
                   --change-set-name "$target" \
+                  --include-property-values \
                   --region "$AWS_REGION" \
                   --output json >"$output" 2>/dev/null; then
                 status="$(jq -er '.Status' "$output")"
@@ -363,6 +364,7 @@ jobs:
           if aws cloudformation describe-change-set \
               --stack-name "${APP_NAME}-delivery-bootstrap" \
               --change-set-name "$CHANGE_SET_NAME" \
+              --include-property-values \
               --region "$AWS_REGION" \
               --output json >"$change_set_file" 2>/dev/null; then
             test "$(jq -r '.Description' "$change_set_file")" = \
@@ -429,6 +431,7 @@ jobs:
           aws cloudformation describe-change-set \
             --stack-name "${APP_NAME}-delivery-bootstrap" \
             --change-set-name "$CHANGE_SET_NAME" \
+            --include-property-values \
             --region "$AWS_REGION" \
             --output json >"$change_set_file"
           change_set_id="$(
@@ -483,9 +486,7 @@ jobs:
                 and .Description == $description
                 and .Status == "CREATE_COMPLETE"
                 and .ExecutionStatus == "AVAILABLE"
-                and .ChangeSetType == "UPDATE"
                 and ((.IncludeNestedStacks // false) == false)
-                and ((.RoleARN // null) == null)
                 and .Capabilities == ["CAPABILITY_NAMED_IAM"]
                 and ($before | keys | sort) == ($after | keys | sort)
                 and $before.ArtifactAccessLoggingEnabled == "false"
@@ -814,6 +815,7 @@ jobs:
                   if aws cloudformation describe-change-set \
                       --stack-name "${APP_NAME}-delivery-bootstrap" \
                       --change-set-name "$rollback_id" \
+                      --include-property-values \
                       --region "$AWS_REGION" \
                       --output json >"$rollback_file" 2>/dev/null; then
                     status="$(jq -er '.Status' "$rollback_file")" || return 1
@@ -874,9 +876,7 @@ jobs:
                     and .Description == $description
                     and .Status == "CREATE_COMPLETE"
                     and .ExecutionStatus == "AVAILABLE"
-                    and .ChangeSetType == "UPDATE"
                     and ((.IncludeNestedStacks // false) == false)
-                    and ((.RoleARN // null) == null)
                     and .Capabilities == ["CAPABILITY_NAMED_IAM"]
                     and ($before | keys | sort) == ($after | keys | sort)
                     and $before.ArtifactAccessLoggingEnabled == "true"

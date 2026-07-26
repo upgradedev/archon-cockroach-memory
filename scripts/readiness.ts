@@ -1350,6 +1350,15 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /wait_for_change_set_available/u.test(foundationWorkflow) &&
         /wait_for_rollback_change_set/u.test(foundationWorkflow) &&
+        (
+          foundationWorkflow.match(/--include-property-values/gmu) ?? []
+        ).length === 4 &&
+        (
+          foundationWorkflow.match(/--change-set-type UPDATE/gmu) ?? []
+        ).length === 2 &&
+        !/\.ChangeSetType/u.test(foundationWorkflow) &&
+        (foundationWorkflow.match(/RoleARN \/\/ null/gmu) ?? []).length ===
+          2 &&
         !/cloudformation wait change-set-create-complete/u.test(
           foundationWorkflow
         ) &&
