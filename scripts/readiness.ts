@@ -1309,6 +1309,13 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ExecuteOnlyBootstrapLoggingChangeSets[\s\S]*?cloudformation:ChangeSetName:[\s\S]*?changeSet\/bootstrap-s3-\*\/\*/u.test(
           deliveryBootstrap
         ) &&
+        /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole[\s\S]*?role\/\$\{AppName\}-staging-cloudformation[\s\S]*?role\/\$\{AppName\}-production-cloudformation[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          deliveryBootstrap
+        ) &&
+        /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          deliveryBootstrap
+        ) &&
+        !/role\/\*|automation-rule\/\*/u.test(deliveryBootstrap) &&
         (
           deliveryBootstrap.match(
             /Sid: InspectS3AccessLoggingFoundationStack/gmu
@@ -1318,7 +1325,7 @@ function sourceChecks(): SourceCheck[] {
           deliveryBootstrap.match(
             /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
           ) ?? []
-        ).length === 3 &&
+        ).length === 4 &&
         (
           deliveryBootstrap.match(
             /Sid: InspectS3AccessLoggingFoundationRule/gmu
@@ -1395,8 +1402,8 @@ function sourceChecks(): SourceCheck[] {
         /rejects drift and redacts AWS failures/u.test(
           s3AccessLoggingTests
         ),
-      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, live proof, and CI gate are source-controlled.",
-      "The centralized S3 logging archive, narrow exception, activation recovery, proof, or CI/readiness gate is incomplete."
+      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, CloudFormation-only dynamic-reference reads, live proof, and CI gate are source-controlled.",
+      "The centralized S3 logging archive, narrow exception, activation recovery, exact dynamic-reference reads, proof, or CI/readiness gate is incomplete."
     ),
     sourceCheck(
       "product.oidc-promotion-rollback",

@@ -211,7 +211,10 @@ only the immutable ARN of one inspected, non-replacement
 activation, and recovery pollers fit inside the protected job budget. The role
 cannot mutate IAM/Security Hub, delete a stack, or directly call
 `PutBucketLogging` outside CloudFormation because that permission is FAS-bound
-to `cloudformation.amazonaws.com`. The Phase-2 application logging release is
+to `cloudformation.amazonaws.com`. CloudFormation's in-place update can resolve
+only the two exact environment execution-role ARNs and the exact Security Hub
+automation-rule tags; those read actions are also FAS-bound to
+`cloudformation.amazonaws.com`. The Phase-2 application logging release is
 blocked until the stored bootstrap parameter and live EventTime configuration
 agree. Staging and production deploy identities have only the narrow read
 permissions needed to re-prove that bootstrap/S3/Security Hub foundation before
