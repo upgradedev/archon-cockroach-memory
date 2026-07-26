@@ -1,11 +1,43 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  allCockroachImagesPinned,
+  allComposeImagesPinned,
+  allDockerfileBasesPinned,
+  allSetupNodeStepsPinned,
+  allWorkflowActionsPinned,
   evaluate,
+  EXPECTED_COCKROACH_IMAGE_REFS,
+  EXPECTED_COMPOSE_IMAGE_REFS,
+  EXPECTED_DOCKERFILE_BASE_REFS,
+  EXPECTED_SETUP_NODE_STEPS,
+  EXPECTED_WORKFLOW_ACTION_REFS,
+  generatedArtifactPaths,
+  GENERATED_ARTIFACT_BASENAMES,
+  hasExactCiTrigger,
+  hasUniqueCiTriggerOwnership,
+  isSubmissionEligible,
   OFFICIAL_CRITERIA,
+  PINNED_NODE_VERSION,
+  repositoryDockerComposeSources,
+  repositoryDockerfileSources,
+  repositoryWorkflowSources,
+  setupNodeVersions,
   SOURCE_FLOOR,
 } from "../scripts/readiness.js";
+
+function repositoryWorkflowTexts(): string[] {
+  return repositoryWorkflowSources().map(({ source }) => source);
+}
 
 test("readiness: every repository-verifiable source gate passes", () => {
   const report = evaluate();
@@ -32,11 +64,13 @@ test("readiness: judging mirrors the five equally presented official criteria", 
 test("readiness: source readiness cannot masquerade as submission eligibility", () => {
   const report = evaluate();
   assert.equal(report.sourceGate.pass, true);
+  const deliverablesComplete = report.eligibility.requirements.every(
+    (requirement) => requirement.status === "complete"
+  );
+  assert.equal(report.eligibility.pass, deliverablesComplete);
   assert.equal(
     report.submissionEligible,
-    report.eligibility.requirements.every(
-      (requirement) => requirement.status === "complete"
-    )
+    report.sourceGate.pass && deliverablesComplete
   );
   for (const id of [
     "unrestricted-functional-demo",
@@ -46,6 +80,25 @@ test("readiness: source readiness cannot masquerade as submission eligibility", 
     assert.ok(
       report.eligibility.requirements.some((requirement) => requirement.id === id),
       `${id} must be represented as a hard eligibility requirement`
+    );
+  }
+});
+
+test("readiness: submission eligibility is the full source/deliverables truth table", () => {
+  for (const [
+    sourceGatePass,
+    eligibilityPass,
+    expected,
+  ] of [
+    [false, false, false],
+    [false, true, false],
+    [true, false, false],
+    [true, true, true],
+  ] as const) {
+    assert.equal(
+      isSubmissionEligible(sourceGatePass, eligibilityPass),
+      expected,
+      `${sourceGatePass}/${eligibilityPass}`
     );
   }
 });
@@ -116,6 +169,462 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
     readinessJob,
     /jq -e 'length == 7 and all\(\.\[\]; \.result == "success"\)'/u
   );
+});
+
+test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
+  const workflows = repositoryWorkflowTexts();
+  const versions = workflows.flatMap(setupNodeVersions);
+  assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
+  assert.deepEqual(
+    [...new Set(versions)],
+    [PINNED_NODE_VERSION]
+  );
+  assert.equal(allSetupNodeStepsPinned(workflows), true);
+  assert.equal(allWorkflowActionsPinned(workflows), true);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 55);
+
+  const setupNodeSha =
+    "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
+  const mixedNodeVersions = `
+steps:
+  - uses: actions/setup-node@${setupNodeSha}
+    with:
+      node-version: ${PINNED_NODE_VERSION}
+  - name: Mutable runtime must fail the aggregate
+    uses: actions/setup-node@${setupNodeSha}
+    with:
+      node-version: 22
+`;
+  assert.deepEqual(
+    setupNodeVersions(mixedNodeVersions),
+    [PINNED_NODE_VERSION, undefined]
+  );
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [mixedNodeVersions],
+      PINNED_NODE_VERSION,
+      2
+    ),
+    false
+  );
+  assert.equal(
+    allWorkflowActionsPinned([
+      `steps:
+  - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+  - uses: actions/setup-node@main
+`,
+    ], 2),
+    false
+  );
+
+  const exactSetupNode = `steps:
+  - uses: actions/setup-node@${setupNodeSha}
+    with:
+      node-version: "${PINNED_NODE_VERSION}"
+`;
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [exactSetupNode],
+      PINNED_NODE_VERSION,
+      1
+    ),
+    true
+  );
+  const flowSetupNode = `steps:
+  - { uses: actions/setup-node@${setupNodeSha}, with: { node-version: "${PINNED_NODE_VERSION}" } }
+`;
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [flowSetupNode],
+      PINNED_NODE_VERSION,
+      1
+    ),
+    true
+  );
+  assert.equal(
+    allWorkflowActionsPinned([flowSetupNode], 1),
+    true
+  );
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [`${exactSetupNode}${flowSetupNode.replace("steps:\n", "")}`],
+      PINNED_NODE_VERSION,
+      2
+    ),
+    true
+  );
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [
+        `steps:
+  - uses: Actions/Setup-Node@${setupNodeSha}
+    with:
+      node-version: ${PINNED_NODE_VERSION}
+`,
+      ],
+      PINNED_NODE_VERSION,
+      1
+    ),
+    true
+  );
+  for (const invalid of [
+    `steps:
+  - uses: actions/setup-node@${setupNodeSha}
+    env:
+      node-version: ${PINNED_NODE_VERSION}
+`,
+    `steps:
+  - uses: actions/setup-node@${setupNodeSha}
+`,
+    `steps:
+  - uses: Actions/Setup-Node@${setupNodeSha}
+    env:
+      node-version: ${PINNED_NODE_VERSION}
+`,
+  ]) {
+    assert.equal(
+      allSetupNodeStepsPinned(
+        [invalid],
+        PINNED_NODE_VERSION,
+        1
+      ),
+      false,
+      invalid
+    );
+  }
+  const aliasedStep = `setup: &setup
+  uses: actions/setup-node@${setupNodeSha}
+  with:
+    node-version: ${PINNED_NODE_VERSION}
+steps:
+  - *setup
+`;
+  assert.equal(
+    allSetupNodeStepsPinned(
+      [aliasedStep],
+      PINNED_NODE_VERSION,
+      1
+    ),
+    false
+  );
+  assert.equal(allWorkflowActionsPinned([aliasedStep], 1), false);
+
+  for (const invalid of [
+    "steps:\n  - { uses: actions/checkout@main }\n",
+    "steps:\n  - uses : actions/checkout@release\n",
+    'steps:\n  - "uses": actions/checkout@latest\n',
+    'steps:\n  - "us\\u0065s": actions/checkout@main\n',
+  ]) {
+    assert.equal(
+      allWorkflowActionsPinned([invalid], 1),
+      false,
+      invalid
+    );
+  }
+  assert.equal(
+    allWorkflowActionsPinned(
+      [
+        'steps:\n  - "us\\u0065s": actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0\n',
+      ],
+      1
+    ),
+    true
+  );
+  assert.equal(
+    allWorkflowActionsPinned(
+      ["steps:\n  - uses: ./.github/actions/unreviewed\n"],
+      1
+    ),
+    false
+  );
+});
+
+test("readiness: every CockroachDB and Docker base image is digest-pinned", () => {
+  const workflows = repositoryWorkflowTexts();
+  const compose = repositoryDockerComposeSources();
+  const dockerfiles = repositoryDockerfileSources();
+  assert.equal(compose.length, 2);
+  assert.equal(dockerfiles.length, 1);
+  assert.equal(EXPECTED_COCKROACH_IMAGE_REFS, 8);
+  assert.equal(EXPECTED_COMPOSE_IMAGE_REFS, 4);
+  assert.equal(EXPECTED_DOCKERFILE_BASE_REFS, 1);
+  assert.equal(allComposeImagesPinned(compose), true);
+  assert.equal(
+    allCockroachImagesPinned({
+      workflows,
+      compose,
+      dockerfiles,
+    }),
+    true
+  );
+  assert.equal(allDockerfileBasesPinned(dockerfiles), true);
+  const digest = `sha256:${"a".repeat(64)}`;
+  assert.equal(
+    allCockroachImagesPinned(
+      {
+        workflows: [
+          `steps:
+  - run: |
+      docker run cockroachdb/cockroach:v26.2.3@sha256:${"a".repeat(64)}
+      docker run cockroachdb/cockroach:v26.2.3
+`,
+        ],
+        compose: [],
+        dockerfiles: [],
+      },
+      2
+    ),
+    false
+  );
+  assert.equal(
+    allCockroachImagesPinned(
+      {
+        workflows: [
+          `steps:
+  - run: |
+      docker run -d --name crdb -p 26257:26257 -e PROOF=cockroachdb/cockroach:v26.2.3@${digest} "$CRDB_IMAGE" start-single-node --insecure
+`,
+        ],
+        compose: [],
+        dockerfiles: [],
+      },
+      1
+    ),
+    false
+  );
+  assert.equal(
+    allCockroachImagesPinned(
+      {
+        workflows: [
+          `steps:
+  - run: |
+      docker run cockroachdb/cockroach:v26.2.3@${digest}
+      docker run "$CRDB_IMAGE";# docker run cockroachdb/cockroach:v26.2.3@${digest}
+`,
+        ],
+        compose: [],
+        dockerfiles: [],
+      },
+      1
+    ),
+    false
+  );
+
+  assert.equal(
+    allDockerfileBasesPinned(
+      [
+        `  FROM example/build@${digest} AS build
+FROM example/runtime@${digest}
+`,
+        `FROM example/sidecar@${digest}
+`,
+      ],
+      3
+    ),
+    true
+  );
+  assert.equal(
+    allDockerfileBasesPinned(
+      [`  FROM example/base@${digest}
+FROM example/mutable:latest
+`],
+      2
+    ),
+    false
+  );
+  assert.equal(
+    allComposeImagesPinned(
+      [
+        `services:
+  roach:
+    build: https://github.com/example/mutable.git#main
+`,
+      ],
+      0
+    ),
+    false
+  );
+  assert.equal(
+    allCockroachImagesPinned(
+      {
+        workflows: [
+          `steps:
+  - run: |
+      docker run "$CRDB_IMAGE"
+      # docker run cockroachdb/cockroach:v26.2.3@${digest}
+`,
+        ],
+        compose: [],
+        dockerfiles: [],
+      },
+      1
+    ),
+    false
+  );
+  assert.equal(
+    allDockerfileBasesPinned(
+      [`FROM example/base@${digest}\n`, "# no FROM\n"],
+      1
+    ),
+    false
+  );
+
+  assert.equal(
+    allComposeImagesPinned(
+      [
+        `services:
+  roach:
+    image: \${CRDB_IMAGE}
+`,
+      ],
+      1
+    ),
+    false
+  );
+
+  const sandbox = mkdtempSync(
+    join(tmpdir(), "archon-readiness-supply-chain-")
+  );
+  try {
+    const nested = join(sandbox, "services", "memory");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(
+      join(nested, "compose.yaml"),
+      `services:
+  roach:
+    image: cockroachdb/cockroach:v26.2.3@${digest}
+`,
+      "utf8"
+    );
+    writeFileSync(
+      join(nested, "Cockroach.Dockerfile"),
+      `FROM cockroachdb/cockroach:v26.2.3@${digest}
+`,
+      "utf8"
+    );
+    const nestedCompose =
+      repositoryDockerComposeSources(sandbox);
+    const nestedDockerfiles =
+      repositoryDockerfileSources(sandbox);
+    assert.equal(nestedCompose.length, 1);
+    assert.equal(nestedDockerfiles.length, 1);
+    assert.equal(allComposeImagesPinned(nestedCompose, 1), true);
+    assert.equal(
+      allDockerfileBasesPinned(nestedDockerfiles, 1),
+      true
+    );
+    assert.equal(
+      allCockroachImagesPinned(
+        {
+          workflows: [],
+          compose: nestedCompose,
+          dockerfiles: nestedDockerfiles,
+        },
+        2
+      ),
+      true
+    );
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("readiness: CI runs once for main pushes and for every pull request", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  assert.equal(hasExactCiTrigger(workflow), true);
+  const repositoryWorkflows = repositoryWorkflowSources();
+  assert.equal(
+    hasUniqueCiTriggerOwnership(repositoryWorkflows),
+    true
+  );
+  assert.equal(
+    hasUniqueCiTriggerOwnership([
+      ...repositoryWorkflows,
+      { name: "duplicate.yaml", source: workflow },
+    ]),
+    false
+  );
+  assert.equal(
+    hasUniqueCiTriggerOwnership(
+      repositoryWorkflows.map((entry) =>
+        entry.name === "codeql.yml"
+          ? {
+              ...entry,
+              source: entry.source.replace(
+                "  pull_request:\n",
+                ""
+              ),
+            }
+          : entry
+      )
+    ),
+    false
+  );
+  for (const invalid of [
+    "on:\n  push:\n  pull_request:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\non:\n  workflow_dispatch:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\non :\n  workflow_dispatch:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\n\"on\":\n  workflow_dispatch:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\n\"o\\u006e\":\n  workflow_dispatch:",
+  ]) {
+    assert.equal(hasExactCiTrigger(invalid), false, invalid);
+  }
+});
+
+test("readiness: generated receipts and nested build directories fail closed", () => {
+  const sandbox = mkdtempSync(
+    join(tmpdir(), "archon-readiness-artifacts-")
+  );
+  try {
+    for (const basename of GENERATED_ARTIFACT_BASENAMES) {
+      writeFileSync(join(sandbox, basename), "generated", "utf8");
+    }
+    mkdirSync(join(sandbox, "packages", "api", "dist"), {
+      recursive: true,
+    });
+    mkdirSync(join(sandbox, "packages", "web", "build"), {
+      recursive: true,
+    });
+    mkdirSync(join(sandbox, "src"), { recursive: true });
+    writeFileSync(
+      join(sandbox, "src", "distribution.ts"),
+      "export const source = true;\n",
+      "utf8"
+    );
+
+    const found = generatedArtifactPaths(sandbox);
+    for (const basename of GENERATED_ARTIFACT_BASENAMES) {
+      assert.ok(found.includes(basename), basename);
+    }
+    assert.ok(found.includes("packages/api/dist"));
+    assert.ok(found.includes("packages/web/build"));
+    assert.ok(!found.includes("src/distribution.ts"));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+
+  const gitignore = readFileSync(
+    new URL("../.gitignore", import.meta.url),
+    "utf8"
+  ).split(/\r?\n/u);
+  for (const ignored of [
+    ...GENERATED_ARTIFACT_BASENAMES,
+    "dist/",
+    "build/",
+  ]) {
+    assert.ok(gitignore.includes(ignored), ignored);
+  }
+  const makefile = readFileSync(
+    new URL("../Makefile", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(makefile, /scripts\/build_video\.py/u);
+  assert.doesNotMatch(makefile, /^video(?:-frames)?:/mu);
 });
 
 test("readiness: required tool story is Vector + hardened Managed MCP", () => {

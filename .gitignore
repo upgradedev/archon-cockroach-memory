@@ -39,6 +39,15 @@ deployment-receipt*.json
 database-release-receipt.json
 managed-mcp-*-receipt.json
 managed-mcp-receipt.json
+legacy-reconciliation-receipt.json
+api-stage-preflight.json
+api-stage-proof.json
+previous-stack-template.yaml
+previous-stack-parameters.json
+bench-clustered.txt
+bench-uniform.txt
+distribution.txt
+server.pid
 
 # Readiness gate — generated report (produced by `npm run readiness` / CI)
 readiness.json
