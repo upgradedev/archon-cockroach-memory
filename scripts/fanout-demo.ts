@@ -447,18 +447,18 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
     ) {
       throw new Error("Exact fan-out SPLIT did not return all three points.");
     }
-    const enforcedRows = await query<{ start_pretty: string }>(
-      `SELECT start_pretty
+    // SPLIT just proved the three requested keys individually. An exact
+    // enforced-count check on the primary index now rejects any extra point
+    // without depending on privileged crdb_internal metadata or comparing
+    // differently formatted SHOW/ALTER key renderings.
+    const enforced = await query<{ n: string }>(
+      `SELECT count(*) AS n
          FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX}]
         WHERE split_enforced_until IS NOT NULL`
     );
-    const enforcedPrettyKeys = enforcedRows.map((row) => row.start_pretty);
-    if (
-      enforcedPrettyKeys.length !== FANOUT_SPLIT_POINTS.length ||
-      enforcedPrettyKeys.some((key) => !ownedPrettyKeys.includes(key))
-    ) {
+    if (Number(enforced[0]?.n) !== FANOUT_SPLIT_POINTS.length) {
       throw new Error(
-        "Refusing fan-out work while an unrelated enforced split exists."
+        "Fan-out primary-index ownership is not exactly the three requested split points."
       );
     }
 
