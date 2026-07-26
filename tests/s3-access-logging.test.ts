@@ -344,6 +344,10 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
 });
 
 test("environment deploy roles can prove but cannot mutate the logging foundation", () => {
+  const legacyCandidatePath = new RegExp(
+    `candidates/${"\\?".repeat(40)}/\\*`,
+    "u"
+  );
   assert.equal(
     (
       BOOTSTRAP.match(
@@ -447,6 +451,7 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
       )
     );
     assert.doesNotMatch(role, /ArtifactBucket\.Arn\}\/candidates\/\*/u);
+    assert.doesNotMatch(role, legacyCandidatePath);
     assert.match(
       role,
       /Resource: !Sub "arn:\$\{AWS::Partition\}:cloudfront::\$\{AWS::AccountId\}:distribution\/\*"/u
@@ -469,6 +474,7 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
           "u"
         )
       );
+      assert.match(policy, legacyCandidatePath);
       assert.doesNotMatch(policy, /candidates\/recovery\//u);
       assert.doesNotMatch(
         policy,

@@ -179,7 +179,11 @@ S3 CAS data plane uses the private, versioned artifact bucket. Deployment
 objects are isolated under
 `candidates/deployments/<environment>/`, while each delivery role can access
 only its own `candidates/recovery/<environment>/` objects, so no new recovery
-database or cross-environment object authority is required.
+database or cross-environment recovery authority is required. CloudFormation
+and CodeDeploy retain temporary read-only access to the exact legacy
+`candidates/<40-character-id>/` shape so the first post-migration rollback can
+still consume the prior immutable revision; no role can write or list that
+legacy namespace.
 
 The bootstrap template also contains the required `Recover AWS` OIDC trust and
 least-privilege CloudFormation, S3, Logs, Lambda, and CloudFront actions.

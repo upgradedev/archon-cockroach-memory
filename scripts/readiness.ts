@@ -1877,6 +1877,7 @@ function sourceChecks(): SourceCheck[] {
       .length === 2 &&
     (packageSource.match(/tests\/recovery-watchdog\.test\.ts/gu) ?? [])
       .length === 2;
+  const legacyCandidateReadPattern = "\\?".repeat(40);
   const durableRecoveryIamContract =
     (["staging", "production"] as const).every((environment) => {
       const title =
@@ -1922,6 +1923,14 @@ function sourceChecks(): SourceCheck[] {
       );
     }) &&
     !deliveryBootstrap.includes("${ArtifactBucket.Arn}/candidates/*") &&
+    (
+      deliveryBootstrap.match(
+        new RegExp(
+          `\\$\\{ArtifactBucket\\.Arn\\}/candidates/${legacyCandidateReadPattern}/\\*`,
+          "gu"
+        )
+      ) ?? []
+    ).length === 4 &&
     ![
       lambdaTemplate,
       deliveryBootstrap,

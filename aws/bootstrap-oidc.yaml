@@ -486,8 +486,13 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub >-
-                  ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+                Resource:
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+                  # Transitional read-only compatibility for immutable artifacts
+                  # published before environment-scoped deployment prefixes.
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -536,8 +541,13 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub >-
-                  ${ArtifactBucket.Arn}/candidates/deployments/production/*
+                Resource:
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/deployments/production/*
+                  # Transitional read-only compatibility for immutable artifacts
+                  # published before environment-scoped deployment prefixes.
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -661,8 +671,13 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub >-
-              ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+            Resource:
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+              # Retain rollback access to the previous pre-migration template's
+              # immutable Lambda artifacts until both environments have rolled.
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
           - Sid: StagingLambda
             Effect: Allow
             Action:
@@ -741,8 +756,13 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub >-
-              ${ArtifactBucket.Arn}/candidates/deployments/production/*
+            Resource:
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/deployments/production/*
+              # Retain rollback access to the previous pre-migration template's
+              # immutable Lambda artifacts until both environments have rolled.
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
           - Sid: ProductionLambda
             Effect: Allow
             Action:

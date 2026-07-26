@@ -155,10 +155,13 @@ for deployed evidence. It deliberately uses the private, versioned artifact
 bucket with environment-isolated deployment objects under
 `candidates/deployments/<environment>/` and recovery objects under
 `candidates/recovery/<environment>/`, so it does not require a new recovery
-database or cross-environment object authority. The bootstrap template also
-models the required `Recover AWS` OIDC trust and least-privilege recovery
-actions, but the live foundation roles have not been proved promoted to that
-template state.
+database or cross-environment recovery authority. A temporary, read-only,
+exact-length `candidates/<40-character-id>/` compatibility path remains only
+for CloudFormation and CodeDeploy rollback of the immediately preceding
+pre-migration revision; it grants neither write nor list access. The bootstrap
+template also models the required `Recover AWS` OIDC trust and least-privilege
+recovery actions, but the live foundation roles have not been proved promoted
+to that template state.
 
 - Private, encrypted, versioned Amazon S3 stores data-only, intent-bound
   archives and checksum-addressed receipts under
