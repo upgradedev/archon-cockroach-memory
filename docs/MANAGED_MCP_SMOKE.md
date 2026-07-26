@@ -86,12 +86,65 @@ not parsed or workflow-gated as exact typed `9 / 9 / 9`. It therefore proves liv
 Managed MCP connectivity and tool availability only. It must not be cited as a
 successful v2 receipt.
 
-At the time this source contract was added, a new protected v2 run had not yet
-been recorded. The v2 proof becomes live evidence only when either
-[the dedicated Managed MCP workflow](../.github/workflows/managed-mcp-audit.yml)
-or the post-production job in
-[`deploy-aws.yml`](../.github/workflows/deploy-aws.yml) passes against the live
-cluster and publishes its sanitized artifact.
+The hardened v2 proof is now live evidence. Exact commit
+[`a2b69e3fad31010d14d0c3bca261421e635ca885`](https://github.com/upgradedev/archon-cockroach-memory/commit/a2b69e3fad31010d14d0c3bca261421e635ca885)
+passed the post-production Managed MCP job in
+[Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177).
+The run passed the bounded live proof and exact v2 receipt gate, then uploaded
+the sanitized
+`managed-mcp-production-a2b69e3fad31010d14d0c3bca261421e635ca885`
+artifact.
+
+## Separation from AWS delivery recovery
+
+Managed MCP and CockroachDB prove the application memory data plane. They do
+not act as the deployment rollback ledger and are not a hidden dependency of
+AWS recovery.
+
+The repository's current durable recovery revision is checked in but is not
+claimed as hosted-CI or deployed evidence. It uses conditional writes in the
+private, versioned S3 `candidates/recovery/<environment>/` prefix. An immutable
+bundle records the prior AWS release, and an ETag-guarded ledger serializes
+`ARMED → COMMITTED` or `ARMED → RECOVERING → RECOVERED`.
+
+The checked-in watchdog classifies the exact source run after its completion
+event, every 15 minutes, or on manual dispatch. A two-hour lease is bound to the
+exact watchdog run, attempt, and environment; only expiry or proof that the
+exact owner completed unsuccessfully permits early reclaim. Recovery emits a
+strict schema-v2 `archon.durable-recovery.receipt`, distinct from the Managed
+MCP schema-v2 receipt described above. Its finalizer verifies the immutable
+manifest, exact `RECOVERING` ledger revision, and post-recovery
+CloudFormation-control proof. It conditionally stores and round-trips both
+checksum-addressed objects at exact S3 versions, then CAS-advances the same
+lease to `RECOVERED` with both identities bound into the ledger.
+
+CloudFormation preflight, terminal, recovery, and daily `04:17 UTC` audit gates
+bind exact stack identity and revision, enforce termination protection, and run
+fresh bounded drift detection. The watchdog uses trusted `main` code and fresh
+environment-bound AWS OIDC credentials, so it can operate when the original
+runner or application stack is unavailable. All application and recovery state
+is restricted to AWS `eu-west-1`; CloudFront is global edge infrastructure, not
+a `us-west-2` recovery workload.
+
+DynamoDB would be a valid AWS-native implementation of this small control-plane
+state machine, but no DynamoDB recovery ledger is deployed or required here.
+CockroachDB remains the system for durable agent facts, provenance, lifecycle,
+SQL audit, and vector recall; S3 recovery state contains no application memory
+or Managed MCP response.
+
+The bootstrap template models the required `Recover AWS` OIDC trust and narrow
+recovery permissions, but that source state is not proof of a live IAM
+promotion. The currently authorized foundation workflow accepts only the exact
+artifact-bucket logging change and cannot roll out IAM. A separate authorized
+IAM promotion, post-promotion role/API probes, hosted CI, and live
+staging/production recovery, finalizer, and audit receipts remain required.
+
+Recovery bundles, extracted files, and receipts are generated and validated in
+protected CI under `${RUNNER_TEMP}` and removed from the runner after use. A
+supplemental sanitized GitHub receipt may aid review, but the terminal recovery
+proof is the immutable S3 receipt plus control proof bound into the ledger.
+None of these files should be copied into the repository or treated as Managed
+MCP evidence.
 
 ## Protected re-run
 

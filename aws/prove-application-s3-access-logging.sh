@@ -4,20 +4,22 @@
 # Usage:
 #   prove-application-s3-access-logging.sh preflight
 #   APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE=... \
+#     prove-application-s3-access-logging.sh validate-preflight
+#   APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE=... \
 #     prove-application-s3-access-logging.sh verify
 #   APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE=... \
 #     prove-application-s3-access-logging.sh recover
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 [preflight|verify|recover]" >&2
+  echo "Usage: $0 [preflight|validate-preflight|verify|recover]" >&2
   exit 1
 fi
 mode="$1"
 case "$mode" in
-  preflight|verify|recover) ;;
+  preflight|validate-preflight|verify|recover) ;;
   *)
-    echo "Usage: $0 [preflight|verify|recover]" >&2
+    echo "Usage: $0 [preflight|validate-preflight|verify|recover]" >&2
     exit 1
     ;;
 esac
@@ -49,9 +51,11 @@ case "$ENVIRONMENT" in
     ;;
 esac
 
-# Every mode proves the permanent centralized foundation before inspecting an
-# application bucket or trusting a preflight receipt.
-if ! bash aws/prove-s3-access-logging.sh verify >/dev/null 2>&1; then
+# Every AWS-reading mode proves the permanent centralized foundation. The pure
+# validator is intentionally available before a recovery handler makes any AWS
+# call or mutation.
+if [ "$mode" != "validate-preflight" ] &&
+   ! bash aws/prove-s3-access-logging.sh verify >/dev/null 2>&1; then
   echo "Unable to prove the centralized S3 access-logging foundation." >&2
   exit 1
 fi
@@ -251,6 +255,24 @@ load_preflight() {
 }
 
 case "$mode" in
+  validate-preflight)
+    load_preflight
+    jq -n \
+      --arg environment "$ENVIRONMENT" \
+      --arg priorState "$preflight_prior_state" \
+      --arg stackState "$expected_stack_state" \
+      --argjson integrity "$preflight_integrity" \
+      '{
+        ok: true,
+        schema: "archon.application-s3-access-logging.preflight-validation",
+        version: 1,
+        environment: $environment,
+        stackState: $stackState,
+        priorState: $priorState,
+        integrity: $integrity
+      }'
+    ;;
+
   preflight)
     inspect_application_bucket
     payload="$(
@@ -291,10 +313,13 @@ case "$mode" in
 
   verify)
     load_preflight
-    if [ -z "${STACK_NAME:-}" ]; then
-      echo "STACK_NAME is required for application logging verification." >&2
+    if [ -z "${STACK_NAME:-}" ] ||
+       [ -z "${AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN:-}" ]; then
+      echo "STACK_NAME and AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN are required for application logging verification." >&2
       exit 1
     fi
+    [[ "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+    expected_stack_prefix="arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/"
     application_stack="$(
       aws_json \
         "the application CloudFormation stack" \
@@ -308,9 +333,13 @@ case "$mode" in
         --arg environment "$ENVIRONMENT" \
         --arg source "$source_bucket" \
         --arg expectedStackState "$expected_stack_state" \
+        --arg stackPrefix "$expected_stack_prefix" \
+        --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
         '
           (.Stacks | length) == 1
           and .Stacks[0].StackName == $stack
+          and (.Stacks[0].StackId | startswith($stackPrefix))
+          and .Stacks[0].RoleARN == $role
           and (
             (
               $expectedStackState == "greenfield"
@@ -321,6 +350,7 @@ case "$mode" in
               and (
                 .Stacks[0].StackStatus == "CREATE_COMPLETE"
                 or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
               )
             )
           )
@@ -346,15 +376,57 @@ case "$mode" in
     stack_status="$(
       jq -er '.Stacks[0].StackStatus' <<<"$application_stack" 2>/dev/null
     )"
+    stack_id="$(
+      jq -er '.Stacks[0].StackId' <<<"$application_stack" 2>/dev/null
+    )"
+    stack_fingerprint="$(
+      jq -cS '
+        .Stacks[0]
+        | {
+            CreationTime,
+            LastUpdatedTime,
+            Outputs: ((.Outputs // []) | sort_by(.OutputKey)),
+            Parameters: ((.Parameters // []) | sort_by(.ParameterKey)),
+            RoleARN,
+            StackId,
+            StackName,
+            StackStatus,
+            Tags: ((.Tags // []) | sort_by(.Key))
+          }
+      ' <<<"$application_stack"
+    )"
 
     processed_template="$(
       aws_json \
         "the processed application CloudFormation template" \
         cloudformation get-template \
-        --stack-name "$STACK_NAME" \
+        --stack-name "$stack_id" \
         --template-stage Processed \
         --region "$AWS_REGION"
     )"
+    application_stack_recheck="$(
+      aws_json \
+        "the stable application CloudFormation stack" \
+        cloudformation describe-stacks \
+        --stack-name "$stack_id" \
+        --region "$AWS_REGION"
+    )"
+    test "$(
+      jq -cS '
+        .Stacks[0]
+        | {
+            CreationTime,
+            LastUpdatedTime,
+            Outputs: ((.Outputs // []) | sort_by(.OutputKey)),
+            Parameters: ((.Parameters // []) | sort_by(.ParameterKey)),
+            RoleARN,
+            StackId,
+            StackName,
+            StackStatus,
+            Tags: ((.Tags // []) | sort_by(.Key))
+          }
+      ' <<<"$application_stack_recheck"
+    )" = "$stack_fingerprint"
     if ! processed_template_body="$(
       jq -ce '
         .TemplateBody

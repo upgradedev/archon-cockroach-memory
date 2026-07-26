@@ -46,6 +46,29 @@ jobs:
             application-s3-access-logging-recovery.json
             previous-stack-template.yaml
             previous-stack-parameters.json
+            previous-stack-tags.json
+            frontend-prestate.json
+            previous-index.html
+            previous-live-alias.json
+            recovery-intent.json
+            recovery-intent.tar
+            recovery-snapshot-proof.json
+            staging-durable-recovery-receipt.json
+            production-durable-recovery-receipt.json
+            staging-recovery-execution.json
+            production-recovery-execution.json
+            staging-recovery-finalization.json
+            production-recovery-finalization.json
+            staging-terminal-receipt-object.json
+            production-terminal-receipt-object.json
+            staging-cloudformation-controls-preflight.json
+            production-cloudformation-controls-preflight.json
+            staging-cloudformation-controls-terminal.json
+            production-cloudformation-controls-terminal.json
+            staging-cloudformation-controls-recovery.json
+            production-cloudformation-controls-recovery.json
+            staging-cloudformation-controls-audit.json
+            production-cloudformation-controls-audit.json
             bench-clustered.txt
             bench-uniform.txt
             distribution.txt
@@ -362,7 +385,7 @@ jobs:
       - name: Dependency audit
         run: |
           npm audit --audit-level=high
-          npm audit --prefix web --audit-level=high
+          npm audit --prefix web --audit-level=moderate
       - name: Backend and frontend type/unit/build gates
         run: |
           npm run typecheck
@@ -375,8 +398,21 @@ jobs:
           bash -n aws/prove-api-stage-controls.sh
           bash -n aws/prove-s3-access-logging.sh
           bash -n aws/prove-application-s3-access-logging.sh
+          bash -n aws/prove-recovery-snapshot.sh
+          bash -n aws/serialize-sam-stack-tags.sh
+          bash -n aws/classify-durable-recovery-source.sh
+          bash -n aws/create-durable-recovery-bundle.sh
           bash -n aws/delete-greenfield-stack.sh
+          bash -n aws/download-durable-recovery-bundle.sh
+          bash -n aws/enforce-cloudformation-controls.sh
+          bash -n aws/extract-durable-recovery-bundle.sh
+          bash -n aws/finalize-durable-recovery-receipt.sh
+          bash -n aws/put-durable-recovery-object.sh
+          bash -n aws/recover-durable-environment.sh
+          bash -n aws/recovery-intent-ledger.sh
           bash -n aws/restore-cloudformation-stack.sh
+          bash -n aws/verify-durable-recovery-bundle.sh
+          bash -n aws/verify-durable-recovery-receipt.sh
           jq -e '.Statement | length == 2' aws/bootstrap-stack-policy.json >/dev/null
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region eu-west-1

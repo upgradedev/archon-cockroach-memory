@@ -23,7 +23,7 @@ import { parseDocument } from "yaml";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 59;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 79;
 export const EXPECTED_SETUP_NODE_STEPS = 14;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
@@ -36,6 +36,7 @@ export const EXPECTED_WORKFLOW_FILES = [
   "database-release.yml",
   "deploy-aws.yml",
   "managed-mcp-audit.yml",
+  "recover-aws.yml",
 ] as const;
 const ALLOWED_LOCAL_ACTION_REFS = new Set([
   "./.github/workflows/database-release.yml",
@@ -50,19 +51,57 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "application-s3-access-logging-recovery.json",
   "previous-stack-template.yaml",
   "previous-stack-parameters.json",
+  "previous-stack-tags.json",
   "bench-clustered.txt",
   "bench-uniform.txt",
   "distribution.txt",
   "server.pid",
+] as const;
+export const DURABLE_RECOVERY_LOCAL_BASENAMES = [
+  "frontend-prestate.json",
+  "previous-index.html",
+  "previous-live-alias.json",
+  "recovery-intent.json",
+  "recovery-intent.tar",
+  "recovery-snapshot-proof.json",
+  "staging-durable-recovery-receipt.json",
+  "production-durable-recovery-receipt.json",
+  "staging-recovery-execution.json",
+  "production-recovery-execution.json",
+  "staging-recovery-finalization.json",
+  "production-recovery-finalization.json",
+  "staging-terminal-receipt-object.json",
+  "production-terminal-receipt-object.json",
+  "staging-cloudformation-controls-preflight.json",
+  "production-cloudformation-controls-preflight.json",
+  "staging-cloudformation-controls-terminal.json",
+  "production-cloudformation-controls-terminal.json",
+  "staging-cloudformation-controls-recovery.json",
+  "production-cloudformation-controls-recovery.json",
+  "staging-cloudformation-controls-audit.json",
+  "production-cloudformation-controls-audit.json",
+] as const;
+export const DURABLE_RECOVERY_SCRIPT_PATHS = [
+  "aws/classify-durable-recovery-source.sh",
+  "aws/create-durable-recovery-bundle.sh",
+  "aws/download-durable-recovery-bundle.sh",
+  "aws/enforce-cloudformation-controls.sh",
+  "aws/extract-durable-recovery-bundle.sh",
+  "aws/finalize-durable-recovery-receipt.sh",
+  "aws/put-durable-recovery-object.sh",
+  "aws/recover-durable-environment.sh",
+  "aws/recovery-intent-ledger.sh",
+  "aws/verify-durable-recovery-bundle.sh",
+  "aws/verify-durable-recovery-receipt.sh",
 ] as const;
 const CANONICAL_DEMO_URL =
   "https://d2s5v0o0eg2aaw.cloudfront.net";
 
 export const OFFICIAL_CRITERIA = [
   "Agentic Memory Design",
-  "Technological Implementation",
+  "Technical Implementation",
   "Real-World Impact",
-  "Product Readiness",
+  "Production Readiness",
   "Creativity & Originality",
 ] as const;
 
@@ -129,6 +168,9 @@ export function generatedArtifactPaths(root = ROOT): string[] {
   ]);
   const blockedDemoDirectories = new Set(["audio", "clips", "frames"]);
   const blockedBasenames = new Set<string>(GENERATED_ARTIFACT_BASENAMES);
+  const blockedDurableRecoveryBasenames = new Set<string>(
+    DURABLE_RECOVERY_LOCAL_BASENAMES
+  );
   const found: string[] = [];
   const visit = (absolute: string, relative: string): void => {
     for (const entry of readdirSync(absolute, { withFileTypes: true })) {
@@ -142,6 +184,12 @@ export function generatedArtifactPaths(root = ROOT): string[] {
         if (entry.name === "node_modules") continue;
         if (
           blockedDirectories.has(entry.name) ||
+          /^(?:staging|production)-(?:durable-recovery-bundle|recovery-verified-[0-9]+-[1-9][0-9]*)$/u.test(
+            entry.name
+          ) ||
+          /^archon-(?:recovery-bundle|durable-recovery)\.[A-Za-z0-9]+$/u.test(
+            entry.name
+          ) ||
           (relative === "demo/assets" &&
             blockedDemoDirectories.has(entry.name))
         ) {
@@ -151,6 +199,16 @@ export function generatedArtifactPaths(root = ROOT): string[] {
         visit(join(absolute, entry.name), childRelative);
       } else if (
         blockedBasenames.has(entry.name) ||
+        blockedDurableRecoveryBasenames.has(entry.name) ||
+        /^archon-recovery-(?:archive|receipt)\.[A-Za-z0-9]+$/u.test(
+          entry.name
+        ) ||
+        /^(?:staging|production)-(?:durable-)?recovery-[a-z0-9-]+\.json$/u.test(
+          entry.name
+        ) ||
+        /^(?:staging|production)-recovery-(?:roundtrip-)?[0-9]+-[1-9][0-9]*\.tar$/u.test(
+          entry.name
+        ) ||
         /\.(?:mp4|pyc)$/iu.test(entry.name) ||
         /^(?:readiness|database-release-receipt|legacy-reconciliation-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
           entry.name
@@ -651,6 +709,61 @@ function hasExactCodeqlTrigger(source: string): boolean {
   );
 }
 
+export function hasExactAwsRecoveryTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
+
+  const workflowRun = trigger.get("workflow_run");
+  const schedule = trigger.get("schedule");
+  if (
+    !(workflowRun instanceof Map) ||
+    workflowRun.size !== 3 ||
+    !Array.isArray(schedule) ||
+    schedule.length !== 2
+  ) {
+    return false;
+  }
+  const workflows = workflowRun.get("workflows");
+  const branches = workflowRun.get("branches");
+  const types = workflowRun.get("types");
+  const scheduleCrons = schedule
+    .map((entry) =>
+      entry instanceof Map && entry.size === 1
+        ? entry.get("cron")
+        : null
+    )
+    .filter((cron): cron is string => typeof cron === "string")
+    .sort();
+  return (
+    Array.isArray(workflows) &&
+    workflows.length === 1 &&
+    workflows[0] === "Deploy AWS" &&
+    Array.isArray(branches) &&
+    branches.length === 1 &&
+    branches[0] === "main" &&
+    Array.isArray(types) &&
+    types.length === 1 &&
+    types[0] === "completed" &&
+    scheduleCrons.length === 2 &&
+    scheduleCrons[0] === "17 4 * * *" &&
+    scheduleCrons[1] === "7,22,37,52 * * * *" &&
+    trigger.get("workflow_dispatch") === null
+  );
+}
+
+export function hasExactAwsDeliveryConcurrency(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const concurrency = parsed?.root.get("concurrency");
+  return (
+    concurrency instanceof Map &&
+    concurrency.size === 3 &&
+    concurrency.get("group") === "aws-production-delivery" &&
+    concurrency.get("cancel-in-progress") === false &&
+    concurrency.get("queue") === "max"
+  );
+}
+
 export function hasUniqueCiTriggerOwnership(
   workflows: WorkflowSource[]
 ): boolean {
@@ -677,6 +790,10 @@ export function hasUniqueCiTriggerOwnership(
     ],
     ["deploy-aws.yml", ["workflow_run"]],
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
+    [
+      "recover-aws.yml",
+      ["schedule", "workflow_dispatch", "workflow_run"],
+    ],
   ]);
   for (const workflow of workflows) {
     const parsed = parseWorkflow(workflow.source);
@@ -697,11 +814,16 @@ export function hasUniqueCiTriggerOwnership(
   }
   const ci = workflows.find(({ name }) => name === "ci.yml");
   const codeql = workflows.find(({ name }) => name === "codeql.yml");
+  const recovery = workflows.find(
+    ({ name }) => name === "recover-aws.yml"
+  );
   return (
     ci !== undefined &&
     codeql !== undefined &&
+    recovery !== undefined &&
     hasExactCiTrigger(ci.source) &&
-    hasExactCodeqlTrigger(codeql.source)
+    hasExactCodeqlTrigger(codeql.source) &&
+    hasExactAwsRecoveryTrigger(recovery.source)
   );
 }
 
@@ -735,6 +857,7 @@ function sourceChecks(): SourceCheck[] {
   const schema = read("src/db/schema.sql");
   const ci = read(".github/workflows/ci.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
+  const recoveryWorkflow = read(".github/workflows/recover-aws.yml");
   const foundationWorkflow = read(
     ".github/workflows/bootstrap-aws.yml"
   );
@@ -744,6 +867,22 @@ function sourceChecks(): SourceCheck[] {
     deliveryBootstrap.match(
       /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u
     )?.[0] ?? "";
+  const environmentDeployTrustBlocks = [
+    {
+      environment: "staging",
+      source:
+        deliveryBootstrap.match(
+          /(?:^|\r?\n)  StagingDeployRole:\r?\n[\s\S]*?\r?\n      Policies:/u
+        )?.[0] ?? "",
+    },
+    {
+      environment: "production",
+      source:
+        deliveryBootstrap.match(
+          /(?:^|\r?\n)  ProductionDeployRole:\r?\n[\s\S]*?\r?\n      Policies:/u
+        )?.[0] ?? "",
+    },
+  ];
   const apiStageProof = read("aws/prove-api-stage-controls.sh");
   const s3AccessLoggingProof = read(
     "aws/prove-s3-access-logging.sh"
@@ -759,6 +898,50 @@ function sourceChecks(): SourceCheck[] {
   );
   const stackRestore = read("aws/restore-cloudformation-stack.sh");
   const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
+  const recoverySnapshot = read("aws/prove-recovery-snapshot.sh");
+  const samStackTagSerializer = read("aws/serialize-sam-stack-tags.sh");
+  const awsRecoveryTests = read("tests/aws-recovery-scripts.test.ts");
+  const durableRecoveryClassifier = read(
+    "aws/classify-durable-recovery-source.sh"
+  );
+  const durableRecoveryBundleCreator = read(
+    "aws/create-durable-recovery-bundle.sh"
+  );
+  const durableRecoveryDownloader = read(
+    "aws/download-durable-recovery-bundle.sh"
+  );
+  const durableRecoveryExtractor = read(
+    "aws/extract-durable-recovery-bundle.sh"
+  );
+  const cloudFormationControls = read(
+    "aws/enforce-cloudformation-controls.sh"
+  );
+  const durableRecoveryFinalizer = read(
+    "aws/finalize-durable-recovery-receipt.sh"
+  );
+  const durableRecoveryObjectPublisher = read(
+    "aws/put-durable-recovery-object.sh"
+  );
+  const durableRecoveryExecutor = read(
+    "aws/recover-durable-environment.sh"
+  );
+  const durableRecoveryLedger = read("aws/recovery-intent-ledger.sh");
+  const durableRecoveryVerifier = read(
+    "aws/verify-durable-recovery-bundle.sh"
+  );
+  const durableRecoveryReceiptVerifier = read(
+    "aws/verify-durable-recovery-receipt.sh"
+  );
+  const durableRecoveryScriptSources = DURABLE_RECOVERY_SCRIPT_PATHS.map(
+    (scriptPath) => read(scriptPath)
+  );
+  const durableRecoveryTests = read("tests/durable-recovery.test.ts");
+  const recoveryWatchdogTests = read(
+    "tests/recovery-watchdog.test.ts"
+  );
+  const cloudFormationControlsTests = read(
+    "tests/cloudformation-controls.test.ts"
+  );
   const gitignore = read(".gitignore");
   const makefile = read("Makefile");
   const narrator = read("src/agents/narrator.ts");
@@ -767,6 +950,13 @@ function sourceChecks(): SourceCheck[] {
   const packageSource = read("package.json");
   const managedMcpAudit = read("scripts/cloud-mcp-audit.ts");
   const managedMcpAuditTests = read("tests/cloud-mcp-audit.test.ts");
+  const managedMcpEvidenceDocs = [
+    read("README.md"),
+    read("docs/TOOLS.md"),
+    read("docs/MANAGED_MCP_SMOKE.md"),
+  ];
+  const staleManagedMcpEvidence =
+    /had not yet been recorded|becomes live evidence only|awaits a new protected|new protected pass is required/iu;
   const managedMcpWorkflow = read(
     ".github/workflows/managed-mcp-audit.yml"
   );
@@ -843,6 +1033,106 @@ function sourceChecks(): SourceCheck[] {
       /name: Deploy (?:staging|production) with recovery-safe SAM canary/gu
     ),
   ].map((match) => match.index ?? -1);
+  const reconciliationPositions = [
+    ...deploy.matchAll(
+      /name: Reconcile an interrupted same-run (?:staging|production) greenfield recovery/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const postReconciliationCredentialRefreshPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials after (?:staging|production) reconciliation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const reconciliationCredentialsArePhaseBounded =
+    reconciliationPositions.length === 2 &&
+    postReconciliationCredentialRefreshPositions.length === 2 &&
+    applicationS3PreflightPositions.length === 2 &&
+    reconciliationPositions.every((position, index) => {
+      const refreshPosition =
+        postReconciliationCredentialRefreshPositions[index];
+      const preflightPosition = applicationS3PreflightPositions[index];
+      return (
+        position < refreshPosition &&
+        refreshPosition < preflightPosition &&
+        (
+          deploy
+            .slice(position, refreshPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0 &&
+        (
+          deploy
+            .slice(refreshPosition, preflightPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0
+      );
+    }) &&
+    (deploy.match(/role-duration-seconds:\s+3600/gu) ?? []).length ===
+      12;
+  const durableRecoveryArmPositions = [
+    ...deploy.matchAll(
+      /name: Persist and arm the immutable (?:staging|production) recovery intent/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const durableRecoveryArmBlocks = [
+    deploy.match(
+      /- name: Persist and arm the immutable staging recovery intent[\s\S]*?(?=\r?\n      - name: Deploy staging with recovery-safe SAM canary)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Persist and arm the immutable production recovery intent[\s\S]*?(?=\r?\n      - name: Deploy production with recovery-safe SAM canary)/u
+    )?.[0] ?? "",
+  ];
+  const durableRecoveryArmsPrecedeSam =
+    durableRecoveryArmPositions.length === 2 &&
+    applicationDeployPositions.length === 2 &&
+    durableRecoveryArmPositions.every(
+      (position, index) => position < applicationDeployPositions[index]
+    );
+  const samCredentialRefreshPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials for (?:staging|production) SAM deployment/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const samCredentialsRefreshImmediatelyBeforeDeploy =
+    samCredentialRefreshPositions.length === 2 &&
+    applicationDeployPositions.length === 2 &&
+    samCredentialRefreshPositions.every((position, index) => {
+      const deployPosition = applicationDeployPositions[index];
+      return (
+        position < deployPosition &&
+        (
+          deploy
+            .slice(position, deployPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0
+      );
+    });
+  const postSamCredentialRefreshPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials after (?:staging|production) SAM deployment/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const stackOutputPositions = [
+    ...deploy.matchAll(
+      /name: Resolve public, non-secret stack outputs/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const samCredentialsRefreshImmediatelyAfterDeploy =
+    applicationDeployPositions.length === 2 &&
+    postSamCredentialRefreshPositions.length === 2 &&
+    stackOutputPositions.length === 2 &&
+    postSamCredentialRefreshPositions.every((position, index) => {
+      const deployPosition = applicationDeployPositions[index];
+      const stackOutputPosition = stackOutputPositions[index];
+      return (
+        deployPosition < position &&
+        position < stackOutputPosition &&
+        (
+          deploy
+            .slice(position, stackOutputPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0
+      );
+    });
   const applicationS3VerifyPositions = [
     ...deploy.matchAll(
       /name: Prove live application S3 access logging before frontend mutation/gu
@@ -865,6 +1155,176 @@ function sourceChecks(): SourceCheck[] {
         applicationS3VerifyPositions[index] <
           frontendPublishPositions[index]
     );
+  const terminalReceiptPositions = [
+    ...deploy.matchAll(
+      /name: Build and validate sanitized (?:staging|production) deployment receipt/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const terminalReceiptBlocks = [
+    deploy.match(
+      /- name: Build and validate sanitized staging deployment receipt[\s\S]*?(?=\r?\n      - name: Commit the receipt-bound staging recovery intent)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Build and validate sanitized production deployment receipt[\s\S]*?(?=\r?\n      - name: Commit the receipt-bound production recovery intent)/u
+    )?.[0] ?? "",
+  ];
+  const recoveryCredentialPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials for (?:staging|production) recovery/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const receiptUploadPositions = [
+    ...deploy.matchAll(
+      /name: Upload (?:staging|production) receipt/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const applicationS3TerminallyOrdered =
+    terminalReceiptPositions.length === 2 &&
+    recoveryCredentialPositions.length === 2 &&
+    receiptUploadPositions.length === 2 &&
+    terminalReceiptPositions.every(
+      (position, index) =>
+        frontendPublishPositions[index] < position &&
+        position < recoveryCredentialPositions[index] &&
+        recoveryCredentialPositions[index] < receiptUploadPositions[index]
+    );
+  const durableRecoveryCommitPositions = [
+    ...deploy.matchAll(
+      /name: Commit the receipt-bound (?:staging|production) recovery intent/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const durableRecoveryCommitBlocks = [
+    deploy.match(
+      /- name: Commit the receipt-bound staging recovery intent[\s\S]*?(?=\r?\n      - name: Refresh short-lived AWS credentials for staging recovery)/u
+    )?.[0] ?? "",
+    deploy.match(
+      /- name: Commit the receipt-bound production recovery intent[\s\S]*?(?=\r?\n      - name: Refresh short-lived AWS credentials for production recovery)/u
+    )?.[0] ?? "",
+  ];
+  const durableRecoveryCommitsAreTerminallyOrdered =
+    terminalReceiptPositions.length === 2 &&
+    durableRecoveryCommitPositions.length === 2 &&
+    recoveryCredentialPositions.length === 2 &&
+    terminalReceiptPositions.every(
+      (position, index) =>
+        position < durableRecoveryCommitPositions[index] &&
+        durableRecoveryCommitPositions[index] <
+          recoveryCredentialPositions[index]
+    );
+  const watchdogCredentialRefreshPositions = [
+    ...recoveryWorkflow.matchAll(
+      /name: Refresh credentials for the full (?:staging|production) recovery cycle/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const watchdogExecutorPositions = [
+    ...recoveryWorkflow.matchAll(
+      /name: Restore and prove the exact (?:staging|production) prestate/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const watchdogTerminalBlocks = [
+    recoveryWorkflow.match(
+      /- name: Restore and prove the exact staging prestate[\s\S]*?(?=\r?\n      - name: Upload supplemental staging recovery receipt)/u
+    )?.[0] ?? "",
+    recoveryWorkflow.match(
+      /- name: Restore and prove the exact production prestate[\s\S]*?(?=\r?\n      - name: Upload supplemental production recovery receipt)/u
+    )?.[0] ?? "",
+  ];
+  const watchdogRefreshesImmediatelyPrecedeExecution =
+    watchdogCredentialRefreshPositions.length === 2 &&
+    watchdogExecutorPositions.length === 2 &&
+    watchdogCredentialRefreshPositions.every((position, index) => {
+      const executorPosition = watchdogExecutorPositions[index];
+      return (
+        position < executorPosition &&
+        (
+          recoveryWorkflow
+            .slice(position, executorPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0
+      );
+    });
+  const watchdogTerminalJsonGatesAreOrdered =
+    watchdogTerminalBlocks.every((block, index) => {
+      const environment = index === 0 ? "staging" : "production";
+      const executionInputs = block.indexOf(
+        'for output in "$receipt" "$execution"; do'
+      );
+      const executionGate = block.indexOf("jq -e -s", executionInputs);
+      const controlStep = block.indexOf(
+        `name: Enforce exact ${environment} post-recovery stack controls`
+      );
+      const controlGate = block.indexOf("jq -e -s", controlStep);
+      const finalizerStep = block.indexOf(
+        `name: Persist receipt and mark ${environment} recovered atomically`
+      );
+      const finalizerInputs = block.indexOf(
+        'for input in "$receipt" "$execution" "$controls"; do',
+        finalizerStep
+      );
+      const finalizerInputGate = block.indexOf(
+        "jq -e -s",
+        finalizerInputs
+      );
+      const finalizerCommand = block.indexOf(
+        "bash aws/finalize-durable-recovery-receipt.sh",
+        finalizerInputGate
+      );
+      const finalizationGate = block.indexOf(
+        "jq -e -s",
+        finalizerCommand
+      );
+      return (
+        block.length > 0 &&
+        (
+          block.match(
+            /length == 1 and \(\.\[0\] \| type == "object"\)/gu
+          ) ?? []
+        ).length === 4 &&
+        executionInputs >= 0 &&
+        executionInputs < executionGate &&
+        executionGate < controlStep &&
+        controlStep < controlGate &&
+        controlGate < finalizerStep &&
+        finalizerStep < finalizerInputs &&
+        finalizerInputs < finalizerInputGate &&
+        finalizerInputGate < finalizerCommand &&
+        finalizerCommand < finalizationGate
+      );
+    });
+  const cloudFormationPreflightPositions = [
+    ...deploy.matchAll(
+      /name: Enforce (?:staging|production) stack protection and fresh pre-deploy drift gate/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const recoveryControlPositions = [
+    ...recoveryWorkflow.matchAll(
+      /name: Enforce exact (?:staging|production) post-recovery stack controls/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const recoveryFinalizerPositions = [
+    ...recoveryWorkflow.matchAll(
+      /name: Persist receipt and mark (?:staging|production) recovered atomically/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const cloudFormationControlsAreOrdered =
+    cloudFormationPreflightPositions.length === 2 &&
+    durableRecoveryArmPositions.length === 2 &&
+    terminalReceiptPositions.length === 2 &&
+    durableRecoveryCommitPositions.length === 2 &&
+    watchdogExecutorPositions.length === 2 &&
+    recoveryControlPositions.length === 2 &&
+    recoveryFinalizerPositions.length === 2 &&
+    cloudFormationPreflightPositions.every(
+      (position, index) => position < durableRecoveryArmPositions[index]
+    ) &&
+    terminalReceiptPositions.every(
+      (position, index) => position < durableRecoveryCommitPositions[index]
+    ) &&
+    watchdogExecutorPositions.every(
+      (position, index) =>
+        position < recoveryControlPositions[index] &&
+        recoveryControlPositions[index] < recoveryFinalizerPositions[index]
+    );
   const fullRecallSmokeBlocks = [
     deploy.match(
       /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
@@ -875,12 +1335,16 @@ function sourceChecks(): SourceCheck[] {
   ];
   const recoveryBlocks = [
     deploy.match(
-      /- name: Restore the previous staging release on verification failure[\s\S]*?(?=\r?\n      - name: Publish sanitized staging deployment receipt)/u
+      /- name: Restore the previous staging release on verification failure[\s\S]*?(?=\r?\n      - name: Upload staging receipt)/u
     )?.[0] ?? "",
     deploy.match(
-      /- name: Restore the previous production release on verification failure[\s\S]*?(?=\r?\n      - name: Publish sanitized production deployment receipt)/u
+      /- name: Restore the previous production release on verification failure[\s\S]*?(?=\r?\n      - name: Upload production receipt)/u
     )?.[0] ?? "",
   ];
+  const greenfieldOwnerPayloadBlock =
+    recoverySnapshot.match(
+      /owner_payload="\$\([\s\S]*?\r?\n    \)"\r?\n    greenfield_owner="\$\(/u
+    )?.[0] ?? "";
   const canaryTrafficFragments = [
     "trap stop_canary_probe EXIT",
     "while true; do",
@@ -961,6 +1425,741 @@ function sourceChecks(): SourceCheck[] {
       );
     }
   );
+  const durableRecoveryScriptsAreCiGated =
+    durableRecoveryScriptSources.every(
+      (source) =>
+        /^#!\/usr\/bin\/env bash\r?\n/u.test(source) &&
+        /^set -euo pipefail$/mu.test(source)
+    ) &&
+    DURABLE_RECOVERY_SCRIPT_PATHS.every((scriptPath) =>
+      ci.includes(`bash -n ${scriptPath}`)
+    );
+  const durableRecoveryArmContract =
+    durableRecoveryArmsPrecedeSam &&
+    reconciliationCredentialsArePhaseBounded &&
+    samCredentialsRefreshImmediatelyBeforeDeploy &&
+    samCredentialsRefreshImmediatelyAfterDeploy &&
+    durableRecoveryArmBlocks.every(
+      (block) =>
+        block.length > 0 &&
+        /id: durable_recovery/u.test(block) &&
+        /bundle_tar="\$\{RUNNER_TEMP:\?\}\//u.test(block) &&
+        /roundtrip_tar="\$\{RUNNER_TEMP:\?\}\//u.test(block) &&
+        /extracted_dir="\$\{RUNNER_TEMP:\?\}\//u.test(block) &&
+        /trap cleanup_durable_intent EXIT/u.test(block) &&
+        /bash aws\/create-durable-recovery-bundle\.sh/u.test(block) &&
+        /bash aws\/put-durable-recovery-object\.sh/u.test(block) &&
+        /aws s3api get-object/u.test(block) &&
+        /--version-id "\$RECOVERY_ARCHIVE_VERSION_ID"/u.test(block) &&
+        /--checksum-mode ENABLED/u.test(block) &&
+        /bash aws\/extract-durable-recovery-bundle\.sh/u.test(block) &&
+        /bash aws\/recovery-intent-ledger\.sh arm/u.test(block) &&
+        /\.state == "ARMED"/u.test(block) &&
+        /echo "armed=true"/u.test(block) &&
+        /echo "previous_index_version=/u.test(block) &&
+        /echo "previous_index_sha256=/u.test(block)
+    );
+  const durableFrontendBaselineContract =
+    (
+      deploy.match(
+        /EXPECTED_HAD_PREVIOUS_INDEX: \$\{\{ steps\.durable_recovery\.outputs\.had_previous_index \}\}/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /EXPECTED_PREVIOUS_INDEX_SHA256: \$\{\{ steps\.durable_recovery\.outputs\.previous_index_sha256 \}\}/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /EXPECTED_PREVIOUS_INDEX_VERSION: \$\{\{ steps\.durable_recovery\.outputs\.previous_index_version \}\}/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /test "\$current_version" = "\$EXPECTED_PREVIOUS_INDEX_VERSION"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(/test -z "\$EXPECTED_PREVIOUS_INDEX_SHA256"/gu) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /Unable to re-prove the durable frontend baseline\./gu
+      ) ?? []
+    ).length === 2;
+  const durableRecoveryCommitContract =
+    durableRecoveryCommitsAreTerminallyOrdered &&
+    durableRecoveryCommitBlocks.every(
+      (block) =>
+        block.length > 0 &&
+        /^        if: success\(\)$/mu.test(block) &&
+        /RECOVERY_INTENT_ID: \$\{\{ steps\.durable_recovery\.outputs\.intent_id \}\}/u.test(
+          block
+        ) &&
+        /receipt_key="candidates\/recovery\/(?:staging|production)\/receipts\/\$\{RECOVERY_INTENT_ID\}\/\$\{receipt_sha256\}\.json"/u.test(
+          block
+        ) &&
+        /trap 'rm -f -- "\$object_proof"' EXIT/u.test(block) &&
+        /bash aws\/put-durable-recovery-object\.sh/u.test(block) &&
+        /RECOVERY_RECEIPT_BUCKET=/u.test(block) &&
+        /RECOVERY_RECEIPT_KEY=/u.test(block) &&
+        /RECOVERY_RECEIPT_SHA256=/u.test(block) &&
+        /RECOVERY_RECEIPT_VERSION_ID=/u.test(block) &&
+        /bash aws\/recovery-intent-ledger\.sh commit/u.test(block) &&
+        /\.schema == "archon\.recovery-intent\.terminal"/u.test(block) &&
+        /\.state == "COMMITTED"/u.test(block) &&
+        /\.receiptSha256 == \$receipt/u.test(block)
+    );
+  const environmentDeployOidcTrustContract =
+    /GitHubRepositoryId:\r?\n\s+Type: String\r?\n\s+Default: "1285750381"\r?\n\s+AllowedPattern: "\^\[0-9\]\{1,20\}\$"/u.test(
+      deliveryBootstrap
+    ) &&
+    /GitHubRepositoryOwnerId:\r?\n\s+Type: String\r?\n\s+Default: "25751981"\r?\n\s+AllowedPattern: "\^\[0-9\]\{1,20\}\$"/u.test(
+      deliveryBootstrap
+    ) &&
+    environmentDeployTrustBlocks.every(({ environment, source }) => {
+      const claimPrefix = "token.actions.githubusercontent.com:";
+      return (
+        source.length > 0 &&
+        (source.match(/token\.actions\.githubusercontent\.com:/gu) ?? [])
+          .length === 8 &&
+        source.includes(
+          `${claimPrefix}aud: sts.amazonaws.com`
+        ) &&
+        source.includes(
+          `${claimPrefix}sub: !Sub >-`
+        ) &&
+        source.includes(
+          `repo:\${GitHubOrganization}/\${GitHubRepository}:environment:${environment}`
+        ) &&
+        source.includes(
+          `${claimPrefix}repository: !Sub >-`
+        ) &&
+        source.includes(
+          "${GitHubOrganization}/${GitHubRepository}"
+        ) &&
+        source.includes(
+          `${claimPrefix}repository_id: !Ref GitHubRepositoryId`
+        ) &&
+        source.includes(
+          `${claimPrefix}repository_owner_id: !Ref GitHubRepositoryOwnerId`
+        ) &&
+        source.includes(
+          `${claimPrefix}ref: refs/heads/main`
+        ) &&
+        source.includes(
+          `${claimPrefix}environment: ${environment}`
+        ) &&
+        /token\.actions\.githubusercontent\.com:workflow:\r?\n\s+- Deploy AWS\r?\n\s+- Recover AWS\r?\n      Policies:$/u.test(
+          source
+        ) &&
+        !/token\.actions\.githubusercontent\.com:(?:workflow_ref|job_workflow_ref):/u.test(
+          source
+        )
+      );
+    });
+  const watchdogWorkflowContract =
+    hasExactAwsRecoveryTrigger(recoveryWorkflow) &&
+    hasExactAwsDeliveryConcurrency(deploy) &&
+    hasExactAwsDeliveryConcurrency(recoveryWorkflow) &&
+    /name: Deploy and smoke staging/u.test(deploy) &&
+    /name: Promote identical candidate to production/u.test(deploy) &&
+    /TERMINAL_JOB_NAME: Deploy and smoke staging/u.test(recoveryWorkflow) &&
+    /TERMINAL_JOB_NAME: Promote identical candidate to production/u.test(
+      recoveryWorkflow
+    ) &&
+    /"staging:Deploy and smoke staging"\|"production:Promote identical candidate to production"/u.test(
+      durableRecoveryClassifier
+    ) &&
+    (recoveryWorkflow.match(/timeout-minutes:\s+65/gu) ?? []).length === 2 &&
+    (
+      recoveryWorkflow.match(/role-duration-seconds:\s+3600/gu) ?? []
+    ).length === 6 &&
+    /--argjson leaseUntil "\$\(\(now \+ 7200\)\)"/u.test(
+      durableRecoveryLedger
+    ) &&
+    watchdogRefreshesImmediatelyPrecedeExecution &&
+    watchdogTerminalJsonGatesAreOrdered &&
+    (
+      recoveryWorkflow.match(
+        /uses: actions\/checkout@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          ref: \$\{\{ github\.sha \}\}\r?\n          fetch-depth: 0/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$GITHUB_REPOSITORY" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$GITHUB_REF" = "refs\/heads\/main"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$GITHUB_REF_TYPE" = "branch"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$GITHUB_WORKFLOW_REF" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory\/\.github\/workflows\/recover-aws\.yml@refs\/heads\/main"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /git fetch --no-tags origin \\\r?\n\s+\+refs\/heads\/main:refs\/remotes\/origin\/main/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /test "\$\(git rev-parse origin\/main\)" = "\$GITHUB_SHA"/gu
+      ) ?? []
+    ).length === 2 &&
+    !/github\.event\.workflow_run\.head_sha/u.test(recoveryWorkflow) &&
+    /recover-staging:[\s\S]*?if: >-\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
+      recoveryWorkflow
+    ) &&
+    /recover-production:[\s\S]*?needs:\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
+      recoveryWorkflow
+    ) &&
+    !/needs\.recover-staging\.result/u.test(recoveryWorkflow) &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/recovery-intent-ledger\.sh claim/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/download-durable-recovery-bundle\.sh/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/recover-durable-environment\.sh/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/finalize-durable-recovery-receipt\.sh/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /length == 1 and \(\.\[0\] \| type == "object"\)/gu
+      ) ?? []
+    ).length === 16 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/classify-durable-recovery-source\.sh >"\$classification"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/recovery-intent-ledger\.sh claim \\\r?\n\s+>"\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-recovery-claim\.json"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/download-durable-recovery-bundle\.sh "\$bundle_dir" \\\r?\n\s+>"\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-recovery-download\.json"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-recovery-(?:execution|finalization)\.json/gu
+      ) ?? []
+    ).length === 4 &&
+    /bash aws\/recovery-intent-ledger\.sh recover/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/enforce-cloudformation-controls\.sh audit/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /name: Upload (?:staging|production) daily protection and drift audit/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/enforce-cloudformation-controls\.sh recover/gu
+      ) ?? []
+    ).length === 4 &&
+    (recoveryWorkflow.match(/\.state == "RECOVERED"/gu) ?? []).length ===
+      2 &&
+    (
+      recoveryWorkflow.match(
+        /name: Remove (?:staging|production) runner recovery material\r?\n        if: always\(\)/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /rm -rf -- "\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-durable-recovery-bundle"/gu
+      ) ?? []
+    ).length === 2;
+  const durableS3CasLedgerContract =
+    /assert-clear\|arm\|read\|claim\|commit\|recover/u.test(
+      durableRecoveryLedger
+    ) &&
+    /ledger_key="candidates\/recovery\/\$\{RECOVERY_ENVIRONMENT\}\/ledger\.json"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /--expected-bucket-owner "\$AWS_ACCOUNT_ID"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /--checksum-mode ENABLED/u.test(durableRecoveryLedger) &&
+    durableRecoveryLedger.includes(
+      String.raw`.ETag | type == "string" and test("^\"[0-9a-f]{32}\"$")`
+    ) &&
+    /\.ServerSideEncryption == "AES256"/u.test(durableRecoveryLedger) &&
+    /\.Metadata == \{/u.test(durableRecoveryLedger) &&
+    /"kind": "recovery-ledger"/u.test(durableRecoveryLedger) &&
+    /\(keys \| sort\) == \(\[/u.test(durableRecoveryLedger) &&
+    /\.schema == "archon\.recovery-intent\.ledger"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /\.state == "ARMED"/u.test(durableRecoveryLedger) &&
+    /\.state == "RECOVERING"/u.test(durableRecoveryLedger) &&
+    /\.state == "COMMITTED"/u.test(durableRecoveryLedger) &&
+    /\.state == "RECOVERED"/u.test(durableRecoveryLedger) &&
+    /put_args\+=\(--if-match "\$prior_etag"\)/u.test(
+      durableRecoveryLedger
+    ) &&
+    /put_args\+=\(--if-none-match '\*'\)/u.test(durableRecoveryLedger) &&
+    /--server-side-encryption AES256/u.test(durableRecoveryLedger) &&
+    /--checksum-algorithm SHA256/u.test(durableRecoveryLedger) &&
+    /validate_previous_ledger_provenance\(\)/u.test(
+      durableRecoveryLedger
+    ) &&
+    /read\|first-create\|terminal-rearm/u.test(durableRecoveryLedger) &&
+    /if \$armedMode == "first-create"[\s\S]*?then null_previous_ledger[\s\S]*?elif \$armedMode == "terminal-rearm"[\s\S]*?then complete_previous_ledger/u.test(
+      durableRecoveryLedger
+    ) &&
+    /armed_provenance_mode="terminal-rearm"[\s\S]*?armed_provenance_mode="first-create"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /RECOVERED terminal ledger re-arms with its complete exact provenance/u.test(
+      durableRecoveryTests
+    ) &&
+    /Regression: a terminal ledger must re-arm with the complete exact/u.test(
+      durableRecoveryTests
+    ) &&
+    [
+      "incomplete prior tuple",
+      "malformed prior ETag",
+      "null S3 prior version",
+    ].every((marker) => durableRecoveryTests.includes(marker)) &&
+    /COMMITTED\|RECOVERED[\s\S]*?assert_terminal_item/u.test(
+      durableRecoveryLedger
+    ) &&
+    /ARMED\|RECOVERING[\s\S]*?unresolved/u.test(durableRecoveryLedger) &&
+    /\.receiptKey == \([\s\S]*?"candidates\/recovery\/" \+ \$environment \+ "\/receipts\/"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /\.receiptVersionId[\s\S]*?type == "string" and length > 0/u.test(
+      durableRecoveryLedger
+    ) &&
+    /test "\$\(jq -er '\.state' <<<"\$current"\)" = "ARMED"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /test "\$\(jq -er '\.state' <<<"\$current"\)" = "RECOVERING"/u.test(
+      durableRecoveryLedger
+    );
+  const durableRecoveryDataContract =
+    /--if-none-match '\*'/u.test(durableRecoveryObjectPublisher) &&
+    /--server-side-encryption AES256/u.test(
+      durableRecoveryObjectPublisher
+    ) &&
+    /--checksum-algorithm SHA256/u.test(durableRecoveryObjectPublisher) &&
+    /--version-id "\$archive_version_id"/u.test(
+      durableRecoveryDownloader
+    ) &&
+    /--checksum-mode ENABLED/u.test(durableRecoveryDownloader) &&
+    /bash aws\/extract-durable-recovery-bundle\.sh/u.test(
+      durableRecoveryDownloader
+    ) &&
+    durableRecoveryExtractor.indexOf('tar -tf "$archive_file"') >= 0 &&
+    durableRecoveryExtractor.indexOf('tar -tf "$archive_file"') <
+      durableRecoveryExtractor.indexOf("  --extract") &&
+    /contains an unsafe member name/u.test(durableRecoveryExtractor) &&
+    /contains a non-regular member/u.test(durableRecoveryExtractor) &&
+    /--no-same-owner/u.test(durableRecoveryExtractor) &&
+    /--no-same-permissions/u.test(durableRecoveryExtractor) &&
+    /\.schema == "archon\.durable-recovery-intent"/u.test(
+      durableRecoveryVerifier
+    ) &&
+    /\(\(keys \| sort\) == \["bytes", "path", "sha256"\]\)/u.test(
+      durableRecoveryVerifier
+    ) &&
+    /bash aws\/prove-recovery-snapshot\.sh/u.test(
+      durableRecoveryVerifier
+    ) &&
+    /\.state == "RECOVERING"/u.test(durableRecoveryExecutor) &&
+    /bash aws\/verify-durable-recovery-bundle\.sh/u.test(
+      durableRecoveryExecutor
+    ) &&
+    /schema: "archon\.durable-recovery\.receipt"/u.test(
+      durableRecoveryExecutor
+    ) &&
+    /version: 2/u.test(durableRecoveryExecutor) &&
+    /--slurpfile stackProof "\$stack_proof"/u.test(
+      durableRecoveryExecutor
+    ) &&
+    /proofs: \{\r?\n\s+stack: \$stackProof\[0\]/u.test(
+      durableRecoveryExecutor
+    ) &&
+    /schema: "archon\.durable-recovery-receipt\.validation"/u.test(
+      durableRecoveryReceiptVerifier
+    ) &&
+    /EXPECTED_RECOVERY_RECEIPT_SHA256/u.test(
+      durableRecoveryReceiptVerifier
+    ) &&
+    /aws s3api get-object/u.test(durableRecoveryFinalizer) &&
+    /--version-id "\$receipt_version_id"/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /--checksum-mode ENABLED/u.test(durableRecoveryFinalizer) &&
+    /bash aws\/verify-durable-recovery-receipt\.sh/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /control_proof_key="candidates\/recovery\/\$\{RECOVERY_ENVIRONMENT\}\/controls\/\$\{RECOVERY_INTENT_ID\}\/\$\{control_proof_sha256\}\.json"/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /validate_control_proof "\$roundtrip_control_proof"/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /RECOVERY_CONTROL_PROOF_SHA256/u.test(durableRecoveryFinalizer) &&
+    /RECOVERY_CONTROL_PROOF_SHA256/u.test(durableRecoveryLedger) &&
+    (
+      recoveryWorkflow.match(
+        /"\$execution" \\\r?\n\s+"\$controls" >"\$finalization"/gu
+      ) ?? []
+    ).length === 2 &&
+    /test "\$GITHUB_REPOSITORY" = "upgradedev\/archon-cockroach-memory"/u.test(
+      durableRecoveryClassifier
+    ) &&
+    /actions\/runs\/\$\{source_run_id\}\/attempts\/\$\{source_run_attempt\}/u.test(
+      durableRecoveryClassifier
+    ) &&
+    /schema: "archon\.durable-recovery-bundle\.proof"/u.test(
+      durableRecoveryBundleCreator
+    ) &&
+    /private S3 recovery ledger preserves terminal provenance, CAS, and lease bounds/u.test(
+      durableRecoveryTests
+    ) &&
+    /durable extraction rejects \$\{unsafeCase\.name\} before extraction/u.test(
+      durableRecoveryTests
+    ) &&
+    /ambiguous terminal CAS succeeds only after an exact RECOVERED read/u.test(
+      durableRecoveryTests
+    ) &&
+    /classifier accepts every documented Deploy AWS path/u.test(
+      recoveryWatchdogTests
+    ) &&
+    (packageSource.match(/tests\/durable-recovery\.test\.ts/gu) ?? [])
+      .length === 2 &&
+    (packageSource.match(/tests\/recovery-watchdog\.test\.ts/gu) ?? [])
+      .length === 2;
+  const durableRecoveryIamContract =
+    (
+      deliveryBootstrap.match(
+        /Sid: Publish(?:Staging|Production)Candidate[\s\S]*?- s3:GetObject\r?\n\s+- s3:GetObjectVersion\r?\n\s+- s3:PutObject[\s\S]*?Resource: !Sub "\$\{ArtifactBucket\.Arn\}\/candidates\/\*"/gu
+      ) ?? []
+    ).length === 2 &&
+    ![
+      lambdaTemplate,
+      deliveryBootstrap,
+      foundationWorkflow,
+      deploy,
+      recoveryWorkflow,
+      ...durableRecoveryScriptSources,
+    ].some((source) =>
+      /AWS::DynamoDB::Table|\bdynamodb:/iu.test(source)
+    );
+  const cloudFormationControlsContract =
+    cloudFormationControlsAreOrdered &&
+    /preflight\|terminal\|recover\|audit/u.test(cloudFormationControls) &&
+    /update-termination-protection/u.test(cloudFormationControls) &&
+    /--enable-termination-protection/u.test(cloudFormationControls) &&
+    /detect-stack-drift/u.test(cloudFormationControls) &&
+    /describe-stack-drift-detection-status/u.test(
+      cloudFormationControls
+    ) &&
+    /describe-stack-resource-drifts/u.test(cloudFormationControls) &&
+    /DETECTION_COMPLETE/u.test(cloudFormationControls) &&
+    /StackDriftStatus == "IN_SYNC"/u.test(cloudFormationControls) &&
+    /DriftedStackResourceCount == 0/u.test(cloudFormationControls) &&
+    /checkedResourceCount/u.test(cloudFormationControls) &&
+    (
+      cloudFormationControls.match(/require_single_json_object/gu) ?? []
+    ).length === 6 &&
+    /require_single_json_object\(\) \{[\s\S]*?jq -s -e \\\r?\n\s+'length == 1 and \(\.\[0\] \| type == "object"\)'/u.test(
+      cloudFormationControls
+    ) &&
+    /every live CloudFormation boundary rejects duplicate valid JSON documents/u.test(
+      cloudFormationControlsTests
+    ) &&
+    /\.identity\.stackId == \$receipt\[0\]\.proofs\.stack\.stackId/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /\.identity\.stackRevision[\s\S]*?== \$receipt\[0\]\.proofs\.stack\.stackRevision/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /\.identity\.tagsSha256 == \$receipt\[0\]\.proofs\.stack\.tagsSha256/u.test(
+      durableRecoveryFinalizer
+    ) &&
+    /controlProofBucket/u.test(durableRecoveryLedger) &&
+    /controlProofKey/u.test(durableRecoveryLedger) &&
+    /controlProofSha256/u.test(durableRecoveryLedger) &&
+    /controlProofVersionId/u.test(durableRecoveryLedger) &&
+    !/ExpectedProperties|ActualProperties/u.test(
+      cloudFormationControls
+    ) &&
+    (
+      deploy.match(
+        /bash aws\/enforce-cloudformation-controls\.sh preflight/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /bash aws\/enforce-cloudformation-controls\.sh terminal/gu
+      ) ?? []
+    ).length === 2 &&
+    terminalReceiptBlocks.every(
+      (block) =>
+        block.length > 0 &&
+        /bash aws\/enforce-cloudformation-controls\.sh terminal/u.test(
+          block
+        ) &&
+        /--slurpfile cfnPreflight "\$preflight_control"/u.test(block) &&
+        /--slurpfile cfnTerminal "\$terminal_control"/u.test(block) &&
+        /cloudFormationControls: \{/u.test(block)
+    ) &&
+    (
+      deploy.match(
+        /length == 1 and \(\.\[0\] \| type == "object"\)/gu
+      ) ?? []
+    ).length >= 4 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/enforce-cloudformation-controls\.sh audit/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /bash aws\/enforce-cloudformation-controls\.sh recover/gu
+      ) ?? []
+    ).length === 4 &&
+    (
+      deliveryBootstrap.match(
+        /cloudformation:UpdateTerminationProtection/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deliveryBootstrap.match(/cloudformation:DetectStackDrift/gu) ?? []
+    ).length === 2 &&
+    (
+      deliveryBootstrap.match(
+        /cloudformation:DetectStackResourceDrift/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deliveryBootstrap.match(
+        /cloudformation:DescribeStackResourceDrifts/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deliveryBootstrap.match(
+        /cloudformation:BatchDescribeTypeConfigurations/gu
+      ) ?? []
+    ).length === 2 &&
+    /update-termination-protection/u.test(greenfieldCleanup) &&
+    /--no-enable-termination-protection/u.test(greenfieldCleanup) &&
+    /proof output is sanitized and never persists resource properties/u.test(
+      cloudFormationControlsTests
+    ) &&
+    (
+      packageSource.match(/tests\/cloudformation-controls\.test\.ts/gu) ??
+      []
+    ).length === 2;
+  const greenfieldRetainedLogDeleteIamBlocks = [
+    ...deliveryBootstrap.matchAll(
+      /- Sid: DeleteFailed(?:Staging|Production)GreenfieldRetainedLogs[\s\S]*?(?=\r?\n              - Sid: InspectFailed(?:Staging|Production)GreenfieldRetainedLogTags)/gu
+    ),
+  ].map((match) => match[0]);
+  const greenfieldRetainedLogInspectIamBlocks = [
+    ...deliveryBootstrap.matchAll(
+      /- Sid: InspectFailed(?:Staging|Production)GreenfieldRetainedLogTags[\s\S]*?(?=\r?\n              - Effect: Allow)/gu
+    ),
+  ].map((match) => match[0]);
+  const greenfieldRetainedLogCleanupContract =
+    [
+      'legacy_api_log_group="/aws/apigateway/${APP_NAME}-${ENVIRONMENT}"',
+      'vended_api_log_group="/aws/vendedlogs/apigateway/${APP_NAME}-${ENVIRONMENT}"',
+      'lambda_log_group="/aws/lambda/${APP_NAME}-${ENVIRONMENT}-api"',
+      "ApiAccessLogGroup",
+      "ApiVendedAccessLogGroup",
+      "ArchonFunctionLogGroup",
+    ].every((fragment) => greenfieldCleanup.includes(fragment)) &&
+    /log_owner_state\(\)/u.test(greenfieldCleanup) &&
+    /assert_log_absent\(\)/u.test(greenfieldCleanup) &&
+    (
+      greenfieldCleanup.match(
+        /^delete_owned_log_group \\$/gmu
+      ) ?? []
+    ).length === 3 &&
+    /retainedLogGroupsDeleted: \$logGroupsDeleted/u.test(
+      greenfieldCleanup
+    ) &&
+    greenfieldRetainedLogDeleteIamBlocks.length === 2 &&
+    greenfieldRetainedLogDeleteIamBlocks.every(
+      (block) =>
+        /Action: logs:DeleteLogGroup/u.test(block) &&
+        (block.match(/log-group:/gu) ?? []).length === 3 &&
+        /log-group:\/aws\/apigateway\/\$\{AppName\}-(?:staging|production)"/u.test(
+          block
+        ) &&
+        /log-group:\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-(?:staging|production)"/u.test(
+          block
+        ) &&
+        /log-group:\/aws\/lambda\/\$\{AppName\}-(?:staging|production)-api"/u.test(
+          block
+        ) &&
+        !/:\*"/u.test(block)
+    ) &&
+    greenfieldRetainedLogInspectIamBlocks.length === 2 &&
+    greenfieldRetainedLogInspectIamBlocks.every(
+      (block) =>
+        /Action: logs:ListTagsForResource/u.test(block) &&
+        (block.match(/log-group:/gu) ?? []).length === 3 &&
+        /log-group:\/aws\/apigateway\/\$\{AppName\}-(?:staging|production)"/u.test(
+          block
+        ) &&
+        /log-group:\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-(?:staging|production)"/u.test(
+          block
+        ) &&
+        /log-group:\/aws\/lambda\/\$\{AppName\}-(?:staging|production)-api"/u.test(
+          block
+        ) &&
+        !/:\*"/u.test(block)
+    ) &&
+    /logs delete-log-group --log-group-name \\/u.test(awsRecoveryTests) &&
+    /\/aws\/vendedlogs\/apigateway\/archon-memory-staging/u.test(
+      awsRecoveryTests
+    ) &&
+    /vended API log logical-id/u.test(awsRecoveryTests);
+  const boundedCloudFormationPollingContract =
+    !/\bcloudformation\s+wait\b/u.test(stackRestore) &&
+    !/\bcloudformation\s+wait\b/u.test(greenfieldCleanup) &&
+    [
+      "read_bounded_poll_setting",
+      "assert_poll_phase_budget",
+      "ensure_recovery_time_budget",
+      "sleep_within_recovery_budget",
+      "describe_exact_stack_status",
+      "poll_exact_stack_status",
+      "poll_exact_change_set_creation",
+      "ARCHON_RECOVERY_TOTAL_BUDGET_SECONDS 2400 60 3000",
+      "ARCHON_RECOVERY_STABILIZE_POLL_ATTEMPTS 12 1 30",
+      "ARCHON_RECOVERY_STABILIZE_POLL_INTERVAL_SECONDS 5 0 10",
+      "ARCHON_RECOVERY_CHANGE_SET_POLL_ATTEMPTS 60 1 90",
+      "ARCHON_RECOVERY_CHANGE_SET_POLL_INTERVAL_SECONDS 5 0 10",
+      "ARCHON_RECOVERY_FINAL_POLL_ATTEMPTS 120 1 180",
+      "ARCHON_RECOVERY_FINAL_POLL_INTERVAL_SECONDS 10 0 15",
+      'recovery_started_epoch="${ARCHON_RECOVERY_STARTED_EPOCH:-$current_epoch}"',
+    ].every((fragment) => stackRestore.includes(fragment)) &&
+    [
+      "read_bounded_poll_setting",
+      "assert_poll_phase_budget",
+      "ensure_greenfield_time_budget",
+      "sleep_within_greenfield_budget",
+      "describe_exact_greenfield_stack_status",
+      "poll_exact_greenfield_stack_status",
+      "poll_exact_greenfield_stack_deletion",
+      "ARCHON_GREENFIELD_TOTAL_BUDGET_SECONDS 2400 60 3000",
+      "ARCHON_GREENFIELD_STABILIZE_POLL_ATTEMPTS 12 1 30",
+      "ARCHON_GREENFIELD_STABILIZE_POLL_INTERVAL_SECONDS 5 0 10",
+      "ARCHON_GREENFIELD_DELETE_POLL_ATTEMPTS 120 1 180",
+      "ARCHON_GREENFIELD_DELETE_POLL_INTERVAL_SECONDS 10 0 15",
+      'greenfield_started_epoch="${ARCHON_GREENFIELD_STARTED_EPOCH:-$current_epoch}"',
+    ].every((fragment) => greenfieldCleanup.includes(fragment)) &&
+    (stackRestore.match(/AWS_MAX_ATTEMPTS=1 aws/gu) ?? []).length >= 2 &&
+    (greenfieldCleanup.match(/AWS_MAX_ATTEMPTS=1 aws/gu) ?? []).length >=
+      2 &&
+    /jq -ser/u.test(stackRestore) &&
+    /jq -ser/u.test(greenfieldCleanup) &&
+    /AWS recovery scripts contain no CloudFormation service waiter/u.test(
+      awsRecoveryTests
+    ) &&
+    /stack recovery bounds change-set polling and leaves it for a later watchdog/u.test(
+      awsRecoveryTests
+    ) &&
+    /stack recovery fails closed on final polling \$\{pollFailure\.name\}/u.test(
+      awsRecoveryTests
+    ) &&
+    /greenfield cleanup fails closed on delete polling \$\{deletePollFailure\.name\}/u.test(
+      awsRecoveryTests
+    ) &&
+    (
+      awsRecoveryTests.match(
+        /\{ name: "multiple-object JSON stream", mode: "json-stream" \}/gu
+      ) ?? []
+    ).length === 2;
+  const greenfieldRerunOwnerContract =
+    greenfieldOwnerPayloadBlock.length > 0 &&
+    [
+      "--arg account",
+      "--arg app",
+      "--arg candidate",
+      "--arg environment",
+      "--arg region",
+      "--arg repository",
+      "--arg runId",
+      "--arg stack",
+    ].every((fragment) => greenfieldOwnerPayloadBlock.includes(fragment)) &&
+    !/runAttempt/u.test(greenfieldOwnerPayloadBlock) &&
+    /--arg runAttempt "\$source_deploy_run_attempt"/u.test(
+      recoverySnapshot
+    ) &&
+    /runAttempt: \$runAttempt/u.test(recoverySnapshot) &&
+    (
+      deploy.match(
+        /SOURCE_REPOSITORY: \$\{\{ github\.repository \}\}/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      deploy.match(
+        /SOURCE_DEPLOY_RUN_ATTEMPT: \$\{\{ github\.run_attempt \}\}/gu
+      ) ?? []
+    ).length === 4 &&
+    (
+      deploy.match(
+        /SOURCE_DEPLOY_RUN_ID: \$\{\{ github\.run_id \}\}/gu
+      ) ?? []
+    ).length === 4 &&
+    /greenfield owner is rerun-stable while the manifest binds the attempt/u.test(
+      awsRecoveryTests
+    ) &&
+    /attempt 2 can clean an attempt-1 failed greenfield stack/u.test(
+      awsRecoveryTests
+    );
   const localArtifacts = generatedArtifactPaths();
   const workflowEntries = repositoryWorkflowSources();
   const workflows = workflowEntries.map(({ source }) => source);
@@ -1046,6 +2245,14 @@ function sourceChecks(): SourceCheck[] {
         contains(
           "docs/MANAGED_MCP_SMOKE.md",
           /receipt schema v2/iu
+        ) &&
+        managedMcpEvidenceDocs.every(
+          (document) =>
+            /actions\/runs\/30204081177/u.test(document) &&
+            /a2b69e3fad31010d14d0c3bca261421e635ca885/u.test(
+              document
+            ) &&
+            !staleManagedMcpEvidence.test(document)
         ),
       "Managed MCP v2 proves the exact fixed scope with an index-forced ten-row sentinel, strict typed aggregate parsing, and sanitized pure-test coverage.",
       "Managed MCP v2 fixed scope, bounds, strict parser, import guard, tests, or evidence disclosure is incomplete."
@@ -1080,7 +2287,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.ci-matrix",
-      "Technological Implementation",
+      "Technical Implementation",
       /frontend-iac:/u.test(ci) &&
         /cluster-survival:/u.test(ci) &&
         /pen-test:/u.test(ci) &&
@@ -1091,7 +2298,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.managed-mcp-receipt-v2-gate",
-      "Technological Implementation",
+      "Technical Implementation",
       managedMcpGateBlocks.every(
         (block) =>
           block.length > 0 &&
@@ -1108,7 +2315,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.fail-closed-ci-aggregate",
-      "Technological Implementation",
+      "Technical Implementation",
       /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac\]/u.test(
         readinessJob
       ) &&
@@ -1124,7 +2331,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.immutable-supply-chain",
-      "Technological Implementation",
+      "Technical Implementation",
       allWorkflowActionsPinned(workflows) &&
         allSetupNodeStepsPinned(workflows) &&
         allComposeImagesPinned(composeSources) &&
@@ -1137,7 +2344,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.exact-ci-trigger",
-      "Technological Implementation",
+      "Technical Implementation",
       hasExactCiTrigger(ci) &&
         hasUniqueCiTriggerOwnership(workflowEntries),
       "The CI workflow runs once for main pushes and every pull request; only CI and the explicit CodeQL scan own those repository events.",
@@ -1145,7 +2352,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.bedrock-grounding",
-      "Technological Implementation",
+      "Technical Implementation",
       /checks:\s*\{[\s\S]*claims:\s*boolean/iu.test(narrator) &&
         /RECALL_MIN_SCORE/iu.test(handler) &&
         /citation/iu.test(narrator),
@@ -1154,7 +2361,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "tech.runtime-cspann-release-gate",
-      "Technological Implementation",
+      "Technical Implementation",
       /export\s+function\s+buildRecallQuery/iu.test(memory) &&
         /buildRecallQuery/iu.test(databaseRelease) &&
         /verifyRuntimeCspannPath/iu.test(databaseRelease) &&
@@ -1273,7 +2480,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "product.aws-reference-architecture",
-      "Product Readiness",
+      "Production Readiness",
       /AWS::CloudFront::Distribution/u.test(lambdaTemplate) &&
         /AWS::Serverless::HttpApi/u.test(lambdaTemplate) &&
         /AWS::Serverless::Function/u.test(lambdaTemplate) &&
@@ -1336,7 +2543,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "product.s3-access-logging-foundation",
-      "Product Readiness",
+      "Production Readiness",
       /S3AccessLogArchiveS39Suppression:[\s\S]*?Type: AWS::SecurityHub::AutomationRule/u.test(
         deliveryBootstrap
       ) &&
@@ -1480,11 +2687,11 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "product.application-s3-access-logging-live",
-      "Product Readiness",
+      "Production Readiness",
       /SpaBucket:[\s\S]*?LoggingConfiguration:[\s\S]*?DestinationBucketName: !Sub "\$\{AppName\}-s3-access-logs-\$\{AWS::AccountId\}-\$\{AWS::Region\}"[\s\S]*?LogFilePrefix: !Sub "\$\{Environment\}-web\/"[\s\S]*?PartitionDateSource: EventTime/u.test(
         lambdaTemplate
       ) &&
-        /preflight\|verify\|recover/u.test(
+        /preflight\|validate-preflight\|verify\|recover/u.test(
           applicationS3AccessLoggingProof
         ) &&
         /bash aws\/prove-s3-access-logging\.sh verify/u.test(
@@ -1509,6 +2716,13 @@ function sourceChecks(): SourceCheck[] {
         /EXPECTED_STACK_STATE/u.test(
           applicationS3AccessLoggingProof
         ) &&
+        /AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
+        /stack_fingerprint/u.test(applicationS3AccessLoggingProof) &&
+        /--stack-name "\$stack_id"/u.test(
+          applicationS3AccessLoggingProof
+        ) &&
         /greenfield:absent\|existing:disabled\|existing:enabled/u.test(
           applicationS3AccessLoggingProof
         ) &&
@@ -1518,11 +2732,12 @@ function sourceChecks(): SourceCheck[] {
           applicationS3AccessLoggingProof
         ) &&
         applicationS3ProofsOrdered &&
+        applicationS3TerminallyOrdered &&
         (
           deploy.match(
             /EXPECTED_STACK_STATE: \$\{\{ steps\.api_preflight\.outputs\.stack_state \}\}/gu
           ) ?? []
-        ).length === 4 &&
+        ).length === 8 &&
         (
           deploy.match(/id: application_s3_verify/gu) ?? []
         ).length === 2 &&
@@ -1545,21 +2760,37 @@ function sourceChecks(): SourceCheck[] {
           deploy.match(
             /prove-application-s3-access-logging\.sh verify/gu
           ) ?? []
+        ).length === 4 &&
+        (
+          deploy.match(
+            /prove-application-s3-access-logging\.sh \\\r?\n\s+validate-preflight/gu
+          ) ?? []
         ).length === 2 &&
         (
           deploy.match(
             /prove-application-s3-access-logging\.sh recover/gu
           ) ?? []
         ).length === 2 &&
-        recoveryBlocks.every(
-          (block) =>
+        recoveryBlocks.every((block) => {
+          const preflightValidation = block.indexOf("validate-preflight");
+          const snapshotValidation = block.indexOf(
+            "bash aws/prove-recovery-snapshot.sh"
+          );
+          const firstRecoveryMutation = block.indexOf("RECOVERY_FAILED=0");
+          return (
             /prove_application_s3_recovery/u.test(block) &&
             /application-s3-access-logging-recovery\.json/u.test(block) &&
             /EXPECTED_STACK_STATE/u.test(block) &&
             /sha256sum application-s3-access-logging-preflight\.json/u.test(
               block
-            )
-        ) &&
+            ) &&
+            preflightValidation >= 0 &&
+            snapshotValidation >= 0 &&
+            firstRecoveryMutation >= 0 &&
+            preflightValidation < firstRecoveryMutation &&
+            snapshotValidation < firstRecoveryMutation
+          );
+        }) &&
         (
           deploy.match(
             /--slurpfile s3Preflight application-s3-access-logging-preflight\.json/gu
@@ -1567,7 +2798,7 @@ function sourceChecks(): SourceCheck[] {
         ).length === 2 &&
         (
           deploy.match(
-            /--slurpfile s3Proof application-s3-access-logging-proof\.json/gu
+            /--slurpfile s3Proof "\$terminal_proof"/gu
           ) ?? []
         ).length === 2 &&
         (deploy.match(/s3AccessLogging: \{/gu) ?? []).length === 2 &&
@@ -1576,7 +2807,13 @@ function sourceChecks(): SourceCheck[] {
             /preMutationReproved: true[\s\S]*?loggingEnabled: true[\s\S]*?targetPrefix:[\s\S]*?partitionDateSource:[\s\S]*?processedTemplateManaged: true[\s\S]*?liveControlPlaneVerified: true/gu
           ) ?? []
         ).length === 2 &&
+        (deploy.match(/terminalLiveReproved: true/gu) ?? []).length === 2 &&
+        (deploy.match(/terminalProofSha256:/gu) ?? []).length === 2 &&
+        /candidateSha/u.test(recoverySnapshot) &&
+        /executionRoleArn/u.test(recoverySnapshot) &&
+        /manifestSha256/u.test(recoverySnapshot) &&
         /bash -n aws\/prove-application-s3-access-logging\.sh/u.test(ci) &&
+        /bash -n aws\/prove-recovery-snapshot\.sh/u.test(ci) &&
         /prove-application-s3-access-logging\.sh/u.test(
           s3AccessLoggingTests
         ) &&
@@ -1584,14 +2821,32 @@ function sourceChecks(): SourceCheck[] {
           s3AccessLoggingTests
         ) &&
         /stringTemplateBody/u.test(s3AccessLoggingTests),
-      "Both application web buckets are source-controlled for exact EventTime S3 logging, cross-bound to stack state, re-proved immediately before mutation, verified in the processed template and live control plane before frontend publication, restored fail-closed, and hash-bound through sanitized receipts.",
+      "Both application web buckets are source-controlled for exact EventTime S3 logging, cross-bound to immutable recovery snapshots, re-proved immediately before mutation and at the terminal receipt, verified in the processed template and live control plane, and restored fail-closed.",
       "Application S3 access logging lacks exact template/live proof, stack-state binding, immutable receipt evidence, pre-mutation replay protection, recovery verification, or CI regression coverage."
     ),
     sourceCheck(
+      "product.durable-out-of-band-recovery",
+      "Production Readiness",
+      durableRecoveryScriptsAreCiGated &&
+        durableRecoveryArmContract &&
+        durableFrontendBaselineContract &&
+        durableRecoveryCommitContract &&
+        environmentDeployOidcTrustContract &&
+        watchdogWorkflowContract &&
+        durableS3CasLedgerContract &&
+        durableRecoveryDataContract &&
+        durableRecoveryIamContract &&
+        cloudFormationControlsContract &&
+        localArtifacts.length === 0,
+      "Both deployments establish a checksum/version-bound S3 CAS recovery fence plus termination-protection and fresh drift gates before mutation; receipt-bound commits, daily audits, and a trusted serialized watchdog recover unresolved intents with no local residue.",
+      "Durable pre-mutation fencing, S3 conditional CAS, receipt-bound terminal state, CloudFormation protection/drift evidence, trusted watchdog recovery, CI coverage, or runner artifact hygiene is incomplete."
+    ),
+    sourceCheck(
       "product.oidc-promotion-rollback",
-      "Product Readiness",
+      "Production Readiness",
       has("aws/bootstrap-oidc.yaml") &&
         /AssumeRoleWithWebIdentity/u.test(read("aws/bootstrap-oidc.yaml")) &&
+        environmentDeployOidcTrustContract &&
         /Verify candidate tree hashes/iu.test(deploy) &&
         /Restore the previous production release/iu.test(deploy) &&
         /Hosted Chromium judge journey on staging/iu.test(deploy) &&
@@ -1622,20 +2877,114 @@ function sourceChecks(): SourceCheck[] {
             /name: Refresh short-lived AWS credentials for (?:staging|production) recovery/gu
           ) ?? []
         ).length === 2 &&
-        (deploy.match(/timeout-minutes:\s+90/gu) ?? []).length === 2 &&
-        /--parameters "file:\/\/\$\{parameters_file\}"/u.test(stackRestore) &&
+        (deploy.match(/timeout-minutes:\s+105/gu) ?? []).length === 2 &&
+        /--template-body "file:\/\/\$\{immutable_template_file\}"/u.test(
+          stackRestore
+        ) &&
+        /--parameters "file:\/\/\$\{immutable_parameters_file\}"/u.test(
+          stackRestore
+        ) &&
+        /--tags "file:\/\/\$\{immutable_tags_file\}"/u.test(stackRestore) &&
+        /assert_recovery_snapshot_integrity/u.test(stackRestore) &&
         /cloudformation create-change-set/u.test(stackRestore) &&
+        /--client-token "\$change_set_name"/u.test(stackRestore) &&
+        /change_set_id/u.test(stackRestore) &&
+        /\.ExecutionStatus == "AVAILABLE"/u.test(stackRestore) &&
+        /\.StackId == \$stackId/u.test(stackRestore) &&
+        /EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256/u.test(stackRestore) &&
+        /EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256/u.test(stackRestore) &&
+        /EXPECTED_PREVIOUS_STACK_TAGS_SHA256/u.test(stackRestore) &&
+        /--slurpfile expectedTags "\$immutable_tags_file"/u.test(
+          stackRestore
+        ) &&
         /cloudformation execute-change-set/u.test(stackRestore) &&
-        /cloudformation wait stack-update-complete/u.test(stackRestore) &&
+        /--client-request-token "\$execute_token"/u.test(stackRestore) &&
+        /--no-disable-rollback/u.test(stackRestore) &&
+        /--retain-except-on-create/u.test(stackRestore) &&
+        /cloudformation continue-update-rollback/u.test(stackRestore) &&
+        boundedCloudFormationPollingContract &&
+        /cloudformation describe-stack-resources/u.test(greenfieldCleanup) &&
+        /ArchonGreenfieldOwner/u.test(greenfieldCleanup) &&
+        /aws:cloudformation:stack-id/u.test(greenfieldCleanup) &&
+        /aws:cloudformation:stack-name/u.test(greenfieldCleanup) &&
+        /aws:cloudformation:logical-id/u.test(greenfieldCleanup) &&
+        /s3api get-bucket-tagging/u.test(greenfieldCleanup) &&
+        /logs list-tags-for-resource/u.test(greenfieldCleanup) &&
+        /--expected-bucket-owner "\$AWS_ACCOUNT_ID"/u.test(
+          greenfieldCleanup
+        ) &&
+        /REVIEW_IN_PROGRESS/u.test(greenfieldCleanup) &&
+        /DELETE_FAILED/u.test(greenfieldCleanup) &&
+        /archon-delete-retry-/u.test(greenfieldCleanup) &&
+        !/NoSuchBucket\|Not Found\|\\\(404\\\)/u.test(greenfieldCleanup) &&
+        /state: "greenfield-stack-absent"/u.test(greenfieldCleanup) &&
+        /cloudformation:DescribeStackResources/u.test(deliveryBootstrap) &&
+        /s3:GetBucketTagging/u.test(deliveryBootstrap) &&
+        /logs:ListTagsForResource/u.test(deliveryBootstrap) &&
+        greenfieldRetainedLogCleanupContract &&
+        greenfieldRerunOwnerContract &&
         /cloudformation delete-stack/u.test(greenfieldCleanup) &&
+        /cloudformation update-termination-protection/u.test(
+          greenfieldCleanup
+        ) &&
+        /--no-enable-termination-protection/u.test(greenfieldCleanup) &&
+        /--client-request-token "\$delete_token"/u.test(greenfieldCleanup) &&
+        /@json/u.test(samStackTagSerializer) &&
+        samStackTagSerializer.includes('contains("\\\\") | not') &&
+        /SAM tag serializer preserves legal parser-sensitive values/u.test(
+          awsRecoveryTests
+        ) &&
+        /bash -n aws\/serialize-sam-stack-tags\.sh/u.test(ci) &&
+        (
+          deploy.match(
+            /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /if: \(failure\(\) \|\| cancelled\(\)\) && steps\.deploy\.outputs\.started == 'true'/gu
+          ) ?? []
+        ).length === 4 &&
+        (deploy.match(/terminally_proved=false/gu) ?? []).length === 2 &&
+        (
+          deploy.match(
+            /actions\/runs\/\$\{GITHUB_RUN_ID\}\/attempts\/\$\{prior_attempt\}\/jobs\?per_page=100/gu
+          ) ?? []
+        ).length === 2 &&
+        (deploy.match(/post_sam_tags="\$\{RUNNER_TEMP:\?\}/gu) ?? [])
+          .length === 2 &&
+        (deploy.match(/\.Stacks\[0\]\.StackId == \$previousStackId/gu) ?? [])
+          .length === 2 &&
+        (
+          deliveryBootstrap.match(
+            /Sid: Expand(?:Staging|Production)ServerlessTransform/gu
+          ) ?? []
+        ).length === 2 &&
+        !/cloudformation:(?:CreateStack|UpdateStack)/u.test(
+          deliveryBootstrap
+        ) &&
         /s3api list-object-versions/u.test(greenfieldCleanup) &&
-        /s3api delete-bucket/u.test(greenfieldCleanup),
-      "Environment-bound OIDC, build-once promotion, pre-mutation permission proof, hosted E2E, and full-stack fail-closed rollback are source-controlled.",
+        /s3api delete-bucket/u.test(greenfieldCleanup) &&
+        (
+          deploy.match(
+            /Reconcile an interrupted same-run (?:staging|production) greenfield recovery/gu
+          ) ?? []
+        ).length === 2 &&
+        (deploy.match(/--annotation-directive EXCLUDE/gu) ?? []).length ===
+          2 &&
+        (
+          deploy.match(
+            /--expected-source-bucket-owner "\$AWS_ACCOUNT_ID"/gu
+          ) ?? []
+        ).length === 2 &&
+        (deploy.match(/--revision-id "\$alias_revision"/gu) ?? []).length ===
+          2,
+      "Environment-bound OIDC, build-once promotion, immutable change-set recovery, run-owned greenfield cleanup, hosted E2E, and full-stack fail-closed rollback are source-controlled.",
       "OIDC/promotion/preflight/hosted verification/full-stack rollback evidence is incomplete."
     ),
     sourceCheck(
       "product.recovery-safe-canary",
-      "Product Readiness",
+      "Production Readiness",
       canaryDeployBlocks.every(
         (block) =>
           block.length > 0 &&
@@ -1692,15 +3041,34 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "product.generated-artifact-hygiene",
-      "Product Readiness",
+      "Production Readiness",
       GENERATED_ARTIFACT_BASENAMES.every((basename) =>
         gitignore.split(/\r?\n/u).includes(basename)
       ) &&
+        [
+          "frontend-prestate.json",
+          "previous-index.html",
+          "previous-live-alias.json",
+          "recovery-intent.json",
+          "recovery-intent.tar",
+          "recovery-snapshot-proof.json",
+          "staging-recovery-*.json",
+          "production-recovery-*.json",
+          "staging-durable-recovery-*.json",
+          "production-durable-recovery-*.json",
+          "staging-terminal-receipt-object.json",
+          "production-terminal-receipt-object.json",
+          "staging-cloudformation-controls-*.json",
+          "production-cloudformation-controls-*.json",
+        ].every((pattern) =>
+          gitignore.split(/\r?\n/u).includes(pattern)
+        ) &&
         ["dist/", "build/"].every((directory) =>
           gitignore.split(/\r?\n/u).includes(directory)
         ) &&
         [
           ...GENERATED_ARTIFACT_BASENAMES,
+          ...DURABLE_RECOVERY_LOCAL_BASENAMES,
           "dist/nested/generated.js",
           "build/nested/generated.js",
         ].every((candidate) => ci.includes(candidate)) &&
@@ -1713,7 +3081,7 @@ function sourceChecks(): SourceCheck[] {
     ),
     sourceCheck(
       "product.no-local-build-products",
-      "Product Readiness",
+      "Production Readiness",
       localArtifacts.length === 0,
       "No local build/video products are left in the repository workspace.",
       "Local build or generated video artifacts remain."

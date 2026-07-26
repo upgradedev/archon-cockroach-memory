@@ -36,6 +36,18 @@ const APPLICATION_PROOF_SOURCE = readFileSync(
   APPLICATION_PROOF_SCRIPT,
   "utf8"
 );
+const RECOVERY_SNAPSHOT_SOURCE = readFileSync(
+  join(ROOT, "aws", "prove-recovery-snapshot.sh"),
+  "utf8"
+);
+const STACK_RESTORE_SOURCE = readFileSync(
+  join(ROOT, "aws", "restore-cloudformation-stack.sh"),
+  "utf8"
+);
+const GREENFIELD_CLEANUP_SOURCE = readFileSync(
+  join(ROOT, "aws", "delete-greenfield-stack.sh"),
+  "utf8"
+);
 const STACK_POLICY = JSON.parse(
   readFileSync(join(ROOT, "aws", "bootstrap-stack-policy.json"), "utf8")
 );
@@ -283,7 +295,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.equal(
     (WORKFLOW.match(/--include-property-values/gmu) ?? []).length,
-    4
+    6
   );
   assert.equal(
     (WORKFLOW.match(/--change-set-type UPDATE/gmu) ?? []).length,
@@ -346,6 +358,25 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
   );
   for (const logicalId of ["StagingDeployRole", "ProductionDeployRole"]) {
     const role = resourceBlock(logicalId);
+    const environment =
+      logicalId === "StagingDeployRole" ? "staging" : "production";
+    const title =
+      logicalId === "StagingDeployRole" ? "Staging" : "Production";
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: Expand${title}ServerlessTransform[\\s\\S]*?` +
+          "Action: cloudformation:CreateChangeSet[\\s\\S]*?" +
+          "arn:\\$\\{AWS::Partition\\}:cloudformation:\\$\\{AWS::Region\\}:" +
+          "aws:transform/Serverless-2016-10-31",
+        "u"
+      )
+    );
+    assert.match(role, /cloudformation:ContinueUpdateRollback/u);
+    assert.doesNotMatch(
+      role,
+      /cloudformation:(?:CreateStack|UpdateStack)/u
+    );
     assert.match(
       role,
       /Sid: InspectS3AccessLoggingFoundationStack[\s\S]*?Action: cloudformation:DescribeStacks[\s\S]*?stack\/\$\{AppName\}-delivery-bootstrap\/\*/u
@@ -361,6 +392,28 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
     assert.doesNotMatch(
       role,
       /securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:GetStackPolicy|SetStackPolicy)|s3:PutBucketLogging/u
+    );
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: DeleteFailed${title}GreenfieldRetainedLogs[\\s\\S]*?` +
+          `log-group:/aws/apigateway/\\$\\{AppName\\}-${environment}:\\*[\\s\\S]*?` +
+          `log-group:/aws/lambda/\\$\\{AppName\\}-${environment}-api:\\*`,
+        "u"
+      )
+    );
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: InspectFailed${title}GreenfieldRetainedLogTags[\\s\\S]*?` +
+          `log-group:/aws/apigateway/\\$\\{AppName\\}-${environment}"[\\s\\S]*?` +
+          `log-group:/aws/lambda/\\$\\{AppName\\}-${environment}-api"`,
+        "u"
+      )
+    );
+    assert.match(
+      role,
+      /Resource: !Sub "arn:\$\{AWS::Partition\}:cloudfront::\$\{AWS::AccountId\}:distribution\/\*"/u
     );
   }
 });
@@ -669,7 +722,7 @@ test("S3 access-logging proof rejects drift and redacts AWS failures", () => {
 type ApplicationEnvironment = "staging" | "production";
 
 interface ApplicationProofFixture {
-  mode?: "preflight" | "verify" | "recover";
+  mode?: "preflight" | "validate-preflight" | "verify" | "recover";
   environment?: ApplicationEnvironment;
   expectedStackState?: "greenfield" | "existing";
   logging?: Record<string, unknown>;
@@ -682,7 +735,9 @@ interface ApplicationProofFixture {
   stackBucket?: string;
   stackCount?: number;
   stackEnvironment?: string;
+  stackId?: string;
   stackName?: string;
+  stackRoleArn?: string;
   stackStatus?: string;
 }
 
@@ -743,8 +798,16 @@ function runApplicationProof(fixture: ApplicationProofFixture = {}) {
       fixture.stackName === undefined
         ? `${APP}-${environment}`
         : fixture.stackName;
+    const stackId =
+      fixture.stackId ??
+      `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${stackName}/` +
+        "11111111-2222-3333-4444-555555555555";
+    const executionRoleArn =
+      `arn:aws:iam::${ACCOUNT}:role/${APP}-${environment}-cloudformation`;
     const stackDescription = {
+      StackId: stackId,
       StackName: stackName,
+      RoleARN: fixture.stackRoleArn ?? executionRoleArn,
       StackStatus: fixture.stackStatus ?? "UPDATE_COMPLETE",
       Parameters: [
         {
@@ -772,6 +835,7 @@ function runApplicationProof(fixture: ApplicationProofFixture = {}) {
       ),
     };
     const traceFile = join(fakeBin, "trace.log");
+    writeFileSync(traceFile, "", "utf8");
     const preflightFile = join(fakeBin, "preflight.json");
     if (fixture.preflightContent !== undefined) {
       writeFileSync(preflightFile, fixture.preflightContent, "utf8");
@@ -841,6 +905,7 @@ esac
           PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
           APP_NAME: APP,
           AWS_ACCOUNT_ID: ACCOUNT,
+          AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: executionRoleArn,
           AWS_REGION: REGION,
           ENVIRONMENT: environment,
           EXPECTED_STACK_STATE:
@@ -874,7 +939,7 @@ esac
 
 test("application S3 logging proof has an exact integrity-bound contract", () => {
   for (const expected of [
-    "preflight|verify|recover",
+    "preflight|validate-preflight|verify|recover",
     "bash aws/prove-s3-access-logging.sh verify",
     'AWS_REGION" != "eu-west-1',
     "staging|production",
@@ -890,6 +955,9 @@ test("application S3 logging proof has an exact integrity-bound contract", () =>
     "jq-cS-v1",
     "sha256sum",
     "STACK_NAME",
+    "AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN",
+    "expected_stack_prefix",
+    "stack_fingerprint",
     "cloudformation describe-stacks",
     "cloudformation get-template",
     "--template-stage Processed",
@@ -936,6 +1004,15 @@ test("application logging workflow cross-binds stack state and immutable receipt
     "sha256sum application-s3-access-logging-proof.json",
     '$stackState == "greenfield"',
     '$stackState == "existing"',
+    "bash aws/prove-recovery-snapshot.sh",
+    'validate-preflight >/dev/null',
+    'ArchonGreenfieldOwner=$GREENFIELD_OWNER',
+    'GREENFIELD_OWNER="$EXPECTED_GREENFIELD_OWNER"',
+    "bash aws/serialize-sam-stack-tags.sh",
+    'post_sam_tags="${RUNNER_TEMP:?}',
+    ".Stacks[0].StackId == $previousStackId",
+    "terminalLiveReproved: true",
+    'cmp --silent \\\n            application-s3-access-logging-proof.json',
   ]) {
     assert.ok(DEPLOY_WORKFLOW.includes(expected), expected);
   }
@@ -967,6 +1044,200 @@ test("application logging workflow cross-binds stack state and immutable receipt
     ).length,
     2
   );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /bash aws\/prove-application-s3-access-logging\.sh verify/gmu
+      ) ?? []
+    ).length,
+    8
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /post_sam_tags="\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-tags-after-sam\.json"/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /bash aws\/prove-application-s3-access-logging\.sh \\\r?\n\s+validate-preflight/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /Build and validate sanitized (?:staging|production) deployment receipt/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  for (const environment of ["staging", "production"]) {
+    const terminal = DEPLOY_WORKFLOW.indexOf(
+      `Build and validate sanitized ${environment} deployment receipt`
+    );
+    const recovery = DEPLOY_WORKFLOW.indexOf(
+      `Refresh short-lived AWS credentials for ${environment} recovery`
+    );
+    const upload = DEPLOY_WORKFLOW.indexOf(
+      `Upload ${environment} receipt`
+    );
+    assert.ok(terminal >= 0, `missing ${environment} terminal receipt`);
+    assert.ok(
+      recovery > terminal,
+      `${environment} recovery must be armed after terminal validation`
+    );
+    assert.ok(
+      upload > recovery,
+      `${environment} receipt upload must follow recovery handlers`
+    );
+    const recoveryEnd = DEPLOY_WORKFLOW.indexOf(
+      `Upload ${environment} receipt`,
+      recovery
+    );
+    const recoveryBlock = DEPLOY_WORKFLOW.slice(recovery, recoveryEnd);
+    const preflightValidation = recoveryBlock.indexOf("validate-preflight");
+    const snapshotValidation = recoveryBlock.indexOf(
+      "bash aws/prove-recovery-snapshot.sh"
+    );
+    const firstRecoveryMutation = recoveryBlock.indexOf("RECOVERY_FAILED=0");
+    assert.ok(
+      preflightValidation >= 0 &&
+        firstRecoveryMutation >= 0 &&
+        preflightValidation < firstRecoveryMutation,
+      `${environment} must validate the preflight before recovery`
+    );
+    assert.ok(
+      snapshotValidation >= 0 &&
+        firstRecoveryMutation >= 0 &&
+        snapshotValidation < firstRecoveryMutation,
+      `${environment} must validate the recovery snapshot before mutation`
+    );
+  }
+});
+
+test("preflight validation is pure and rejects integrity tampering before AWS", () => {
+  const preflight = runApplicationProof({
+    mode: "preflight",
+    logging: exactApplicationLogging("staging"),
+  });
+  assert.equal(preflight.process.status, 0, preflight.process.stderr);
+
+  const validation = runApplicationProof({
+    mode: "validate-preflight",
+    preflightContent: preflight.process.stdout,
+  });
+  assert.equal(validation.process.status, 0, validation.process.stderr);
+  assert.deepEqual(validation.trace, []);
+
+  const tamperedReceipt = JSON.parse(preflight.process.stdout);
+  tamperedReceipt.priorState = "disabled";
+  const tampered = runApplicationProof({
+    mode: "validate-preflight",
+    preflightContent: JSON.stringify(tamperedReceipt),
+  });
+  assert.notEqual(tampered.process.status, 0);
+  assert.deepEqual(tampered.trace, []);
+});
+
+test("recovery helpers bind immutable snapshots and greenfield ownership", () => {
+  for (const expected of [
+    "AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN",
+    "CANDIDATE_SHA",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "templateSha256",
+    "parametersSha256",
+    "tagsSha256",
+    "stackRevision",
+    "greenfieldOwner",
+    "manifestSha256",
+  ]) {
+    assert.ok(RECOVERY_SNAPSHOT_SOURCE.includes(expected), expected);
+  }
+  const candidateBinding = RECOVERY_SNAPSHOT_SOURCE.indexOf(
+    "--arg candidateSha"
+  );
+  const manifestHashing = RECOVERY_SNAPSHOT_SOURCE.indexOf("manifest_sha256=");
+  assert.ok(candidateBinding >= 0);
+  assert.ok(manifestHashing > candidateBinding);
+  for (const expected of [
+    "EXPECTED_PREVIOUS_STACK_ID",
+    "EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256",
+    "EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256",
+    "EXPECTED_PREVIOUS_STACK_TAGS_SHA256",
+    '--tags "file://${immutable_tags_file}"',
+    ".Stacks[0].StackId == $stackId",
+    ".Stacks[0].RoleARN == $role",
+    'stack_target="$EXPECTED_PREVIOUS_STACK_ID"',
+  ]) {
+    assert.ok(STACK_RESTORE_SOURCE.includes(expected), expected);
+  }
+  const templateIntegrity = STACK_RESTORE_SOURCE.indexOf(
+    'sha256sum "$immutable_template_file"'
+  );
+  const parameterIntegrity = STACK_RESTORE_SOURCE.indexOf(
+    'sha256sum "$immutable_parameters_file"'
+  );
+  const tagIntegrity = STACK_RESTORE_SOURCE.indexOf(
+    'sha256sum "$immutable_tags_file"'
+  );
+  const describeStack = STACK_RESTORE_SOURCE.indexOf(
+    "cloudformation describe-stacks"
+  );
+  const createChangeSet = STACK_RESTORE_SOURCE.indexOf(
+    "cloudformation create-change-set"
+  );
+  const executeChangeSet = STACK_RESTORE_SOURCE.indexOf(
+    "cloudformation execute-change-set"
+  );
+  for (const integrityCheck of [
+    templateIntegrity,
+    parameterIntegrity,
+    tagIntegrity,
+  ]) {
+    assert.ok(integrityCheck >= 0);
+    assert.ok(integrityCheck < describeStack);
+    assert.ok(integrityCheck < createChangeSet);
+    assert.ok(integrityCheck < executeChangeSet);
+  }
+  assert.ok(describeStack >= 0);
+  assert.ok(createChangeSet > describeStack);
+  assert.ok(executeChangeSet > createChangeSet);
+  for (const expected of [
+    "GREENFIELD_OWNER",
+    "ArchonGreenfieldOwner",
+    ".EnableTerminationProtection == false",
+    'state: "greenfield-stack-absent"',
+    '--stack-name "$stack_id"',
+  ]) {
+    assert.ok(GREENFIELD_CLEANUP_SOURCE.includes(expected), expected);
+  }
+  const cleanupDescribe = GREENFIELD_CLEANUP_SOURCE.indexOf(
+    "cloudformation describe-stacks"
+  );
+  const cleanupDelete = GREENFIELD_CLEANUP_SOURCE.indexOf(
+    "cloudformation delete-stack"
+  );
+  assert.ok(cleanupDescribe >= 0);
+  assert.ok(cleanupDelete > cleanupDescribe);
+  const cleanupOwnerProof = GREENFIELD_CLEANUP_SOURCE.indexOf(
+    "ArchonGreenfieldOwner"
+  );
+  assert.ok(cleanupOwnerProof >= 0);
+  assert.ok(cleanupOwnerProof < cleanupDelete);
 });
 
 test("application logging preflight accepts only absent, disabled, or exact enabled state", () => {
@@ -1115,9 +1386,23 @@ test("application logging verify binds the preflight and exact live configuratio
   assert.deepEqual(verified.trace, [
     "foundation:aws/prove-s3-access-logging.sh verify",
     `aws:cloudformation describe-stacks --stack-name ${APP}-staging --region ${REGION} --output json`,
-    `aws:cloudformation get-template --stack-name ${APP}-staging --template-stage Processed --region ${REGION} --output json`,
+    `aws:cloudformation get-template --stack-name arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${APP}-staging/11111111-2222-3333-4444-555555555555 --template-stage Processed --region ${REGION} --output json`,
+    `aws:cloudformation describe-stacks --stack-name arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${APP}-staging/11111111-2222-3333-4444-555555555555 --region ${REGION} --output json`,
     `aws:s3api get-bucket-logging --bucket ${APP}-staging-web-${ACCOUNT}-${REGION} --expected-bucket-owner ${ACCOUNT} --region ${REGION} --output json`,
   ]);
+
+  const rollbackComplete = runApplicationProof({
+    mode: "verify",
+    environment: "staging",
+    stackStatus: "UPDATE_ROLLBACK_COMPLETE",
+    logging: exactApplicationLogging("staging"),
+    preflightContent: preflight.process.stdout,
+  });
+  assert.equal(
+    rollbackComplete.process.status,
+    0,
+    rollbackComplete.process.stderr
+  );
 
   const stringTemplateBody = applicationProcessedTemplate();
   stringTemplateBody.TemplateBody = JSON.stringify(
@@ -1202,8 +1487,14 @@ test("application logging verify binds the preflight and exact live configuratio
 
   for (const fixture of [
     { stackCount: 2 },
-    { stackStatus: "UPDATE_ROLLBACK_COMPLETE" },
+    { stackStatus: "UPDATE_ROLLBACK_FAILED" },
     { stackStatus: "CREATE_IN_PROGRESS" },
+    {
+      stackId:
+        `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/wrong-stack/` +
+        "11111111-2222-3333-4444-555555555555",
+    },
+    { stackRoleArn: `arn:aws:iam::${ACCOUNT}:role/wrong-role` },
     { stackAppName: "wrong-application" },
     { stackEnvironment: "production" },
     { stackBucket: "wrong-source-bucket" },
