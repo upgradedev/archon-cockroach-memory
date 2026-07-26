@@ -1,0 +1,27 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "Update:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "Update:Delete",
+        "Update:Replace"
+      ],
+      "Resource": [
+        "LogicalResourceId/ArtifactBucket",
+        "LogicalResourceId/ArtifactBucketPolicy",
+        "LogicalResourceId/FoundationPromotionRole",
+        "LogicalResourceId/GitHubOidcProvider",
+        "LogicalResourceId/S3AccessLogArchive",
+        "LogicalResourceId/S3AccessLogArchivePolicy",
+        "LogicalResourceId/S3AccessLogArchiveS39Suppression"
+      ]
+    }
+  ]
+}

@@ -139,7 +139,13 @@ The canonical tool inventory is [docs/TOOLS.md](./docs/TOOLS.md).
 
 The deployment follows the AWS serverless web application reference pattern:
 
-- Private, encrypted, versioned S3 origin.
+- Private, encrypted, versioned S3 origin. The delivery foundation defines one
+  BOE/SSE-S3, versioned server-access-log archive with exact artifact,
+  staging-web, and production-web source/prefix grants. Artifact logging is
+  enabled through a protected first activation; staging and production logging
+  follow only after that live prerequisite is proved. The archive deliberately
+  does not log to itself; an exact-resource, terminal Security Hub S3.9
+  automation rule records and suppresses only that recursive-logging exception.
 - CloudFront Origin Access Control, same-origin `/api/*`, HTTP/2+3, compression,
   CSP/HSTS/security headers, and SPA routing.
 - API Gateway HTTP API with a named `live` stage, stage-wide throttling,
@@ -189,13 +195,28 @@ secret scan
 
 Supply-chain references are immutable commit/image digests. Staging, production,
 and database-operator OIDC subjects are bound to their GitHub environments.
-Bootstrap owns the environment-specific Lambda and CodeDeploy roles; the SAM
-application stack is CI-gated to synthesize no IAM resources. The one-time roles
-and artifact bucket are defined in
-[aws/bootstrap-oidc.yaml](./aws/bootstrap-oidc.yaml). Any bootstrap policy
-change is applied by the authorized bootstrap principal before the corresponding
-application release; each environment then preflights those permissions before
-SAM is allowed to mutate its stack. HTTP API delivery uses
+Bootstrap owns the environment-specific Lambda and CodeDeploy roles, retained
+S3 log archive, narrow S3.9 exception, and a versioned artifact bucket; the SAM
+application stack is CI-gated to synthesize no IAM resources. Those resources
+are defined in [aws/bootstrap-oidc.yaml](./aws/bootstrap-oidc.yaml).
+
+The existing bootstrap stack remains unbound from any persistent CloudFormation
+service role. Its one-time administrator update creates the archive and policy
+with artifact logging explicitly disabled. The protected
+`Bootstrap AWS Foundation` workflow then uses a claim-bound, activation-only
+OIDC role and separate `plan`/`apply` dispatches. It accepts only the current
+40-character green main SHA, pins a versioned template by SHA-256, and executes
+only the immutable ARN of one inspected, non-replacement
+`ArtifactBucket.LoggingConfiguration` change. Explicit bounded plan,
+activation, and recovery pollers fit inside the protected job budget. The role
+cannot mutate IAM/Security Hub, delete a stack, or directly call
+`PutBucketLogging` outside CloudFormation because that permission is FAS-bound
+to `cloudformation.amazonaws.com`. The Phase-2 application logging release is
+blocked until the stored bootstrap parameter and live EventTime configuration
+agree.
+
+Each environment preflights its permissions before SAM is allowed to mutate its
+stack. HTTP API delivery uses
 `/aws/vendedlogs/apigateway/*`, while the legacy log-group logical resource stays
 managed solely to keep exact-template rollback collision-free.
 

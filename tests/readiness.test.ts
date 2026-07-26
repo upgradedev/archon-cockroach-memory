@@ -51,6 +51,16 @@ test("readiness: every repository-verifiable source gate passes", () => {
   assert.equal(report.sourceGate.pass, true);
 });
 
+test("readiness: centralized S3 access logging is a first-class product gate", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.s3-access-logging-foundation"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Product Readiness");
+  assert.equal(check.status, "pass", check.detail);
+});
+
 test("readiness: judging mirrors the five equally presented official criteria", () => {
   const report = evaluate();
   assert.deepEqual(Object.keys(report.judging), [...OFFICIAL_CRITERIA]);
@@ -181,7 +191,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 55);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 59);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
