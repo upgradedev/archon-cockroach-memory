@@ -35,6 +35,27 @@ if (!REAL_DB) await import("./db_mock.js");
 
 const DIM = EMBED_DIM;
 
+function fanoutErrorDiagnostic(error: unknown): unknown {
+  if (error instanceof AggregateError) {
+    return {
+      name: error.name,
+      message: error.message,
+      errors: error.errors.map(fanoutErrorDiagnostic),
+    };
+  }
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      code:
+        "code" in error
+          ? (error as Error & { code?: unknown }).code
+          : undefined,
+    };
+  }
+  return { thrownType: typeof error };
+}
+
 before(async () => {
   if (REAL_DB) {
     await deleteFanoutRowsInBatches({ phase: "suite-setup" });
@@ -298,12 +319,20 @@ test(
   "4. the memory splits into >=2 KV ranges and one ANN recall fans out across them correctly",
   { skip: REAL_DB ? false : "requires a real CockroachDB (SPLIT AT / SHOW RANGES / EXPLAIN not modelled by the mock)" },
   async () => {
-    const result = await runFanoutDemo({
-      n: Number(process.env.FANOUT_N ?? 3000),
-      queries: 40,
-      k: 10,
-      log: (line) => console.log(line),
-    });
+    let result: Awaited<ReturnType<typeof runFanoutDemo>>;
+    try {
+      result = await runFanoutDemo({
+        n: Number(process.env.FANOUT_N ?? 3000),
+        queries: 40,
+        k: 10,
+        log: (line) => console.log(line),
+      });
+    } catch (error) {
+      console.error(
+        `fanout-test diagnostic=${JSON.stringify(fanoutErrorDiagnostic(error))}`
+      );
+      throw error;
+    }
 
     // The memory table genuinely occupies MULTIPLE KV ranges (forced deterministically).
     assert.ok(
