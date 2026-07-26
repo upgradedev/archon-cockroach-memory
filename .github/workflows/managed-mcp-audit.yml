@@ -44,19 +44,82 @@ jobs:
           set -euo pipefail
           test -n "$CCLOUD_API_KEY"
           test -n "$COCKROACH_CLUSTER_ID"
-          npm run --silent mcp:cloud:audit | tee managed-mcp-receipt.json
-          jq -e \
-            '.ok == true and
+          npm run --silent mcp:cloud:audit > managed-mcp-receipt.json
+          if grep -Fq -- "$CCLOUD_API_KEY" managed-mcp-receipt.json; then
+            echo "Managed MCP receipt leaked the API key." >&2
+            exit 1
+          fi
+          if grep -Fq -- "$COCKROACH_CLUSTER_ID" managed-mcp-receipt.json; then
+            echo "Managed MCP receipt leaked the cluster identifier." >&2
+            exit 1
+          fi
+          jq -e --arg database "$COCKROACH_DATABASE" \
+            'type == "object" and
+             keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"] and
+             .schemaVersion == 2 and
+             .ok == true and
+             (.checkedAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")) and
+             .endpoint == "https://cockroachlabs.cloud/mcp" and
+             .database == $database and
              .mode == "read-only" and
-             (.proofs | length) >= 4 and
-             (.redactions | index("API key")) != null' \
+             .scope == {
+               "tenantId":"public-demo",
+               "company":"Helios SA",
+               "status":"active",
+               "embedModel":"amazon.titan-embed-text-v2:0"
+             } and
+             .bound == {
+               "index":"idx_agent_memory_active_scope",
+               "innerLimit":10,
+               "outerLimit":1
+             } and
+             .aggregate == {
+               "persisted":9,
+               "idempotencyKeys":9,
+               "contentDigests":9
+             } and
+             .calledTools == ["get_cluster","list_tables","get_table_schema","select_query"] and
+             (.toolsAdvertised | type == "number" and floor == . and . >= 4) and
+             .proofs == [
+               {
+                 "name":"get_cluster",
+                 "ok":true,
+                 "detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."
+               },
+               {
+                 "name":"list_tables",
+                 "ok":true,
+                 "detail":"`agent_memory` is present in the configured application database."
+               },
+               {
+                 "name":"get_table_schema",
+                 "ok":true,
+                 "detail":"Live schema exposes VECTOR(1024) and a native vector index."
+               },
+               {
+                 "name":"select_query",
+                 "ok":true,
+                 "detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."
+               }
+             ] and
+             (.proofs |
+               type == "array" and
+               length == 4 and
+               map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"] and
+               all(.[];
+                 keys == ["detail","name","ok"] and
+                 .ok == true and
+                 (.detail | type == "string" and length > 0)
+               )
+             ) and
+             .redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]' \
             managed-mcp-receipt.json
 
       - name: Upload the sanitized proof receipt
-        if: always()
+        if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: managed-mcp-proof-${{ github.run_id }}
           path: managed-mcp-receipt.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30

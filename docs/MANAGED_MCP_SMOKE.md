@@ -1,61 +1,109 @@
-# CockroachDB Cloud Managed MCP — live read-only proof
+# CockroachDB Cloud Managed MCP — receipt schema v2
 
-Archon Memory uses CockroachDB Cloud's **hosted Managed MCP Server** as a
-production-readiness control plane. This is distinct from the application's own
-self-hosted memory MCP tools.
+Archon Memory uses CockroachDB Cloud's hosted **Managed MCP Server** as an
+independent production-readiness control plane. This is distinct from the
+application-owned memory MCP server.
 
-The managed connection is intentionally read-only in this workflow. An MCP client
-asks CockroachDB Cloud to:
+The protected audit is read-only and calls exactly four advertised tools, once
+each and in this order:
 
-1. identify the live cluster;
-2. list the application database tables;
-3. inspect the `agent_memory` schema and native vector index; and
-4. execute one bounded aggregate query.
+1. `get_cluster`;
+2. `list_tables`;
+3. `get_table_schema`; and
+4. `select_query`.
 
-It never prints the Cloud API key, SQL credentials, memory text, or embeddings.
+No create, insert, update, or administrative Managed MCP tool is called.
 
-## Latest release-gated verification
+## Exact bounded Store proof
+
+`select_query` receives SQL fixed in
+[`scripts/cloud-mcp-audit.ts`](../scripts/cloud-mcp-audit.ts). It cannot be
+changed with environment variables or workflow input. The query:
+
+- equality-constrains tenant `public-demo`;
+- equality-constrains company `Helios SA`;
+- equality-constrains lifecycle status `active`;
+- equality-constrains embedding model
+  `amazon.titan-embed-text-v2:0`;
+- forces `idx_agent_memory_active_scope`;
+- selects only `idempotency_key` and `content_hash` inside an ordered
+  `LIMIT 10` sentinel;
+- aggregates that bounded result; and
+- applies an outer `LIMIT 1`.
+
+The tenth inner row is a fail-closed overflow sentinel: the canonical public
+fixture has nine rows, so a tenth row produces `persisted = 10` and fails. The
+single returned aggregate must contain exactly these keys and numeric values:
+
+| Key | Required value |
+|---|---:|
+| `persisted` | 9 |
+| `idempotency_keys` | 9 |
+| `content_digests` | 9 |
+
+`idempotency_keys` counts only non-empty bounded keys.
+`content_digests` counts only distinct lowercase 64-character SHA-256 values.
+The Managed MCP response must be either `structuredContent` containing
+`{"rows":[one]}` or one MCP text block containing that exact JSON shape.
+Additional/missing keys, additional/missing rows, numeric strings, negative or
+fractional counts, unsafe integers, invalid JSON, ambiguous structured/text
+payloads, and any value other than `9 / 9 / 9` fail closed.
+
+## Sanitized v2 receipt contract
+
+The receipt contains only:
+
+- `schemaVersion: 2`, `ok`, and a UTC `checkedAt`;
+- the public Managed MCP endpoint and a validated database identifier;
+- `mode: "read-only"`;
+- the exact `scope`, `bound`, and `aggregate` above;
+- the exact four-entry `calledTools` list;
+- a safe integer count of advertised tools;
+- exactly four named boolean proofs with fixed, source-owned descriptions; and
+- a fixed list of redaction categories.
+
+It contains no API-key value, cluster identifier, SQL credential or connection
+URL, memory content, embedding, or raw Managed MCP response. Both protected
+workflows capture stdout without streaming the unvalidated file, check for the
+actual API-key and cluster-ID values, enforce the complete top-level JSON key
+set, every fixed nested value, and the four exact proof objects, and only then
+upload a receipt.
+
+## Historical live evidence — pre-hardening
 
 The exact commit
 [`25ca1c84f9df7721b8415b9bd55cc5849bf96ca4`](https://github.com/upgradedev/archon-cockroach-memory/commit/25ca1c84f9df7721b8415b9bd55cc5849bf96ca4)
 passed the post-production Managed MCP job in
 [Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107).
-That job ran only after the same candidate passed source CI, CodeQL, the protected
-database schema-v5 Store-integrity release, staging and production smoke, and
-both hosted browser journeys.
-Its sanitized receipt is retained for 90 days as a GitHub Actions artifact and
-is not copied into the repository.
+At **2026-07-23 06:23:43 UTC**, that run connected to the live AWS
+`eu-west-1` CockroachDB Cloud Basic cluster, observed CockroachDB v26.2.1 and 12
+advertised tools, and passed the four read-only tool checks.
 
-## Verified live run
+That run is historical **pre-hardening** evidence. It predates receipt schema v2:
+its aggregate was not pinned to the exact four-axis scope, did not force
+`idx_agent_memory_active_scope`, did not use the ten-row/one-row bounds, and was
+not parsed or workflow-gated as exact typed `9 / 9 / 9`. It therefore proves live
+Managed MCP connectivity and tool availability only. It must not be cited as a
+successful v2 receipt.
 
-Run at **2026-07-23 06:23:43 UTC** against the live AWS `eu-west-1` CockroachDB
-Cloud Basic cluster (CockroachDB **v26.2.1** at verification time).
+At the time this source contract was added, a new protected v2 run had not yet
+been recorded. The v2 proof becomes live evidence only when either
+[the dedicated Managed MCP workflow](../.github/workflows/managed-mcp-audit.yml)
+or the post-production job in
+[`deploy-aws.yml`](../.github/workflows/deploy-aws.yml) passes against the live
+cluster and publishes its sanitized artifact.
 
-```text
-endpoint: https://cockroachlabs.cloud/mcp
-transport: Streamable HTTP
-tools advertised: 12
+## Protected re-run
 
-PASS get_cluster       — live cluster metadata returned
-PASS list_tables       — agent_memory present in database archon
-PASS get_table_schema  — VECTOR(1024) and native vector index present
-PASS select_query      — bounded memory/company aggregate succeeded
-```
+The recommended path is GitHub Actions:
 
-The client received the following managed tools:
+1. configure `CCLOUD_API_KEY` as a protected `production-audit` secret;
+2. configure `COCKROACH_CLUSTER_ID` and `COCKROACH_DATABASE` as protected
+   variables;
+3. dispatch **Cockroach Cloud Managed MCP Audit**; and
+4. retain the resulting sanitized receipt artifact as the live evidence.
 
-```text
-create_database  create_table  explain_query  get_cluster
-get_table_schema insert_rows   list_clusters  list_databases
-list_tables      select_query  show_running_queries  show_statement
-```
-
-The application audit calls only the four read-only tools shown in the PASS list.
-
-## Re-run
-
-Create a scoped CockroachDB Cloud service-account API key and keep it outside the
-repository:
+For an authorized operator reproducing the client outside CI:
 
 ```bash
 export CCLOUD_API_KEY='<redacted>'
@@ -64,16 +112,5 @@ export COCKROACH_DATABASE='archon'
 npm run mcp:cloud:audit
 ```
 
-The command emits a sanitized, machine-readable receipt and exits non-zero if the
-table, vector type, vector index, or aggregate proof is missing.
-
-Implementation: [`scripts/cloud-mcp-audit.ts`](../scripts/cloud-mcp-audit.ts).
-
-## Why this is agentic
-
-The control-plane agent is not a decorative connectivity test. It discovers the
-live schema through MCP tool metadata and verifies that the deployed memory
-substrate still matches the application's required invariants. This gives the
-release pipeline an independent, SQL-credential-free check of the CockroachDB
-deployment before or after an AWS application release.
-
+Do not copy the emitted receipt into the repository. Generated Managed MCP
+receipts are ignored and readiness-gated as local artifacts.

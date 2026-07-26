@@ -105,10 +105,20 @@ multi-range fan-out, RF=3 distribution, and node-loss survival are recorded in
 
 ### 2. CockroachDB Cloud Managed MCP
 
-The hosted Managed MCP endpoint has been exercised against the live CockroachDB
-Cloud cluster with bounded, read-only calls for cluster identity, table listing,
-schema inspection, and a fixed-scope query. Credentials and connection material
-are never emitted.
+The hardened receipt-schema-v2 audit uses exactly four hosted, read-only Managed
+MCP calls for cluster identity, table listing, schema inspection, and one
+fixed-scope aggregate. Its SQL is pinned to
+`public-demo / Helios SA / active / amazon.titan-embed-text-v2:0`, forces
+`idx_agent_memory_active_scope`, reads through a ten-row sentinel, returns at
+most one aggregate row, and accepts only the exact `9 / 9 / 9` Store proof.
+Credentials, cluster identifiers, connection material, memory text, and
+embeddings are never emitted.
+
+[Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107)
+is historical pre-hardening evidence: it proves live Managed MCP connectivity and
+the four tool surfaces, but predates receipt schema v2 and therefore does not
+prove the new exact scope, bound, parser, or `9 / 9 / 9` gate. The v2 claim
+becomes live evidence only after a new protected workflow run passes.
 
 Evidence and the reproducible operator path:
 
@@ -275,7 +285,7 @@ generated video assets.
 | Historical native-vector plans / recall benchmark | Verified |
 | Runtime-principal company + kind C-SPANN serving gate | Verified in the [latest exact-SHA protected release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) |
 | Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Verified 9/9/9 in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) and exposed read-only in `/api/proof` |
-| Live CockroachDB Cloud Managed MCP read-only proof | Verified after production in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107) |
+| CockroachDB Cloud Managed MCP | Historical live read-only connectivity/tool proof in [run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107); hardened exact-scope receipt v2 is source/CI-gated and awaits a new protected live run |
 | Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Verified |
 | Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Verified end to end |
 | Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |

@@ -118,7 +118,7 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   );
 });
 
-test("readiness: required tool story is Vector + live Managed MCP", () => {
+test("readiness: required tool story is Vector + hardened Managed MCP", () => {
   const report = evaluate();
   assert.equal(
     report.checks.find((check) => check.id === "memory.native-vector-lifecycle")
@@ -127,6 +127,12 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
   );
   assert.equal(
     report.checks.find((check) => check.id === "memory.managed-mcp")?.status,
+    "pass"
+  );
+  assert.equal(
+    report.checks.find(
+      (check) => check.id === "tech.managed-mcp-receipt-v2-gate"
+    )?.status,
     "pass"
   );
   assert.equal(
@@ -146,6 +152,91 @@ test("readiness: required tool story is Vector + live Managed MCP", () => {
       (check) => check.id === "tech.runtime-cspann-release-gate"
     )?.status,
     "pass"
+  );
+});
+
+test("readiness: Managed MCP source and both protected workflows pin receipt v2 exactly", () => {
+  const audit = readFileSync(
+    new URL("../scripts/cloud-mcp-audit.ts", import.meta.url),
+    "utf8"
+  );
+  for (const pattern of [
+    /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*2/u,
+    /tenantId:\s*"public-demo"/u,
+    /company:\s*"Helios SA"/u,
+    /status:\s*"active"/u,
+    /embedModel:\s*"amazon\.titan-embed-text-v2:0"/u,
+    /FORCE_INDEX=idx_agent_memory_active_scope/u,
+    /LIMIT 10[\s\S]*LIMIT 1/u,
+    /parseManagedMcpAggregateResult/u,
+    /assertExactKeys/u,
+    /Number\.isSafeInteger/u,
+    /invokedDirectly/u,
+  ]) {
+    assert.match(audit, pattern);
+  }
+
+  const standalone = readFileSync(
+    new URL("../.github/workflows/managed-mcp-audit.yml", import.meta.url),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const deployJob = deploy.match(
+    /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(deployJob);
+
+  const exactGateFragments = [
+    'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
+    ".schemaVersion == 2",
+    '"tenantId":"public-demo"',
+    '"company":"Helios SA"',
+    '"status":"active"',
+    '"embedModel":"amazon.titan-embed-text-v2:0"',
+    '"index":"idx_agent_memory_active_scope"',
+    '"innerLimit":10',
+    '"outerLimit":1',
+    '"persisted":9',
+    '"idempotencyKeys":9',
+    '"contentDigests":9',
+    '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
+    ".proofs == [",
+    '"detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
+    '"detail":"`agent_memory` is present in the configured application database."',
+    '"detail":"Live schema exposes VECTOR(1024) and a native vector index."',
+    '"detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
+    "length == 4",
+    'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
+    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
+    'grep -Fq -- "$CCLOUD_API_KEY"',
+    'grep -Fq -- "$COCKROACH_CLUSTER_ID"',
+  ];
+  for (const workflow of [standalone, deployJob]) {
+    for (const fragment of exactGateFragments) {
+      assert.ok(workflow.includes(fragment), fragment);
+    }
+    const receipt = workflow.indexOf("npm run --silent mcp:cloud:audit");
+    const apiKeyCheck = workflow.indexOf(
+      'grep -Fq -- "$CCLOUD_API_KEY"'
+    );
+    const clusterIdCheck = workflow.indexOf(
+      'grep -Fq -- "$COCKROACH_CLUSTER_ID"'
+    );
+    const exactJqGate = workflow.indexOf(
+      'jq -e --arg database "$COCKROACH_DATABASE"'
+    );
+    assert.ok(receipt >= 0);
+    assert.ok(receipt < apiKeyCheck);
+    assert.ok(receipt < clusterIdCheck);
+    assert.ok(apiKeyCheck < exactJqGate);
+    assert.ok(clusterIdCheck < exactJqGate);
+  }
+  assert.match(
+    standalone,
+    /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u
   );
 });
 
