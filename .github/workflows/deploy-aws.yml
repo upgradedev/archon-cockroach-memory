@@ -127,11 +127,20 @@ jobs:
           set -euo pipefail
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region "$AWS_REGION"
-          PATH="$PWD/node_modules/.bin:$PATH" sam build \
-            --template-file aws/template.yaml \
-            --build-dir .aws-sam/build \
-            --cached \
-            --parallel
+          SAM_BUILD_LOG="${RUNNER_TEMP:?}/sam-build.log"
+          if ! PATH="$PWD/node_modules/.bin:$PATH" sam build \
+              --template-file aws/template.yaml \
+              --build-dir .aws-sam/build \
+              --cached \
+              --parallel 2>&1 |
+            tee "$SAM_BUILD_LOG"; then
+            exit 1
+          fi
+          if grep -Eqi 'reserved logical ID|unexpected behaviors' \
+            "$SAM_BUILD_LOG"; then
+            echo "SAM emitted a reserved-logical-ID warning." >&2
+            exit 1
+          fi
           if grep -q "Type: AWS::IAM::" .aws-sam/build/template.yaml; then
             echo "Application stack must not synthesize IAM resources." >&2
             exit 1
@@ -257,7 +266,15 @@ jobs:
              ((.state == "greenfield" and .deferredToPostDeploy == true) or
               (.state == "existing" and
                (.currentStage == "live" or .currentStage == "$default") and
-               (.accessLogGroup | type == "string" and length > 0)))' \
+               (.accessLogGroup | type == "string" and length > 0) and
+               .permissions == [
+                 "cloudformation:GetTemplate",
+                 "apigateway:GET",
+                 "cloudfront:GetDistribution",
+                 "cloudfront:GetDistributionConfig",
+                 "logs:DescribeLogStreams",
+                 "logs:FilterLogEvents"
+               ]))' \
             api-stage-preflight.json >/dev/null
           echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
             >> "$GITHUB_OUTPUT"
@@ -428,6 +445,7 @@ jobs:
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
+          API_ENDPOINT="$(jq -er '.[] | select(.OutputKey == "ApiEndpoint") | .OutputValue' <<<"$OUTPUTS")"
           API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
           API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
           API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
@@ -435,10 +453,37 @@ jobs:
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
             echo "distribution_id=$DISTRIBUTION_ID"
+            echo "api_endpoint=$API_ENDPOINT"
             echo "api_id=$API_ID"
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove transformed and live API stage routing before frontend mutation
+        env:
+          API_ID: ${{ steps.stack.outputs.api_id }}
+          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
+          API_ENDPOINT: ${{ steps.stack.outputs.api_endpoint }}
+          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh |
+            tee api-stage-proof.json
+          jq -e \
+            '.ok == true and
+             .stage == "live" and
+             .legacyDefaultStageAbsent == true and
+             .detailedMetrics == true and
+             .throttlingRate == 5 and
+             .throttlingBurst == 10 and
+             .cloudFrontStatus == "Deployed" and
+             .cloudFrontOriginPath == "/live" and
+             .directStageHealth == "GET /live/api/health 200" and
+             .sameOriginHealth == "GET /api/health 200" and
+             .accessLogEvent == "GET /api/health 200"' \
+            api-stage-proof.json >/dev/null
 
       - name: Publish the frontend and invalidate CloudFront
         id: frontend
@@ -552,26 +597,6 @@ jobs:
                .attribute == "total" and
                .resolution.recommendedValue == 18400) and
              any(.report.absences[]; .subject == "PAY-118")' <<<"$AUDIT"
-
-      - name: Prove transformed and live API stage controls
-        env:
-          API_ID: ${{ steps.stack.outputs.api_id }}
-          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
-          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
-          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
-        run: |
-          set -euo pipefail
-          bash aws/prove-api-stage-controls.sh |
-            tee api-stage-proof.json
-          jq -e \
-            '.ok == true and
-             .stage == "live" and
-             .legacyDefaultStageAbsent == true and
-             .detailedMetrics == true and
-             .throttlingRate == 5 and
-             .throttlingBurst == 10 and
-             .accessLogEvent == "GET /api/health 200"' \
-            api-stage-proof.json >/dev/null
 
       - name: Hosted Chromium judge journey on staging
         env:
@@ -731,6 +756,10 @@ jobs:
                  $apiStage[0].detailedMetrics == true and
                  $apiStage[0].throttlingRate == 5 and
                  $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].cloudFrontStatus == "Deployed" and
+                 $apiStage[0].cloudFrontOriginPath == "/live" and
+                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
+                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
                  $apiStage[0].accessLogEvent == "GET /api/health 200")
              then . + {deployment: {
               environment: $environment,
@@ -848,7 +877,15 @@ jobs:
              ((.state == "greenfield" and .deferredToPostDeploy == true) or
               (.state == "existing" and
                (.currentStage == "live" or .currentStage == "$default") and
-               (.accessLogGroup | type == "string" and length > 0)))' \
+               (.accessLogGroup | type == "string" and length > 0) and
+               .permissions == [
+                 "cloudformation:GetTemplate",
+                 "apigateway:GET",
+                 "cloudfront:GetDistribution",
+                 "cloudfront:GetDistributionConfig",
+                 "logs:DescribeLogStreams",
+                 "logs:FilterLogEvents"
+               ]))' \
             api-stage-preflight.json >/dev/null
           echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
             >> "$GITHUB_OUTPUT"
@@ -1019,6 +1056,7 @@ jobs:
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
+          API_ENDPOINT="$(jq -er '.[] | select(.OutputKey == "ApiEndpoint") | .OutputValue' <<<"$OUTPUTS")"
           API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
           API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
           API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
@@ -1026,10 +1064,37 @@ jobs:
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
             echo "distribution_id=$DISTRIBUTION_ID"
+            echo "api_endpoint=$API_ENDPOINT"
             echo "api_id=$API_ID"
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove transformed and live API stage routing before frontend mutation
+        env:
+          API_ID: ${{ steps.stack.outputs.api_id }}
+          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
+          API_ENDPOINT: ${{ steps.stack.outputs.api_endpoint }}
+          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
+        run: |
+          set -euo pipefail
+          bash aws/prove-api-stage-controls.sh |
+            tee api-stage-proof.json
+          jq -e \
+            '.ok == true and
+             .stage == "live" and
+             .legacyDefaultStageAbsent == true and
+             .detailedMetrics == true and
+             .throttlingRate == 5 and
+             .throttlingBurst == 10 and
+             .cloudFrontStatus == "Deployed" and
+             .cloudFrontOriginPath == "/live" and
+             .directStageHealth == "GET /live/api/health 200" and
+             .sameOriginHealth == "GET /api/health 200" and
+             .accessLogEvent == "GET /api/health 200"' \
+            api-stage-proof.json >/dev/null
 
       - name: Publish the frontend and invalidate CloudFront
         id: frontend
@@ -1141,26 +1206,6 @@ jobs:
                .attribute == "total" and
                .resolution.recommendedValue == 18400) and
              any(.report.absences[]; .subject == "PAY-118")' <<<"$AUDIT"
-
-      - name: Prove transformed and live API stage controls
-        env:
-          API_ID: ${{ steps.stack.outputs.api_id }}
-          API_STAGE_NAME: ${{ steps.stack.outputs.api_stage_name }}
-          API_ACCESS_LOG_GROUP: ${{ steps.stack.outputs.api_access_log_group }}
-          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
-        run: |
-          set -euo pipefail
-          bash aws/prove-api-stage-controls.sh |
-            tee api-stage-proof.json
-          jq -e \
-            '.ok == true and
-             .stage == "live" and
-             .legacyDefaultStageAbsent == true and
-             .detailedMetrics == true and
-             .throttlingRate == 5 and
-             .throttlingBurst == 10 and
-             .accessLogEvent == "GET /api/health 200"' \
-            api-stage-proof.json >/dev/null
 
       - name: Hosted Chromium judge journey on production
         env:
@@ -1320,6 +1365,10 @@ jobs:
                  $apiStage[0].detailedMetrics == true and
                  $apiStage[0].throttlingRate == 5 and
                  $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].cloudFrontStatus == "Deployed" and
+                 $apiStage[0].cloudFrontOriginPath == "/live" and
+                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
+                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
                  $apiStage[0].accessLogEvent == "GET /api/health 200")
              then . + {deployment: {
               environment: $environment,
