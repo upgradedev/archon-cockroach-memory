@@ -2187,7 +2187,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.match(
     restore,
-    /\(\(\.Stacks\[0\]\.Tags \/\/ \[\]\) \| map\(\{Key, Value\}\) \| sort_by\(\.Key\)\)[\s\S]*?\(\$expectedTags\[0\] \| sort_by\(\.Key\)\)/u
+    /\(\(\.\[0\]\.Stacks\[0\]\.Tags \/\/ \[\]\) \| map\(\{Key, Value\}\) \| sort_by\(\.Key\)\)[\s\S]*?\(\$expectedTags\[0\] \| sort_by\(\.Key\)\)/u
   );
   assert.match(restore, /assert_recovery_snapshot_integrity/u);
   assert.match(restore, /cloudformation create-change-set/u);
