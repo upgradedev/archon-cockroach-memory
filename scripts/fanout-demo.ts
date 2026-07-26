@@ -203,7 +203,6 @@ async function cleanupTransaction<T>(
           );
           const result = await work(client);
           await client.query("COMMIT");
-          transactionStarted = false;
           return result;
         } catch (error) {
           if (!transactionStarted) throw error;
