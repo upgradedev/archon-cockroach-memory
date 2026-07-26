@@ -3,9 +3,8 @@
 # Vector indexing requires CockroachDB v25.2+. CI and local compose use the same
 # immutable v26.2.3 multi-architecture manifest.
 #
-#   docker compose up -d
-#   npm run db:schema      # applies src/db/schema.sql (enables + creates vector index)
-#   npm run memory:demo    # write-memory + vector-recall round trip
+#   docker compose up -d --wait
+#   npm run local:bootstrap  # creates DB, applies schema, seeds 12 safe fixtures
 #
 # DB Console: http://localhost:8080
 # SQL:        postgresql://root@localhost:26257/archon_memory?sslmode=disable

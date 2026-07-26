@@ -35,23 +35,37 @@
 // CI stands one up; locally point DATABASE_URL at `docker compose up` + `npm run db:schema`.
 //
 // DESTRUCTIVE: the unscoped recall is scored against this corpus, so the table must hold only
-// it — the demo DELETEs all agent_memory rows before/after and UNSPLITs its splits. Like the
-// benchmark, it refuses a DB whose name does not look ephemeral (or ALLOW_DESTRUCTIVE_FANOUT=1).
+// it. The demo uses bounded primary-key cleanup transactions before/after and releases only
+// its three exact split points. Cleanup errors fail closed. Like the benchmark, it refuses a
+// DB whose name does not look ephemeral (or ALLOW_DESTRUCTIVE_FANOUT=1).
 
 import { pathToFileURL } from "node:url";
+import type { PoolClient } from "pg";
 import { unitGaussianVector, normalize, EMBED_DIM } from "../src/memory/embeddings.js";
-import { query, closePool, withClient, toVectorLiteral } from "../src/db/client.js";
+import {
+  query,
+  closePool,
+  withClient,
+  toVectorLiteral,
+  isRetryableSerializationError,
+} from "../src/db/client.js";
 
 const DIM = EMBED_DIM;
+const PRIMARY_IDX = "agent_memory@agent_memory_pkey";
 const IDX = "agent_memory@idx_agent_memory_embedding";
 
 // Three enforced split points at the quarter boundaries of the UUID space → 4 primary ranges.
 // A returned row's range is identified by the first hex nibble of its UUID (0–3 / 4–7 / 8–b / c–f).
-const SPLIT_POINTS = [
+export const FANOUT_SPLIT_POINTS = [
   "40000000-0000-0000-0000-000000000000",
   "80000000-0000-0000-0000-000000000000",
   "c0000000-0000-0000-0000-000000000000",
-];
+] as const;
+export const FANOUT_CLEANUP_BATCH_SIZE = 100;
+export const FANOUT_CLEANUP_STATEMENT_TIMEOUT_MS = 30_000;
+export const FANOUT_CLEANUP_DEADLINE_MS = 240_000;
+export const FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS = 8;
+
 function uuidBucket(uuid: string): number {
   const v = parseInt(uuid[0]!, 16);
   return v < 4 ? 0 : v < 8 ? 1 : v < 12 ? 2 : 3;
@@ -73,6 +87,28 @@ export interface FanoutResult {
   recallAtKMin: number;
   usesVectorSearch: boolean;
   k: number;
+  preCleanup: FanoutCleanupStats;
+  postCleanup: FanoutCleanupStats;
+  unsplitPoints: number;
+}
+
+export interface FanoutCleanupOptions {
+  phase?: string;
+  statementTimeoutMs?: number;
+  deadlineMs?: number;
+  log?: (line: string) => void;
+}
+
+export interface FanoutCleanupStats {
+  deletedRows: number;
+  batches: number;
+  maxBatchRows: number;
+  remainingRows: number;
+  elapsedMs: number;
+}
+
+export class FanoutCleanupDeadlineError extends Error {
+  override name = "FanoutCleanupDeadlineError";
 }
 
 // A seeded clustered corpus (centroid + noise) — mirrors the manifold structure of real
@@ -110,13 +146,264 @@ async function rangeCount(target: string): Promise<number> {
 function guardDestructive() {
   const url = process.env.DATABASE_URL ?? "";
   const dbName = decodeURIComponent(url.split("/").pop()?.split("?")[0] ?? "");
-  const looksEphemeral = /(bench|test|ci|_memory|archon_memory|defaultdb)/i.test(dbName);
+  const looksEphemeral =
+    dbName === "archon_memory" ||
+    /(?:^|[_-])(?:bench|test|ci)(?:$|[_-])/iu.test(dbName);
   if (!looksEphemeral && process.env.ALLOW_DESTRUCTIVE_FANOUT !== "1") {
     throw new Error(
       `Refusing to run the destructive fan-out demo against database "${dbName}". ` +
         `Point DATABASE_URL at an ephemeral benchmark DB, or set ALLOW_DESTRUCTIVE_FANOUT=1.`
     );
   }
+}
+
+function cleanupLimit(value: number | undefined, maximum: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      Number.isFinite(value) ? Math.floor(value!) : maximum,
+      maximum
+    )
+  );
+}
+
+// CockroachDB may surface a SERIALIZABLE restart at COMMIT even for this
+// primary-key-bounded DELETE. Replaying the whole batch is safe because the
+// cursor advances only after a successful COMMIT. Retry only SQLSTATE 40001;
+// every other statement/transport/rollback failure remains fail-closed.
+async function cleanupTransaction<T>(
+  deadlineAt: number,
+  statementTimeoutMs: number,
+  work: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  let serializationError: unknown;
+  for (
+    let attempt = 1;
+    attempt <= FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      return await withClient(async (client) => {
+        const remainingMs = Math.floor(deadlineAt - performance.now());
+        if (remainingMs <= 0) {
+          throw new FanoutCleanupDeadlineError(
+            "Fan-out cleanup deadline exceeded."
+          );
+        }
+        const timeoutMs = Math.max(
+          1,
+          Math.min(statementTimeoutMs, remainingMs)
+        );
+        let transactionStarted = false;
+        try {
+          await client.query("BEGIN");
+          transactionStarted = true;
+          await client.query(
+            `SET LOCAL statement_timeout = '${timeoutMs}ms'`
+          );
+          const result = await work(client);
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          if (!transactionStarted) throw error;
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              "Fan-out cleanup statement and rollback both failed."
+            );
+          }
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (
+        !isRetryableSerializationError(error) ||
+        attempt === FANOUT_CLEANUP_MAX_SERIALIZATION_ATTEMPTS
+      ) {
+        throw error;
+      }
+      serializationError = error;
+      const remainingMs = Math.floor(deadlineAt - performance.now());
+      if (remainingMs <= 0) {
+        throw new FanoutCleanupDeadlineError(
+          "Fan-out cleanup deadline exceeded while retrying a serialization conflict.",
+          { cause: serializationError }
+        );
+      }
+      const backoffMs = Math.min(
+        25 * 2 ** (attempt - 1),
+        500
+      );
+      if (remainingMs <= backoffMs) {
+        throw new FanoutCleanupDeadlineError(
+          "Fan-out cleanup deadline cannot accommodate the next serialization retry.",
+          { cause: serializationError }
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+  throw serializationError;
+}
+
+export async function deleteFanoutRowsInBatches(
+  options: FanoutCleanupOptions = {}
+): Promise<FanoutCleanupStats> {
+  guardDestructive();
+  const phase = options.phase?.trim() || "cleanup";
+  const log = options.log ?? (() => {});
+  const statementTimeoutMs = cleanupLimit(
+    options.statementTimeoutMs,
+    FANOUT_CLEANUP_STATEMENT_TIMEOUT_MS
+  );
+  const deadlineMs = cleanupLimit(
+    options.deadlineMs,
+    FANOUT_CLEANUP_DEADLINE_MS
+  );
+  const startedAt = performance.now();
+  const deadlineAt = startedAt + deadlineMs;
+  let cursor: string | undefined;
+  let deletedRows = 0;
+  let batches = 0;
+  let maxBatchRows = 0;
+
+  while (true) {
+    const rows = await cleanupTransaction(
+      deadlineAt,
+      statementTimeoutMs,
+      async (client) => {
+        const predicate = cursor ? "WHERE id > $1::UUID" : "";
+        const params = cursor ? [cursor] : [];
+        const result = await client.query<{ id: string }>(
+          `WITH deleted AS (
+             DELETE FROM agent_memory@primary
+             ${predicate}
+             ORDER BY id
+             LIMIT ${FANOUT_CLEANUP_BATCH_SIZE}
+             RETURNING id
+           )
+           SELECT id FROM deleted ORDER BY id`,
+          params
+        );
+        return result.rows;
+      }
+    );
+    if (rows.length === 0) break;
+    if (rows.length > FANOUT_CLEANUP_BATCH_SIZE) {
+      throw new Error("Fan-out cleanup exceeded its fixed batch bound.");
+    }
+    cursor = rows.at(-1)?.id;
+    if (!cursor) {
+      throw new Error("Fan-out cleanup returned a row without a UUID.");
+    }
+    batches += 1;
+    deletedRows += rows.length;
+    maxBatchRows = Math.max(maxBatchRows, rows.length);
+    log(
+      `cleanup[${phase}] batch=${batches} deleted=${rows.length} ` +
+        `total=${deletedRows} elapsedMs=${Math.round(
+          performance.now() - startedAt
+        )}`
+    );
+  }
+
+  const remainingRows = await cleanupTransaction(
+    deadlineAt,
+    statementTimeoutMs,
+    async (client) => {
+      const result = await client.query<{ n: string }>(
+        "SELECT count(*) AS n FROM agent_memory"
+      );
+      const count = Number(result.rows[0]?.n);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new Error("Fan-out cleanup returned an invalid final count.");
+      }
+      return count;
+    }
+  );
+  if (remainingRows !== 0) {
+    throw new Error(
+      `Fan-out cleanup left ${remainingRows} row(s) in agent_memory.`
+    );
+  }
+
+  return {
+    deletedRows,
+    batches,
+    maxBatchRows,
+    remainingRows,
+    elapsedMs: Math.round(performance.now() - startedAt),
+  };
+}
+
+/** @internal Exported only so the fail-closed error semantics stay regression-tested. */
+export async function withFanoutFinalCleanup<T>(
+  work: () => Promise<T>,
+  cleanup: () => Promise<void>
+): Promise<T> {
+  let primaryFailed = false;
+  let primaryError: unknown;
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  let result: T | undefined;
+
+  try {
+    try {
+      result = await work();
+    } catch (error) {
+      primaryFailed = true;
+      primaryError = error;
+    }
+  } finally {
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupFailed = true;
+      cleanupError = error;
+    }
+  }
+
+  if (primaryFailed && cleanupFailed) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      "Fan-out workload and final cleanup both failed."
+    );
+  }
+  if (primaryFailed) throw primaryError;
+  if (cleanupFailed) throw cleanupError;
+  return result as T;
+}
+
+async function exactUnsplit(log: (line: string) => void): Promise<number> {
+  const rows = await query<{ pretty: string }>(
+    `ALTER TABLE agent_memory UNSPLIT AT VALUES ${FANOUT_SPLIT_POINTS.map(
+      (_, index) => `($${index + 1}::UUID)`
+    ).join(", ")}`,
+    [...FANOUT_SPLIT_POINTS]
+  );
+  const prettyKeys = rows
+    .map((row) => row.pretty)
+    .filter((value): value is string => Boolean(value));
+  if (
+    rows.length !== FANOUT_SPLIT_POINTS.length ||
+    new Set(prettyKeys).size !== FANOUT_SPLIT_POINTS.length
+  ) {
+    throw new Error("Exact fan-out UNSPLIT did not return all three points.");
+  }
+  const enforced = await query<{ n: string }>(
+    `SELECT count(*) AS n
+       FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX}]
+      WHERE split_enforced_until IS NOT NULL`
+  );
+  if (Number(enforced[0]?.n) !== 0) {
+    throw new Error(
+      "An enforced agent_memory split remains after exact UNSPLIT."
+    );
+  }
+  log(`cleanup[unsplit] released=${rows.length} exact-owned-points`);
+  return rows.length;
 }
 
 // Split the memory table across ranges, run one ANN recall per query, score it against
@@ -131,8 +418,60 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
 
   guardDestructive();
   log(`Multi-range fan-out demo: N=${n} · ${queries} queries · top-${k} · dim=${DIM} · ${clusters} clusters`);
-  await query(`ALTER TABLE agent_memory UNSPLIT ALL`).catch(() => {});
-  await query(`DELETE FROM agent_memory`); // isolate: unscoped ground truth needs only this corpus
+  let ownsSplits = false;
+  let cleanupAuthorized = false;
+  let preCleanupDeadlineExceeded = false;
+  const cleanupReceipt: {
+    pre?: FanoutCleanupStats;
+    post?: FanoutCleanupStats;
+    unsplitPoints: number;
+  } = { unsplitPoints: 0 };
+
+  const measured = await withFanoutFinalCleanup(async () => {
+    // Establish the same exact split points first. This makes a rerun recover a
+    // prior interrupted demo while leaving every unrelated split untouched.
+    const splitRows = await query<{ pretty: string }>(
+      `ALTER TABLE agent_memory SPLIT AT VALUES ${FANOUT_SPLIT_POINTS.map(
+        (_, index) => `($${index + 1}::UUID)`
+      ).join(", ")}`,
+      [...FANOUT_SPLIT_POINTS]
+    );
+    ownsSplits = true;
+    const ownedPrettyKeys = splitRows
+      .map((row) => row.pretty)
+      .filter((value): value is string => Boolean(value));
+    if (
+      splitRows.length !== FANOUT_SPLIT_POINTS.length ||
+      new Set(ownedPrettyKeys).size !== FANOUT_SPLIT_POINTS.length
+    ) {
+      throw new Error("Exact fan-out SPLIT did not return all three points.");
+    }
+    // SPLIT just proved the three requested keys individually. An exact
+    // enforced-count check on the primary index now rejects any extra point
+    // without depending on privileged crdb_internal metadata or comparing
+    // differently formatted SHOW/ALTER key renderings.
+    const enforced = await query<{ n: string }>(
+      `SELECT count(*) AS n
+         FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX}]
+        WHERE split_enforced_until IS NOT NULL`
+    );
+    if (Number(enforced[0]?.n) !== FANOUT_SPLIT_POINTS.length) {
+      throw new Error(
+        "Fan-out primary-index ownership is not exactly the three requested split points."
+      );
+    }
+
+    cleanupAuthorized = true;
+    try {
+      cleanupReceipt.pre = await deleteFanoutRowsInBatches({
+        phase: "pre",
+        log,
+      });
+    } catch (error) {
+      preCleanupDeadlineExceeded =
+        error instanceof FanoutCleanupDeadlineError;
+      throw error;
+    }
 
   // 1. Load the corpus (batched, index-maintained). PKs default to gen_random_uuid().
   const BATCH = 500;
@@ -154,16 +493,12 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
   }
   log(`Loaded ${n} memories in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
 
-  // 2. Force the table into multiple ranges — deterministic, enforced, size-independent.
-  await query(
-    `ALTER TABLE agent_memory SPLIT AT VALUES ${SPLIT_POINTS.map((_, i) => `($${i + 1}::UUID)`).join(", ")}`,
-    SPLIT_POINTS
-  );
-  const tableRanges = await rangeCount("TABLE agent_memory");
+  // 2. Prove the exact enforced split points created multiple table ranges.
+  const tableRanges = await rangeCount(`INDEX ${PRIMARY_IDX}`);
   const indexRanges = await rangeCount(`INDEX ${IDX}`);
   const detail = await query<{ range_id: string; lease_holder: string; replicas: number[] }>(
     `SELECT range_id, lease_holder, replicas
-       FROM [SHOW RANGES FROM TABLE agent_memory WITH DETAILS] ORDER BY range_id`
+       FROM [SHOW RANGES FROM INDEX ${PRIMARY_IDX} WITH DETAILS] ORDER BY range_id`
   );
   log(`\nMemory table spans ${tableRanges} KV range(s) (vector index: ${indexRanges} range(s) at this scale):`);
   log("  range_id | lease_holder | replicas");
@@ -213,9 +548,6 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
   for (const p of plan) log("  " + p.info);
   log(`\n→ plan uses a 'vector search' node: ${usesVectorSearch}`);
 
-  await query(`ALTER TABLE agent_memory UNSPLIT ALL`).catch(() => {});
-  await query(`DELETE FROM agent_memory`);
-
   return {
     corpus: n,
     tableRanges,
@@ -226,6 +558,47 @@ export async function runFanoutDemo(opts: FanoutOptions = {}): Promise<FanoutRes
     usesVectorSearch,
     k,
   };
+  }, async () => {
+    const cleanupErrors: unknown[] = [];
+    if (cleanupAuthorized && !preCleanupDeadlineExceeded) {
+      try {
+        cleanupReceipt.post = await deleteFanoutRowsInBatches({
+          phase: "final",
+          log,
+        });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (ownsSplits) {
+      try {
+        cleanupReceipt.unsplitPoints = await exactUnsplit(log);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (cleanupErrors.length === 1) throw cleanupErrors[0];
+    if (cleanupErrors.length > 1) {
+      throw new AggregateError(
+        cleanupErrors,
+        "Fan-out row cleanup and exact UNSPLIT both failed."
+      );
+    }
+  });
+
+  if (
+    !cleanupReceipt.pre ||
+    !cleanupReceipt.post ||
+    cleanupReceipt.unsplitPoints !== 3
+  ) {
+    throw new Error("Fan-out cleanup receipt is incomplete.");
+  }
+  return {
+    ...measured,
+    preCleanup: cleanupReceipt.pre,
+    postCleanup: cleanupReceipt.post,
+    unsplitPoints: cleanupReceipt.unsplitPoints,
+  };
 }
 
 // ── CLI wrapper ────────────────────────────────────────────────────────────────
@@ -235,13 +608,17 @@ async function main() {
     process.exit(1);
   }
   const recallFloor = Number(process.env.FANOUT_RECALL_FLOOR ?? 0.9);
-  const result = await runFanoutDemo({
-    n: Number(process.env.FANOUT_N ?? 3000),
-    queries: Number(process.env.FANOUT_QUERIES ?? 40),
-    k: Number(process.env.FANOUT_K ?? 10),
-    log: (line) => console.log(line),
-  });
-  await closePool();
+  let result: FanoutResult;
+  try {
+    result = await runFanoutDemo({
+      n: Number(process.env.FANOUT_N ?? 3000),
+      queries: Number(process.env.FANOUT_QUERIES ?? 40),
+      k: Number(process.env.FANOUT_K ?? 10),
+      log: (line) => console.log(line),
+    });
+  } finally {
+    await closePool();
+  }
 
   console.log(`\nJSON ${JSON.stringify(result)}`);
   const ok =
