@@ -167,13 +167,25 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
+    /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
+  assert.match(
+    role,
     /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.equal(
     (role.match(/Action: s3:PutBucketLogging/gmu) ?? []).length,
     1
   );
-  assert.equal((role.match(/Action: iam:GetRole/gmu) ?? []).length, 1);
+  assert.equal((role.match(/Action: iam:GetRole/gmu) ?? []).length, 2);
+  assert.equal(
+    (
+      role.match(
+        /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
+      ) ?? []
+    ).length,
+    10
+  );
   assert.equal(
     (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
       .length,
@@ -221,6 +233,18 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     "cloudformation delete-change-set",
     "CHANGE_SET_ID",
     ".ChangeSetId == $id",
+    "Delete an unverified unexecuted activation plan",
+    "steps.exact_plan.outcome == 'failure'",
+    "env.ALREADY_ACTIVE != 'true'",
+    "env.CHANGE_SET_ID != ''",
+    '.Status == "CREATE_COMPLETE"',
+    'executionStatus: "AVAILABLE"',
+    '"unverified-plan-cleanup-failed" false ""',
+    '"unverified-plan-deleted" true "AVAILABLE"',
+    'grep -Fq "ChangeSetNotFound"',
+    '"ChangeSet [$CHANGE_SET_ID] does not exist"',
+    'test "$deleted" = "true"',
+    "deleted: true",
     "wait_for_change_set_available",
     "wait_for_rollback_change_set",
     "--include-property-values",
@@ -251,6 +275,10 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   assert.equal(
     (WORKFLOW.match(/--change-set-type UPDATE/gmu) ?? []).length,
     2
+  );
+  assert.match(
+    WORKFLOW,
+    /name: Delete an unverified unexecuted activation plan\s+if: \$\{\{ always\(\) && env\.ALREADY_ACTIVE != 'true' && steps\.exact_plan\.outcome == 'failure' && env\.CHANGE_SET_ID != '' \}\}[\s\S]*?\.ChangeSetId == \$id[\s\S]*?\.Status == "CREATE_COMPLETE"[\s\S]*?\.ExecutionStatus == "AVAILABLE"[\s\S]*?cloudformation delete-change-set[\s\S]*?--change-set-name "\$CHANGE_SET_ID"[\s\S]*?grep -Fq "ChangeSetNotFound"[\s\S]*?"ChangeSet \[\$CHANGE_SET_ID\] does not exist"[\s\S]*?test "\$deleted" = "true"[\s\S]*?record_cleanup "unverified-plan-deleted" true "AVAILABLE"/u
   );
   assert.doesNotMatch(WORKFLOW, /\.ChangeSetType/u);
   assert.equal((WORKFLOW.match(/RoleARN \/\/ null/gmu) ?? []).length, 2);

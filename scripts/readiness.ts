@@ -1316,12 +1316,20 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
+        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          foundationPromotionRole
+        ) &&
         /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
         (
           foundationPromotionRole.match(/Action: iam:GetRole/gmu) ?? []
-        ).length === 1 &&
+        ).length === 2 &&
+        (
+          foundationPromotionRole.match(
+            /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
+          ) ?? []
+        ).length === 10 &&
         (
           foundationPromotionRole.match(
             /Action: securityhub:ListTagsForResource/gmu
@@ -1371,6 +1379,9 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /CHANGE_SET_ID/u.test(foundationWorkflow) &&
         /\.ChangeSetId == \$id/u.test(foundationWorkflow) &&
+        /name: Delete an unverified unexecuted activation plan\s+if: \$\{\{ always\(\) && env\.ALREADY_ACTIVE != 'true' && steps\.exact_plan\.outcome == 'failure' && env\.CHANGE_SET_ID != '' \}\}[\s\S]*?\.Status == "CREATE_COMPLETE"[\s\S]*?\.ExecutionStatus == "AVAILABLE"[\s\S]*?cloudformation delete-change-set[\s\S]*?--change-set-name "\$CHANGE_SET_ID"[\s\S]*?grep -Fq "ChangeSetNotFound"[\s\S]*?"ChangeSet \[\$CHANGE_SET_ID\] does not exist"[\s\S]*?test "\$deleted" = "true"[\s\S]*?record_cleanup "unverified-plan-deleted" true "AVAILABLE"/u.test(
+          foundationWorkflow
+        ) &&
         /--change-set-name "\$CHANGE_SET_ID"/u.test(
           foundationWorkflow
         ) &&
@@ -1421,7 +1432,7 @@ function sourceChecks(): SourceCheck[] {
         /rejects drift and redacts AWS failures/u.test(
           s3AccessLoggingTests
         ),
-      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow, CloudFormation-only dynamic-reference reads, live proof, and CI gate are source-controlled.",
+      "A retained, non-recursive S3 log archive, exact S3.9 exception, protected activation/rollback workflow with unverified-plan cleanup, CloudFormation-only dynamic-reference reads, live proof, and CI gate are source-controlled.",
       "The centralized S3 logging archive, narrow exception, activation recovery, exact dynamic-reference reads, proof, or CI/readiness gate is incomplete."
     ),
     sourceCheck(

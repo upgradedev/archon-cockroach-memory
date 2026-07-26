@@ -448,6 +448,7 @@ jobs:
           } >>"$GITHUB_ENV"
 
       - name: Require the exact non-replacement ArtifactBucket change
+        id: exact_plan
         if: env.ALREADY_ACTIVE != 'true'
         shell: bash
         run: |
@@ -549,6 +550,103 @@ jobs:
               baseline: $baseline[0]
             }' >"$receipt_next"
           mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Delete an unverified unexecuted activation plan
+        if: ${{ always() && env.ALREADY_ACTIVE != 'true' && steps.exact_plan.outcome == 'failure' && env.CHANGE_SET_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          record_cleanup() {
+            local deleted execution_status result receipt_next
+            result="$1"
+            deleted="$2"
+            execution_status="$3"
+            receipt_next="${RUNNER_TEMP:?}/foundation-unverified-plan-receipt.json"
+            jq \
+              --arg changeSetId "$CHANGE_SET_ID" \
+              --arg result "$result" \
+              --arg executionStatus "$execution_status" \
+              --argjson deleted "$deleted" \
+              '. + {
+                ok: false,
+                result: $result,
+                unverifiedPlan: {
+                  id: $changeSetId,
+                  executionStatus: (
+                    if $executionStatus == ""
+                    then null
+                    else $executionStatus
+                    end
+                  ),
+                  deleted: $deleted
+                }
+              }' "$RECEIPT_FILE" >"$receipt_next"
+            mv "$receipt_next" "$RECEIPT_FILE"
+          }
+          cleanup_failed() {
+            local status="$?"
+            trap - ERR
+            if [ "${validated_available:-false}" = "true" ]; then
+              record_cleanup \
+                "unverified-plan-cleanup-failed" false "AVAILABLE" || true
+            else
+              record_cleanup \
+                "unverified-plan-cleanup-failed" false "" || true
+            fi
+            exit "$status"
+          }
+          validated_available=false
+          trap cleanup_failed ERR
+
+          unverified="${RUNNER_TEMP:?}/foundation-unverified-change-set.json"
+          aws cloudformation describe-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$unverified"
+          jq -e \
+            --arg id "$CHANGE_SET_ID" \
+            '
+              .ChangeSetId == $id
+              and .Status == "CREATE_COMPLETE"
+              and .ExecutionStatus == "AVAILABLE"
+            ' "$unverified" >/dev/null
+          validated_available=true
+          record_cleanup \
+            "unverified-plan-cleanup-pending" false "AVAILABLE"
+
+          aws cloudformation delete-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --region "$AWS_REGION"
+          deleted=false
+          for attempt in $(seq 1 30); do
+            probe="${RUNNER_TEMP:?}/foundation-unverified-change-set-probe.json"
+            probe_error="${RUNNER_TEMP:?}/foundation-unverified-change-set-probe.err"
+            if aws cloudformation describe-change-set \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --change-set-name "$CHANGE_SET_ID" \
+                --region "$AWS_REGION" \
+                --output json >"$probe" 2>"$probe_error"; then
+              jq -e \
+                --arg id "$CHANGE_SET_ID" \
+                '.ChangeSetId == $id' "$probe" >/dev/null
+            elif grep -Fq "ChangeSetNotFound" "$probe_error" &&
+                grep -Fq \
+                  "ChangeSet [$CHANGE_SET_ID] does not exist" \
+                  "$probe_error"; then
+              deleted=true
+              break
+            fi
+            if [ "$attempt" -ge 30 ]; then
+              echo "The unverified change set was not proven absent." >&2
+              false
+            fi
+            sleep 2
+          done
+          test "$deleted" = "true"
+          trap - ERR
+          record_cleanup "unverified-plan-deleted" true "AVAILABLE"
 
       - name: Re-prove main and execute the inspected plan
         if: env.ALREADY_ACTIVE != 'true' && inputs.operation == 'apply'

@@ -208,12 +208,14 @@ OIDC role and separate `plan`/`apply` dispatches. It accepts only the current
 40-character green main SHA, pins a versioned template by SHA-256, and executes
 only the immutable ARN of one inspected, non-replacement
 `ArtifactBucket.LoggingConfiguration` change. Explicit bounded plan,
-activation, and recovery pollers fit inside the protected job budget. The role
+activation, unverified-plan cleanup, and recovery pollers fit inside the
+protected job budget. The role
 cannot mutate IAM/Security Hub, delete a stack, or directly call
 `PutBucketLogging` outside CloudFormation because that permission is FAS-bound
 to `cloudformation.amazonaws.com`. CloudFormation's in-place update can resolve
-only the two exact environment execution-role ARNs and the exact Security Hub
-automation-rule tags; those read actions are also FAS-bound to
+only the ten exact role ARNs referenced through foundation `GetAtt`
+expressions and the exact Security Hub automation-rule tags; those read actions
+are also FAS-bound to
 `cloudformation.amazonaws.com`. The Phase-2 application logging release is
 blocked until the stored bootstrap parameter and live EventTime configuration
 agree. Staging and production deploy identities have only the narrow read

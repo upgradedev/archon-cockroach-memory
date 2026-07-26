@@ -1084,6 +1084,29 @@ Resources:
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ResolveExactFoundationRoleAttributes
+                Effect: Allow
+                Action: iam:GetRole
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-staging-lambda-runtime
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-production-lambda-runtime
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-staging-codedeploy
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-production-codedeploy
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-database-operator
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-promotion
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-staging-deploy
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-production-deploy
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
               - Sid: ResolveExactFoundationAutomationRule
                 Effect: Allow
                 Action: securityhub:ListTagsForResource
