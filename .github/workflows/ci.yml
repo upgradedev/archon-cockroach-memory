@@ -81,7 +81,6 @@ jobs:
             fi
             sleep 2
           done
-          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_migration"
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_reconciliation"
           # Fail loudly if it never came up.
@@ -97,8 +96,17 @@ jobs:
           DATABASE_URL: postgresql://root@localhost:26257/archon_reconciliation?sslmode=disable
         run: npm run db:memory:reconciliation:rehearsal
 
-      - name: Apply schema (creates the VECTOR(1024) memory table + vector index)
-        run: npm run db:schema
+      - name: Bootstrap the safe local demo twice and prove exact idempotency
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            output="$(npm run --silent local:bootstrap)"
+            printf '%s\n' "$output"
+            test "$(printf '%s\n' "$output" |
+              grep -Fxc 'local-bootstrap receipt=12/12/12 expected=12 persisted=12 unique=12 exact=12 model=fake-hash-embedder')" -eq 1
+            echo "safe local bootstrap attempt ${attempt}/2 passed"
+          done
 
       # Unit + integration tests, INCLUDING the multi-range vector fan-out test
       # (tests/fanout.test.ts): against the real CockroachDB in CI it forces the memory
@@ -109,9 +117,6 @@ jobs:
       # correctness under the mock and skips the range assertions.
       - name: Unit + integration tests (incl. multi-range fan-out)
         run: npm test
-
-      - name: Vector-recall smoke (offline FakeEmbedder — no AWS creds)
-        run: npm run memory:demo
 
       # Fast benchmark smoke — proves the recall@k harness runs end-to-end and the
       # distributed vector index tracks exact NN above a floor (fails loudly if the

@@ -15,9 +15,18 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { Client } from "pg";
 import { query, closePool, toVectorLiteral } from "../src/db/client.js";
 import { unitGaussianVector, normalize, EMBED_DIM } from "../src/memory/embeddings.js";
-import { runFanoutDemo } from "../scripts/fanout-demo.js";
+import {
+  FANOUT_CLEANUP_BATCH_SIZE,
+  FANOUT_CLEANUP_DEADLINE_MS,
+  FANOUT_CLEANUP_STATEMENT_TIMEOUT_MS,
+  FANOUT_SPLIT_POINTS,
+  deleteFanoutRowsInBatches,
+  runFanoutDemo,
+  withFanoutFinalCleanup,
+} from "../scripts/fanout-demo.js";
 
 // Whether a real DB is configured — captured before importing the mock (which sets a
 // dummy DATABASE_URL). Same signal integration.test.ts uses to pick the path.
@@ -27,11 +36,84 @@ if (!REAL_DB) await import("./db_mock.js");
 const DIM = EMBED_DIM;
 
 before(async () => {
-  await query(`DELETE FROM agent_memory`);
+  if (REAL_DB) {
+    await deleteFanoutRowsInBatches({ phase: "suite-setup" });
+  } else {
+    await query(`DELETE FROM agent_memory`);
+  }
 });
 
 after(async () => {
   await closePool();
+});
+
+test("0. fan-out final cleanup preserves and aggregates exact failures", async () => {
+  const primary = new Error("primary");
+  const cleanup = new Error("cleanup");
+  let caught: unknown;
+  try {
+    await withFanoutFinalCleanup(
+      async () => {
+        throw primary;
+      },
+      async () => {}
+    );
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught, primary);
+
+  caught = undefined;
+  try {
+    await withFanoutFinalCleanup(
+      async () => {
+        throw primary;
+      },
+      async () => {
+        throw cleanup;
+      }
+    );
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught instanceof AggregateError);
+  assert.deepEqual(caught.errors, [primary, cleanup]);
+
+  let rejectedUndefined = false;
+  try {
+    await withFanoutFinalCleanup(
+      async () => {
+        throw undefined;
+      },
+      async () => {}
+    );
+  } catch (error) {
+    rejectedUndefined = true;
+    assert.equal(error, undefined);
+  }
+  assert.equal(rejectedUndefined, true);
+});
+
+test("0b. exported cleanup refuses a non-ephemeral database", async () => {
+  const previousUrl = process.env.DATABASE_URL;
+  const previousOverride = process.env.ALLOW_DESTRUCTIVE_FANOUT;
+  process.env.DATABASE_URL =
+    "postgresql://operator@example.invalid:26257/archon?sslmode=verify-full";
+  delete process.env.ALLOW_DESTRUCTIVE_FANOUT;
+  try {
+    await assert.rejects(
+      () => deleteFanoutRowsInBatches({ phase: "guard-proof" }),
+      /Refusing to run the destructive fan-out demo/u
+    );
+  } finally {
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+    if (previousOverride === undefined) {
+      delete process.env.ALLOW_DESTRUCTIVE_FANOUT;
+    } else {
+      process.env.ALLOW_DESTRUCTIVE_FANOUT = previousOverride;
+    }
+  }
 });
 
 // ── Test 1 — ANN recall returns the correct top-k (mock: exact, real: ANN) ──────
@@ -99,9 +181,107 @@ test("1. ANN recall over the vector index returns the correct top-k", async () =
   assert.ok(recallMean >= 0.85, `recall@${K} ${(recallMean * 100).toFixed(1)}% below 85% floor`);
 });
 
-// ── Test 2 — one ANN recall fans out across a multi-range memory (real DB only) ──
 test(
-  "2. the memory splits into >=2 KV ranges and one ANN recall fans out across them correctly",
+  "2. real cleanup is primary-key bounded and commits one transaction per batch",
+  { skip: REAL_DB ? false : "requires a real CockroachDB" },
+  async () => {
+    assert.deepEqual(FANOUT_SPLIT_POINTS, [
+      "40000000-0000-0000-0000-000000000000",
+      "80000000-0000-0000-0000-000000000000",
+      "c0000000-0000-0000-0000-000000000000",
+    ]);
+    assert.equal(FANOUT_CLEANUP_BATCH_SIZE, 100);
+    assert.equal(FANOUT_CLEANUP_STATEMENT_TIMEOUT_MS, 30_000);
+    assert.equal(FANOUT_CLEANUP_DEADLINE_MS, 240_000);
+
+    await deleteFanoutRowsInBatches({ phase: "test-reset" });
+    const vector = toVectorLiteral(unitGaussianVector(88_001, DIM));
+    const params: unknown[] = [vector];
+    const values: string[] = [];
+    for (let index = 0; index < 205; index++) {
+      params.push(`cleanup-${index}`);
+      const ref = params.length;
+      values.push(
+        `('insight', '_fanout-cleanup', $${ref}, ` +
+          `'cleanup row ' || $${ref}, $1::VECTOR, 'fanout-cleanup')`
+      );
+    }
+    await query(
+      `INSERT INTO agent_memory
+         (kind, company, source_ref, content, embedding, embed_model)
+       VALUES ${values.join(", ")}`,
+      params
+    );
+
+    const stats = await deleteFanoutRowsInBatches({
+      phase: "batch-contract",
+    });
+    assert.equal(stats.deletedRows, 205);
+    assert.equal(stats.batches, 3);
+    assert.equal(stats.maxBatchRows, 100);
+    assert.equal(stats.remainingRows, 0);
+    const remaining = await query<{ n: string }>(
+      "SELECT count(*) AS n FROM agent_memory"
+    );
+    assert.equal(Number(remaining[0]?.n), 0);
+  }
+);
+
+test(
+  "3. real cleanup surfaces a lock-induced statement timeout without retry",
+  { skip: REAL_DB ? false : "requires a real CockroachDB" },
+  async () => {
+    const vector = toVectorLiteral(unitGaussianVector(88_002, DIM));
+    const inserted = await query<{ id: string }>(
+      `INSERT INTO agent_memory
+         (kind, company, source_ref, content, embedding, embed_model)
+       VALUES ('insight', '_fanout-lock', 'lock-row', 'lock row',
+               $1::VECTOR, 'fanout-lock')
+       RETURNING id`,
+      [vector]
+    );
+    const id = inserted[0]?.id;
+    assert.ok(id);
+
+    const locker = new Client({
+      connectionString: process.env.DATABASE_URL,
+    });
+    await locker.connect();
+    try {
+      await locker.query("BEGIN");
+      await locker.query(
+        "SELECT id FROM agent_memory WHERE id = $1::UUID FOR UPDATE",
+        [id]
+      );
+      await assert.rejects(
+        () =>
+          deleteFanoutRowsInBatches({
+            phase: "lock-timeout",
+            statementTimeoutMs: 250,
+            deadlineMs: 2_000,
+          }),
+        /statement timeout|canceling statement|query execution canceled/iu
+      );
+    } finally {
+      try {
+        await locker.query("ROLLBACK");
+      } finally {
+        await locker.end();
+      }
+    }
+
+    const recovered = await deleteFanoutRowsInBatches({
+      phase: "lock-recovery",
+    });
+    assert.equal(recovered.deletedRows, 1);
+    assert.equal(recovered.batches, 1);
+    assert.equal(recovered.remainingRows, 0);
+  }
+);
+
+// ── Test 4 — one ANN recall fans out across a multi-range memory (real DB only) ──
+test(
+  "4. the memory splits into >=2 KV ranges and one ANN recall fans out across them correctly",
   { skip: REAL_DB ? false : "requires a real CockroachDB (SPLIT AT / SHOW RANGES / EXPLAIN not modelled by the mock)" },
   async () => {
     const result = await runFanoutDemo({
@@ -128,5 +308,27 @@ test(
     );
     // Index-accelerated ANN, not a full scan.
     assert.equal(result.usesVectorSearch, true, "EXPLAIN did not plan a `vector search` node");
+    assert.equal(result.postCleanup.deletedRows, result.corpus);
+    assert.equal(
+      result.postCleanup.batches,
+      Math.ceil(result.corpus / FANOUT_CLEANUP_BATCH_SIZE)
+    );
+    assert.equal(
+      result.postCleanup.maxBatchRows,
+      Math.min(result.corpus, FANOUT_CLEANUP_BATCH_SIZE)
+    );
+    assert.equal(result.postCleanup.remainingRows, 0);
+    assert.equal(result.unsplitPoints, 3);
+
+    const remaining = await query<{ n: string }>(
+      "SELECT count(*) AS n FROM agent_memory"
+    );
+    assert.equal(Number(remaining[0]?.n), 0);
+    const enforced = await query<{ n: string }>(
+      `SELECT count(*) AS n
+         FROM [SHOW RANGES FROM TABLE agent_memory]
+        WHERE split_enforced_until IS NOT NULL`
+    );
+    assert.equal(Number(enforced[0]?.n), 0);
   }
 );

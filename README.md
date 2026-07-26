@@ -259,11 +259,14 @@ Requirements: Node.js 22+, Docker, and npm.
 
 ```bash
 npm ci
-docker compose up -d
-npm run db:schema
-npm test
-npm run memory:demo
+docker compose up -d --wait
+npm run local:bootstrap
 ```
+
+`local:bootstrap` is loopback-only and add-only. It creates the dedicated local
+database, applies the schema, seeds the deterministic nine public fixtures plus
+three RLS isolation canaries, preserves unrelated rows, and proves the exact
+`12/12/12` fixture contract. Builds and tests remain CI-owned.
 
 The frontend has its own locked workspace:
 
