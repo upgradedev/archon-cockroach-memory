@@ -1299,7 +1299,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
-    2
+    3
   );
   assert.equal(
     (bootstrap.match(/- cloudfront:GetDistribution$/gmu) ?? []).length,
