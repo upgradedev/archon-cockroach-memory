@@ -2905,7 +2905,7 @@ function sourceChecks(): SourceCheck[] {
         ).length === 2 &&
         (
           deploy.match(/--template-stage Original/gu) ?? []
-        ).length === 2 &&
+        ).length === 4 &&
         (
           deploy.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? []
         ).length === 2 &&

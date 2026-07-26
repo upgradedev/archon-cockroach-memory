@@ -1838,7 +1838,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/--template-stage Original/gu) ?? []).length,
-    2
+    4
   );
   assert.equal(
     (workflow.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? [])

@@ -1120,7 +1120,7 @@ test("application logging workflow cross-binds stack state and immutable receipt
         /bash aws\/prove-application-s3-access-logging\.sh verify/gmu
       ) ?? []
     ).length,
-    8
+    4
   );
   assert.equal(
     (
