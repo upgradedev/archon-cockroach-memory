@@ -16,6 +16,14 @@ Parameters:
       - staging
       - production
     Default: staging
+  HttpApiStageName:
+    Type: String
+    Default: live
+    AllowedValues:
+      - live
+    Description: >-
+      Single source of truth for the protected named HTTP API stage and the
+      CloudFront API origin path.
   DatabaseSecretId:
     Type: String
     AllowedPattern: "^[A-Za-z0-9/_+=.@-]+$"
@@ -243,7 +251,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  ServerlessHttpApi:
+  ArchonHttpApi:
     Type: AWS::Serverless::HttpApi
     DependsOn:
       - ApiVendedAccessLogGroup
@@ -253,7 +261,7 @@ Resources:
       # stage. A named stage keeps the generated AWS::ApiGatewayV2::Stage
       # explicit in the processed template so throttling, metrics, and access
       # logs are enforced rather than merely declared.
-      StageName: live
+      StageName: !Ref HttpApiStageName
       FailOnWarnings: true
       DefaultRouteSettings:
         DetailedMetricsEnabled: true
@@ -305,25 +313,25 @@ Resources:
         Health:
           Type: HttpApi
           Properties:
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref ArchonHttpApi
             Path: /api/health
             Method: GET
         RecallPost:
           Type: HttpApi
           Properties:
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref ArchonHttpApi
             Path: /api/recall
             Method: POST
         Audit:
           Type: HttpApi
           Properties:
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref ArchonHttpApi
             Path: /api/audit
             Method: GET
         Proof:
           Type: HttpApi
           Properties:
-            ApiId: !Ref ServerlessHttpApi
+            ApiId: !Ref ArchonHttpApi
             Path: /api/proof
             Method: GET
     Metadata:
@@ -368,10 +376,11 @@ Resources:
             OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
             S3OriginConfig: {}
           - Id: ApiOrigin
-            DomainName: !Sub "${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
-            # The generated Stage reference creates an ordering edge: CloudFront
-            # cannot switch its origin path until the named stage exists.
-            OriginPath: !Join ["", ["/", !Ref ServerlessHttpApi.Stage]]
+            DomainName: !Sub "${ArchonHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+            # Bind CloudFront to the exact stage resource generated from the
+            # non-reserved API logical ID. This Ref resolves to the deployed
+            # stage name and creates the required ordering edge.
+            OriginPath: !Join ["", ["/", !Ref ArchonHttpApi.Stage]]
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only
@@ -552,9 +561,9 @@ Resources:
       MetricName: 5xx
       Dimensions:
         - Name: ApiId
-          Value: !Ref ServerlessHttpApi
+          Value: !Ref ArchonHttpApi
         - Name: Stage
-          Value: live
+          Value: !Ref HttpApiStageName
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
@@ -609,7 +618,7 @@ Resources:
                 "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "metrics": [
-                  ["AWS/ApiGateway", "Count", "ApiId", "${ServerlessHttpApi}", "Stage", "live"],
+                  ["AWS/ApiGateway", "Count", "ApiId", "${ArchonHttpApi}", "Stage", "${HttpApiStageName}"],
                   [".", "4xx", ".", ".", ".", "."],
                   [".", "5xx", ".", ".", ".", "."],
                   [".", "Latency", ".", ".", ".", ".", {"stat": "p95"}]
@@ -648,13 +657,16 @@ Outputs:
     Value: !Ref SpaBucket
   ApiEndpoint:
     Description: Direct HTTP API endpoint (CloudFront /api/* is preferred)
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/live"
+    Value: !Join
+      - ""
+      - - !Sub "https://${ArchonHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+        - !Ref ArchonHttpApi.Stage
   ApiId:
     Description: HTTP API identifier used by the protected live-stage release proof
-    Value: !Ref ServerlessHttpApi
+    Value: !Ref ArchonHttpApi
   ApiStageName:
     Description: Named HTTP API stage whose controls are verified after deployment
-    Value: live
+    Value: !Ref ArchonHttpApi.Stage
   ApiAccessLogGroupName:
     Description: Access-log group verified by the protected release pipeline
     Value: !Ref ApiVendedAccessLogGroup

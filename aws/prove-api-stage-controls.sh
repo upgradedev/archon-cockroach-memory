@@ -7,8 +7,8 @@
 #
 # Preflight requires STACK_NAME, API_ACCESS_LOG_GROUP, and AWS_REGION. It proves
 # the OIDC role can perform every read before SAM is allowed to mutate the stack.
-# Verify additionally requires API_ID, API_STAGE_NAME, APPLICATION_URL, and
-# AWS_ACCOUNT_ID.
+# Verify additionally requires API_ID, API_STAGE_NAME, API_ENDPOINT,
+# APPLICATION_URL, and AWS_ACCOUNT_ID.
 set -euo pipefail
 
 mode="${1:-verify}"
@@ -61,6 +61,18 @@ if [ "$mode" = "preflight" ]; then
     echo "Unable to resolve the current API id from the stack output." >&2
     exit 1
   fi
+  distribution_id="$(
+    jq -er \
+      '.Stacks[0].Outputs[]
+       | select(.OutputKey == "DistributionId")
+       | .OutputValue' <<<"$current_stack"
+  )"
+  aws cloudfront get-distribution \
+    --id "$distribution_id" \
+    --output json >/dev/null
+  aws cloudfront get-distribution-config \
+    --id "$distribution_id" \
+    --output json >/dev/null
   deployed_log_group="$(
     jq -r \
       '[.Stacks[0].Outputs[]?
@@ -117,6 +129,8 @@ if [ "$mode" = "preflight" ]; then
       permissions: [
         "cloudformation:GetTemplate",
         "apigateway:GET",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
         "logs:DescribeLogStreams",
         "logs:FilterLogEvents"
       ]
@@ -124,7 +138,7 @@ if [ "$mode" = "preflight" ]; then
   exit 0
 fi
 
-for name in API_ID API_STAGE_NAME APPLICATION_URL AWS_ACCOUNT_ID; do
+for name in API_ID API_STAGE_NAME API_ENDPOINT APPLICATION_URL AWS_ACCOUNT_ID DISTRIBUTION_ID; do
   if [ -z "${!name:-}" ]; then
     echo "$name is required for the API stage proof." >&2
     exit 1
@@ -133,6 +147,12 @@ done
 
 if [ "$API_STAGE_NAME" != "live" ]; then
   echo "The protected API stage must be the named live stage." >&2
+  exit 1
+fi
+
+expected_api_endpoint="https://${API_ID}.execute-api.${AWS_REGION}.amazonaws.com/${API_STAGE_NAME}"
+if [ "$API_ENDPOINT" != "$expected_api_endpoint" ]; then
+  echo "The direct API endpoint is not bound to the protected named stage." >&2
   exit 1
 fi
 
@@ -151,21 +171,42 @@ jq -e \
       .TemplateBody.Resources
       | to_entries[]
       | select(.value.Type == "AWS::ApiGatewayV2::Stage")
-      | .value.Properties
+      | {
+          logicalId: .key,
+          properties: .value.Properties
+        }
     ] as $stages
-    | ($stages | length) == 1
-      and $stages[0].StageName == $stage
-      and $stages[0].AutoDeploy == true
-      and $stages[0].DefaultRouteSettings.DetailedMetricsEnabled == true
-      and $stages[0].DefaultRouteSettings.ThrottlingBurstLimit.Ref == "ApiThrottleBurst"
-      and $stages[0].DefaultRouteSettings.ThrottlingRateLimit.Ref == "ApiThrottleRate"
-      and (($stages[0].RouteSettings // {}) | length) == 0
-      and $stages[0].AccessLogSettings.DestinationArn."Fn::GetAtt"
+    | [
+        .TemplateBody.Resources
+        | to_entries[]
+        | select(.value.Type == "AWS::CloudFront::Distribution")
+        | .value.Properties.DistributionConfig.Origins[]
+        | select(.Id == "ApiOrigin")
+      ] as $apiOrigins
+    | .TemplateBody.Parameters.HttpApiStageName.Type == "String"
+      and .TemplateBody.Parameters.HttpApiStageName.Default == $stage
+      and .TemplateBody.Parameters.HttpApiStageName.AllowedValues == [$stage]
+      and ($stages | length) == 1
+      and $stages[0].logicalId != "ServerlessHttpApiApiGatewayDefaultStage"
+      and ($stages[0].logicalId | startswith("ArchonHttpApi"))
+      and $stages[0].properties.ApiId.Ref == "ArchonHttpApi"
+      and $stages[0].properties.StageName.Ref == "HttpApiStageName"
+      and $stages[0].properties.AutoDeploy == true
+      and $stages[0].properties.DefaultRouteSettings.DetailedMetricsEnabled == true
+      and $stages[0].properties.DefaultRouteSettings.ThrottlingBurstLimit.Ref == "ApiThrottleBurst"
+      and $stages[0].properties.DefaultRouteSettings.ThrottlingRateLimit.Ref == "ApiThrottleRate"
+      and (($stages[0].properties.RouteSettings // {}) | length) == 0
+      and $stages[0].properties.AccessLogSettings.DestinationArn."Fn::GetAtt"
         == ["ApiVendedAccessLogGroup", "Arn"]
-      and ($stages[0].AccessLogSettings.Format | contains("$context.requestId"))
-      and ($stages[0].AccessLogSettings.Format | contains("$context.stage"))
-      and ($stages[0].AccessLogSettings.Format | contains("$context.routeKey"))
-      and ($stages[0].AccessLogSettings.Format | contains("$context.status"))
+      and ($stages[0].properties.AccessLogSettings.Format | contains("$context.requestId"))
+      and ($stages[0].properties.AccessLogSettings.Format | contains("$context.stage"))
+      and ($stages[0].properties.AccessLogSettings.Format | contains("$context.routeKey"))
+      and ($stages[0].properties.AccessLogSettings.Format | contains("$context.status"))
+      and ($apiOrigins | length) == 1
+      and $apiOrigins[0].OriginPath."Fn::Join"[0] == ""
+      and $apiOrigins[0].OriginPath."Fn::Join"[1][0] == "/"
+      and $apiOrigins[0].OriginPath."Fn::Join"[1][1].Ref
+        == $stages[0].logicalId
   ' <<<"$processed_template" >/dev/null
 
 live_stage="$(
@@ -207,11 +248,55 @@ jq -e \
       and (.AccessLogSettings.Format | contains("$context.status"))
   ' <<<"$live_stage" >/dev/null
 
+aws cloudfront wait distribution-deployed \
+  --id "$DISTRIBUTION_ID"
+distribution_status="$(
+  aws cloudfront get-distribution \
+    --id "$DISTRIBUTION_ID" \
+    --query 'Distribution.Status' \
+    --output text
+)"
+if [ "$distribution_status" != "Deployed" ]; then
+  echo "CloudFront did not reach the deployed state." >&2
+  exit 1
+fi
+cloudfront_config="$(
+  aws cloudfront get-distribution-config \
+    --id "$DISTRIBUTION_ID" \
+    --output json
+)"
+expected_origin_domain="${API_ID}.execute-api.${AWS_REGION}.amazonaws.com"
+jq -e \
+  --arg originPath "/${API_STAGE_NAME}" \
+  --arg originDomain "$expected_origin_domain" \
+  '
+    [
+      .DistributionConfig.Origins.Items[]
+      | select(.Id == "ApiOrigin")
+    ] as $apiOrigins
+    | ($apiOrigins | length) == 1
+      and $apiOrigins[0].OriginPath == $originPath
+      and $apiOrigins[0].DomainName == $originDomain
+  ' <<<"$cloudfront_config" >/dev/null
+
+direct_health="$(
+  curl --fail --silent --show-error \
+    --retry 3 --retry-delay 2 --retry-all-errors \
+    --max-time 30 \
+    "$API_ENDPOINT/api/health"
+)"
+jq -e '.ok == true and .status == "reachable"' \
+  <<<"$direct_health" >/dev/null
+
 start_ms="$((($(date +%s) - 2) * 1000))"
-curl --fail --silent --show-error \
-  --retry 3 --retry-delay 2 --retry-all-errors \
-  --max-time 30 \
-  "$APPLICATION_URL/api/health" >/dev/null
+same_origin_health="$(
+  curl --fail --silent --show-error \
+    --retry 3 --retry-delay 2 --retry-all-errors \
+    --max-time 30 \
+    "$APPLICATION_URL/api/health"
+)"
+jq -e '.ok == true and .status == "reachable"' \
+  <<<"$same_origin_health" >/dev/null
 
 for attempt in $(seq 1 12); do
   streams="$(
@@ -258,6 +343,10 @@ for attempt in $(seq 1 12); do
         detailedMetrics: true,
         throttlingRate: 5,
         throttlingBurst: 10,
+        cloudFrontStatus: "Deployed",
+        cloudFrontOriginPath: "/live",
+        directStageHealth: "GET /live/api/health 200",
+        sameOriginHealth: "GET /api/health 200",
         accessLogGroup: $logGroup,
         accessLogEvent: "GET /api/health 200"
       }'
