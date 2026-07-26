@@ -1561,6 +1561,7 @@ function sourceChecks(): SourceCheck[] {
     });
   const watchdogWorkflowContract =
     hasExactAwsRecoveryTrigger(recoveryWorkflow) &&
+    hasExactAwsDeliveryConcurrency(foundationWorkflow) &&
     hasExactAwsDeliveryConcurrency(deploy) &&
     hasExactAwsDeliveryConcurrency(recoveryWorkflow) &&
     /name: Deploy and smoke staging/u.test(deploy) &&

@@ -22,6 +22,7 @@ on:
 concurrency:
   group: aws-production-delivery
   cancel-in-progress: false
+  queue: max
 
 permissions:
   actions: read

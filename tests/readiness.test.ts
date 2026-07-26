@@ -82,6 +82,10 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
     new URL("../.github/workflows/recover-aws.yml", import.meta.url),
     "utf8"
   );
+  const foundationWorkflow = readFileSync(
+    new URL("../.github/workflows/bootstrap-aws.yml", import.meta.url),
+    "utf8"
+  );
   const ci = readFileSync(
     new URL("../.github/workflows/ci.yml", import.meta.url),
     "utf8"
@@ -111,6 +115,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   );
 
   assert.equal(hasExactAwsRecoveryTrigger(recovery), true);
+  assert.equal(hasExactAwsDeliveryConcurrency(foundationWorkflow), true);
   assert.equal(hasExactAwsDeliveryConcurrency(deploy), true);
   assert.equal(hasExactAwsDeliveryConcurrency(recovery), true);
   assert.match(deploy, /name: Deploy and smoke staging/u);
