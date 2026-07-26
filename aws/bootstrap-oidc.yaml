@@ -1069,15 +1069,10 @@ Resources:
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: ListFoundationAutomationRules
-                Effect: Allow
-                Action: securityhub:ListAutomationRules
-                Resource: "*"
               - Sid: InspectFoundationAutomationRule
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:securityhub:${AWS::Region}:${AWS::AccountId}:automation-rule/*
+                Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -1152,6 +1147,15 @@ Resources:
                   - s3:GetEncryptionConfiguration
                   - s3:GetLifecycleConfiguration
                 Resource: !GetAtt S3AccessLogArchive.Arn
+              - Sid: InspectS3AccessLoggingFoundationStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+              - Sid: InspectS3AccessLoggingFoundationRule
+                Effect: Allow
+                Action: securityhub:BatchGetAutomationRules
+                Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
               - Effect: Allow
                 Action:
                   - s3:DeleteObject
@@ -1274,6 +1278,15 @@ Resources:
                   - s3:GetEncryptionConfiguration
                   - s3:GetLifecycleConfiguration
                 Resource: !GetAtt S3AccessLogArchive.Arn
+              - Sid: InspectS3AccessLoggingFoundationStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+              - Sid: InspectS3AccessLoggingFoundationRule
+                Effect: Allow
+                Action: securityhub:BatchGetAutomationRules
+                Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
               - Effect: Allow
                 Action:
                   - s3:DeleteObject

@@ -1309,6 +1309,28 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ExecuteOnlyBootstrapLoggingChangeSets[\s\S]*?cloudformation:ChangeSetName:[\s\S]*?changeSet\/bootstrap-s3-\*\/\*/u.test(
           deliveryBootstrap
         ) &&
+        (
+          deliveryBootstrap.match(
+            /Sid: InspectS3AccessLoggingFoundationStack/gmu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deliveryBootstrap.match(
+            /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+          ) ?? []
+        ).length === 3 &&
+        (
+          deliveryBootstrap.match(
+            /Sid: InspectS3AccessLoggingFoundationRule/gmu
+          ) ?? []
+        ).length === 2 &&
+        !/ListAutomationRules|automation-rule\/\*/u.test(
+          deliveryBootstrap
+        ) &&
+        !/list-automation-rules/u.test(s3AccessLoggingProof) &&
+        /\.Rules\[0\]\.RuleName == \$ruleName/u.test(
+          s3AccessLoggingProof
+        ) &&
         /name: Bootstrap AWS Foundation/u.test(foundationWorkflow) &&
         /operation:[\s\S]*?- plan[\s\S]*?- apply/u.test(
           foundationWorkflow

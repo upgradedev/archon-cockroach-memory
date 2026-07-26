@@ -319,25 +319,6 @@ else
     ' <<<"$artifact_logging" >/dev/null
 fi
 
-automation_list="$(
-  aws_json \
-    "the Security Hub automation-rule inventory" \
-    securityhub list-automation-rules \
-    --max-results 100 \
-    --region "$AWS_REGION"
-)"
-jq -e \
-  --arg ruleArn "$rule_arn" \
-  --arg ruleName "${APP_NAME}-intentional-s3-log-archive-s39" \
-  '
-    [.AutomationRulesMetadata[]
-      | select(.RuleArn == $ruleArn and .RuleName == $ruleName)] as $matches
-    | ($matches | length) == 1
-      and $matches[0].RuleOrder == 1
-      and $matches[0].RuleStatus == "ENABLED"
-      and $matches[0].IsTerminal == true
-  ' <<<"$automation_list" >/dev/null
-
 automation_rule="$(
   aws_json \
     "the Security Hub S3.9 suppression rule" \
@@ -347,6 +328,7 @@ automation_rule="$(
 )"
 jq -e \
   --arg ruleArn "$rule_arn" \
+  --arg ruleName "${APP_NAME}-intentional-s3-log-archive-s39" \
   --arg account "$AWS_ACCOUNT_ID" \
   --arg region "$AWS_REGION" \
   --arg archiveArn "$archive_arn" \
@@ -359,6 +341,7 @@ jq -e \
     (.Rules | length) == 1
     and (.UnprocessedAutomationRules | length) == 0
     and .Rules[0].RuleArn == $ruleArn
+    and .Rules[0].RuleName == $ruleName
     and .Rules[0].RuleOrder == 1
     and .Rules[0].RuleStatus == "ENABLED"
     and .Rules[0].IsTerminal == true
