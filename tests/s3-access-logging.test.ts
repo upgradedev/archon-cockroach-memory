@@ -163,11 +163,11 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
-    /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole[\s\S]*?role\/\$\{AppName\}-staging-cloudformation[\s\S]*?role\/\$\{AppName\}-production-cloudformation[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+    /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(
     role,
-    /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+    /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.equal(
     (role.match(/Action: s3:PutBucketLogging/gmu) ?? []).length,
@@ -181,7 +181,15 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.doesNotMatch(
     role,
-    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*/u
+    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass|ListRoles|ListRolePolicies|GetRolePolicy|ListAttachedRolePolicies|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
+  );
+  assert.equal(
+    (
+      role.match(
+        /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+      ) ?? []
+    ).length,
+    2
   );
   assert.match(
     role,

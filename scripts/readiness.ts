@@ -737,6 +737,10 @@ function sourceChecks(): SourceCheck[] {
   );
   const lambdaTemplate = read("aws/template.yaml");
   const deliveryBootstrap = read("aws/bootstrap-oidc.yaml");
+  const foundationPromotionRole =
+    deliveryBootstrap.match(
+      /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u
+    )?.[0] ?? "";
   const apiStageProof = read("aws/prove-api-stage-controls.sh");
   const s3AccessLoggingProof = read(
     "aws/prove-s3-access-logging.sh"
@@ -1309,13 +1313,28 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ExecuteOnlyBootstrapLoggingChangeSets[\s\S]*?cloudformation:ChangeSetName:[\s\S]*?changeSet\/bootstrap-s3-\*\/\*/u.test(
           deliveryBootstrap
         ) &&
-        /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole[\s\S]*?role\/\$\{AppName\}-staging-cloudformation[\s\S]*?role\/\$\{AppName\}-production-cloudformation[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
-          deliveryBootstrap
+        /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          foundationPromotionRole
         ) &&
-        /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource[\s\S]*?Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
-          deliveryBootstrap
+        /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+          foundationPromotionRole
         ) &&
-        !/role\/\*|automation-rule\/\*/u.test(deliveryBootstrap) &&
+        (
+          foundationPromotionRole.match(/Action: iam:GetRole/gmu) ?? []
+        ).length === 1 &&
+        (
+          foundationPromotionRole.match(
+            /Action: securityhub:ListTagsForResource/gmu
+          ) ?? []
+        ).length === 1 &&
+        (
+          foundationPromotionRole.match(
+            /Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn/gmu
+          ) ?? []
+        ).length === 2 &&
+        !/iam:(?:ListRoles|ListRolePolicies|GetRolePolicy|ListAttachedRolePolicies|ListRoleTags)|role\/\*|automation-rule\/\*|Resource: "\*"/u.test(
+          foundationPromotionRole
+        ) &&
         (
           deliveryBootstrap.match(
             /Sid: InspectS3AccessLoggingFoundationStack/gmu
