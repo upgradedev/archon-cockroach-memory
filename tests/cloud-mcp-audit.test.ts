@@ -6,8 +6,10 @@ import {
   MANAGED_MCP_AGGREGATE_QUERY,
   MANAGED_MCP_CALLED_TOOLS,
   MANAGED_MCP_QUERY_BOUND,
+  MANAGED_MCP_REQUEST_TIMEOUT_MS,
   MANAGED_MCP_RECEIPT_SCHEMA_VERSION,
   buildManagedMcpReceiptV2,
+  compatibleArgs,
   parseManagedMcpAggregateResult,
 } from "../scripts/cloud-mcp-audit.js";
 
@@ -85,6 +87,84 @@ test("managed MCP parser accepts only exact 9/9/9 structured or JSON-text rows",
   );
   assert.deepEqual(
     parseManagedMcpAggregateResult(textResult()),
+    EXPECTED_MANAGED_MCP_AGGREGATE
+  );
+});
+
+test("managed MCP audit bounds every protocol request", () => {
+  assert.equal(MANAGED_MCP_REQUEST_TIMEOUT_MS, 45_000);
+});
+
+test("managed MCP tool arguments require explicit supported scope aliases", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      database_name: { type: "string" },
+      table_name: { type: "string" },
+    },
+  };
+  assert.deepEqual(
+    compatibleArgs(
+      schema,
+      {
+        database: "archon",
+        database_name: "archon",
+        table: "agent_memory",
+        table_name: "agent_memory",
+      },
+      [
+        ["database", "database_name"],
+        ["table", "table_name"],
+      ]
+    ),
+    {
+      database_name: "archon",
+      table_name: "agent_memory",
+    }
+  );
+
+  for (const invalidSchema of [
+    undefined,
+    {},
+    { type: "object" },
+    { type: "object", properties: {} },
+  ]) {
+    assert.throws(
+      () =>
+        compatibleArgs(
+          invalidSchema,
+          { database: "archon", database_name: "archon" },
+          [["database", "database_name"]]
+        ),
+      /must declare supported properties/u
+    );
+  }
+
+  assert.throws(
+    () =>
+      compatibleArgs(
+        { type: "object", properties: { unrelated: { type: "string" } } },
+        { database: "archon", database_name: "archon" },
+        [["database", "database_name"]]
+      ),
+    /required aliases: database, database_name/u
+  );
+  assert.deepEqual(compatibleArgs({}, {}), {});
+});
+
+test("managed MCP structured aggregate takes precedence over conflicting text", () => {
+  assert.deepEqual(
+    parseManagedMcpAggregateResult({
+      structuredContent: { rows: [exactRow] },
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            rows: [{ ...exactRow, persisted: 10 }],
+          }),
+        },
+      ],
+    }),
     EXPECTED_MANAGED_MCP_AGGREGATE
   );
 });

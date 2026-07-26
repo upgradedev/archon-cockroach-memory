@@ -33,6 +33,7 @@ export const MANAGED_MCP_QUERY_BOUND = Object.freeze({
   innerLimit: 10,
   outerLimit: 1,
 });
+export const MANAGED_MCP_REQUEST_TIMEOUT_MS = 45_000;
 export const EXPECTED_MANAGED_MCP_AGGREGATE = Object.freeze({
   persisted: 9,
   idempotencyKeys: 9,
@@ -390,7 +391,6 @@ async function resolveClusterId(apiKey: string): Promise<string> {
   const clusters = parseClusters(await response.json());
   const exact = clusters.find((cluster) => cluster.name === clusterName);
   if (exact) return exact.id;
-  if (clusters.length === 1) return clusters[0].id;
 
   throw new Error(
     "The configured cluster was not found; set COCKROACH_CLUSTER_ID explicitly."
@@ -400,7 +400,7 @@ async function resolveClusterId(apiKey: string): Promise<string> {
 function toolText(result: unknown): string {
   const root = object(result);
   const structured = root?.structuredContent;
-  if (structured !== undefined) return JSON.stringify(structured);
+  if (structured !== undefined) return JSON.stringify(structured) ?? "";
 
   const content = Array.isArray(root?.content) ? root.content : [];
   return content
@@ -416,22 +416,38 @@ function hasAny(haystack: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(haystack));
 }
 
-function availablePropertyNames(inputSchema: unknown): Set<string> {
+function availablePropertyNames(inputSchema: unknown): Set<string> | undefined {
   const schema = object(inputSchema);
   const properties = object(schema?.properties);
-  return new Set(properties ? Object.keys(properties) : []);
+  return properties ? new Set(Object.keys(properties)) : undefined;
 }
 
-function compatibleArgs(
+export function compatibleArgs(
   inputSchema: unknown,
-  candidates: Record<string, unknown>
+  candidates: Record<string, unknown>,
+  requiredAliasGroups: readonly (readonly string[])[] = []
 ): Record<string, unknown> {
+  if (Object.keys(candidates).length === 0) return {};
+
   const available = availablePropertyNames(inputSchema);
-  return Object.fromEntries(
-    Object.entries(candidates).filter(
-      ([key]) => available.size === 0 || available.has(key)
-    )
+  if (!available || available.size === 0) {
+    throw new Error(
+      "Managed MCP tool input schema must declare supported properties."
+    );
+  }
+  const compatible = Object.fromEntries(
+    Object.entries(candidates).filter(([key]) => available.has(key))
   );
+  for (const aliases of requiredAliasGroups) {
+    if (!aliases.some((alias) => hasOwn(compatible, alias))) {
+      throw new Error(
+        `Managed MCP tool schema exposes none of the required aliases: ${aliases.join(
+          ", "
+        )}.`
+      );
+    }
+  }
+  return compatible;
 }
 
 async function main(): Promise<void> {
@@ -464,8 +480,12 @@ async function main(): Promise<void> {
   const proofResults: ProofResult[] = [];
   const calledTools: ManagedMcpToolName[] = [];
   try {
-    await client.connect(transport);
-    const listed = await client.listTools();
+    await client.connect(transport, {
+      timeout: MANAGED_MCP_REQUEST_TIMEOUT_MS,
+    });
+    const listed = await client.listTools(undefined, {
+      timeout: MANAGED_MCP_REQUEST_TIMEOUT_MS,
+    });
     const tools = new Map(listed.tools.map((tool) => [tool.name, tool]));
 
     for (const name of MANAGED_MCP_CALLED_TOOLS) {
@@ -476,13 +496,16 @@ async function main(): Promise<void> {
 
     const call = async (
       name: ManagedMcpToolName,
-      candidates: Record<string, unknown>
+      arguments_: Record<string, unknown>
     ): Promise<unknown> => {
-      const tool = tools.get(name);
-      const result = await client.callTool({
-        name,
-        arguments: compatibleArgs(tool?.inputSchema, candidates),
-      });
+      const result = await client.callTool(
+        {
+          name,
+          arguments: arguments_,
+        },
+        undefined,
+        { timeout: MANAGED_MCP_REQUEST_TIMEOUT_MS }
+      );
       if (object(result)?.isError === true) {
         throw new Error(`Managed MCP tool "${name}" returned an error.`);
       }
@@ -497,22 +520,39 @@ async function main(): Promise<void> {
       ok: hasAny(cluster, [/AWS/i, /CockroachDB/i, /version/i, /region/i]),
     });
 
-    const tablesResult = await call("list_tables", {
-      database,
-      database_name: database,
-    });
+    const tablesResult = await call(
+      "list_tables",
+      compatibleArgs(
+        tools.get("list_tables")?.inputSchema,
+        {
+          database,
+          database_name: database,
+        },
+        [["database", "database_name"]]
+      )
+    );
     const tables = toolText(tablesResult);
     proofResults.push({
       name: "list_tables",
       ok: /agent_memory/i.test(tables),
     });
 
-    const schemaResult = await call("get_table_schema", {
-      database,
-      database_name: database,
-      table: "agent_memory",
-      table_name: "agent_memory",
-    });
+    const schemaResult = await call(
+      "get_table_schema",
+      compatibleArgs(
+        tools.get("get_table_schema")?.inputSchema,
+        {
+          database,
+          database_name: database,
+          table: "agent_memory",
+          table_name: "agent_memory",
+        },
+        [
+          ["database", "database_name"],
+          ["table", "table_name"],
+        ]
+      )
+    );
     const schema = toolText(schemaResult);
     proofResults.push({
       name: "get_table_schema",
@@ -526,12 +566,19 @@ async function main(): Promise<void> {
     });
 
     const selectTool = tools.get("select_query");
-    const selectArgs = compatibleArgs(selectTool?.inputSchema, {
-      database,
-      database_name: database,
-      query: MANAGED_MCP_AGGREGATE_QUERY,
-      sql: MANAGED_MCP_AGGREGATE_QUERY,
-    });
+    const selectArgs = compatibleArgs(
+      selectTool?.inputSchema,
+      {
+        database,
+        database_name: database,
+        query: MANAGED_MCP_AGGREGATE_QUERY,
+        sql: MANAGED_MCP_AGGREGATE_QUERY,
+      },
+      [
+        ["database", "database_name"],
+        ["query", "sql"],
+      ]
+    );
     if (
       selectArgs.query !== MANAGED_MCP_AGGREGATE_QUERY &&
       selectArgs.sql !== MANAGED_MCP_AGGREGATE_QUERY
@@ -564,10 +611,10 @@ const invokedDirectly =
   import.meta.url === pathToFileURL(resolve(process.argv[1]!)).href;
 
 if (invokedDirectly) {
-  main().catch((error) => {
-    const message =
-      error instanceof Error ? error.message : "Unknown managed MCP audit error.";
-    process.stderr.write(`Managed MCP audit failed: ${message}\n`);
+  main().catch(() => {
+    process.stderr.write(
+      "Managed MCP audit failed closed without publishing remote response data.\n"
+    );
     process.exitCode = 1;
   });
 }
