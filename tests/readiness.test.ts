@@ -1747,7 +1747,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.match(
     template,
-    /AccessLogSettings:\s+DestinationArn:\s+!GetAtt ApiVendedAccessLogGroup\.Arn/u
+    /AccessLogSettings:[\s\S]*?DestinationArn:\s+!Sub "arn:\$\{AWS::Partition\}:logs:\$\{AWS::Region\}:\$\{AWS::AccountId\}:log-group:\$\{ApiVendedAccessLogGroup\}"/u
   );
   assert.match(
     template,
