@@ -63,7 +63,8 @@ function processedTemplate(
             },
             AccessLogSettings: {
               DestinationArn: {
-                "Fn::GetAtt": ["ApiVendedAccessLogGroup", "Arn"],
+                "Fn::Sub":
+                  "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiVendedAccessLogGroup}",
               },
               Format:
                 '{"requestId":"$context.requestId","stage":"$context.stage","routeKey":"$context.routeKey","status":"$context.status"}',

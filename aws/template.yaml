@@ -274,7 +274,9 @@ Resources:
         ThrottlingBurstLimit: !Ref ApiThrottleBurst
         ThrottlingRateLimit: !Ref ApiThrottleRate
       AccessLogSettings:
-        DestinationArn: !GetAtt ApiVendedAccessLogGroup.Arn
+        # LogGroup.Arn appends ":*", but API Gateway stores the canonical ARN
+        # without that wildcard. Use the canonical form so drift stays IN_SYNC.
+        DestinationArn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiVendedAccessLogGroup}"
         Format: >-
           {"requestId":"$context.requestId","requestTime":"$context.requestTime","stage":"$context.stage","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","responseLatency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}
       Tags:

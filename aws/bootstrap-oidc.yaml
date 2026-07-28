@@ -693,6 +693,7 @@ Resources:
               - lambda:GetFunctionConfiguration
               - lambda:GetFunctionConcurrency
               - lambda:GetPolicy
+              - lambda:GetProvisionedConcurrencyConfig
               - lambda:GetRuntimeManagementConfig
               - lambda:ListAliases
               - lambda:ListTags
@@ -778,6 +779,7 @@ Resources:
               - lambda:GetFunctionConfiguration
               - lambda:GetFunctionConcurrency
               - lambda:GetPolicy
+              - lambda:GetProvisionedConcurrencyConfig
               - lambda:GetRuntimeManagementConfig
               - lambda:ListAliases
               - lambda:ListTags
@@ -843,6 +845,7 @@ Resources:
               - codedeploy:GetDeployment
               - codedeploy:GetDeploymentConfig
               - codedeploy:GetDeploymentGroup
+              - codedeploy:ListDeployments
               - codedeploy:ListTagsForResource
               - codedeploy:RegisterApplicationRevision
               - codedeploy:TagResource
@@ -852,6 +855,7 @@ Resources:
               - logs:CreateLogGroup
               - logs:DeleteLogDelivery
               - logs:DeleteLogGroup
+              - logs:DescribeIndexPolicies
               - logs:DescribeLogGroups
               - logs:DescribeLogStreams
               - logs:DescribeResourcePolicies

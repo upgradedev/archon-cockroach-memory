@@ -2551,7 +2551,12 @@ function sourceChecks(): SourceCheck[] {
         /ThrottlingRateLimit:\s*!Ref ApiThrottleRate/u.test(
           lambdaTemplate
         ) &&
-        /AccessLogSettings:/u.test(lambdaTemplate) &&
+        /AccessLogSettings:[\s\S]*?DestinationArn:\s*!Sub "arn:\$\{AWS::Partition\}:logs:\$\{AWS::Region\}:\$\{AWS::AccountId\}:log-group:\$\{ApiVendedAccessLogGroup\}"/u.test(
+          lambdaTemplate
+        ) &&
+        !/DestinationArn:\s*!GetAtt ApiVendedAccessLogGroup\.Arn/u.test(
+          lambdaTemplate
+        ) &&
         /\/aws\/vendedlogs\/apigateway\//u.test(lambdaTemplate) &&
         (
           lambdaTemplate.match(/DeletionPolicy:\s+RetainExceptOnCreate/gu) ??
@@ -2563,8 +2568,16 @@ function sourceChecks(): SourceCheck[] {
         /logs:CreateLogDelivery/u.test(deliveryBootstrap) &&
         /logs:PutResourcePolicy/u.test(deliveryBootstrap) &&
         /logs:UpdateLogDelivery/u.test(deliveryBootstrap) &&
+        /logs:DescribeIndexPolicies/u.test(deliveryBootstrap) &&
         /logs:DescribeLogStreams/u.test(deliveryBootstrap) &&
         /logs:FilterLogEvents/u.test(deliveryBootstrap) &&
+        /codedeploy:ListDeployments/u.test(deliveryBootstrap) &&
+        /Sid: StagingLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-staging-\*"/u.test(
+          deliveryBootstrap
+        ) &&
+        /Sid: ProductionLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-production-\*"/u.test(
+          deliveryBootstrap
+        ) &&
         (
           deliveryBootstrap.match(
             /log-group:\/aws\/(?:vendedlogs\/)?apigateway\/\$\{AppName\}-(?:staging|production):\*"/gu
@@ -2577,6 +2590,9 @@ function sourceChecks(): SourceCheck[] {
           deliveryBootstrap
         ) &&
         /--template-stage Processed/u.test(apiStageProof) &&
+        /DestinationArn\."Fn::Sub"[\s\S]*?== "arn:\$\{AWS::Partition\}:logs:\$\{AWS::Region\}:\$\{AWS::AccountId\}:log-group:\$\{ApiVendedAccessLogGroup\}"/u.test(
+          apiStageProof
+        ) &&
         /apigatewayv2 get-stage/u.test(apiStageProof) &&
         /cloudfront wait distribution-deployed/u.test(apiStageProof) &&
         /cloudfront get-distribution-config/u.test(apiStageProof) &&
@@ -2587,8 +2603,8 @@ function sourceChecks(): SourceCheck[] {
         stageRoutingProofsPrecedeFrontend &&
         ci.includes("reserved logical ID|unexpected behaviors") &&
         deploy.includes("reserved logical ID|unexpected behaviors"),
-      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
-      "The deployable AWS architecture or its live API stage-control proof is incomplete."
+      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the drift-stable canonical access-log ARN, complete read-only drift discovery, non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
+      "The deployable AWS architecture, canonical access-log ARN, complete drift-discovery permissions, or live API stage-control proof is incomplete."
     ),
     sourceCheck(
       "product.s3-access-logging-foundation",

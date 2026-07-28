@@ -196,8 +196,8 @@ jq -e \
       and $stages[0].properties.DefaultRouteSettings.ThrottlingBurstLimit.Ref == "ApiThrottleBurst"
       and $stages[0].properties.DefaultRouteSettings.ThrottlingRateLimit.Ref == "ApiThrottleRate"
       and (($stages[0].properties.RouteSettings // {}) | length) == 0
-      and $stages[0].properties.AccessLogSettings.DestinationArn."Fn::GetAtt"
-        == ["ApiVendedAccessLogGroup", "Arn"]
+      and $stages[0].properties.AccessLogSettings.DestinationArn."Fn::Sub"
+        == "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiVendedAccessLogGroup}"
       and ($stages[0].properties.AccessLogSettings.Format | contains("$context.requestId"))
       and ($stages[0].properties.AccessLogSettings.Format | contains("$context.stage"))
       and ($stages[0].properties.AccessLogSettings.Format | contains("$context.routeKey"))
@@ -230,9 +230,9 @@ elif ! grep -Eqi 'NotFoundException|not found' <<<"$legacy_stage"; then
   exit 1
 fi
 #
-# AWS::Logs::LogGroup.Arn includes a trailing ":*" for CloudFormation
-# references, but API Gateway V2 normalizes DestinationArn and returns the
-# log-group ARN without that resource wildcard from GetStage.
+# Source and runtime use the same canonical log-group ARN. A LogGroup.Arn
+# GetAtt would append ":*", which API Gateway strips and CloudFormation then
+# reports as perpetual drift.
 expected_log_arn="arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${API_ACCESS_LOG_GROUP}"
 
 if ! jq -e \
