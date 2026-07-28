@@ -2568,8 +2568,16 @@ function sourceChecks(): SourceCheck[] {
         /logs:CreateLogDelivery/u.test(deliveryBootstrap) &&
         /logs:PutResourcePolicy/u.test(deliveryBootstrap) &&
         /logs:UpdateLogDelivery/u.test(deliveryBootstrap) &&
+        /logs:DescribeIndexPolicies/u.test(deliveryBootstrap) &&
         /logs:DescribeLogStreams/u.test(deliveryBootstrap) &&
         /logs:FilterLogEvents/u.test(deliveryBootstrap) &&
+        /codedeploy:ListDeployments/u.test(deliveryBootstrap) &&
+        /Sid: StagingLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-staging-\*"/u.test(
+          deliveryBootstrap
+        ) &&
+        /Sid: ProductionLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-production-\*"/u.test(
+          deliveryBootstrap
+        ) &&
         (
           deliveryBootstrap.match(
             /log-group:\/aws\/(?:vendedlogs\/)?apigateway\/\$\{AppName\}-(?:staging|production):\*"/gu
@@ -2595,8 +2603,8 @@ function sourceChecks(): SourceCheck[] {
         stageRoutingProofsPrecedeFrontend &&
         ci.includes("reserved logical ID|unexpected behaviors") &&
         deploy.includes("reserved logical ID|unexpected behaviors"),
-      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the drift-stable canonical access-log ARN, non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
-      "The deployable AWS architecture, canonical access-log ARN, or live API stage-control proof is incomplete."
+      "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the drift-stable canonical access-log ARN, complete read-only drift discovery, non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
+      "The deployable AWS architecture, canonical access-log ARN, complete drift-discovery permissions, or live API stage-control proof is incomplete."
     ),
     sourceCheck(
       "product.s3-access-logging-foundation",

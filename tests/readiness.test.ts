@@ -1646,7 +1646,7 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
   );
 });
 
-test("readiness: both CloudFormation roles have scoped SAM transform and HTTP API tag permissions", () => {
+test("readiness: both CloudFormation roles have scoped transform, HTTP API tag, and drift-discovery permissions", () => {
   const bootstrap = readFileSync(
     new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
     "utf8"
@@ -1663,6 +1663,12 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
   const productionRole = bootstrap.match(
     /  ProductionExecutionRole:[\s\S]*?\n  StagingDeployRole:/u
   )?.[0];
+  const stagingResourcePolicy = bootstrap.match(
+    /  StagingCloudFormationResourcePolicy:[\s\S]*?\n  ProductionCloudFormationResourcePolicy:/u
+  )?.[0];
+  const productionResourcePolicy = bootstrap.match(
+    /  ProductionCloudFormationResourcePolicy:[\s\S]*?\n  CloudFormationCommonExecutionPolicy:/u
+  )?.[0];
 
   assert.ok(commonPolicy);
   assert.match(
@@ -1672,6 +1678,18 @@ test("readiness: both CloudFormation roles have scoped SAM transform and HTTP AP
   assert.match(
     commonPolicy,
     /- Sid: ApiGatewayV2ApiTags\s+Effect: Allow\s+Action:\s+- apigateway:DELETE\s+- apigateway:GET\s+- apigateway:POST\s+Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/tags\/\*"/u
+  );
+  assert.match(commonPolicy, /- codedeploy:ListDeployments$/mu);
+  assert.match(commonPolicy, /- logs:DescribeIndexPolicies$/mu);
+  assert.ok(stagingResourcePolicy);
+  assert.match(
+    stagingResourcePolicy,
+    /- Sid: StagingLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-staging-\*"/u
+  );
+  assert.ok(productionResourcePolicy);
+  assert.match(
+    productionResourcePolicy,
+    /- Sid: ProductionLambda[\s\S]*?- lambda:GetProvisionedConcurrencyConfig[\s\S]*?Resource: !Sub "arn:\$\{AWS::Partition\}:lambda:\$\{AWS::Region\}:\$\{AWS::AccountId\}:function:\$\{AppName\}-production-\*"/u
   );
   assert.ok(stageTagPolicy);
   assert.match(
@@ -2137,6 +2155,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     "logs:PutResourcePolicy",
     "logs:UpdateLogDelivery",
     "logs:DeleteLogDelivery",
+    "logs:DescribeIndexPolicies",
     "logs:DescribeLogStreams",
     "logs:DescribeResourcePolicies",
     "logs:FilterLogEvents",
@@ -2223,6 +2242,10 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   ]) {
     assert.ok(restore.includes(fragment), fragment);
   }
+  assert.equal(
+    (bootstrap.match(/- codedeploy:ListDeployments$/gmu) ?? []).length,
+    1
+  );
   for (const fragment of [
     "read_bounded_poll_setting",
     "assert_poll_phase_budget",
