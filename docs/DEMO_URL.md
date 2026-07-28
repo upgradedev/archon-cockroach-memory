@@ -35,18 +35,28 @@ That protected run passed build-once promotion, database release, staging,
 production, hosted Chromium, and the hardened exact-scope Managed MCP v2
 `9 / 9 / 9` receipt, with sanitized artifacts uploaded.
 
+The current protected release evidence is commit
+[`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`](https://github.com/upgradedev/archon-cockroach-memory/commit/8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf)
+in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
+That protected run passed build-once promotion, database release, staging,
+production, hosted Chromium, fresh protection/drift gates, durable intent
+commit, and the exact-scope Managed MCP v2 `9 / 9 / 9` receipt.
+
 The URL is a private-S3 React + Tailwind application behind CloudFront, with
 same-origin API Gateway and Lambda services in `eu-west-1`. It requires no
 credentials. Submission eligibility accepts this exact HTTPS CloudFront root
 only; paths, query strings, fragments, credentials, and substitute hosts fail
 closed.
 
-## Durable delivery recovery status
+## Durable delivery recovery evidence
 
-The live URL and the verified runs above use the deployed same-run canary and
-rollback controls. They do not prove the current AWS-native cross-run recovery,
-finalizer, or CloudFormation-control revision. That revision is checked in, but
-is **not claimed as deployed or hosted-CI evidence**:
+The current protected release proves the activated cross-run control plane:
+both environments created immutable recovery archives, armed their CAS-ledger
+intents, passed terminal controls, and committed the exact receipt-bound
+release. Automatic
+[Recover AWS run 30333619982](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30333619982)
+then assumed both recovery roles, classified the exact committed source run,
+and exited successfully without a lease or restoration mutation:
 
 - a data-only prior-release archive is created in CI and stored in the private,
   encrypted, versioned artifact bucket under
@@ -78,18 +88,15 @@ absence, and its cleanup can disable protection only after re-proving the exact
 run-owned stack. The checked-in audit does not mutate protection and is
 scheduled daily at `04:17 UTC`, when the classifier finds no pending recovery.
 
-The selected prefix is already inside the permissions of each live
-environment-scoped delivery role, so the ledger itself needs no new database
-authority. An unselected DynamoDB alternative would additionally require table
-provisioning. The bootstrap template models the required `Recover AWS` OIDC
-trust and narrow recovery, finalization, cleanup, termination-protection, and
-drift actions, but this is source state only. The currently authorized
-`Bootstrap AWS Foundation` workflow accepts only the exact artifact-bucket
-logging change and cannot promote IAM. Before this revision becomes live
-evidence, it needs a separately authorized, narrowly reviewed foundation IAM
-promotion, post-promotion assume-role and allowed/denied API proof, hosted CI,
-and protected staging/production recovery, finalizer, and audit receipts.
-Source presence or a local script run is insufficient.
+The selected prefix remains within each environment-scoped role and requires no
+new database authority. The recovery IAM revision was promoted through a
+separately authorized change set containing only three in-place managed-policy
+document updates; it completed successfully and foundation drift is `IN_SYNC`.
+The protected release exercised the required live APIs, and the automatic
+watchdog proved both recovery-role assumptions and the committed/no-op path.
+This does not claim an intentionally failed deployment, a live
+`RECOVERING → RECOVERED` finalizer receipt, or a scheduled `04:17 UTC` audit
+receipt. Source presence or a local script run remains insufficient evidence.
 
 The recovery bucket, ledger, credentials, and any watchdog compute are fixed to
 AWS `eu-west-1`. CloudFront remains global edge infrastructure. This design

@@ -95,16 +95,23 @@ the sanitized
 `managed-mcp-production-a2b69e3fad31010d14d0c3bca261421e635ca885`
 artifact.
 
+The same hardened proof passed again for the exact protected release commit
+[`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`](https://github.com/upgradedev/archon-cockroach-memory/commit/8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf)
+in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
+
 ## Separation from AWS delivery recovery
 
 Managed MCP and CockroachDB prove the application memory data plane. They do
 not act as the deployment rollback ledger and are not a hidden dependency of
 AWS recovery.
 
-The repository's current durable recovery revision is checked in but is not
-claimed as hosted-CI or deployed evidence. It uses conditional writes in the
-private, versioned S3 `candidates/recovery/<environment>/` prefix. An immutable
-bundle records the prior AWS release, and an ETag-guarded ledger serializes
+The current durable recovery revision is activated and hosted-proven at the
+exact protected release commit above. Deploy AWS run 30331875727 committed both environment
+intents after the full protected release; automatic
+[Recover AWS run 30333619982](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30333619982)
+proved trusted-source checkout, both recovery-role assumptions, exact
+classification, cleanup, and the safe no-op path. Conditional writes in the
+private, versioned S3 `candidates/recovery/<environment>/` prefix serialize
 `ARMED → COMMITTED` or `ARMED → RECOVERING → RECOVERED`.
 
 The checked-in watchdog classifies the exact source run after its completion
@@ -132,12 +139,13 @@ CockroachDB remains the system for durable agent facts, provenance, lifecycle,
 SQL audit, and vector recall; S3 recovery state contains no application memory
 or Managed MCP response.
 
-The bootstrap template models the required `Recover AWS` OIDC trust and narrow
-recovery permissions, but that source state is not proof of a live IAM
-promotion. The currently authorized foundation workflow accepts only the exact
-artifact-bucket logging change and cannot roll out IAM. A separate authorized
-IAM promotion, post-promotion role/API probes, hosted CI, and live
-staging/production recovery, finalizer, and audit receipts remain required.
+The required recovery trust and permissions are live. A separately authorized,
+exact-template foundation change set modified only three managed-policy
+documents in place, completed `UPDATE_COMPLETE`, and left foundation drift
+`IN_SYNC`. The standard logging-only promotion workflow remains unable to
+change IAM. The successful release and automatic watchdog do not constitute an
+intentional `RECOVERING → RECOVERED` restoration, finalizer receipt, or daily
+audit receipt; those remain unexercised live drills.
 
 Recovery bundles, extracted files, and receipts are generated and validated in
 protected CI under `${RUNNER_TEMP}` and removed from the runner after use. A

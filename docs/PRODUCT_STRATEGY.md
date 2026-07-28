@@ -157,10 +157,10 @@ separate repo, branding, schema, demo, and prior-work disclosure.
 
 ## Delivery order
 
-1. Close code, security, data-boundary, evaluation, infrastructure, and public-hosting
-   gaps.
-2. Capture repeatable deployment and live-provider receipts.
-3. Freeze the demo journey and English submission copy.
-4. Record the sub-three-minute video.
-5. Publish any optional post and submit Devpost last.
+1. [x] Close code, security, data-boundary, evaluation, infrastructure, and
+   public-hosting gaps.
+2. [x] Capture repeatable deployment and live-provider receipts.
+3. [ ] Freeze the demo journey and English submission copy.
+4. [ ] Record the sub-three-minute video.
+5. [ ] Publish any optional post and submit Devpost last.
 

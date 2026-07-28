@@ -167,15 +167,26 @@ The deployment follows the AWS serverless web application reference pattern:
   `ExecutedVersion` behind the weighted alias; separate function/API/throttle
   alarms and an operations dashboard retain broad operational coverage.
 
-### Durable AWS delivery recovery — checked-in source, live rollout pending
+### Durable AWS delivery recovery — live protected rollout
 
 The repository now contains the source-controlled workflow, scripts, strict
 receipt validators, finalizer, tests, and readiness rules for surviving loss or
-cancellation of the original GitHub Actions runner. That source state alone is
-deliberately **not** claimed as deployed evidence: exact-revision hosted CI is
-required for source readiness, while an authorized live IAM promotion and live
-staging/production recovery proofs remain required for deployed evidence. Its
-S3 CAS data plane uses the private, versioned artifact bucket. Deployment
+cancellation of the original GitHub Actions runner. That source and its AWS
+activation are live at exact protected code-bearing commit
+[`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`](https://github.com/upgradedev/archon-cockroach-memory/commit/8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf):
+[main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668301),
+[CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668308),
+the complete protected
+[Deploy AWS run](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2),
+and the automatic post-deploy
+[Recover AWS classification](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30333619982)
+all succeeded. Both recovery ledgers ended terminal `COMMITTED`, bound to the
+exact candidate/run/attempt and immutable receipt, with no lease left active.
+The automatic watchdog then proved the successful source run required no
+restoration. This is not presented as an intentionally fault-injected
+`RECOVERED`/finalizer drill.
+
+The S3 CAS data plane uses the private, versioned artifact bucket. Deployment
 objects are isolated under
 `candidates/deployments/<environment>/`, while each delivery role can access
 only its own `candidates/recovery/<environment>/` objects, so no new recovery
@@ -187,11 +198,17 @@ legacy namespace.
 
 The bootstrap template also contains the required `Recover AWS` OIDC trust and
 least-privilege CloudFormation, S3, Logs, Lambda, and CloudFront actions.
-However, the currently authorized `Bootstrap AWS Foundation` promotion path is
-intentionally limited to the exact artifact-bucket logging change; it cannot
-roll out these IAM changes. A separately authorized, narrowly reviewed
-foundation IAM promotion and post-promotion assume-role/API/live proof are
-still required.
+The `Bootstrap AWS Foundation` promotion path remains intentionally limited to
+the exact artifact-bucket logging change and cannot grant IAM authority. The
+separately authorized IAM promotion for the exact commit above used the
+Git template pinned to SHA-256
+`c3408ed4805ddffe7f969b72fce7d5ccc6c88b41c6bd33379b13d708deda5142`,
+inspected exactly three direct in-place
+`AWS::IAM::ManagedPolicy` document changes, and contained no replacement,
+addition, deletion, or non-IAM mutation. The foundation finished
+`UPDATE_COMPLETE`; its live default policy versions contain the required drift
+discovery actions, its post-promotion drift result is `IN_SYNC`, and termination
+protection is enabled. Future IAM changes still require separate authorization.
 
 The checked-in control plane is AWS-native and fixed to `eu-west-1`:
 
@@ -287,7 +304,8 @@ secret scan
     conditional-write CAS ledger lets the trusted watchdog finish recovery,
     verify a schema-v2 receipt and post-recovery control proof, and atomically
     bind both immutable objects into the terminal ledger after runner loss
-    (live IAM rollout and hosted proof still pending)
+    (live IAM activation, successful COMMITTED handoff, and no-op watchdog
+    classification proved; a deliberate runner-loss recovery drill is not claimed)
 ```
 
 Supply-chain references are immutable commit/image digests. Staging, production,
@@ -326,10 +344,12 @@ The existing foundation-promotion role is intentionally unable to grant IAM
 authority to itself or the deploy roles. Its workflow additionally rejects any
 plan other than the one-resource artifact-logging change. Therefore the
 checked-in recovery trust, cleanup permissions, termination-protection actions,
-and drift APIs require an independently authorized foundation IAM promotion.
-After that promotion, exact role-assumption and allowed/denied API probes plus
-the protected watchdog, recovery finalizer, and daily audit must succeed before
-this revision becomes deployment evidence.
+and drift APIs required an independently authorized foundation IAM promotion.
+That exact-template promotion and its live IAM/drift proof completed before the
+protected deployment above. The successful deployment exercised terminal
+`COMMITTED` handoff and the automatic watchdog's no-op classification; a
+deliberately failed deployment that reaches `RECOVERED` through the finalizer
+remains a separate chaos drill, not a claimed success-path result.
 
 The Phase-2 application release refuses to
 mutate either stack until the stored bootstrap parameter, live EventTime
@@ -360,12 +380,13 @@ stack. HTTP API delivery uses
 managed solely to keep exact-template rollback collision-free.
 
 This repository does **not** call the pipeline “live-complete” merely because
-the YAML exists. Full CI/CD is established only after main CI, staging,
-protected database release, staging, production, hosted E2E, Managed MCP audit,
-and deployment receipts have all completed successfully. For the current
-recovery/CloudFormation-control revision, hosted CI, the authorized foundation
-IAM promotion, and live staging/production watchdog, finalizer, and audit
-receipts remain pending.
+the YAML exists. Full success-path CI/CD requires main CI, CodeQL, protected
+database release, staging, production, hosted E2E, Managed MCP audit, terminal
+drift/protection gates, and deployment receipts to complete successfully. The
+protected release evidence linked above satisfies that boundary for the current
+recovery/CloudFormation-control revision. The independent watchdog also
+classified both terminal ledgers successfully; no fault was injected merely to
+manufacture a `RECOVERED` receipt.
 
 ## Security and trust boundaries
 
@@ -457,14 +478,15 @@ generated video assets.
 |---|---|
 | Live CockroachDB Cloud Basic cluster, AWS `eu-west-1` | Verified |
 | Historical native-vector plans / recall benchmark | Verified |
-| Runtime-principal company + kind C-SPANN serving gate | Verified in the [latest exact-SHA protected release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177) |
-| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Verified 9/9/9 in the [same release](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177) and exposed read-only in `/api/proof` |
-| CockroachDB Cloud Managed MCP | Live exact-scope receipt v2, fixed bounds, strict parser, and `9 / 9 / 9` proof passed at exact SHA in [run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177), with the sanitized receipt uploaded |
-| Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Verified |
-| Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Earlier exact-SHA baseline verified end to end; it does not prove the current recovery/finalizer/CloudFormation-control revision |
+| Runtime-principal company + kind C-SPANN serving gate | Verified for both principals in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2) |
+| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Verified `9 / 9 / 9` in the same exact-main release and exposed read-only in `/api/proof` |
+| CockroachDB Cloud Managed MCP | Current exact-scope receipt v2, fixed bounds, strict parser, and `9 / 9 / 9` proof passed in the same release |
+| Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Re-proved by the protected real-provider quality gate in the same release |
+| Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Current protected code-bearing revision verified end to end in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2) |
 | Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
-| Durable private-S3 CAS-ledger watchdog recovery | Schema-v2 receipt, finalizer, lease/reclaim watchdog, protection/drift gates, and daily audit are checked in; hosted CI, authorized live IAM promotion, and live proof remain pending |
+| Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
+| Fault-triggered `RECOVERING → RECOVERED` and scheduled daily audit | Implemented and CI-covered, but no intentional live failure drill or `04:17 UTC` audit receipt is claimed |
 | `main` governance | [Active ruleset](https://github.com/upgradedev/archon-cockroach-memory/rules/19722191): PR only, no force-push/delete, strict `readiness` + CodeQL |
 | Final public video, post, and Devpost form | Deliberately last |
 
