@@ -14,14 +14,14 @@ Canonical current sources:
   `../.github/workflows/deploy-aws.yml`
 - Checked-in durable recovery/watchdog: `../.github/workflows/recover-aws.yml`
 
-The schema-v2 recovery receipt, immutable post-recovery control proof and
-finalizer, two-hour lease, 15-minute watchdog, CloudFormation
-protection/fresh-drift gates, and daily audit are current source design, not
-live evidence. The IAM additions in the bootstrap template still require a
-separately authorized foundation promotion; the current promotion workflow is
-intentionally logging-only. Hosted CI and live staging/production recovery
-proof for this revision remain pending. See
-[../README.md](../README.md) and [TOOLS.md](./TOOLS.md) for the current
-readiness boundary.
+The current durable-delivery implementation is activated and hosted-proven at
+exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`. The separately
+authorized foundation IAM promotion completed safely and drift-free;
+Deploy AWS run 30331875727 passed the full staging/production release and
+committed both recovery intents, while Recover AWS run 30333619982 proved the
+automatic trusted-source/OIDC classifier and safe no-op path. A deliberately
+failed live release, `RECOVERING → RECOVERED` finalizer receipt, and scheduled
+daily-audit receipt remain unexercised live drills. See
+[../README.md](../README.md) and [TOOLS.md](./TOOLS.md) for canonical status.
 
 Historical smoke and benchmark captures remain in their dated evidence files.

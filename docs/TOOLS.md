@@ -60,10 +60,11 @@ Proof:
   executes both recalls, verifies the returned fixed scope and probe row, and
   behaviorally rejects all three isolation canaries through both views.
 
-The currently recorded Cloud SQL capture is historical. Catalog existence is
-not treated as proof of runtime index use; the new serving paths are counted as
-live only after the protected database release, production deployment, and
-Managed MCP audit receipts pass.
+The recorded Cloud SQL capture remains historical supporting evidence. Current
+live serving-path evidence is the protected database release, production
+deployment, and Managed MCP receipt from
+[Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2)
+at exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`.
 
 ## 2. CockroachDB Cloud Managed MCP
 
@@ -97,7 +98,9 @@ Evidence status:
   passed at exact commit `a2b69e3fad31010d14d0c3bca261421e635ca885`
   in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177);
   its fixed scope, bounds, strict parser, `9 / 9 / 9` aggregate, and sanitized
-  artifact were all protected-workflow verified.
+  artifact were all protected-workflow verified. The same contract passed for
+  current protected release commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`
+  in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
 application MCP server below.
@@ -146,22 +149,32 @@ authenticated ccloud receipt is produced.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
 
-### Durable delivery recovery control plane — checked-in source, live activation pending
+### Durable delivery recovery control plane — live protected activation
 
-This control plane is represented in source but source alone is **not deployed
-evidence**. Exact-revision hosted CI is required for source readiness; an
-authorized live promotion and post-promotion proof are additionally required
-for deployed evidence. It deliberately uses the private, versioned artifact
-bucket with environment-isolated deployment objects under
+This control plane is activated and hosted-proven at exact protected release commit
+`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`.
+[Main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668301),
+[CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668308),
+the full protected
+[Deploy AWS run](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2),
+and automatic
+[Recover AWS classification](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30333619982)
+all succeeded. Both ledgers are terminal `COMMITTED` with no active lease. This
+proves live IAM/OIDC activation and the committed/no-pending-recovery watchdog
+path, not an intentionally fault-injected `RECOVERED` restoration.
+
+The design uses the private, versioned artifact bucket with
+environment-isolated deployment objects under
 `candidates/deployments/<environment>/` and recovery objects under
 `candidates/recovery/<environment>/`, so it does not require a new recovery
 database or cross-environment recovery authority. A temporary, read-only,
 exact-length `candidates/<40-character-id>/` compatibility path remains only
 for CloudFormation and CodeDeploy rollback of the immediately preceding
 pre-migration revision; it grants neither write nor list access. The bootstrap
-template also models the required `Recover AWS` OIDC trust and least-privilege
-recovery actions, but the live foundation roles have not been proved promoted
-to that template state.
+template defines the required `Recover AWS` OIDC trust and least-privilege
+recovery actions. A separately authorized exact-template promotion applied
+only three in-place managed-policy document updates; the live default policies
+and foundation `IN_SYNC` drift state were verified.
 
 - Private, encrypted, versioned Amazon S3 stores data-only, intent-bound
   archives and checksum-addressed receipts under
@@ -216,14 +229,14 @@ The unselected DynamoDB option would require a controlled foundation promotion:
 the activation-only role cannot create the table or grant itself and the deploy
 roles new IAM actions, and the foundation stack has no persistent
 CloudFormation service role. The selected S3 CAS design avoids new database
-authority, while its checked-in recovery, finalization, transient/greenfield,
-termination-protection, and drift permissions still need an independently
-authorized foundation IAM promotion. The current `Bootstrap AWS Foundation`
-workflow is intentionally limited to the exact artifact-bucket logging plan and
-rejects other changes, so it cannot perform that IAM rollout. This revision
-becomes evidence only after a separate authorized promotion, post-promotion
-assume-role and allowed/denied API probes, hosted CI, and protected
-staging/production recovery, finalizer, and audit proof.
+authority. Its recovery, finalization, cleanup, termination-protection, and
+drift permissions were promoted through the separately authorized
+exact-template foundation change set. The live policies, protected
+staging/production release, and automatic recovery classifier passed. The
+logging-only foundation workflow remains unable to mutate IAM; future IAM
+changes still require separate authorization. An actual
+`RECOVERING → RECOVERED` restoration/finalizer and daily audit receipt are not
+claimed by these successful no-failure runs.
 
 The source components are:
 
@@ -243,10 +256,12 @@ The source components are:
 - `.github/workflows/recover-aws.yml`
 
 Bundle creation, immutable-object download, extraction, verification,
-finalization, watchdog simulation, and receipt checks are CI-only. Their
-temporary files belong under the hosted runner's `${RUNNER_TEMP}` and must not
-be committed or retained as local build artifacts. No hosted run or deployment
-success is claimed here for this new revision.
+finalization, watchdog simulation, and receipt checks remain CI-only. Deploy
+AWS run 30331875727 generated and validated the staging and production recovery
+objects under `${RUNNER_TEMP}`, committed both intents, and removed temporary
+runner material. Recover AWS run 30333619982 proved the trusted-source,
+environment-OIDC classifier and cleanup path. Because both intents were already
+`COMMITTED`, no restoration receipt or post-recovery control object was created.
 
 Infrastructure and delivery proof live in:
 
