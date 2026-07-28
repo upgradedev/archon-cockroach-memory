@@ -16,6 +16,7 @@ on:
 concurrency:
   group: aws-production-delivery
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -163,7 +164,7 @@ jobs:
       - name: Upload immutable candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}
+          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .aws-sam/build/
             web/dist/
@@ -194,10 +195,11 @@ jobs:
       name: staging
       url: ${{ steps.stack.outputs.application_url }}
     permissions:
+      actions: read
       contents: read
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-staging' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
@@ -224,7 +226,7 @@ jobs:
       - name: Download the CI-proven candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}
+          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify candidate tree hashes and eu-west-1 boundary
         run: |
@@ -248,9 +250,314 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
           role-session-name: archon-staging-${{ github.run_id }}
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Refuse staging mutation while earlier recovery is unresolved
+        env:
+          RECOVERY_ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          bash aws/recovery-intent-ledger.sh assert-clear |
+            tee "${RUNNER_TEMP:?}/staging-recovery-ledger-clear.json"
+          jq -e \
+            '.ok == true
+             and .schema == "archon.recovery-intent.clear"
+             and .version == 1
+             and .environment == "staging"
+             and (
+               .state == null
+               or .state == "COMMITTED"
+               or .state == "RECOVERED"
+             )' \
+            "${RUNNER_TEMP:?}/staging-recovery-ledger-clear.json" \
+            >/dev/null
+
+      - name: Reconcile an interrupted same-run staging greenfield recovery
+        env:
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          ENVIRONMENT: staging
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          TERMINAL_JOB_NAME: Deploy and smoke staging
+        run: |
+          set -euo pipefail
+          owner_proof="${RUNNER_TEMP:?}/staging-greenfield-owner-proof.json"
+          empty_template="${RUNNER_TEMP:?}/staging-no-previous-template"
+          empty_parameters="${RUNNER_TEMP:?}/staging-no-previous-parameters"
+          empty_tags="${RUNNER_TEMP:?}/staging-no-previous-tags"
+          test ! -e "$empty_template"
+          test ! -e "$empty_parameters"
+          test ! -e "$empty_tags"
+          STACK_STATE=greenfield \
+          HAS_PREVIOUS_STACK=false \
+          PREVIOUS_STACK_TEMPLATE_FILE="$empty_template" \
+          PREVIOUS_STACK_PARAMETERS_FILE="$empty_parameters" \
+          PREVIOUS_STACK_TAGS_FILE="$empty_tags" \
+          CANDIDATE_SHA="$CANDIDATE_SHA" \
+            bash aws/prove-recovery-snapshot.sh >"$owner_proof"
+          GREENFIELD_OWNER="$(
+            jq -er '.greenfieldOwner | select(test("^[0-9a-f]{64}$"))' \
+              "$owner_proof"
+          )"
+          terminally_proved=false
+          if [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+            for prior_attempt in $(seq 1 $((GITHUB_RUN_ATTEMPT - 1))); do
+              prior_jobs="${RUNNER_TEMP:?}/staging-attempt-${prior_attempt}-jobs.json"
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${prior_attempt}/jobs?per_page=100" \
+                >"$prior_jobs"
+              if jq -e \
+                --arg name "$TERMINAL_JOB_NAME" \
+                '[.jobs[]?
+                  | select(
+                      .name == $name
+                      and .status == "completed"
+                      and .conclusion == "success"
+                    )] | length > 0' \
+                "$prior_jobs" >/dev/null; then
+                terminally_proved=true
+                break
+              fi
+            done
+          fi
+          if [ "$terminally_proved" != "true" ]; then
+            current_run="${RUNNER_TEMP:?}/staging-current-delivery-run.json"
+            candidate_runs="${RUNNER_TEMP:?}/staging-candidate-delivery-runs.json"
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              >"$current_run"
+            current_started_at="$(
+              jq -er \
+                --argjson id "$GITHUB_RUN_ID" \
+                --arg sha "$CANDIDATE_SHA" \
+                '
+                  select(
+                    .id == $id
+                    and .head_sha == $sha
+                    and .event == "workflow_run"
+                    and (
+                      .path == ".github/workflows/deploy-aws.yml"
+                      or .path == ".github/workflows/deploy-aws.yml@main"
+                      or .path == ".github/workflows/deploy-aws.yml@refs/heads/main"
+                    )
+                    and (
+                      .run_started_at
+                      | type == "string"
+                        and test(
+                          "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                        )
+                    )
+                  )
+                  | .run_started_at
+                ' "$current_run"
+            )"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=workflow_run&head_sha=${CANDIDATE_SHA}&per_page=100" \
+              >"$candidate_runs"
+            while IFS= read -r later_run_id; do
+              [[ "$later_run_id" =~ ^[0-9]+$ ]]
+              later_jobs="${RUNNER_TEMP:?}/staging-later-${later_run_id}-jobs.json"
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${later_run_id}/jobs?filter=all&per_page=100" \
+                >"$later_jobs"
+              if jq -e \
+                --arg name "$TERMINAL_JOB_NAME" \
+                '[.jobs[]?
+                  | select(
+                      .name == $name
+                      and .status == "completed"
+                      and .conclusion == "success"
+                    )] | length > 0' \
+                "$later_jobs" >/dev/null; then
+                terminally_proved=true
+                break
+              fi
+            done < <(
+              jq -r \
+                --arg sha "$CANDIDATE_SHA" \
+                --arg startedAt "$current_started_at" \
+                --argjson currentRunId "$GITHUB_RUN_ID" \
+                '
+                  [
+                    .[].workflow_runs[]?
+                    | select(
+                        .id != $currentRunId
+                        and .head_sha == $sha
+                        and .event == "workflow_run"
+                        and (
+                          .path == ".github/workflows/deploy-aws.yml"
+                          or .path == ".github/workflows/deploy-aws.yml@main"
+                          or .path == ".github/workflows/deploy-aws.yml@refs/heads/main"
+                        )
+                        and (
+                          .run_started_at > $startedAt
+                          or (
+                            .run_started_at == $startedAt
+                            and .id > $currentRunId
+                          )
+                        )
+                      )
+                  ]
+                  | sort_by(.run_started_at, .id)
+                  | .[].id
+                ' "$candidate_runs"
+            )
+          fi
+          cleanup_needed=false
+          if live_stack="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json 2>&1)"; then
+            live_identity="$(
+              jq -c \
+              --arg stack "$STACK_NAME" \
+              --arg stackPrefix \
+                "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+              --arg owner "$GREENFIELD_OWNER" \
+              --arg app "$APP_NAME" \
+              --arg environment "$ENVIRONMENT" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                .Stacks[0] as $candidate
+                | (
+                    [.Stacks[]?.Tags[]?
+                      | select(.Key == "ArchonGreenfieldOwner")
+                      | .Value] == [$owner]
+                  ) as $ownerMatches
+                | {
+                    exactOwner: (
+                      (.Stacks | length) == 1
+                      and $ownerMatches
+                      and $candidate.StackName == $stack
+                      and ($candidate.StackId | startswith($stackPrefix))
+                      and $candidate.RoleARN == $role
+                      and (
+                        $candidate.EnableTerminationProtection
+                        | type == "boolean"
+                      )
+                      and (
+                        ($candidate.Tags // [])
+                        | map({Key, Value})
+                        | sort_by(.Key)
+                      ) == (
+                        [
+                          {Key: "Application", Value: $app},
+                          {
+                            Key: "ArchonGreenfieldOwner",
+                            Value: $owner
+                          },
+                          {Key: "Environment", Value: $environment}
+                        ]
+                        | sort_by(.Key)
+                      )
+                    ),
+                    ownerMatches: $ownerMatches,
+                    status: ($candidate.StackStatus // "")
+                  }
+              ' <<<"$live_stack"
+            )"
+            if [ "$(jq -er '.ownerMatches' <<<"$live_identity")" = "true" ] &&
+               [ "$(jq -er '.exactOwner' <<<"$live_identity")" != "true" ]; then
+              echo "The same-run staging stack failed exact ownership checks." >&2
+              exit 1
+            fi
+            if [ "$(jq -er '.exactOwner' <<<"$live_identity")" = "true" ]; then
+              live_status="$(jq -er '.status' <<<"$live_identity")"
+              case "$live_status" in
+                CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+                  if [ "$terminally_proved" != "true" ]; then
+                    cleanup_needed=true
+                  fi
+                  ;;
+                REVIEW_IN_PROGRESS|CREATE_IN_PROGRESS|CREATE_FAILED|ROLLBACK_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|UPDATE_FAILED|UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|UPDATE_ROLLBACK_FAILED|DELETE_IN_PROGRESS|DELETE_FAILED)
+                  cleanup_needed=true
+                  ;;
+                *)
+                  echo "The same-run staging stack is still mutating: $live_status" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          elif grep -qi "does not exist" <<<"$live_stack"; then
+            cleanup_needed=true
+          else
+            echo "Unable to inspect prior staging greenfield state." >&2
+            exit 1
+          fi
+          if [ "$cleanup_needed" = "true" ]; then
+            GREENFIELD_OWNER="$GREENFIELD_OWNER" \
+              bash aws/delete-greenfield-stack.sh \
+                >"${RUNNER_TEMP:?}/staging-greenfield-reconciliation.json"
+          fi
+
+      - name: Refresh short-lived AWS credentials after staging reconciliation
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-preflight-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Preflight application S3 access logging before stack mutation
+        id: application_s3_preflight
+        env:
+          ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          bash aws/prove-application-s3-access-logging.sh preflight |
+            tee application-s3-access-logging-preflight.json
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              .ok == true
+              and .schema == "archon.application-s3-access-logging.preflight"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .environment == $environment
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and (
+                .priorState == "absent"
+                or .priorState == "disabled"
+                or .priorState == "enabled"
+              )
+              and .expected == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+              and .integrity.algorithm == "sha256"
+              and .integrity.canonicalization == "jq-cS-v1"
+              and (
+                .integrity.payloadSha256
+                | type == "string"
+                and test("^[0-9a-f]{64}$")
+              )
+            ' application-s3-access-logging-preflight.json >/dev/null
+          receipt_sha256="$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Preflight API stage-proof permissions before stack mutation
         id: api_preflight
@@ -288,58 +595,165 @@ jobs:
           FUNCTION_NAME=""
           FUNCTION_VERSION=""
           APPLICATION_URL=""
+          BUCKET_NAME=""
+          DISTRIBUTION_ID=""
+          STACK_ID=""
+          STACK_STATUS=""
+          STACK_REVISION=""
           HAS_PREVIOUS_STACK=false
           if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            stack_before="${RUNNER_TEMP:?}/staging-stack-before.json"
+            stack_after="${RUNNER_TEMP:?}/staging-stack-after.json"
             aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" \
+              --output json >"$stack_before"
+            jq -e \
+              --arg stack "$STACK_NAME" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackName == $stack
+                and (
+                  .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                  or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                  or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                )
+                and .Stacks[0].RoleARN == $role
+              ' "$stack_before" >/dev/null
             HAS_PREVIOUS_STACK=true
+            STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack_before")"
+            STACK_STATUS="$(jq -er '.Stacks[0].StackStatus' "$stack_before")"
+            STACK_REVISION="$(
+              jq -er \
+                '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+                "$stack_before"
+            )"
             aws cloudformation get-template \
-              --stack-name "$STACK_NAME" \
+              --stack-name "$STACK_ID" \
               --region "$AWS_REGION" \
               --template-stage Original \
               --output json |
               jq -er '.TemplateBody | if type == "string" then . else tojson end' \
                 > previous-stack-template.yaml
             test "$(wc -c < previous-stack-template.yaml)" -le 51200
-            aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query 'Stacks[0].Parameters' \
-              --output json |
-              jq -e \
+            jq -e \
                 'map({ParameterKey, ParameterValue})
+                 | sort_by(.ParameterKey)
                  | if (length > 0 and
                        all(.[];
                          (.ParameterKey | type == "string" and length > 0) and
-                         (.ParameterValue | type == "string")))
+                         (.ParameterValue |
+                           type == "string" and . != "****")) and
+                       ([.[].ParameterKey] | unique | length) == length)
                    then .
                    else error("invalid stack parameter snapshot")
-                   end' > previous-stack-parameters.json
-            FUNCTION_NAME="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='FunctionName'].OutputValue | [0]" \
-              --output text)"
-            APPLICATION_URL="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='ApplicationUrl'].OutputValue | [0]" \
-              --output text)"
+                   end' \
+              < <(jq '.Stacks[0].Parameters' "$stack_before") \
+              > previous-stack-parameters.json
+            jq -e \
+              '
+                (.Stacks[0].Tags // [])
+                | map({Key, Value})
+                | sort_by(.Key)
+                | if ([.[].Key] | unique | length) == length
+                  then .
+                  else error("duplicate stack tag keys")
+                  end
+              ' "$stack_before" > previous-stack-tags.json
+            FUNCTION_NAME="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "FunctionName")
+                 | .OutputValue' "$stack_before"
+            )"
+            APPLICATION_URL="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "ApplicationUrl")
+                 | .OutputValue' "$stack_before"
+            )"
+            BUCKET_NAME="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "SpaBucketName")
+                 | .OutputValue' "$stack_before"
+            )"
+            DISTRIBUTION_ID="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "DistributionId")
+                 | .OutputValue' "$stack_before"
+            )"
+            test "$BUCKET_NAME" = \
+              "${APP_NAME}-staging-web-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+            [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
             if [ -n "$FUNCTION_NAME" ] && [ "$FUNCTION_NAME" != "None" ]; then
-              FUNCTION_VERSION="$(aws lambda get-alias \
+              alias_before="${RUNNER_TEMP:?}/staging-alias-before.json"
+              alias_after="${RUNNER_TEMP:?}/staging-alias-after.json"
+              aws lambda get-alias \
                 --function-name "$FUNCTION_NAME" \
                 --name live \
                 --region "$AWS_REGION" \
-                --query FunctionVersion \
-                --output text)"
-              [[ "$FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+                --output json >"$alias_before"
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${FUNCTION_NAME}:live" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and (.FunctionVersion | test("^[1-9][0-9]*$"))
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' "$alias_before" >/dev/null
+              FUNCTION_VERSION="$(
+                jq -er '.FunctionVersion' "$alias_before"
+              )"
             else
               echo "The existing stack has no recoverable Lambda function." >&2
               exit 1
             fi
             test -n "$APPLICATION_URL"
             test "$APPLICATION_URL" != "None"
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$stack_after"
+            jq -e \
+              --slurpfile before "$stack_before" \
+              '
+                ($before[0].Stacks | length) == 1
+                and (.Stacks | length) == 1
+                and .Stacks[0].StackId == $before[0].Stacks[0].StackId
+                and .Stacks[0].StackStatus ==
+                  $before[0].Stacks[0].StackStatus
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime)
+                  ==
+                  ($before[0].Stacks[0].LastUpdatedTime //
+                    $before[0].Stacks[0].CreationTime)
+                )
+                and .Stacks[0].RoleARN == $before[0].Stacks[0].RoleARN
+                and .Stacks[0].Parameters ==
+                  $before[0].Stacks[0].Parameters
+                and .Stacks[0].Outputs == $before[0].Stacks[0].Outputs
+              ' "$stack_after" >/dev/null
+            aws lambda get-alias \
+              --function-name "$FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json >"$alias_after"
+            jq -e \
+              --slurpfile before "$alias_before" \
+              '
+                .AliasArn == $before[0].AliasArn
+                and .Name == $before[0].Name
+                and .FunctionVersion == $before[0].FunctionVersion
+                and (.RoutingConfig // {}) ==
+                  ($before[0].RoutingConfig // {})
+                and .RevisionId == $before[0].RevisionId
+              ' "$alias_after" >/dev/null
           elif [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             if stack_result="$(aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
@@ -354,17 +768,408 @@ jobs:
             echo "Invalid API stage preflight stack state." >&2
             exit 1
           fi
+          snapshot="${RUNNER_TEMP:?}/staging-recovery-snapshot.json"
+          ENVIRONMENT=staging \
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          HAS_PREVIOUS_STACK="$HAS_PREVIOUS_STACK" \
+          PREVIOUS_STACK_ID="$STACK_ID" \
+          PREVIOUS_STACK_STATUS="$STACK_STATUS" \
+          PREVIOUS_STACK_REVISION="$STACK_REVISION" \
+          PREVIOUS_FUNCTION_NAME="$FUNCTION_NAME" \
+          PREVIOUS_FUNCTION_VERSION="$FUNCTION_VERSION" \
+          PREVIOUS_APPLICATION_URL="$APPLICATION_URL" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$snapshot"
+          jq -e \
+            --arg environment staging \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --argjson hasPreviousStack "$HAS_PREVIOUS_STACK" \
+            '
+              .ok == true
+              and .schema == "archon.recovery-snapshot.proof"
+              and .version == 1
+              and .environment == $environment
+              and .stackState == $stackState
+              and .hasPreviousStack == $hasPreviousStack
+              and (.manifestSha256 | test("^[0-9a-f]{64}$"))
+            ' "$snapshot" >/dev/null
           {
             echo "function_name=$FUNCTION_NAME"
             echo "function_version=$FUNCTION_VERSION"
             echo "application_url=$APPLICATION_URL"
+            echo "bucket_name=$BUCKET_NAME"
+            echo "distribution_id=$DISTRIBUTION_ID"
             echo "has_previous_stack=$HAS_PREVIOUS_STACK"
+            echo "stack_id=$STACK_ID"
+            echo "stack_status=$STACK_STATUS"
+            echo "stack_revision=$STACK_REVISION"
+            echo "previous_release_sha256=$(jq -er '.manifestSha256' "$snapshot")"
+            echo "template_sha256=$(jq -r '.templateSha256 // ""' "$snapshot")"
+            echo "parameters_sha256=$(jq -r '.parametersSha256 // ""' "$snapshot")"
+            echo "tags_sha256=$(jq -r '.tagsSha256 // ""' "$snapshot")"
+            echo "greenfield_owner=$(jq -r '.greenfieldOwner // ""' "$snapshot")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Enforce staging stack protection and fresh pre-deploy drift gate
+        env:
+          ENVIRONMENT: staging
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          EXPECTED_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          EXPECTED_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+        run: |
+          set -euo pipefail
+          proof="${RUNNER_TEMP:?}/staging-cloudformation-controls-preflight.json"
+          bash aws/enforce-cloudformation-controls.sh preflight >"$proof"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            --arg expectedState "$EXPECTED_STACK_STATE" \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .identity.environment == "staging"
+              and (
+                (
+                  $expectedState == "greenfield"
+                  and .identity.state == "absent"
+                  and .protection.enabled == null
+                  and .drift == null
+                )
+                or (
+                  $expectedState == "existing"
+                  and .identity.state == "existing"
+                  and .protection.enabled == true
+                  and .drift.detectionStatus == "DETECTION_COMPLETE"
+                  and .drift.stackDriftStatus == "IN_SYNC"
+                  and .drift.driftedResourceCount == 0
+                  and .drift.checkedResourceCount > 0
+                )
+              )
+            ' "$proof" >/dev/null
+
+      - name: Re-prove the application S3 preflight immediately before SAM
+        id: application_s3_recheck
+        env:
+          ENVIRONMENT: staging
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+        run: |
+          set -euo pipefail
+          snapshot_recheck="${RUNNER_TEMP:?}/staging-recovery-snapshot-recheck.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$snapshot_recheck"
+          jq -e \
+            --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$snapshot_recheck" >/dev/null
+
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            current_stack="${RUNNER_TEMP:?}/staging-stack-recheck.json"
+            current_template="${RUNNER_TEMP:?}/staging-template-recheck.yaml"
+            current_parameters="${RUNNER_TEMP:?}/staging-parameters-recheck.json"
+            current_tags="${RUNNER_TEMP:?}/staging-tags-recheck.json"
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$current_stack"
+            jq -e \
+              --arg stackId "$PREVIOUS_STACK_ID" \
+              --arg status "$PREVIOUS_STACK_STATUS" \
+              --arg revision "$PREVIOUS_STACK_REVISION" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              --arg function "$PREVIOUS_FUNCTION_NAME" \
+              --arg url "$PREVIOUS_APPLICATION_URL" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackId == $stackId
+                and .Stacks[0].StackStatus == $status
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime) == $revision
+                )
+                and .Stacks[0].RoleARN == $role
+                and (
+                  [.Stacks[0].Outputs[]
+                    | select(.OutputKey == "FunctionName")
+                    | .OutputValue] == [$function]
+                )
+                and (
+                  [.Stacks[0].Outputs[]
+                    | select(.OutputKey == "ApplicationUrl")
+                    | .OutputValue] == [$url]
+                )
+              ' "$current_stack" >/dev/null
+            aws cloudformation get-template \
+              --stack-name "$PREVIOUS_STACK_ID" \
+              --region "$AWS_REGION" \
+              --template-stage Original \
+              --output json |
+              jq -er \
+                '.TemplateBody | if type == "string" then . else tojson end' \
+                >"$current_template"
+            jq \
+              '.Stacks[0].Parameters
+               | map({ParameterKey, ParameterValue})
+               | sort_by(.ParameterKey)' \
+              "$current_stack" >"$current_parameters"
+            jq -e \
+              '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+              "$current_stack" >"$current_tags"
+            test "$(
+              sha256sum "$current_template" | awk '{print $1}'
+            )" = "$EXPECTED_TEMPLATE_SHA256"
+            test "$(
+              sha256sum "$current_parameters" | awk '{print $1}'
+            )" = "$EXPECTED_PARAMETERS_SHA256"
+            test "$(
+              sha256sum "$current_tags" | awk '{print $1}'
+            )" = "$EXPECTED_TAGS_SHA256"
+            aws lambda get-alias \
+              --function-name "$PREVIOUS_FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json |
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' >/dev/null
+          else
+            if stack_result="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "Stack state changed before the greenfield deploy." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$stack_result"; then
+              echo "Unable to re-prove the greenfield stack state." >&2
+              exit 1
+            fi
+          fi
+
+          recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.json"
+          canonical_before="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-before.canonical.json"
+          canonical_recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.canonical.json"
+          bash aws/prove-application-s3-access-logging.sh preflight >"$recheck"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          jq -cS . application-s3-access-logging-preflight.json \
+            >"$canonical_before"
+          jq -cS . "$recheck" >"$canonical_recheck"
+          cmp --silent "$canonical_before" "$canonical_recheck"
+          jq -e \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            '
+              (
+                $stackState == "greenfield"
+                and .priorState == "absent"
+              )
+              or (
+                $stackState == "existing"
+                and (
+                  .priorState == "disabled"
+                  or .priorState == "enabled"
+                )
+              )
+            ' "$recheck" >/dev/null
+          {
+            echo "reproved=true"
+            echo "stack_state=$EXPECTED_STACK_STATE"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Persist and arm the immutable staging recovery intent
+        id: durable_recovery
+        env:
+          ARTIFACT_BUCKET: ${{ env.AWS_SAM_ARTIFACT_BUCKET }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          ENVIRONMENT: staging
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          PREVIOUS_BUCKET_NAME: ${{ steps.previous.outputs.bucket_name }}
+          PREVIOUS_DISTRIBUTION_ID: ${{ steps.previous.outputs.distribution_id }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          RECOVERY_ENVIRONMENT: staging
+          RECOVERY_SNAPSHOT_PROOF_FILE: ${{ runner.temp }}/staging-recovery-snapshot-recheck.json
+          SOURCE_CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
+          STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          bundle_tar="${RUNNER_TEMP:?}/staging-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
+          roundtrip_tar="${RUNNER_TEMP:?}/staging-recovery-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
+          extracted_dir="${RUNNER_TEMP:?}/staging-recovery-verified-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bundle_proof="${RUNNER_TEMP:?}/staging-recovery-bundle-proof.json"
+          object_proof="${RUNNER_TEMP:?}/staging-recovery-object-proof.json"
+          object_response="${RUNNER_TEMP:?}/staging-recovery-object-response.json"
+          cleanup_durable_intent() {
+            rm -f -- \
+              "$bundle_tar" \
+              "$roundtrip_tar" \
+              "$bundle_proof" \
+              "$object_proof" \
+              "$object_response"
+            rm -rf -- "$extracted_dir"
+          }
+          trap cleanup_durable_intent EXIT
+
+          bash aws/create-durable-recovery-bundle.sh "$bundle_tar" \
+            >"$bundle_proof"
+          RECOVERY_INTENT_ID="$(
+            jq -er '.intentId | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_MANIFEST_SHA256="$(
+            jq -er '.manifestSha256 | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_ARCHIVE_SHA256="$(
+            jq -er '.archiveSha256 | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_ARCHIVE_KEY="candidates/recovery/staging/${RECOVERY_INTENT_ID}.tar"
+          RECOVERY_INTENT_ID="$RECOVERY_INTENT_ID" \
+            bash aws/put-durable-recovery-object.sh \
+              "$bundle_tar" \
+              "$RECOVERY_ARCHIVE_KEY" >"$object_proof"
+          RECOVERY_ARCHIVE_BUCKET="$(jq -er '.bucket' "$object_proof")"
+          RECOVERY_ARCHIVE_VERSION_ID="$(
+            jq -er '.versionId | select(length > 0 and . != "null")' \
+              "$object_proof"
+          )"
+          test "$(jq -er '.sha256' "$object_proof")" = \
+            "$RECOVERY_ARCHIVE_SHA256"
+
+          aws s3api get-object \
+            --bucket "$RECOVERY_ARCHIVE_BUCKET" \
+            --key "$RECOVERY_ARCHIVE_KEY" \
+            --version-id "$RECOVERY_ARCHIVE_VERSION_ID" \
+            --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+            --checksum-mode ENABLED \
+            --region "$AWS_REGION" \
+            --output json \
+            "$roundtrip_tar" >"$object_response"
+          test "$(
+            sha256sum "$roundtrip_tar" | awk '{print $1}'
+          )" = "$RECOVERY_ARCHIVE_SHA256"
+          expected_checksum="$(
+            openssl dgst -sha256 -binary "$roundtrip_tar" | base64 -w0
+          )"
+          jq -e \
+            --arg checksum "$expected_checksum" \
+            --arg version "$RECOVERY_ARCHIVE_VERSION_ID" \
+            '.VersionId == $version and .ChecksumSHA256 == $checksum' \
+            "$object_response" >/dev/null
+          EXPECTED_ARCHIVE_SHA256="$RECOVERY_ARCHIVE_SHA256" \
+          EXPECTED_CANDIDATE_SHA="$CANDIDATE_SHA" \
+          EXPECTED_INTENT_ID="$RECOVERY_INTENT_ID" \
+          EXPECTED_MANIFEST_SHA256="$RECOVERY_MANIFEST_SHA256" \
+          EXPECTED_SOURCE_CI_RUN_ATTEMPT="$SOURCE_CI_RUN_ATTEMPT" \
+          EXPECTED_SOURCE_CI_RUN_ID="$SOURCE_CI_RUN_ID" \
+          EXPECTED_SOURCE_DEPLOY_RUN_ATTEMPT="$SOURCE_DEPLOY_RUN_ATTEMPT" \
+          EXPECTED_SOURCE_DEPLOY_RUN_ID="$SOURCE_DEPLOY_RUN_ID" \
+            bash aws/extract-durable-recovery-bundle.sh \
+              "$roundtrip_tar" \
+              "$extracted_dir" >/dev/null
+
+          RECOVERY_ARCHIVE_BUCKET="$RECOVERY_ARCHIVE_BUCKET" \
+          RECOVERY_ARCHIVE_KEY="$RECOVERY_ARCHIVE_KEY" \
+          RECOVERY_ARCHIVE_SHA256="$RECOVERY_ARCHIVE_SHA256" \
+          RECOVERY_ARCHIVE_VERSION_ID="$RECOVERY_ARCHIVE_VERSION_ID" \
+          RECOVERY_INTENT_ID="$RECOVERY_INTENT_ID" \
+          RECOVERY_MANIFEST_SHA256="$RECOVERY_MANIFEST_SHA256" \
+            bash aws/recovery-intent-ledger.sh arm \
+              >"${RUNNER_TEMP:?}/staging-recovery-ledger-armed.json"
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg version "$RECOVERY_ARCHIVE_VERSION_ID" \
+            '
+              .state == "ARMED"
+              and .intentId == $intent
+              and .archiveVersionId == $version
+            ' "${RUNNER_TEMP:?}/staging-recovery-ledger-armed.json" \
+            >/dev/null
+          had_previous_index="$(
+            jq -er \
+              '.hadPreviousIndex
+               | if type == "boolean"
+                 then tostring
+                 else error("invalid previous-index state")
+                 end' \
+              "$bundle_proof"
+          )"
+          {
+            echo "armed=true"
+            echo "intent_id=$RECOVERY_INTENT_ID"
+            echo "archive_bucket=$RECOVERY_ARCHIVE_BUCKET"
+            echo "archive_key=$RECOVERY_ARCHIVE_KEY"
+            echo "archive_version_id=$RECOVERY_ARCHIVE_VERSION_ID"
+            echo "archive_sha256=$RECOVERY_ARCHIVE_SHA256"
+            echo "manifest_sha256=$RECOVERY_MANIFEST_SHA256"
+            echo "had_previous_index=$had_previous_index"
+            echo "previous_index_version=$(jq -r '.previousIndexVersionId // ""' "$bundle_proof")"
+            echo "previous_index_sha256=$(jq -r '.previousIndexSha256 // ""' "$bundle_proof")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Refresh short-lived AWS credentials for staging SAM deployment
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-sam-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Deploy staging with recovery-safe SAM canary
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
         run: |
           set -euo pipefail
           test -n "$DATABASE_SECRET_ID"
@@ -386,6 +1191,30 @@ jobs:
           )
           if [ -n "$ALARM_TOPIC_ARN" ]; then
             PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
+          fi
+          SAM_TAGS=()
+          if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
+            [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
+            SAM_TAGS=(
+              --tags
+              "ArchonGreenfieldOwner=$GREENFIELD_OWNER"
+              "Application=$APP_NAME"
+              "Environment=staging"
+            )
+          else
+            test "$EXPECTED_STACK_STATE" = "existing"
+            test -z "$GREENFIELD_OWNER"
+            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test "$(
+              sha256sum previous-stack-tags.json | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            serialized_tags_file="${RUNNER_TEMP:?}/staging-sam-stack-tags.argv"
+            bash aws/serialize-sam-stack-tags.sh \
+              previous-stack-tags.json >"$serialized_tags_file"
+            mapfile -t preserved_stack_tags <"$serialized_tags_file"
+            if [ "${#preserved_stack_tags[@]}" -gt 0 ]; then
+              SAM_TAGS=(--tags "${preserved_stack_tags[@]}")
+            fi
           fi
           CANARY_PROBE_PID=""
           stop_canary_probe() {
@@ -418,30 +1247,160 @@ jobs:
             ) &
             CANARY_PROBE_PID=$!
           fi
+          if [ "$EXPECTED_STACK_STATE:$HAS_PREVIOUS_STACK" = "existing:true" ]; then
+            final_stack="${RUNNER_TEMP:?}/staging-stack-final-before-sam.json"
+            aws cloudformation describe-stacks \
+              --stack-name "$PREVIOUS_STACK_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$final_stack"
+            jq -e \
+              --arg stackId "$PREVIOUS_STACK_ID" \
+              --arg status "$PREVIOUS_STACK_STATUS" \
+              --arg revision "$PREVIOUS_STACK_REVISION" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackId == $stackId
+                and .Stacks[0].StackStatus == $status
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime) == $revision
+                )
+                and .Stacks[0].RoleARN == $role
+              ' "$final_stack" >/dev/null
+            final_tags="${RUNNER_TEMP:?}/staging-tags-final-before-sam.json"
+            jq -e \
+              '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+              "$final_stack" >"$final_tags"
+            test "$(
+              sha256sum "$final_tags" | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            aws lambda get-alias \
+              --function-name "$PREVIOUS_FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json |
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' >/dev/null
+          elif [ "$EXPECTED_STACK_STATE:$HAS_PREVIOUS_STACK" = "greenfield:false" ]; then
+            if final_stack_state="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "A stack appeared immediately before the greenfield SAM deploy." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$final_stack_state"; then
+              echo "Unable to prove final greenfield absence before SAM." >&2
+              exit 1
+            fi
+          else
+            echo "The final stack-state contract is inconsistent." >&2
+            exit 1
+          fi
           echo "started=true" >> "$GITHUB_OUTPUT"
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/staging/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "${PARAMETERS[@]}" \
+            "${SAM_TAGS[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --no-progressbar
           stop_canary_probe
           trap - EXIT
 
+      - name: Refresh short-lived AWS credentials after staging SAM deployment
+        if: success()
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-post-sam-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
       - name: Resolve public, non-secret stack outputs
         id: stack
+        env:
+          ENVIRONMENT: staging
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
         run: |
           set -euo pipefail
-          OUTPUTS="$(aws cloudformation describe-stacks \
+          post_sam_stack="${RUNNER_TEMP:?}/staging-stack-after-sam.json"
+          aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
-            --query 'Stacks[0].Outputs' \
-            --output json)"
+            --output json >"$post_sam_stack"
+          jq -e \
+            --arg stack "$STACK_NAME" \
+            --arg stackPrefix \
+              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg owner "$GREENFIELD_OWNER" \
+            --arg previousStackId "$PREVIOUS_STACK_ID" \
+            --arg app "$APP_NAME" \
+            --arg environment "$ENVIRONMENT" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (.Stacks[0].StackId | startswith($stackPrefix))
+              and .Stacks[0].RoleARN == $role
+              and (
+                (
+                  $stackState == "greenfield"
+                  and $previousStackId == ""
+                  and .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                  and ((.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key))
+                    == ([
+                      {Key: "Application", Value: $app},
+                      {Key: "ArchonGreenfieldOwner", Value: $owner},
+                      {Key: "Environment", Value: $environment}
+                    ] | sort_by(.Key))
+                )
+                or (
+                  $stackState == "existing"
+                  and .Stacks[0].StackId == $previousStackId
+                  and $owner == ""
+                  and (
+                    .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                    or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                    or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  )
+                )
+              )
+            ' "$post_sam_stack" >/dev/null
+          post_sam_tags="${RUNNER_TEMP:?}/staging-tags-after-sam.json"
+          jq -e \
+            '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+            "$post_sam_stack" >"$post_sam_tags"
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test "$(
+              sha256sum "$post_sam_tags" | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+          else
+            test "$EXPECTED_STACK_STATE" = "greenfield"
+            test -z "$PREVIOUS_STACK_TAGS_SHA256"
+            [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          OUTPUTS="$(jq -cer '.Stacks[0].Outputs' "$post_sam_stack")"
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
@@ -449,6 +1408,15 @@ jobs:
           API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
           API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
           API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
+          STACK_ID="$(jq -er '.Stacks[0].StackId' "$post_sam_stack")"
+          STACK_REVISION="$(
+            jq -er \
+              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              "$post_sam_stack"
+          )"
+          STACK_TAGS_SHA256="$(
+            sha256sum "$post_sam_tags" | awk '{print $1}'
+          )"
           {
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
@@ -457,7 +1425,81 @@ jobs:
             echo "api_id=$API_ID"
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
+            echo "stack_id=$STACK_ID"
+            echo "stack_revision=$STACK_REVISION"
+            echo "tags_sha256=$STACK_TAGS_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove live application S3 access logging before frontend mutation
+        id: application_s3_verify
+        env:
+          ENVIRONMENT: staging
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh verify |
+            tee application-s3-access-logging-proof.json
+          jq -e \
+            --slurpfile preflight application-s3-access-logging-preflight.json \
+            --arg environment "$ENVIRONMENT" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              ($preflight | length) == 1
+              and .ok == true
+              and .schema == "archon.application-s3-access-logging.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .processedTemplateManaged == true
+              and .environment == $environment
+              and .stackState == $stackState
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .stackStatus == "CREATE_COMPLETE"
+                )
+                or (
+                  $stackState == "existing"
+                  and (
+                    .stackStatus == "CREATE_COMPLETE"
+                    or .stackStatus == "UPDATE_COMPLETE"
+                    or .stackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  )
+                )
+              )
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and .liveState == "enabled"
+              and .preflightIntegrity == $preflight[0].integrity
+              and .expected == .liveConfiguration
+              and .liveConfiguration == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+            ' application-s3-access-logging-proof.json >/dev/null
+          proof_sha256="$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )"
+          [[ "$proof_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$proof_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Prove transformed and live API stage routing before frontend mutation
         env:
@@ -490,30 +1532,68 @@ jobs:
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
+          EXPECTED_HAD_PREVIOUS_INDEX: ${{ steps.durable_recovery.outputs.had_previous_index }}
+          EXPECTED_PREVIOUS_INDEX_SHA256: ${{ steps.durable_recovery.outputs.previous_index_sha256 }}
+          EXPECTED_PREVIOUS_INDEX_VERSION: ${{ steps.durable_recovery.outputs.previous_index_version }}
         run: |
           set -euo pipefail
-          echo "started=true" >> "$GITHUB_OUTPUT"
-          HAD_PREVIOUS_INDEX=false
+          case "$EXPECTED_HAD_PREVIOUS_INDEX" in
+            true|false) ;;
+            *) exit 1 ;;
+          esac
           if previous_index="$(aws s3api head-object \
             --bucket "$BUCKET_NAME" \
             --key index.html \
+            --expected-bucket-owner "$AWS_ACCOUNT_ID" \
             --region "$AWS_REGION" \
             --output json 2>&1)"; then
-            PREVIOUS_INDEX_VERSION="$(
+            current_version="$(
               jq -er '.VersionId | strings | select(length > 0)' \
                 <<<"$previous_index"
             )"
-            HAD_PREVIOUS_INDEX=true
+            test "$EXPECTED_HAD_PREVIOUS_INDEX" = "true"
+            test "$current_version" = "$EXPECTED_PREVIOUS_INDEX_VERSION"
+            [[ "$EXPECTED_PREVIOUS_INDEX_SHA256" =~ ^[0-9a-f]{64}$ ]]
           elif grep -Eqi 'NoSuchKey|Not Found|\(404\)' <<<"$previous_index"; then
-            PREVIOUS_INDEX_VERSION=""
+            test "$EXPECTED_HAD_PREVIOUS_INDEX" = "false"
+            test -z "$EXPECTED_PREVIOUS_INDEX_VERSION"
+            test -z "$EXPECTED_PREVIOUS_INDEX_SHA256"
           else
-            echo "Unable to capture the current frontend index version." >&2
+            echo "Unable to re-prove the durable frontend baseline." >&2
             exit 1
           fi
-          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >> "$GITHUB_OUTPUT"
-          echo "previous_index_version=$PREVIOUS_INDEX_VERSION" >> "$GITHUB_OUTPUT"
+          HAD_PREVIOUS_INDEX="$EXPECTED_HAD_PREVIOUS_INDEX"
+          PREVIOUS_INDEX_VERSION="$EXPECTED_PREVIOUS_INDEX_VERSION"
+          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >>"$GITHUB_OUTPUT"
+          echo "previous_index_version=$PREVIOUS_INDEX_VERSION" \
+            >>"$GITHUB_OUTPUT"
+          frontend_recovery_payload="$(
+            jq -cnS \
+              --arg bucket "$BUCKET_NAME" \
+              --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+              --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+              '{
+                bucket: $bucket,
+                hadPreviousIndex: $hadPreviousIndex,
+                previousIndexVersion: (
+                  if $previousIndexVersion == ""
+                  then null
+                  else $previousIndexVersion
+                  end
+                )
+              }'
+          )"
+          frontend_recovery_sha256="$(
+            printf '%s' "$frontend_recovery_payload" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          [[ "$frontend_recovery_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "recovery_sha256=$frontend_recovery_sha256" \
+            >>"$GITHUB_OUTPUT"
           # Hashed assets are retained so the previous index remains recoverable.
           # The new index is the atomic switch and is uploaded last.
+          echo "started=true" >>"$GITHUB_OUTPUT"
           aws s3 sync web/dist "s3://$BUCKET_NAME" \
             --region "$AWS_REGION" \
             --exclude index.html \
@@ -608,18 +1688,297 @@ jobs:
           npx --prefix web playwright install --with-deps chromium
           npm run test:e2e --prefix web
 
-      - name: Refresh short-lived AWS credentials for staging recovery
-        if: failure() && steps.deploy.outputs.started == 'true'
+      - name: Refresh short-lived AWS credentials for staging terminal proof
+        if: success()
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-terminal-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Build and validate sanitized staging deployment receipt
+        if: success()
+        env:
+          ENVIRONMENT: staging
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          FRONTEND_BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
+          FRONTEND_HAD_PREVIOUS_INDEX: ${{ steps.frontend.outputs.had_previous_index }}
+          FRONTEND_PREVIOUS_INDEX_VERSION: ${{ steps.frontend.outputs.previous_index_version }}
+          FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
+          LIVE_STACK_ID: ${{ steps.stack.outputs.stack_id }}
+          LIVE_STACK_REVISION: ${{ steps.stack.outputs.stack_revision }}
+          LIVE_STACK_TAGS_SHA256: ${{ steps.stack.outputs.tags_sha256 }}
+        run: |
+          set -euo pipefail
+          preflight_control="${RUNNER_TEMP:?}/staging-cloudformation-controls-preflight.json"
+          terminal_control="${RUNNER_TEMP:?}/staging-cloudformation-controls-terminal.json"
+          EXPECTED_STACK_ID="$LIVE_STACK_ID" \
+          EXPECTED_STACK_REVISION="$LIVE_STACK_REVISION" \
+          EXPECTED_TAGS_SHA256="$LIVE_STACK_TAGS_SHA256" \
+            bash aws/enforce-cloudformation-controls.sh terminal \
+              >"$terminal_control"
+          for proof in "$preflight_control" "$terminal_control"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$proof" >/dev/null
+          done
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "terminal"
+              and .identity.state == "existing"
+              and .identity.environment == "staging"
+              and .protection.enabled == true
+              and .drift.detectionStatus == "DETECTION_COMPLETE"
+              and .drift.stackDriftStatus == "IN_SYNC"
+              and .drift.driftedResourceCount == 0
+              and .drift.checkedResourceCount > 0
+            ' "$terminal_control" >/dev/null
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          test "$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PROOF_SHA256"
+          [[ "$PREVIOUS_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FRONTEND_RECOVERY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+          terminal_snapshot="${RUNNER_TEMP:?}/staging-recovery-snapshot-terminal.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          EXPECTED_PREVIOUS_RELEASE_SHA256="$PREVIOUS_RELEASE_SHA256" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$terminal_snapshot"
+          jq -e \
+            --arg expected "$PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$terminal_snapshot" >/dev/null
+          frontend_recovery_payload="$(
+            jq -cnS \
+              --arg bucket "$FRONTEND_BUCKET_NAME" \
+              --argjson hadPreviousIndex "$FRONTEND_HAD_PREVIOUS_INDEX" \
+              --arg previousIndexVersion "$FRONTEND_PREVIOUS_INDEX_VERSION" \
+              '{
+                bucket: $bucket,
+                hadPreviousIndex: $hadPreviousIndex,
+                previousIndexVersion: (
+                  if $previousIndexVersion == ""
+                  then null
+                  else $previousIndexVersion
+                  end
+                )
+              }'
+          )"
+          test "$(
+            printf '%s' "$frontend_recovery_payload" |
+              sha256sum |
+              awk '{print $1}'
+          )" = "$FRONTEND_RECOVERY_SHA256"
+
+          terminal_proof="${RUNNER_TEMP:?}/staging-application-s3-access-logging-terminal-proof.json"
+          bash aws/prove-application-s3-access-logging.sh verify \
+            >"$terminal_proof"
+          cmp --silent \
+            application-s3-access-logging-proof.json \
+            "$terminal_proof"
+          terminal_proof_sha256="$(
+            sha256sum "$terminal_proof" | awk '{print $1}'
+          )"
+          test "$terminal_proof_sha256" = "$EXPECTED_PROOF_SHA256"
+          verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -e \
+            --slurpfile apiStage api-stage-proof.json \
+            --slurpfile cfnPreflight "$preflight_control" \
+            --slurpfile cfnTerminal "$terminal_control" \
+            --slurpfile s3Preflight application-s3-access-logging-preflight.json \
+            --slurpfile s3Proof "$terminal_proof" \
+            --arg environment staging \
+            --arg stackName "$STACK_NAME" \
+            --arg applicationUrl "$APPLICATION_URL" \
+            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
+            --arg frontendRecoverySha256 "$FRONTEND_RECOVERY_SHA256" \
+            --arg terminalProofSha256 "$terminal_proof_sha256" \
+            --arg verifiedAt "$verified_at" \
+            --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'if (($apiStage | length) == 1 and
+                 ($cfnPreflight | length) == 1 and
+                 ($cfnTerminal | length) == 1 and
+                 ($s3Preflight | length) == 1 and
+                 ($s3Proof | length) == 1 and
+                 $apiStage[0].ok == true and
+                 $apiStage[0].stage == "live" and
+                 $apiStage[0].legacyDefaultStageAbsent == true and
+                 $apiStage[0].detailedMetrics == true and
+                 $apiStage[0].throttlingRate == 5 and
+                 $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].cloudFrontStatus == "Deployed" and
+                 $apiStage[0].cloudFrontOriginPath == "/live" and
+                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
+                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
+                 $apiStage[0].accessLogEvent == "GET /api/health 200" and
+                 $cfnPreflight[0].ok == true and
+                 $cfnPreflight[0].mode == "preflight" and
+                 $cfnPreflight[0].identity.environment == $environment and
+                 $cfnTerminal[0].ok == true and
+                 $cfnTerminal[0].mode == "terminal" and
+                 $cfnTerminal[0].identity.environment == $environment and
+                 $cfnTerminal[0].identity.state == "existing" and
+                 $cfnTerminal[0].protection.enabled == true and
+                 $cfnTerminal[0].drift.detectionStatus ==
+                   "DETECTION_COMPLETE" and
+                 $cfnTerminal[0].drift.stackDriftStatus == "IN_SYNC" and
+                 $cfnTerminal[0].drift.driftedResourceCount == 0 and
+                 $cfnTerminal[0].drift.checkedResourceCount > 0 and
+                 $s3Preflight[0].ok == true and
+                 $s3Preflight[0].mode == "preflight" and
+                 $s3Preflight[0].foundationVerified == true and
+                 $s3Preflight[0].environment == $environment and
+                 $s3Proof[0].ok == true and
+                 $s3Proof[0].mode == "verify" and
+                 $s3Proof[0].environment == $environment and
+                 $s3Proof[0].stackState == $stackState and
+                 (($stackState == "greenfield" and
+                   $s3Preflight[0].priorState == "absent" and
+                   $s3Proof[0].stackStatus == "CREATE_COMPLETE") or
+                  ($stackState == "existing" and
+                   ($s3Preflight[0].priorState == "disabled" or
+                    $s3Preflight[0].priorState == "enabled") and
+                   ($s3Proof[0].stackStatus == "CREATE_COMPLETE" or
+                    $s3Proof[0].stackStatus == "UPDATE_COMPLETE" or
+                    $s3Proof[0].stackStatus ==
+                      "UPDATE_ROLLBACK_COMPLETE"))) and
+                 $s3Proof[0].foundationVerified == true and
+                 $s3Proof[0].processedTemplateManaged == true and
+                 $s3Proof[0].liveState == "enabled" and
+                 $s3Proof[0].preflightIntegrity ==
+                   $s3Preflight[0].integrity and
+                 $preMutationReproved == "true" and
+                 ($previousReleaseSha256 | test("^[0-9a-f]{64}$")) and
+                 ($frontendRecoverySha256 | test("^[0-9a-f]{64}$")) and
+                 ($terminalProofSha256 | test("^[0-9a-f]{64}$")) and
+                 ($verifiedAt | test("Z$")))
+             then . + {deployment: {
+              environment: $environment,
+              stackName: $stackName,
+              applicationUrl: $applicationUrl,
+              deployedAt: $deployedAt,
+              smoke: "passed",
+              canary: "Canary10Percent5Minutes",
+              canaryTrafficProbe: "weighted-alias-proof-and-recall",
+              deployAlarm: "candidate-executed-version-errors",
+              recallGate: "post-promotion-with-explicit-restore",
+              recoverySnapshot: {
+                manifestSha256: $previousReleaseSha256,
+                frontendSha256: $frontendRecoverySha256
+              },
+              cloudFormationControls: {
+                preflight: $cfnPreflight[0],
+                terminal: $cfnTerminal[0]
+              },
+              apiStage: $apiStage[0],
+              s3AccessLogging: {
+                preflight: {
+                  foundationVerified: true,
+                  beforeState: $s3Preflight[0].priorState,
+                  preMutationReproved: true,
+                  stackState: $s3Proof[0].stackState
+                },
+                verified: {
+                  loggingEnabled: true,
+                  targetPrefix:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled.TargetPrefix,
+                  partitionDateSource:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled
+                      .TargetObjectKeyFormat.PartitionedPrefix
+                      .PartitionDateSource,
+                  stackStatus: $s3Proof[0].stackStatus,
+                  processedTemplateManaged: true,
+                  liveControlPlaneVerified: true,
+                  terminalLiveReproved: true,
+                  terminalProofSha256: $terminalProofSha256,
+                  verifiedAt: $verifiedAt
+                }
+              }
+            }}
+             else error("invalid deployment control proof")
+             end' deployment-receipt.json > staging-deployment-receipt.json
+
+      - name: Commit the receipt-bound staging recovery intent
+        if: success()
+        env:
+          RECOVERY_ENVIRONMENT: staging
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_INTENT_ID" =~ ^[0-9a-f]{64}$ ]]
+          receipt_sha256="$(
+            sha256sum staging-deployment-receipt.json | awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          receipt_key="candidates/recovery/staging/receipts/${RECOVERY_INTENT_ID}/${receipt_sha256}.json"
+          object_proof="${RUNNER_TEMP:?}/staging-terminal-receipt-object.json"
+          trap 'rm -f -- "$object_proof"' EXIT
+          bash aws/put-durable-recovery-object.sh \
+            staging-deployment-receipt.json \
+            "$receipt_key" >"$object_proof"
+          test "$(jq -er '.sha256' "$object_proof")" = "$receipt_sha256"
+          RECOVERY_RECEIPT_BUCKET="$(jq -er '.bucket' "$object_proof")" \
+          RECOVERY_RECEIPT_KEY="$(jq -er '.key' "$object_proof")" \
+          RECOVERY_RECEIPT_SHA256="$receipt_sha256" \
+          RECOVERY_RECEIPT_VERSION_ID="$(jq -er '.versionId' "$object_proof")" \
+            bash aws/recovery-intent-ledger.sh commit \
+              >"${RUNNER_TEMP:?}/staging-recovery-ledger-committed.json"
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg receipt "$receipt_sha256" \
+            '
+              .ok == true
+              and .schema == "archon.recovery-intent.terminal"
+              and .version == 1
+              and .state == "COMMITTED"
+              and .intentId == $intent
+              and .receiptSha256 == $receipt
+            ' "${RUNNER_TEMP:?}/staging-recovery-ledger-committed.json" \
+            >/dev/null
+
+      - name: Refresh short-lived AWS credentials for staging recovery
+        if: (failure() || cancelled()) && steps.deploy.outputs.started == 'true'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
           role-session-name: archon-staging-recovery-${{ github.run_id }}
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Restore the previous staging release on verification failure
-        if: failure() && steps.deploy.outputs.started == 'true'
+        if: (failure() || cancelled()) && steps.deploy.outputs.started == 'true'
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
@@ -630,13 +1989,136 @@ jobs:
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
           PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          EXPECTED_PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          EXPECTED_FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
+          ENVIRONMENT: staging
+          RECOVERY_CANCELLED: ${{ job.status == 'cancelled' }}
+          RECOVERY_ENVIRONMENT: staging
+          RECOVERY_EXECUTION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
           set -euo pipefail
+          recovery_ledger="${RUNNER_TEMP:?}/staging-inline-recovery-ledger.json"
+          bash aws/recovery-intent-ledger.sh read >"$recovery_ledger"
+          ledger_state="$(jq -er '.state' "$recovery_ledger")"
+          test "$(jq -er '.intentId' "$recovery_ledger")" = \
+            "$RECOVERY_INTENT_ID"
+          if [ "$ledger_state" = "COMMITTED" ] ||
+             [ "$ledger_state" = "RECOVERED" ]; then
+            exit 0
+          fi
+          test "$ledger_state" = "ARMED"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh \
+            validate-preflight >/dev/null
+          recovery_snapshot="${RUNNER_TEMP:?}/staging-recovery-snapshot-verified.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          EXPECTED_TEMPLATE_SHA256="$EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256" \
+          EXPECTED_PARAMETERS_SHA256="$EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256" \
+          EXPECTED_TAGS_SHA256="$EXPECTED_PREVIOUS_STACK_TAGS_SHA256" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$recovery_snapshot"
+          jq -e \
+            --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$recovery_snapshot" >/dev/null
+          if [ "$FRONTEND_STARTED" = "true" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: (
+                    if $previousIndexVersion == ""
+                    then null
+                    else $previousIndexVersion
+                    end
+                  )
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
+          fi
+
           RECOVERY_FAILED=0
+          prove_application_s3_recovery() {
+            if ! test "$(
+              sha256sum application-s3-access-logging-preflight.json |
+                awk '{print $1}'
+            )" = "$EXPECTED_PREFLIGHT_SHA256"; then
+              return 1
+            fi
+            if ! bash aws/prove-application-s3-access-logging.sh recover |
+                tee application-s3-access-logging-recovery.json; then
+              return 1
+            fi
+            jq -e \
+              --slurpfile preflight application-s3-access-logging-preflight.json \
+              --arg stackState "$EXPECTED_STACK_STATE" \
+              '
+                ($preflight | length) == 1
+                and .ok == true
+                and .schema == "archon.application-s3-access-logging.recovery"
+                and .version == 1
+                and .mode == "recover"
+                and .evidence == "live-control-plane"
+                and .foundationVerified == true
+                and .environment == $preflight[0].environment
+                and .stackState == $stackState
+                and .sourceBucket == $preflight[0].sourceBucket
+                and .destinationBucket == $preflight[0].destinationBucket
+                and .priorState == $preflight[0].priorState
+                and .restoredState == $preflight[0].priorState
+                and .preflightIntegrity == $preflight[0].integrity
+                and (
+                  (
+                    .restoredState == "absent"
+                    and .restoredConfiguration == null
+                  )
+                  or (
+                    .restoredState == "disabled"
+                    and .restoredConfiguration == {}
+                  )
+                  or (
+                    .restoredState == "enabled"
+                    and .restoredConfiguration == .expected
+                  )
+                )
+              ' application-s3-access-logging-recovery.json >/dev/null
+          }
           if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
-            if ! ENVIRONMENT=staging \
+            if ! GREENFIELD_OWNER="$EXPECTED_GREENFIELD_OWNER" \
+              ENVIRONMENT=staging \
               bash aws/delete-greenfield-stack.sh; then
               echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            if [ "$RECOVERY_CANCELLED" = "true" ]; then
+              test "$RECOVERY_FAILED" -eq 0
+              exit 0
+            fi
+            if ! prove_application_s3_recovery; then
+              echo "Failed to prove greenfield S3 logging recovery." >&2
               RECOVERY_FAILED=1
             fi
             test "$RECOVERY_FAILED" -eq 0
@@ -644,38 +2126,96 @@ jobs:
           fi
           if ! bash aws/restore-cloudformation-stack.sh; then
             echo "Failed to restore the exact previous CloudFormation stack." >&2
-            RECOVERY_FAILED=1
+            exit 1
           fi
-          RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
-            --output text 2>/dev/null || true)"
-          if [ -n "$RESTORED_BUCKET_NAME" ] &&
-             [ "$RESTORED_BUCKET_NAME" != "None" ]; then
-            BUCKET_NAME="$RESTORED_BUCKET_NAME"
-          else
-            RECOVERY_FAILED=1
+          if [ "$RECOVERY_CANCELLED" = "true" ]; then
+            exit 0
           fi
-          RESTORED_DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
-            --output text 2>/dev/null || true)"
-          if [ -n "$RESTORED_DISTRIBUTION_ID" ] &&
-             [ "$RESTORED_DISTRIBUTION_ID" != "None" ]; then
-            DISTRIBUTION_ID="$RESTORED_DISTRIBUTION_ID"
-          else
-            RECOVERY_FAILED=1
+          if ! prove_application_s3_recovery; then
+            echo "Failed to prove the restored S3 logging state." >&2
+            exit 1
           fi
+          BUCKET_NAME=""
+          DISTRIBUTION_ID=""
+          restored_stack="${RUNNER_TEMP:?}/staging-stack-after-recovery.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$EXPECTED_PREVIOUS_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$restored_stack"
+          jq -e \
+            --arg stackId "$EXPECTED_PREVIOUS_STACK_ID" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].RoleARN == $role
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and (
+                [.Stacks[0].Outputs[]?
+                  | select(.OutputKey == "SpaBucketName")
+                  | .OutputValue] | length
+              ) == 1
+              and (
+                [.Stacks[0].Outputs[]?
+                  | select(.OutputKey == "DistributionId")
+                  | .OutputValue] | length
+              ) == 1
+            ' "$restored_stack" >/dev/null
+          restored_tags="${RUNNER_TEMP:?}/staging-tags-after-recovery.json"
+          jq -e \
+            '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+            "$restored_stack" >"$restored_tags"
+          test "$(
+            sha256sum "$restored_tags" | awk '{print $1}'
+          )" = "$EXPECTED_PREVIOUS_STACK_TAGS_SHA256"
+          BUCKET_NAME="$(
+            jq -er \
+              '.Stacks[0].Outputs[]
+               | select(.OutputKey == "SpaBucketName")
+               | .OutputValue' "$restored_stack"
+          )"
+          DISTRIBUTION_ID="$(
+            jq -er \
+              '.Stacks[0].Outputs[]
+               | select(.OutputKey == "DistributionId")
+               | .OutputValue' "$restored_stack"
+          )"
+          test "$BUCKET_NAME" = \
+            "${APP_NAME}-staging-web-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
           if [ "$FRONTEND_STARTED" = "true" ] &&
              [ "$HAD_PREVIOUS_INDEX" = "true" ] &&
              [ -n "$BUCKET_NAME" ] &&
              [ -n "$PREVIOUS_INDEX_VERSION" ] &&
              [ "$PREVIOUS_INDEX_VERSION" != "None" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: $previousIndexVersion
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
             if ! aws s3api copy-object \
               --bucket "$BUCKET_NAME" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --expected-source-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
               --metadata-directive REPLACE \
+              --annotation-directive EXCLUDE \
               --content-type "text/html; charset=utf-8" \
               --cache-control "no-cache,no-store,must-revalidate" \
               --region "$AWS_REGION" >/dev/null; then
@@ -684,8 +2224,24 @@ jobs:
           elif [ "$FRONTEND_STARTED" = "true" ] &&
                [ "$HAD_PREVIOUS_INDEX" = "false" ] &&
                [ -n "$BUCKET_NAME" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: null
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
             if ! aws s3api delete-object \
               --bucket "$BUCKET_NAME" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --region "$AWS_REGION" >/dev/null; then
               RECOVERY_FAILED=1
@@ -696,12 +2252,58 @@ jobs:
           if [ -n "$PREVIOUS_FUNCTION_NAME" ] &&
              [ -n "$PREVIOUS_FUNCTION_VERSION" ] &&
              [ "$PREVIOUS_FUNCTION_VERSION" != "None" ]; then
-            if ! aws lambda update-alias \
+            alias_before="${RUNNER_TEMP:?}/staging-alias-before-recovery.json"
+            alias_after="${RUNNER_TEMP:?}/staging-alias-after-recovery.json"
+            alias_update="${RUNNER_TEMP:?}/staging-alias-update.json"
+            if ! aws lambda get-alias \
               --function-name "$PREVIOUS_FUNCTION_NAME" \
               --name live \
-              --function-version "$PREVIOUS_FUNCTION_VERSION" \
-              --region "$AWS_REGION" >/dev/null; then
+              --region "$AWS_REGION" \
+              --output json >"$alias_before"; then
               RECOVERY_FAILED=1
+            else
+              alias_revision="$(
+                jq -er \
+                  --arg arn \
+                    "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                  '
+                    select(
+                      .AliasArn == $arn
+                      and .Name == "live"
+                      and (.FunctionVersion | test("^[1-9][0-9]*$"))
+                      and (.RevisionId | type == "string" and length > 0)
+                    )
+                    | .RevisionId
+                  ' "$alias_before"
+              )"
+              if ! aws lambda update-alias \
+                --function-name "$PREVIOUS_FUNCTION_NAME" \
+                --name live \
+                --function-version "$PREVIOUS_FUNCTION_VERSION" \
+                --routing-config '{"AdditionalVersionWeights":{}}' \
+                --revision-id "$alias_revision" \
+                --region "$AWS_REGION" \
+                --output json >"$alias_update"; then
+                RECOVERY_FAILED=1
+              elif ! aws lambda get-alias \
+                --function-name "$PREVIOUS_FUNCTION_NAME" \
+                --name live \
+                --region "$AWS_REGION" \
+                --output json >"$alias_after"; then
+                RECOVERY_FAILED=1
+              elif ! jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' "$alias_after" >/dev/null; then
+                RECOVERY_FAILED=1
+              fi
             fi
           fi
           if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
@@ -738,49 +2340,11 @@ jobs:
           fi
           test "$RECOVERY_FAILED" -eq 0
 
-      - name: Publish sanitized staging deployment receipt
-        if: success()
-        env:
-          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
-        run: |
-          jq -e \
-            --slurpfile apiStage api-stage-proof.json \
-            --arg environment staging \
-            --arg stackName "$STACK_NAME" \
-            --arg applicationUrl "$APPLICATION_URL" \
-            --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            'if (($apiStage | length) == 1 and
-                 $apiStage[0].ok == true and
-                 $apiStage[0].stage == "live" and
-                 $apiStage[0].legacyDefaultStageAbsent == true and
-                 $apiStage[0].detailedMetrics == true and
-                 $apiStage[0].throttlingRate == 5 and
-                 $apiStage[0].throttlingBurst == 10 and
-                 $apiStage[0].cloudFrontStatus == "Deployed" and
-                 $apiStage[0].cloudFrontOriginPath == "/live" and
-                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
-                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
-                 $apiStage[0].accessLogEvent == "GET /api/health 200")
-             then . + {deployment: {
-              environment: $environment,
-              stackName: $stackName,
-              applicationUrl: $applicationUrl,
-              deployedAt: $deployedAt,
-              smoke: "passed",
-              canary: "Canary10Percent5Minutes",
-              canaryTrafficProbe: "weighted-alias-proof-and-recall",
-              deployAlarm: "candidate-executed-version-errors",
-              recallGate: "post-promotion-with-explicit-restore",
-              apiStage: $apiStage[0]
-            }}
-             else error("invalid API stage proof")
-             end' deployment-receipt.json > staging-deployment-receipt.json
-
       - name: Upload staging receipt
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: staging-deployment-receipt-${{ github.event.workflow_run.head_sha }}
+          name: staging-deployment-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: staging-deployment-receipt.json
           if-no-files-found: error
           retention-days: 30
@@ -795,10 +2359,11 @@ jobs:
       name: production
       url: ${{ steps.stack.outputs.application_url }}
     permissions:
+      actions: read
       contents: read
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-production' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/production/database' }}
@@ -835,7 +2400,7 @@ jobs:
       - name: Download the same CI-proven candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}
+          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify candidate tree hashes and eu-west-1 boundary
         run: |
@@ -859,9 +2424,314 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
           role-session-name: archon-production-${{ github.run_id }}
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Refuse production mutation while earlier recovery is unresolved
+        env:
+          RECOVERY_ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          bash aws/recovery-intent-ledger.sh assert-clear |
+            tee "${RUNNER_TEMP:?}/production-recovery-ledger-clear.json"
+          jq -e \
+            '.ok == true
+             and .schema == "archon.recovery-intent.clear"
+             and .version == 1
+             and .environment == "production"
+             and (
+               .state == null
+               or .state == "COMMITTED"
+               or .state == "RECOVERED"
+             )' \
+            "${RUNNER_TEMP:?}/production-recovery-ledger-clear.json" \
+            >/dev/null
+
+      - name: Reconcile an interrupted same-run production greenfield recovery
+        env:
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          ENVIRONMENT: production
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          TERMINAL_JOB_NAME: Promote identical candidate to production
+        run: |
+          set -euo pipefail
+          owner_proof="${RUNNER_TEMP:?}/production-greenfield-owner-proof.json"
+          empty_template="${RUNNER_TEMP:?}/production-no-previous-template"
+          empty_parameters="${RUNNER_TEMP:?}/production-no-previous-parameters"
+          empty_tags="${RUNNER_TEMP:?}/production-no-previous-tags"
+          test ! -e "$empty_template"
+          test ! -e "$empty_parameters"
+          test ! -e "$empty_tags"
+          STACK_STATE=greenfield \
+          HAS_PREVIOUS_STACK=false \
+          PREVIOUS_STACK_TEMPLATE_FILE="$empty_template" \
+          PREVIOUS_STACK_PARAMETERS_FILE="$empty_parameters" \
+          PREVIOUS_STACK_TAGS_FILE="$empty_tags" \
+          CANDIDATE_SHA="$CANDIDATE_SHA" \
+            bash aws/prove-recovery-snapshot.sh >"$owner_proof"
+          GREENFIELD_OWNER="$(
+            jq -er '.greenfieldOwner | select(test("^[0-9a-f]{64}$"))' \
+              "$owner_proof"
+          )"
+          terminally_proved=false
+          if [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+            for prior_attempt in $(seq 1 $((GITHUB_RUN_ATTEMPT - 1))); do
+              prior_jobs="${RUNNER_TEMP:?}/production-attempt-${prior_attempt}-jobs.json"
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${prior_attempt}/jobs?per_page=100" \
+                >"$prior_jobs"
+              if jq -e \
+                --arg name "$TERMINAL_JOB_NAME" \
+                '[.jobs[]?
+                  | select(
+                      .name == $name
+                      and .status == "completed"
+                      and .conclusion == "success"
+                    )] | length > 0' \
+                "$prior_jobs" >/dev/null; then
+                terminally_proved=true
+                break
+              fi
+            done
+          fi
+          if [ "$terminally_proved" != "true" ]; then
+            current_run="${RUNNER_TEMP:?}/production-current-delivery-run.json"
+            candidate_runs="${RUNNER_TEMP:?}/production-candidate-delivery-runs.json"
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              >"$current_run"
+            current_started_at="$(
+              jq -er \
+                --argjson id "$GITHUB_RUN_ID" \
+                --arg sha "$CANDIDATE_SHA" \
+                '
+                  select(
+                    .id == $id
+                    and .head_sha == $sha
+                    and .event == "workflow_run"
+                    and (
+                      .path == ".github/workflows/deploy-aws.yml"
+                      or .path == ".github/workflows/deploy-aws.yml@main"
+                      or .path == ".github/workflows/deploy-aws.yml@refs/heads/main"
+                    )
+                    and (
+                      .run_started_at
+                      | type == "string"
+                        and test(
+                          "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                        )
+                    )
+                  )
+                  | .run_started_at
+                ' "$current_run"
+            )"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=workflow_run&head_sha=${CANDIDATE_SHA}&per_page=100" \
+              >"$candidate_runs"
+            while IFS= read -r later_run_id; do
+              [[ "$later_run_id" =~ ^[0-9]+$ ]]
+              later_jobs="${RUNNER_TEMP:?}/production-later-${later_run_id}-jobs.json"
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${later_run_id}/jobs?filter=all&per_page=100" \
+                >"$later_jobs"
+              if jq -e \
+                --arg name "$TERMINAL_JOB_NAME" \
+                '[.jobs[]?
+                  | select(
+                      .name == $name
+                      and .status == "completed"
+                      and .conclusion == "success"
+                    )] | length > 0' \
+                "$later_jobs" >/dev/null; then
+                terminally_proved=true
+                break
+              fi
+            done < <(
+              jq -r \
+                --arg sha "$CANDIDATE_SHA" \
+                --arg startedAt "$current_started_at" \
+                --argjson currentRunId "$GITHUB_RUN_ID" \
+                '
+                  [
+                    .[].workflow_runs[]?
+                    | select(
+                        .id != $currentRunId
+                        and .head_sha == $sha
+                        and .event == "workflow_run"
+                        and (
+                          .path == ".github/workflows/deploy-aws.yml"
+                          or .path == ".github/workflows/deploy-aws.yml@main"
+                          or .path == ".github/workflows/deploy-aws.yml@refs/heads/main"
+                        )
+                        and (
+                          .run_started_at > $startedAt
+                          or (
+                            .run_started_at == $startedAt
+                            and .id > $currentRunId
+                          )
+                        )
+                      )
+                  ]
+                  | sort_by(.run_started_at, .id)
+                  | .[].id
+                ' "$candidate_runs"
+            )
+          fi
+          cleanup_needed=false
+          if live_stack="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json 2>&1)"; then
+            live_identity="$(
+              jq -c \
+              --arg stack "$STACK_NAME" \
+              --arg stackPrefix \
+                "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+              --arg owner "$GREENFIELD_OWNER" \
+              --arg app "$APP_NAME" \
+              --arg environment "$ENVIRONMENT" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                .Stacks[0] as $candidate
+                | (
+                    [.Stacks[]?.Tags[]?
+                      | select(.Key == "ArchonGreenfieldOwner")
+                      | .Value] == [$owner]
+                  ) as $ownerMatches
+                | {
+                    exactOwner: (
+                      (.Stacks | length) == 1
+                      and $ownerMatches
+                      and $candidate.StackName == $stack
+                      and ($candidate.StackId | startswith($stackPrefix))
+                      and $candidate.RoleARN == $role
+                      and (
+                        $candidate.EnableTerminationProtection
+                        | type == "boolean"
+                      )
+                      and (
+                        ($candidate.Tags // [])
+                        | map({Key, Value})
+                        | sort_by(.Key)
+                      ) == (
+                        [
+                          {Key: "Application", Value: $app},
+                          {
+                            Key: "ArchonGreenfieldOwner",
+                            Value: $owner
+                          },
+                          {Key: "Environment", Value: $environment}
+                        ]
+                        | sort_by(.Key)
+                      )
+                    ),
+                    ownerMatches: $ownerMatches,
+                    status: ($candidate.StackStatus // "")
+                  }
+              ' <<<"$live_stack"
+            )"
+            if [ "$(jq -er '.ownerMatches' <<<"$live_identity")" = "true" ] &&
+               [ "$(jq -er '.exactOwner' <<<"$live_identity")" != "true" ]; then
+              echo "The same-run production stack failed exact ownership checks." >&2
+              exit 1
+            fi
+            if [ "$(jq -er '.exactOwner' <<<"$live_identity")" = "true" ]; then
+              live_status="$(jq -er '.status' <<<"$live_identity")"
+              case "$live_status" in
+                CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+                  if [ "$terminally_proved" != "true" ]; then
+                    cleanup_needed=true
+                  fi
+                  ;;
+                REVIEW_IN_PROGRESS|CREATE_IN_PROGRESS|CREATE_FAILED|ROLLBACK_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|UPDATE_FAILED|UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|UPDATE_ROLLBACK_FAILED|DELETE_IN_PROGRESS|DELETE_FAILED)
+                  cleanup_needed=true
+                  ;;
+                *)
+                  echo "The same-run production stack is still mutating: $live_status" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          elif grep -qi "does not exist" <<<"$live_stack"; then
+            cleanup_needed=true
+          else
+            echo "Unable to inspect prior production greenfield state." >&2
+            exit 1
+          fi
+          if [ "$cleanup_needed" = "true" ]; then
+            GREENFIELD_OWNER="$GREENFIELD_OWNER" \
+              bash aws/delete-greenfield-stack.sh \
+                >"${RUNNER_TEMP:?}/production-greenfield-reconciliation.json"
+          fi
+
+      - name: Refresh short-lived AWS credentials after production reconciliation
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-preflight-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Preflight application S3 access logging before stack mutation
+        id: application_s3_preflight
+        env:
+          ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          bash aws/prove-application-s3-access-logging.sh preflight |
+            tee application-s3-access-logging-preflight.json
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              .ok == true
+              and .schema == "archon.application-s3-access-logging.preflight"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .environment == $environment
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and (
+                .priorState == "absent"
+                or .priorState == "disabled"
+                or .priorState == "enabled"
+              )
+              and .expected == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+              and .integrity.algorithm == "sha256"
+              and .integrity.canonicalization == "jq-cS-v1"
+              and (
+                .integrity.payloadSha256
+                | type == "string"
+                and test("^[0-9a-f]{64}$")
+              )
+            ' application-s3-access-logging-preflight.json >/dev/null
+          receipt_sha256="$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Preflight API stage-proof permissions before stack mutation
         id: api_preflight
@@ -899,58 +2769,165 @@ jobs:
           FUNCTION_NAME=""
           FUNCTION_VERSION=""
           APPLICATION_URL=""
+          BUCKET_NAME=""
+          DISTRIBUTION_ID=""
+          STACK_ID=""
+          STACK_STATUS=""
+          STACK_REVISION=""
           HAS_PREVIOUS_STACK=false
           if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            stack_before="${RUNNER_TEMP:?}/production-stack-before.json"
+            stack_after="${RUNNER_TEMP:?}/production-stack-after.json"
             aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" >/dev/null
+              --region "$AWS_REGION" \
+              --output json >"$stack_before"
+            jq -e \
+              --arg stack "$STACK_NAME" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackName == $stack
+                and (
+                  .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                  or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                  or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                )
+                and .Stacks[0].RoleARN == $role
+              ' "$stack_before" >/dev/null
             HAS_PREVIOUS_STACK=true
+            STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack_before")"
+            STACK_STATUS="$(jq -er '.Stacks[0].StackStatus' "$stack_before")"
+            STACK_REVISION="$(
+              jq -er \
+                '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+                "$stack_before"
+            )"
             aws cloudformation get-template \
-              --stack-name "$STACK_NAME" \
+              --stack-name "$STACK_ID" \
               --region "$AWS_REGION" \
               --template-stage Original \
               --output json |
               jq -er '.TemplateBody | if type == "string" then . else tojson end' \
                 > previous-stack-template.yaml
             test "$(wc -c < previous-stack-template.yaml)" -le 51200
-            aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query 'Stacks[0].Parameters' \
-              --output json |
-              jq -e \
+            jq -e \
                 'map({ParameterKey, ParameterValue})
+                 | sort_by(.ParameterKey)
                  | if (length > 0 and
                        all(.[];
                          (.ParameterKey | type == "string" and length > 0) and
-                         (.ParameterValue | type == "string")))
+                         (.ParameterValue |
+                           type == "string" and . != "****")) and
+                       ([.[].ParameterKey] | unique | length) == length)
                    then .
                    else error("invalid stack parameter snapshot")
-                   end' > previous-stack-parameters.json
-            FUNCTION_NAME="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='FunctionName'].OutputValue | [0]" \
-              --output text)"
-            APPLICATION_URL="$(aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='ApplicationUrl'].OutputValue | [0]" \
-              --output text)"
+                   end' \
+              < <(jq '.Stacks[0].Parameters' "$stack_before") \
+              > previous-stack-parameters.json
+            jq -e \
+              '
+                (.Stacks[0].Tags // [])
+                | map({Key, Value})
+                | sort_by(.Key)
+                | if ([.[].Key] | unique | length) == length
+                  then .
+                  else error("duplicate stack tag keys")
+                  end
+              ' "$stack_before" > previous-stack-tags.json
+            FUNCTION_NAME="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "FunctionName")
+                 | .OutputValue' "$stack_before"
+            )"
+            APPLICATION_URL="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "ApplicationUrl")
+                 | .OutputValue' "$stack_before"
+            )"
+            BUCKET_NAME="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "SpaBucketName")
+                 | .OutputValue' "$stack_before"
+            )"
+            DISTRIBUTION_ID="$(
+              jq -er \
+                '.Stacks[0].Outputs[]
+                 | select(.OutputKey == "DistributionId")
+                 | .OutputValue' "$stack_before"
+            )"
+            test "$BUCKET_NAME" = \
+              "${APP_NAME}-production-web-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+            [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
             if [ -n "$FUNCTION_NAME" ] && [ "$FUNCTION_NAME" != "None" ]; then
-              FUNCTION_VERSION="$(aws lambda get-alias \
+              alias_before="${RUNNER_TEMP:?}/production-alias-before.json"
+              alias_after="${RUNNER_TEMP:?}/production-alias-after.json"
+              aws lambda get-alias \
                 --function-name "$FUNCTION_NAME" \
                 --name live \
                 --region "$AWS_REGION" \
-                --query FunctionVersion \
-                --output text)"
-              [[ "$FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+                --output json >"$alias_before"
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${FUNCTION_NAME}:live" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and (.FunctionVersion | test("^[1-9][0-9]*$"))
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' "$alias_before" >/dev/null
+              FUNCTION_VERSION="$(
+                jq -er '.FunctionVersion' "$alias_before"
+              )"
             else
               echo "The existing stack has no recoverable Lambda function." >&2
               exit 1
             fi
             test -n "$APPLICATION_URL"
             test "$APPLICATION_URL" != "None"
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$stack_after"
+            jq -e \
+              --slurpfile before "$stack_before" \
+              '
+                ($before[0].Stacks | length) == 1
+                and (.Stacks | length) == 1
+                and .Stacks[0].StackId == $before[0].Stacks[0].StackId
+                and .Stacks[0].StackStatus ==
+                  $before[0].Stacks[0].StackStatus
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime)
+                  ==
+                  ($before[0].Stacks[0].LastUpdatedTime //
+                    $before[0].Stacks[0].CreationTime)
+                )
+                and .Stacks[0].RoleARN == $before[0].Stacks[0].RoleARN
+                and .Stacks[0].Parameters ==
+                  $before[0].Stacks[0].Parameters
+                and .Stacks[0].Outputs == $before[0].Stacks[0].Outputs
+              ' "$stack_after" >/dev/null
+            aws lambda get-alias \
+              --function-name "$FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json >"$alias_after"
+            jq -e \
+              --slurpfile before "$alias_before" \
+              '
+                .AliasArn == $before[0].AliasArn
+                and .Name == $before[0].Name
+                and .FunctionVersion == $before[0].FunctionVersion
+                and (.RoutingConfig // {}) ==
+                  ($before[0].RoutingConfig // {})
+                and .RevisionId == $before[0].RevisionId
+              ' "$alias_after" >/dev/null
           elif [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             if stack_result="$(aws cloudformation describe-stacks \
               --stack-name "$STACK_NAME" \
@@ -965,17 +2942,408 @@ jobs:
             echo "Invalid API stage preflight stack state." >&2
             exit 1
           fi
+          snapshot="${RUNNER_TEMP:?}/production-recovery-snapshot.json"
+          ENVIRONMENT=production \
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          HAS_PREVIOUS_STACK="$HAS_PREVIOUS_STACK" \
+          PREVIOUS_STACK_ID="$STACK_ID" \
+          PREVIOUS_STACK_STATUS="$STACK_STATUS" \
+          PREVIOUS_STACK_REVISION="$STACK_REVISION" \
+          PREVIOUS_FUNCTION_NAME="$FUNCTION_NAME" \
+          PREVIOUS_FUNCTION_VERSION="$FUNCTION_VERSION" \
+          PREVIOUS_APPLICATION_URL="$APPLICATION_URL" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$snapshot"
+          jq -e \
+            --arg environment production \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --argjson hasPreviousStack "$HAS_PREVIOUS_STACK" \
+            '
+              .ok == true
+              and .schema == "archon.recovery-snapshot.proof"
+              and .version == 1
+              and .environment == $environment
+              and .stackState == $stackState
+              and .hasPreviousStack == $hasPreviousStack
+              and (.manifestSha256 | test("^[0-9a-f]{64}$"))
+            ' "$snapshot" >/dev/null
           {
             echo "function_name=$FUNCTION_NAME"
             echo "function_version=$FUNCTION_VERSION"
             echo "application_url=$APPLICATION_URL"
+            echo "bucket_name=$BUCKET_NAME"
+            echo "distribution_id=$DISTRIBUTION_ID"
             echo "has_previous_stack=$HAS_PREVIOUS_STACK"
+            echo "stack_id=$STACK_ID"
+            echo "stack_status=$STACK_STATUS"
+            echo "stack_revision=$STACK_REVISION"
+            echo "previous_release_sha256=$(jq -er '.manifestSha256' "$snapshot")"
+            echo "template_sha256=$(jq -r '.templateSha256 // ""' "$snapshot")"
+            echo "parameters_sha256=$(jq -r '.parametersSha256 // ""' "$snapshot")"
+            echo "tags_sha256=$(jq -r '.tagsSha256 // ""' "$snapshot")"
+            echo "greenfield_owner=$(jq -r '.greenfieldOwner // ""' "$snapshot")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Enforce production stack protection and fresh pre-deploy drift gate
+        env:
+          ENVIRONMENT: production
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          EXPECTED_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          EXPECTED_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+        run: |
+          set -euo pipefail
+          proof="${RUNNER_TEMP:?}/production-cloudformation-controls-preflight.json"
+          bash aws/enforce-cloudformation-controls.sh preflight >"$proof"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            --arg expectedState "$EXPECTED_STACK_STATE" \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "preflight"
+              and .evidence == "live-control-plane"
+              and .identity.environment == "production"
+              and (
+                (
+                  $expectedState == "greenfield"
+                  and .identity.state == "absent"
+                  and .protection.enabled == null
+                  and .drift == null
+                )
+                or (
+                  $expectedState == "existing"
+                  and .identity.state == "existing"
+                  and .protection.enabled == true
+                  and .drift.detectionStatus == "DETECTION_COMPLETE"
+                  and .drift.stackDriftStatus == "IN_SYNC"
+                  and .drift.driftedResourceCount == 0
+                  and .drift.checkedResourceCount > 0
+                )
+              )
+            ' "$proof" >/dev/null
+
+      - name: Re-prove the application S3 preflight immediately before SAM
+        id: application_s3_recheck
+        env:
+          ENVIRONMENT: production
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+        run: |
+          set -euo pipefail
+          snapshot_recheck="${RUNNER_TEMP:?}/production-recovery-snapshot-recheck.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$snapshot_recheck"
+          jq -e \
+            --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$snapshot_recheck" >/dev/null
+
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            current_stack="${RUNNER_TEMP:?}/production-stack-recheck.json"
+            current_template="${RUNNER_TEMP:?}/production-template-recheck.yaml"
+            current_parameters="${RUNNER_TEMP:?}/production-parameters-recheck.json"
+            current_tags="${RUNNER_TEMP:?}/production-tags-recheck.json"
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$current_stack"
+            jq -e \
+              --arg stackId "$PREVIOUS_STACK_ID" \
+              --arg status "$PREVIOUS_STACK_STATUS" \
+              --arg revision "$PREVIOUS_STACK_REVISION" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              --arg function "$PREVIOUS_FUNCTION_NAME" \
+              --arg url "$PREVIOUS_APPLICATION_URL" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackId == $stackId
+                and .Stacks[0].StackStatus == $status
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime) == $revision
+                )
+                and .Stacks[0].RoleARN == $role
+                and (
+                  [.Stacks[0].Outputs[]
+                    | select(.OutputKey == "FunctionName")
+                    | .OutputValue] == [$function]
+                )
+                and (
+                  [.Stacks[0].Outputs[]
+                    | select(.OutputKey == "ApplicationUrl")
+                    | .OutputValue] == [$url]
+                )
+              ' "$current_stack" >/dev/null
+            aws cloudformation get-template \
+              --stack-name "$PREVIOUS_STACK_ID" \
+              --region "$AWS_REGION" \
+              --template-stage Original \
+              --output json |
+              jq -er \
+                '.TemplateBody | if type == "string" then . else tojson end' \
+                >"$current_template"
+            jq \
+              '.Stacks[0].Parameters
+               | map({ParameterKey, ParameterValue})
+               | sort_by(.ParameterKey)' \
+              "$current_stack" >"$current_parameters"
+            jq -e \
+              '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+              "$current_stack" >"$current_tags"
+            test "$(
+              sha256sum "$current_template" | awk '{print $1}'
+            )" = "$EXPECTED_TEMPLATE_SHA256"
+            test "$(
+              sha256sum "$current_parameters" | awk '{print $1}'
+            )" = "$EXPECTED_PARAMETERS_SHA256"
+            test "$(
+              sha256sum "$current_tags" | awk '{print $1}'
+            )" = "$EXPECTED_TAGS_SHA256"
+            aws lambda get-alias \
+              --function-name "$PREVIOUS_FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json |
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' >/dev/null
+          else
+            if stack_result="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "Stack state changed before the greenfield deploy." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$stack_result"; then
+              echo "Unable to re-prove the greenfield stack state." >&2
+              exit 1
+            fi
+          fi
+
+          recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.json"
+          canonical_before="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-before.canonical.json"
+          canonical_recheck="${RUNNER_TEMP:?}/application-s3-access-logging-preflight-recheck.canonical.json"
+          bash aws/prove-application-s3-access-logging.sh preflight >"$recheck"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          jq -cS . application-s3-access-logging-preflight.json \
+            >"$canonical_before"
+          jq -cS . "$recheck" >"$canonical_recheck"
+          cmp --silent "$canonical_before" "$canonical_recheck"
+          jq -e \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            '
+              (
+                $stackState == "greenfield"
+                and .priorState == "absent"
+              )
+              or (
+                $stackState == "existing"
+                and (
+                  .priorState == "disabled"
+                  or .priorState == "enabled"
+                )
+              )
+            ' "$recheck" >/dev/null
+          {
+            echo "reproved=true"
+            echo "stack_state=$EXPECTED_STACK_STATE"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Persist and arm the immutable production recovery intent
+        id: durable_recovery
+        env:
+          ARTIFACT_BUCKET: ${{ env.AWS_SAM_ARTIFACT_BUCKET }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          ENVIRONMENT: production
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          PREVIOUS_BUCKET_NAME: ${{ steps.previous.outputs.bucket_name }}
+          PREVIOUS_DISTRIBUTION_ID: ${{ steps.previous.outputs.distribution_id }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          RECOVERY_ENVIRONMENT: production
+          RECOVERY_SNAPSHOT_PROOF_FILE: ${{ runner.temp }}/production-recovery-snapshot-recheck.json
+          SOURCE_CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
+          STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          bundle_tar="${RUNNER_TEMP:?}/production-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
+          roundtrip_tar="${RUNNER_TEMP:?}/production-recovery-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
+          extracted_dir="${RUNNER_TEMP:?}/production-recovery-verified-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bundle_proof="${RUNNER_TEMP:?}/production-recovery-bundle-proof.json"
+          object_proof="${RUNNER_TEMP:?}/production-recovery-object-proof.json"
+          object_response="${RUNNER_TEMP:?}/production-recovery-object-response.json"
+          cleanup_durable_intent() {
+            rm -f -- \
+              "$bundle_tar" \
+              "$roundtrip_tar" \
+              "$bundle_proof" \
+              "$object_proof" \
+              "$object_response"
+            rm -rf -- "$extracted_dir"
+          }
+          trap cleanup_durable_intent EXIT
+
+          bash aws/create-durable-recovery-bundle.sh "$bundle_tar" \
+            >"$bundle_proof"
+          RECOVERY_INTENT_ID="$(
+            jq -er '.intentId | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_MANIFEST_SHA256="$(
+            jq -er '.manifestSha256 | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_ARCHIVE_SHA256="$(
+            jq -er '.archiveSha256 | select(test("^[0-9a-f]{64}$"))' \
+              "$bundle_proof"
+          )"
+          RECOVERY_ARCHIVE_KEY="candidates/recovery/production/${RECOVERY_INTENT_ID}.tar"
+          RECOVERY_INTENT_ID="$RECOVERY_INTENT_ID" \
+            bash aws/put-durable-recovery-object.sh \
+              "$bundle_tar" \
+              "$RECOVERY_ARCHIVE_KEY" >"$object_proof"
+          RECOVERY_ARCHIVE_BUCKET="$(jq -er '.bucket' "$object_proof")"
+          RECOVERY_ARCHIVE_VERSION_ID="$(
+            jq -er '.versionId | select(length > 0 and . != "null")' \
+              "$object_proof"
+          )"
+          test "$(jq -er '.sha256' "$object_proof")" = \
+            "$RECOVERY_ARCHIVE_SHA256"
+
+          aws s3api get-object \
+            --bucket "$RECOVERY_ARCHIVE_BUCKET" \
+            --key "$RECOVERY_ARCHIVE_KEY" \
+            --version-id "$RECOVERY_ARCHIVE_VERSION_ID" \
+            --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+            --checksum-mode ENABLED \
+            --region "$AWS_REGION" \
+            --output json \
+            "$roundtrip_tar" >"$object_response"
+          test "$(
+            sha256sum "$roundtrip_tar" | awk '{print $1}'
+          )" = "$RECOVERY_ARCHIVE_SHA256"
+          expected_checksum="$(
+            openssl dgst -sha256 -binary "$roundtrip_tar" | base64 -w0
+          )"
+          jq -e \
+            --arg checksum "$expected_checksum" \
+            --arg version "$RECOVERY_ARCHIVE_VERSION_ID" \
+            '.VersionId == $version and .ChecksumSHA256 == $checksum' \
+            "$object_response" >/dev/null
+          EXPECTED_ARCHIVE_SHA256="$RECOVERY_ARCHIVE_SHA256" \
+          EXPECTED_CANDIDATE_SHA="$CANDIDATE_SHA" \
+          EXPECTED_INTENT_ID="$RECOVERY_INTENT_ID" \
+          EXPECTED_MANIFEST_SHA256="$RECOVERY_MANIFEST_SHA256" \
+          EXPECTED_SOURCE_CI_RUN_ATTEMPT="$SOURCE_CI_RUN_ATTEMPT" \
+          EXPECTED_SOURCE_CI_RUN_ID="$SOURCE_CI_RUN_ID" \
+          EXPECTED_SOURCE_DEPLOY_RUN_ATTEMPT="$SOURCE_DEPLOY_RUN_ATTEMPT" \
+          EXPECTED_SOURCE_DEPLOY_RUN_ID="$SOURCE_DEPLOY_RUN_ID" \
+            bash aws/extract-durable-recovery-bundle.sh \
+              "$roundtrip_tar" \
+              "$extracted_dir" >/dev/null
+
+          RECOVERY_ARCHIVE_BUCKET="$RECOVERY_ARCHIVE_BUCKET" \
+          RECOVERY_ARCHIVE_KEY="$RECOVERY_ARCHIVE_KEY" \
+          RECOVERY_ARCHIVE_SHA256="$RECOVERY_ARCHIVE_SHA256" \
+          RECOVERY_ARCHIVE_VERSION_ID="$RECOVERY_ARCHIVE_VERSION_ID" \
+          RECOVERY_INTENT_ID="$RECOVERY_INTENT_ID" \
+          RECOVERY_MANIFEST_SHA256="$RECOVERY_MANIFEST_SHA256" \
+            bash aws/recovery-intent-ledger.sh arm \
+              >"${RUNNER_TEMP:?}/production-recovery-ledger-armed.json"
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg version "$RECOVERY_ARCHIVE_VERSION_ID" \
+            '
+              .state == "ARMED"
+              and .intentId == $intent
+              and .archiveVersionId == $version
+            ' "${RUNNER_TEMP:?}/production-recovery-ledger-armed.json" \
+            >/dev/null
+          had_previous_index="$(
+            jq -er \
+              '.hadPreviousIndex
+               | if type == "boolean"
+                 then tostring
+                 else error("invalid previous-index state")
+                 end' \
+              "$bundle_proof"
+          )"
+          {
+            echo "armed=true"
+            echo "intent_id=$RECOVERY_INTENT_ID"
+            echo "archive_bucket=$RECOVERY_ARCHIVE_BUCKET"
+            echo "archive_key=$RECOVERY_ARCHIVE_KEY"
+            echo "archive_version_id=$RECOVERY_ARCHIVE_VERSION_ID"
+            echo "archive_sha256=$RECOVERY_ARCHIVE_SHA256"
+            echo "manifest_sha256=$RECOVERY_MANIFEST_SHA256"
+            echo "had_previous_index=$had_previous_index"
+            echo "previous_index_version=$(jq -r '.previousIndexVersionId // ""' "$bundle_proof")"
+            echo "previous_index_sha256=$(jq -r '.previousIndexSha256 // ""' "$bundle_proof")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Refresh short-lived AWS credentials for production SAM deployment
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-sam-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Deploy production with recovery-safe SAM canary
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
         run: |
           set -euo pipefail
           test -n "$DATABASE_SECRET_ID"
@@ -997,6 +3365,30 @@ jobs:
           )
           if [ -n "$ALARM_TOPIC_ARN" ]; then
             PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
+          fi
+          SAM_TAGS=()
+          if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
+            [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
+            SAM_TAGS=(
+              --tags
+              "ArchonGreenfieldOwner=$GREENFIELD_OWNER"
+              "Application=$APP_NAME"
+              "Environment=production"
+            )
+          else
+            test "$EXPECTED_STACK_STATE" = "existing"
+            test -z "$GREENFIELD_OWNER"
+            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test "$(
+              sha256sum previous-stack-tags.json | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            serialized_tags_file="${RUNNER_TEMP:?}/production-sam-stack-tags.argv"
+            bash aws/serialize-sam-stack-tags.sh \
+              previous-stack-tags.json >"$serialized_tags_file"
+            mapfile -t preserved_stack_tags <"$serialized_tags_file"
+            if [ "${#preserved_stack_tags[@]}" -gt 0 ]; then
+              SAM_TAGS=(--tags "${preserved_stack_tags[@]}")
+            fi
           fi
           CANARY_PROBE_PID=""
           stop_canary_probe() {
@@ -1029,30 +3421,160 @@ jobs:
             ) &
             CANARY_PROBE_PID=$!
           fi
+          if [ "$EXPECTED_STACK_STATE:$HAS_PREVIOUS_STACK" = "existing:true" ]; then
+            final_stack="${RUNNER_TEMP:?}/production-stack-final-before-sam.json"
+            aws cloudformation describe-stacks \
+              --stack-name "$PREVIOUS_STACK_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$final_stack"
+            jq -e \
+              --arg stackId "$PREVIOUS_STACK_ID" \
+              --arg status "$PREVIOUS_STACK_STATUS" \
+              --arg revision "$PREVIOUS_STACK_REVISION" \
+              --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackId == $stackId
+                and .Stacks[0].StackStatus == $status
+                and (
+                  (.Stacks[0].LastUpdatedTime //
+                    .Stacks[0].CreationTime) == $revision
+                )
+                and .Stacks[0].RoleARN == $role
+              ' "$final_stack" >/dev/null
+            final_tags="${RUNNER_TEMP:?}/production-tags-final-before-sam.json"
+            jq -e \
+              '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+              "$final_stack" >"$final_tags"
+            test "$(
+              sha256sum "$final_tags" | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            aws lambda get-alias \
+              --function-name "$PREVIOUS_FUNCTION_NAME" \
+              --name live \
+              --region "$AWS_REGION" \
+              --output json |
+              jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' >/dev/null
+          elif [ "$EXPECTED_STACK_STATE:$HAS_PREVIOUS_STACK" = "greenfield:false" ]; then
+            if final_stack_state="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" 2>&1)"; then
+              echo "A stack appeared immediately before the greenfield SAM deploy." >&2
+              exit 1
+            elif ! grep -qi "does not exist" <<<"$final_stack_state"; then
+              echo "Unable to prove final greenfield absence before SAM." >&2
+              exit 1
+            fi
+          else
+            echo "The final stack-state contract is inconsistent." >&2
+            exit 1
+          fi
           echo "started=true" >> "$GITHUB_OUTPUT"
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/production/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "${PARAMETERS[@]}" \
+            "${SAM_TAGS[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --no-progressbar
           stop_canary_probe
           trap - EXIT
 
+      - name: Refresh short-lived AWS credentials after production SAM deployment
+        if: success()
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-post-sam-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
       - name: Resolve public, non-secret stack outputs
         id: stack
+        env:
+          ENVIRONMENT: production
+          EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
+          GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
         run: |
           set -euo pipefail
-          OUTPUTS="$(aws cloudformation describe-stacks \
+          post_sam_stack="${RUNNER_TEMP:?}/production-stack-after-sam.json"
+          aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
-            --query 'Stacks[0].Outputs' \
-            --output json)"
+            --output json >"$post_sam_stack"
+          jq -e \
+            --arg stack "$STACK_NAME" \
+            --arg stackPrefix \
+              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg owner "$GREENFIELD_OWNER" \
+            --arg previousStackId "$PREVIOUS_STACK_ID" \
+            --arg app "$APP_NAME" \
+            --arg environment "$ENVIRONMENT" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (.Stacks[0].StackId | startswith($stackPrefix))
+              and .Stacks[0].RoleARN == $role
+              and (
+                (
+                  $stackState == "greenfield"
+                  and $previousStackId == ""
+                  and .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                  and ((.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key))
+                    == ([
+                      {Key: "Application", Value: $app},
+                      {Key: "ArchonGreenfieldOwner", Value: $owner},
+                      {Key: "Environment", Value: $environment}
+                    ] | sort_by(.Key))
+                )
+                or (
+                  $stackState == "existing"
+                  and .Stacks[0].StackId == $previousStackId
+                  and $owner == ""
+                  and (
+                    .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                    or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                    or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  )
+                )
+              )
+            ' "$post_sam_stack" >/dev/null
+          post_sam_tags="${RUNNER_TEMP:?}/production-tags-after-sam.json"
+          jq -e \
+            '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+            "$post_sam_stack" >"$post_sam_tags"
+          if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
+            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test "$(
+              sha256sum "$post_sam_tags" | awk '{print $1}'
+            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+          else
+            test "$EXPECTED_STACK_STATE" = "greenfield"
+            test -z "$PREVIOUS_STACK_TAGS_SHA256"
+            [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          OUTPUTS="$(jq -cer '.Stacks[0].Outputs' "$post_sam_stack")"
           APPLICATION_URL="$(jq -er '.[] | select(.OutputKey == "ApplicationUrl") | .OutputValue' <<<"$OUTPUTS")"
           BUCKET_NAME="$(jq -er '.[] | select(.OutputKey == "SpaBucketName") | .OutputValue' <<<"$OUTPUTS")"
           DISTRIBUTION_ID="$(jq -er '.[] | select(.OutputKey == "DistributionId") | .OutputValue' <<<"$OUTPUTS")"
@@ -1060,6 +3582,15 @@ jobs:
           API_ID="$(jq -er '.[] | select(.OutputKey == "ApiId") | .OutputValue' <<<"$OUTPUTS")"
           API_STAGE_NAME="$(jq -er '.[] | select(.OutputKey == "ApiStageName") | .OutputValue' <<<"$OUTPUTS")"
           API_ACCESS_LOG_GROUP="$(jq -er '.[] | select(.OutputKey == "ApiAccessLogGroupName") | .OutputValue' <<<"$OUTPUTS")"
+          STACK_ID="$(jq -er '.Stacks[0].StackId' "$post_sam_stack")"
+          STACK_REVISION="$(
+            jq -er \
+              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              "$post_sam_stack"
+          )"
+          STACK_TAGS_SHA256="$(
+            sha256sum "$post_sam_tags" | awk '{print $1}'
+          )"
           {
             echo "application_url=$APPLICATION_URL"
             echo "bucket_name=$BUCKET_NAME"
@@ -1068,7 +3599,81 @@ jobs:
             echo "api_id=$API_ID"
             echo "api_stage_name=$API_STAGE_NAME"
             echo "api_access_log_group=$API_ACCESS_LOG_GROUP"
+            echo "stack_id=$STACK_ID"
+            echo "stack_revision=$STACK_REVISION"
+            echo "tags_sha256=$STACK_TAGS_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove live application S3 access logging before frontend mutation
+        id: application_s3_verify
+        env:
+          ENVIRONMENT: production
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+        run: |
+          set -euo pipefail
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh verify |
+            tee application-s3-access-logging-proof.json
+          jq -e \
+            --slurpfile preflight application-s3-access-logging-preflight.json \
+            --arg environment "$ENVIRONMENT" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg source "${APP_NAME}-${ENVIRONMENT}-web-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg destination "${APP_NAME}-s3-access-logs-${AWS_ACCOUNT_ID}-${AWS_REGION}" \
+            --arg prefix "${ENVIRONMENT}-web/" \
+            '
+              ($preflight | length) == 1
+              and .ok == true
+              and .schema == "archon.application-s3-access-logging.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .evidence == "live-control-plane"
+              and .foundationVerified == true
+              and .processedTemplateManaged == true
+              and .environment == $environment
+              and .stackState == $stackState
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .stackStatus == "CREATE_COMPLETE"
+                )
+                or (
+                  $stackState == "existing"
+                  and (
+                    .stackStatus == "CREATE_COMPLETE"
+                    or .stackStatus == "UPDATE_COMPLETE"
+                    or .stackStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  )
+                )
+              )
+              and .sourceBucket == $source
+              and .destinationBucket == $destination
+              and .liveState == "enabled"
+              and .preflightIntegrity == $preflight[0].integrity
+              and .expected == .liveConfiguration
+              and .liveConfiguration == {
+                "LoggingEnabled": {
+                  "TargetBucket": $destination,
+                  "TargetPrefix": $prefix,
+                  "TargetObjectKeyFormat": {
+                    "PartitionedPrefix": {
+                      "PartitionDateSource": "EventTime"
+                    }
+                  }
+                }
+              }
+            ' application-s3-access-logging-proof.json >/dev/null
+          proof_sha256="$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )"
+          [[ "$proof_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$proof_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Prove transformed and live API stage routing before frontend mutation
         env:
@@ -1101,28 +3706,68 @@ jobs:
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
+          EXPECTED_HAD_PREVIOUS_INDEX: ${{ steps.durable_recovery.outputs.had_previous_index }}
+          EXPECTED_PREVIOUS_INDEX_SHA256: ${{ steps.durable_recovery.outputs.previous_index_sha256 }}
+          EXPECTED_PREVIOUS_INDEX_VERSION: ${{ steps.durable_recovery.outputs.previous_index_version }}
         run: |
           set -euo pipefail
-          echo "started=true" >> "$GITHUB_OUTPUT"
-          HAD_PREVIOUS_INDEX=false
+          case "$EXPECTED_HAD_PREVIOUS_INDEX" in
+            true|false) ;;
+            *) exit 1 ;;
+          esac
           if previous_index="$(aws s3api head-object \
             --bucket "$BUCKET_NAME" \
             --key index.html \
+            --expected-bucket-owner "$AWS_ACCOUNT_ID" \
             --region "$AWS_REGION" \
             --output json 2>&1)"; then
-            PREVIOUS_INDEX_VERSION="$(
+            current_version="$(
               jq -er '.VersionId | strings | select(length > 0)' \
                 <<<"$previous_index"
             )"
-            HAD_PREVIOUS_INDEX=true
+            test "$EXPECTED_HAD_PREVIOUS_INDEX" = "true"
+            test "$current_version" = "$EXPECTED_PREVIOUS_INDEX_VERSION"
+            [[ "$EXPECTED_PREVIOUS_INDEX_SHA256" =~ ^[0-9a-f]{64}$ ]]
           elif grep -Eqi 'NoSuchKey|Not Found|\(404\)' <<<"$previous_index"; then
-            PREVIOUS_INDEX_VERSION=""
+            test "$EXPECTED_HAD_PREVIOUS_INDEX" = "false"
+            test -z "$EXPECTED_PREVIOUS_INDEX_VERSION"
+            test -z "$EXPECTED_PREVIOUS_INDEX_SHA256"
           else
-            echo "Unable to capture the current frontend index version." >&2
+            echo "Unable to re-prove the durable frontend baseline." >&2
             exit 1
           fi
-          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >> "$GITHUB_OUTPUT"
-          echo "previous_index_version=$PREVIOUS_INDEX_VERSION" >> "$GITHUB_OUTPUT"
+          HAD_PREVIOUS_INDEX="$EXPECTED_HAD_PREVIOUS_INDEX"
+          PREVIOUS_INDEX_VERSION="$EXPECTED_PREVIOUS_INDEX_VERSION"
+          echo "had_previous_index=$HAD_PREVIOUS_INDEX" >>"$GITHUB_OUTPUT"
+          echo "previous_index_version=$PREVIOUS_INDEX_VERSION" \
+            >>"$GITHUB_OUTPUT"
+          frontend_recovery_payload="$(
+            jq -cnS \
+              --arg bucket "$BUCKET_NAME" \
+              --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+              --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+              '{
+                bucket: $bucket,
+                hadPreviousIndex: $hadPreviousIndex,
+                previousIndexVersion: (
+                  if $previousIndexVersion == ""
+                  then null
+                  else $previousIndexVersion
+                  end
+                )
+              }'
+          )"
+          frontend_recovery_sha256="$(
+            printf '%s' "$frontend_recovery_payload" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          [[ "$frontend_recovery_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "recovery_sha256=$frontend_recovery_sha256" \
+            >>"$GITHUB_OUTPUT"
+          # Hashed assets are retained so the previous index remains recoverable.
+          # The new index is the atomic switch and is uploaded last.
+          echo "started=true" >>"$GITHUB_OUTPUT"
           aws s3 sync web/dist "s3://$BUCKET_NAME" \
             --region "$AWS_REGION" \
             --exclude index.html \
@@ -1217,18 +3862,297 @@ jobs:
           npx --prefix web playwright install --with-deps chromium
           npm run test:e2e --prefix web
 
-      - name: Refresh short-lived AWS credentials for production recovery
-        if: failure() && steps.deploy.outputs.started == 'true'
+      - name: Refresh short-lived AWS credentials for production terminal proof
+        if: success()
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-terminal-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Build and validate sanitized production deployment receipt
+        if: success()
+        env:
+          ENVIRONMENT: production
+          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          EXPECTED_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          FRONTEND_BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
+          FRONTEND_HAD_PREVIOUS_INDEX: ${{ steps.frontend.outputs.had_previous_index }}
+          FRONTEND_PREVIOUS_INDEX_VERSION: ${{ steps.frontend.outputs.previous_index_version }}
+          FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
+          LIVE_STACK_ID: ${{ steps.stack.outputs.stack_id }}
+          LIVE_STACK_REVISION: ${{ steps.stack.outputs.stack_revision }}
+          LIVE_STACK_TAGS_SHA256: ${{ steps.stack.outputs.tags_sha256 }}
+        run: |
+          set -euo pipefail
+          preflight_control="${RUNNER_TEMP:?}/production-cloudformation-controls-preflight.json"
+          terminal_control="${RUNNER_TEMP:?}/production-cloudformation-controls-terminal.json"
+          EXPECTED_STACK_ID="$LIVE_STACK_ID" \
+          EXPECTED_STACK_REVISION="$LIVE_STACK_REVISION" \
+          EXPECTED_TAGS_SHA256="$LIVE_STACK_TAGS_SHA256" \
+            bash aws/enforce-cloudformation-controls.sh terminal \
+              >"$terminal_control"
+          for proof in "$preflight_control" "$terminal_control"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$proof" >/dev/null
+          done
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "terminal"
+              and .identity.state == "existing"
+              and .identity.environment == "production"
+              and .protection.enabled == true
+              and .drift.detectionStatus == "DETECTION_COMPLETE"
+              and .drift.stackDriftStatus == "IN_SYNC"
+              and .drift.driftedResourceCount == 0
+              and .drift.checkedResourceCount > 0
+            ' "$terminal_control" >/dev/null
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          test "$(
+            sha256sum application-s3-access-logging-proof.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PROOF_SHA256"
+          [[ "$PREVIOUS_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FRONTEND_RECOVERY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+          terminal_snapshot="${RUNNER_TEMP:?}/production-recovery-snapshot-terminal.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          EXPECTED_PREVIOUS_RELEASE_SHA256="$PREVIOUS_RELEASE_SHA256" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$terminal_snapshot"
+          jq -e \
+            --arg expected "$PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$terminal_snapshot" >/dev/null
+          frontend_recovery_payload="$(
+            jq -cnS \
+              --arg bucket "$FRONTEND_BUCKET_NAME" \
+              --argjson hadPreviousIndex "$FRONTEND_HAD_PREVIOUS_INDEX" \
+              --arg previousIndexVersion "$FRONTEND_PREVIOUS_INDEX_VERSION" \
+              '{
+                bucket: $bucket,
+                hadPreviousIndex: $hadPreviousIndex,
+                previousIndexVersion: (
+                  if $previousIndexVersion == ""
+                  then null
+                  else $previousIndexVersion
+                  end
+                )
+              }'
+          )"
+          test "$(
+            printf '%s' "$frontend_recovery_payload" |
+              sha256sum |
+              awk '{print $1}'
+          )" = "$FRONTEND_RECOVERY_SHA256"
+
+          terminal_proof="${RUNNER_TEMP:?}/production-application-s3-access-logging-terminal-proof.json"
+          bash aws/prove-application-s3-access-logging.sh verify \
+            >"$terminal_proof"
+          cmp --silent \
+            application-s3-access-logging-proof.json \
+            "$terminal_proof"
+          terminal_proof_sha256="$(
+            sha256sum "$terminal_proof" | awk '{print $1}'
+          )"
+          test "$terminal_proof_sha256" = "$EXPECTED_PROOF_SHA256"
+          verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -e \
+            --slurpfile apiStage api-stage-proof.json \
+            --slurpfile cfnPreflight "$preflight_control" \
+            --slurpfile cfnTerminal "$terminal_control" \
+            --slurpfile s3Preflight application-s3-access-logging-preflight.json \
+            --slurpfile s3Proof "$terminal_proof" \
+            --arg environment production \
+            --arg stackName "$STACK_NAME" \
+            --arg applicationUrl "$APPLICATION_URL" \
+            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg stackState "$EXPECTED_STACK_STATE" \
+            --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
+            --arg frontendRecoverySha256 "$FRONTEND_RECOVERY_SHA256" \
+            --arg terminalProofSha256 "$terminal_proof_sha256" \
+            --arg verifiedAt "$verified_at" \
+            --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'if (($apiStage | length) == 1 and
+                 ($cfnPreflight | length) == 1 and
+                 ($cfnTerminal | length) == 1 and
+                 ($s3Preflight | length) == 1 and
+                 ($s3Proof | length) == 1 and
+                 $apiStage[0].ok == true and
+                 $apiStage[0].stage == "live" and
+                 $apiStage[0].legacyDefaultStageAbsent == true and
+                 $apiStage[0].detailedMetrics == true and
+                 $apiStage[0].throttlingRate == 5 and
+                 $apiStage[0].throttlingBurst == 10 and
+                 $apiStage[0].cloudFrontStatus == "Deployed" and
+                 $apiStage[0].cloudFrontOriginPath == "/live" and
+                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
+                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
+                 $apiStage[0].accessLogEvent == "GET /api/health 200" and
+                 $cfnPreflight[0].ok == true and
+                 $cfnPreflight[0].mode == "preflight" and
+                 $cfnPreflight[0].identity.environment == $environment and
+                 $cfnTerminal[0].ok == true and
+                 $cfnTerminal[0].mode == "terminal" and
+                 $cfnTerminal[0].identity.environment == $environment and
+                 $cfnTerminal[0].identity.state == "existing" and
+                 $cfnTerminal[0].protection.enabled == true and
+                 $cfnTerminal[0].drift.detectionStatus ==
+                   "DETECTION_COMPLETE" and
+                 $cfnTerminal[0].drift.stackDriftStatus == "IN_SYNC" and
+                 $cfnTerminal[0].drift.driftedResourceCount == 0 and
+                 $cfnTerminal[0].drift.checkedResourceCount > 0 and
+                 $s3Preflight[0].ok == true and
+                 $s3Preflight[0].mode == "preflight" and
+                 $s3Preflight[0].foundationVerified == true and
+                 $s3Preflight[0].environment == $environment and
+                 $s3Proof[0].ok == true and
+                 $s3Proof[0].mode == "verify" and
+                 $s3Proof[0].environment == $environment and
+                 $s3Proof[0].stackState == $stackState and
+                 (($stackState == "greenfield" and
+                   $s3Preflight[0].priorState == "absent" and
+                   $s3Proof[0].stackStatus == "CREATE_COMPLETE") or
+                  ($stackState == "existing" and
+                   ($s3Preflight[0].priorState == "disabled" or
+                    $s3Preflight[0].priorState == "enabled") and
+                   ($s3Proof[0].stackStatus == "CREATE_COMPLETE" or
+                    $s3Proof[0].stackStatus == "UPDATE_COMPLETE" or
+                    $s3Proof[0].stackStatus ==
+                      "UPDATE_ROLLBACK_COMPLETE"))) and
+                 $s3Proof[0].foundationVerified == true and
+                 $s3Proof[0].processedTemplateManaged == true and
+                 $s3Proof[0].liveState == "enabled" and
+                 $s3Proof[0].preflightIntegrity ==
+                   $s3Preflight[0].integrity and
+                 $preMutationReproved == "true" and
+                 ($previousReleaseSha256 | test("^[0-9a-f]{64}$")) and
+                 ($frontendRecoverySha256 | test("^[0-9a-f]{64}$")) and
+                 ($terminalProofSha256 | test("^[0-9a-f]{64}$")) and
+                 ($verifiedAt | test("Z$")))
+             then . + {deployment: {
+              environment: $environment,
+              stackName: $stackName,
+              applicationUrl: $applicationUrl,
+              deployedAt: $deployedAt,
+              smoke: "passed",
+              canary: "Canary10Percent5Minutes",
+              canaryTrafficProbe: "weighted-alias-proof-and-recall",
+              deployAlarm: "candidate-executed-version-errors",
+              recallGate: "post-promotion-with-explicit-restore",
+              recoverySnapshot: {
+                manifestSha256: $previousReleaseSha256,
+                frontendSha256: $frontendRecoverySha256
+              },
+              cloudFormationControls: {
+                preflight: $cfnPreflight[0],
+                terminal: $cfnTerminal[0]
+              },
+              apiStage: $apiStage[0],
+              s3AccessLogging: {
+                preflight: {
+                  foundationVerified: true,
+                  beforeState: $s3Preflight[0].priorState,
+                  preMutationReproved: true,
+                  stackState: $s3Proof[0].stackState
+                },
+                verified: {
+                  loggingEnabled: true,
+                  targetPrefix:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled.TargetPrefix,
+                  partitionDateSource:
+                    $s3Proof[0].liveConfiguration.LoggingEnabled
+                      .TargetObjectKeyFormat.PartitionedPrefix
+                      .PartitionDateSource,
+                  stackStatus: $s3Proof[0].stackStatus,
+                  processedTemplateManaged: true,
+                  liveControlPlaneVerified: true,
+                  terminalLiveReproved: true,
+                  terminalProofSha256: $terminalProofSha256,
+                  verifiedAt: $verifiedAt
+                }
+              }
+            }}
+             else error("invalid deployment control proof")
+             end' deployment-receipt.json > production-deployment-receipt.json
+
+      - name: Commit the receipt-bound production recovery intent
+        if: success()
+        env:
+          RECOVERY_ENVIRONMENT: production
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_INTENT_ID" =~ ^[0-9a-f]{64}$ ]]
+          receipt_sha256="$(
+            sha256sum production-deployment-receipt.json | awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          receipt_key="candidates/recovery/production/receipts/${RECOVERY_INTENT_ID}/${receipt_sha256}.json"
+          object_proof="${RUNNER_TEMP:?}/production-terminal-receipt-object.json"
+          trap 'rm -f -- "$object_proof"' EXIT
+          bash aws/put-durable-recovery-object.sh \
+            production-deployment-receipt.json \
+            "$receipt_key" >"$object_proof"
+          test "$(jq -er '.sha256' "$object_proof")" = "$receipt_sha256"
+          RECOVERY_RECEIPT_BUCKET="$(jq -er '.bucket' "$object_proof")" \
+          RECOVERY_RECEIPT_KEY="$(jq -er '.key' "$object_proof")" \
+          RECOVERY_RECEIPT_SHA256="$receipt_sha256" \
+          RECOVERY_RECEIPT_VERSION_ID="$(jq -er '.versionId' "$object_proof")" \
+            bash aws/recovery-intent-ledger.sh commit \
+              >"${RUNNER_TEMP:?}/production-recovery-ledger-committed.json"
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg receipt "$receipt_sha256" \
+            '
+              .ok == true
+              and .schema == "archon.recovery-intent.terminal"
+              and .version == 1
+              and .state == "COMMITTED"
+              and .intentId == $intent
+              and .receiptSha256 == $receipt
+            ' "${RUNNER_TEMP:?}/production-recovery-ledger-committed.json" \
+            >/dev/null
+
+      - name: Refresh short-lived AWS credentials for production recovery
+        if: (failure() || cancelled()) && steps.deploy.outputs.started == 'true'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
           role-session-name: archon-production-recovery-${{ github.run_id }}
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Restore the previous production release on verification failure
-        if: failure() && steps.deploy.outputs.started == 'true'
+        if: (failure() || cancelled()) && steps.deploy.outputs.started == 'true'
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
           DISTRIBUTION_ID: ${{ steps.stack.outputs.distribution_id }}
@@ -1239,13 +4163,136 @@ jobs:
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
           PREVIOUS_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          EXPECTED_PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
+          PREVIOUS_STACK_REVISION: ${{ steps.previous.outputs.stack_revision }}
+          EXPECTED_PREVIOUS_RELEASE_SHA256: ${{ steps.previous.outputs.previous_release_sha256 }}
+          EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256: ${{ steps.previous.outputs.template_sha256 }}
+          EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
+          EXPECTED_PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
+          EXPECTED_FRONTEND_RECOVERY_SHA256: ${{ steps.frontend.outputs.recovery_sha256 }}
+          ENVIRONMENT: production
+          RECOVERY_CANCELLED: ${{ job.status == 'cancelled' }}
+          RECOVERY_ENVIRONMENT: production
+          RECOVERY_EXECUTION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+          APPLICATION_S3_ACCESS_LOGGING_PREFLIGHT_FILE: application-s3-access-logging-preflight.json
+          EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
+          EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
         run: |
           set -euo pipefail
+          recovery_ledger="${RUNNER_TEMP:?}/production-inline-recovery-ledger.json"
+          bash aws/recovery-intent-ledger.sh read >"$recovery_ledger"
+          ledger_state="$(jq -er '.state' "$recovery_ledger")"
+          test "$(jq -er '.intentId' "$recovery_ledger")" = \
+            "$RECOVERY_INTENT_ID"
+          if [ "$ledger_state" = "COMMITTED" ] ||
+             [ "$ledger_state" = "RECOVERED" ]; then
+            exit 0
+          fi
+          test "$ledger_state" = "ARMED"
+          test "$(
+            sha256sum application-s3-access-logging-preflight.json |
+              awk '{print $1}'
+          )" = "$EXPECTED_PREFLIGHT_SHA256"
+          bash aws/prove-application-s3-access-logging.sh \
+            validate-preflight >/dev/null
+          recovery_snapshot="${RUNNER_TEMP:?}/production-recovery-snapshot-verified.json"
+          STACK_STATE="$EXPECTED_STACK_STATE" \
+          EXPECTED_TEMPLATE_SHA256="$EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256" \
+          EXPECTED_PARAMETERS_SHA256="$EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256" \
+          EXPECTED_TAGS_SHA256="$EXPECTED_PREVIOUS_STACK_TAGS_SHA256" \
+          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+            bash aws/prove-recovery-snapshot.sh >"$recovery_snapshot"
+          jq -e \
+            --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
+            '.ok == true and .manifestSha256 == $expected' \
+            "$recovery_snapshot" >/dev/null
+          if [ "$FRONTEND_STARTED" = "true" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: (
+                    if $previousIndexVersion == ""
+                    then null
+                    else $previousIndexVersion
+                    end
+                  )
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
+          fi
+
           RECOVERY_FAILED=0
+          prove_application_s3_recovery() {
+            if ! test "$(
+              sha256sum application-s3-access-logging-preflight.json |
+                awk '{print $1}'
+            )" = "$EXPECTED_PREFLIGHT_SHA256"; then
+              return 1
+            fi
+            if ! bash aws/prove-application-s3-access-logging.sh recover |
+                tee application-s3-access-logging-recovery.json; then
+              return 1
+            fi
+            jq -e \
+              --slurpfile preflight application-s3-access-logging-preflight.json \
+              --arg stackState "$EXPECTED_STACK_STATE" \
+              '
+                ($preflight | length) == 1
+                and .ok == true
+                and .schema == "archon.application-s3-access-logging.recovery"
+                and .version == 1
+                and .mode == "recover"
+                and .evidence == "live-control-plane"
+                and .foundationVerified == true
+                and .environment == $preflight[0].environment
+                and .stackState == $stackState
+                and .sourceBucket == $preflight[0].sourceBucket
+                and .destinationBucket == $preflight[0].destinationBucket
+                and .priorState == $preflight[0].priorState
+                and .restoredState == $preflight[0].priorState
+                and .preflightIntegrity == $preflight[0].integrity
+                and (
+                  (
+                    .restoredState == "absent"
+                    and .restoredConfiguration == null
+                  )
+                  or (
+                    .restoredState == "disabled"
+                    and .restoredConfiguration == {}
+                  )
+                  or (
+                    .restoredState == "enabled"
+                    and .restoredConfiguration == .expected
+                  )
+                )
+              ' application-s3-access-logging-recovery.json >/dev/null
+          }
           if [ "$HAS_PREVIOUS_STACK" != "true" ]; then
-            if ! ENVIRONMENT=production \
+            if ! GREENFIELD_OWNER="$EXPECTED_GREENFIELD_OWNER" \
+              ENVIRONMENT=production \
               bash aws/delete-greenfield-stack.sh; then
               echo "Failed to clean the failed greenfield deployment." >&2
+              RECOVERY_FAILED=1
+            fi
+            if [ "$RECOVERY_CANCELLED" = "true" ]; then
+              test "$RECOVERY_FAILED" -eq 0
+              exit 0
+            fi
+            if ! prove_application_s3_recovery; then
+              echo "Failed to prove greenfield S3 logging recovery." >&2
               RECOVERY_FAILED=1
             fi
             test "$RECOVERY_FAILED" -eq 0
@@ -1253,38 +4300,96 @@ jobs:
           fi
           if ! bash aws/restore-cloudformation-stack.sh; then
             echo "Failed to restore the exact previous CloudFormation stack." >&2
-            RECOVERY_FAILED=1
+            exit 1
           fi
-          RESTORED_BUCKET_NAME="$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='SpaBucketName'].OutputValue | [0]" \
-            --output text 2>/dev/null || true)"
-          if [ -n "$RESTORED_BUCKET_NAME" ] &&
-             [ "$RESTORED_BUCKET_NAME" != "None" ]; then
-            BUCKET_NAME="$RESTORED_BUCKET_NAME"
-          else
-            RECOVERY_FAILED=1
+          if [ "$RECOVERY_CANCELLED" = "true" ]; then
+            exit 0
           fi
-          RESTORED_DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" \
-            --output text 2>/dev/null || true)"
-          if [ -n "$RESTORED_DISTRIBUTION_ID" ] &&
-             [ "$RESTORED_DISTRIBUTION_ID" != "None" ]; then
-            DISTRIBUTION_ID="$RESTORED_DISTRIBUTION_ID"
-          else
-            RECOVERY_FAILED=1
+          if ! prove_application_s3_recovery; then
+            echo "Failed to prove the restored S3 logging state." >&2
+            exit 1
           fi
+          BUCKET_NAME=""
+          DISTRIBUTION_ID=""
+          restored_stack="${RUNNER_TEMP:?}/production-stack-after-recovery.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$EXPECTED_PREVIOUS_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$restored_stack"
+          jq -e \
+            --arg stackId "$EXPECTED_PREVIOUS_STACK_ID" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].RoleARN == $role
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and (
+                [.Stacks[0].Outputs[]?
+                  | select(.OutputKey == "SpaBucketName")
+                  | .OutputValue] | length
+              ) == 1
+              and (
+                [.Stacks[0].Outputs[]?
+                  | select(.OutputKey == "DistributionId")
+                  | .OutputValue] | length
+              ) == 1
+            ' "$restored_stack" >/dev/null
+          restored_tags="${RUNNER_TEMP:?}/production-tags-after-recovery.json"
+          jq -e \
+            '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
+            "$restored_stack" >"$restored_tags"
+          test "$(
+            sha256sum "$restored_tags" | awk '{print $1}'
+          )" = "$EXPECTED_PREVIOUS_STACK_TAGS_SHA256"
+          BUCKET_NAME="$(
+            jq -er \
+              '.Stacks[0].Outputs[]
+               | select(.OutputKey == "SpaBucketName")
+               | .OutputValue' "$restored_stack"
+          )"
+          DISTRIBUTION_ID="$(
+            jq -er \
+              '.Stacks[0].Outputs[]
+               | select(.OutputKey == "DistributionId")
+               | .OutputValue' "$restored_stack"
+          )"
+          test "$BUCKET_NAME" = \
+            "${APP_NAME}-production-web-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
           if [ "$FRONTEND_STARTED" = "true" ] &&
              [ "$HAD_PREVIOUS_INDEX" = "true" ] &&
              [ -n "$BUCKET_NAME" ] &&
              [ -n "$PREVIOUS_INDEX_VERSION" ] &&
              [ "$PREVIOUS_INDEX_VERSION" != "None" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                --arg previousIndexVersion "$PREVIOUS_INDEX_VERSION" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: $previousIndexVersion
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
             if ! aws s3api copy-object \
               --bucket "$BUCKET_NAME" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --expected-source-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
               --metadata-directive REPLACE \
+              --annotation-directive EXCLUDE \
               --content-type "text/html; charset=utf-8" \
               --cache-control "no-cache,no-store,must-revalidate" \
               --region "$AWS_REGION" >/dev/null; then
@@ -1293,8 +4398,24 @@ jobs:
           elif [ "$FRONTEND_STARTED" = "true" ] &&
                [ "$HAD_PREVIOUS_INDEX" = "false" ] &&
                [ -n "$BUCKET_NAME" ]; then
+            frontend_recovery_payload="$(
+              jq -cnS \
+                --arg bucket "$BUCKET_NAME" \
+                --argjson hadPreviousIndex "$HAD_PREVIOUS_INDEX" \
+                '{
+                  bucket: $bucket,
+                  hadPreviousIndex: $hadPreviousIndex,
+                  previousIndexVersion: null
+                }'
+            )"
+            test "$(
+              printf '%s' "$frontend_recovery_payload" |
+                sha256sum |
+                awk '{print $1}'
+            )" = "$EXPECTED_FRONTEND_RECOVERY_SHA256"
             if ! aws s3api delete-object \
               --bucket "$BUCKET_NAME" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --region "$AWS_REGION" >/dev/null; then
               RECOVERY_FAILED=1
@@ -1305,12 +4426,58 @@ jobs:
           if [ -n "$PREVIOUS_FUNCTION_NAME" ] &&
              [ -n "$PREVIOUS_FUNCTION_VERSION" ] &&
              [ "$PREVIOUS_FUNCTION_VERSION" != "None" ]; then
-            if ! aws lambda update-alias \
+            alias_before="${RUNNER_TEMP:?}/production-alias-before-recovery.json"
+            alias_after="${RUNNER_TEMP:?}/production-alias-after-recovery.json"
+            alias_update="${RUNNER_TEMP:?}/production-alias-update.json"
+            if ! aws lambda get-alias \
               --function-name "$PREVIOUS_FUNCTION_NAME" \
               --name live \
-              --function-version "$PREVIOUS_FUNCTION_VERSION" \
-              --region "$AWS_REGION" >/dev/null; then
+              --region "$AWS_REGION" \
+              --output json >"$alias_before"; then
               RECOVERY_FAILED=1
+            else
+              alias_revision="$(
+                jq -er \
+                  --arg arn \
+                    "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                  '
+                    select(
+                      .AliasArn == $arn
+                      and .Name == "live"
+                      and (.FunctionVersion | test("^[1-9][0-9]*$"))
+                      and (.RevisionId | type == "string" and length > 0)
+                    )
+                    | .RevisionId
+                  ' "$alias_before"
+              )"
+              if ! aws lambda update-alias \
+                --function-name "$PREVIOUS_FUNCTION_NAME" \
+                --name live \
+                --function-version "$PREVIOUS_FUNCTION_VERSION" \
+                --routing-config '{"AdditionalVersionWeights":{}}' \
+                --revision-id "$alias_revision" \
+                --region "$AWS_REGION" \
+                --output json >"$alias_update"; then
+                RECOVERY_FAILED=1
+              elif ! aws lambda get-alias \
+                --function-name "$PREVIOUS_FUNCTION_NAME" \
+                --name live \
+                --region "$AWS_REGION" \
+                --output json >"$alias_after"; then
+                RECOVERY_FAILED=1
+              elif ! jq -e \
+                --arg arn \
+                  "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${PREVIOUS_FUNCTION_NAME}:live" \
+                --arg version "$PREVIOUS_FUNCTION_VERSION" \
+                '
+                  .AliasArn == $arn
+                  and .Name == "live"
+                  and .FunctionVersion == $version
+                  and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+                  and (.RevisionId | type == "string" and length > 0)
+                ' "$alias_after" >/dev/null; then
+                RECOVERY_FAILED=1
+              fi
             fi
           fi
           if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
@@ -1347,49 +4514,11 @@ jobs:
           fi
           test "$RECOVERY_FAILED" -eq 0
 
-      - name: Publish sanitized production deployment receipt
-        if: success()
-        env:
-          APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
-        run: |
-          jq -e \
-            --slurpfile apiStage api-stage-proof.json \
-            --arg environment production \
-            --arg stackName "$STACK_NAME" \
-            --arg applicationUrl "$APPLICATION_URL" \
-            --arg deployedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            'if (($apiStage | length) == 1 and
-                 $apiStage[0].ok == true and
-                 $apiStage[0].stage == "live" and
-                 $apiStage[0].legacyDefaultStageAbsent == true and
-                 $apiStage[0].detailedMetrics == true and
-                 $apiStage[0].throttlingRate == 5 and
-                 $apiStage[0].throttlingBurst == 10 and
-                 $apiStage[0].cloudFrontStatus == "Deployed" and
-                 $apiStage[0].cloudFrontOriginPath == "/live" and
-                 $apiStage[0].directStageHealth == "GET /live/api/health 200" and
-                 $apiStage[0].sameOriginHealth == "GET /api/health 200" and
-                 $apiStage[0].accessLogEvent == "GET /api/health 200")
-             then . + {deployment: {
-              environment: $environment,
-              stackName: $stackName,
-              applicationUrl: $applicationUrl,
-              deployedAt: $deployedAt,
-              smoke: "passed",
-              canary: "Canary10Percent5Minutes",
-              canaryTrafficProbe: "weighted-alias-proof-and-recall",
-              deployAlarm: "candidate-executed-version-errors",
-              recallGate: "post-promotion-with-explicit-restore",
-              apiStage: $apiStage[0]
-            }}
-             else error("invalid API stage proof")
-             end' deployment-receipt.json > production-deployment-receipt.json
-
       - name: Upload production receipt
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: production-deployment-receipt-${{ github.event.workflow_run.head_sha }}
+          name: production-deployment-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-deployment-receipt.json
           if-no-files-found: error
           retention-days: 90
@@ -1499,7 +4628,7 @@ jobs:
       - name: Upload sanitized Managed MCP receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: managed-mcp-production-${{ github.event.workflow_run.head_sha }}
+          name: managed-mcp-production-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: managed-mcp-production-receipt.json
           if-no-files-found: error
           retention-days: 90

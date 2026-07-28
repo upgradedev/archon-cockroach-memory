@@ -486,7 +486,13 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource:
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+                  # Transitional read-only compatibility for immutable artifacts
+                  # published before environment-scoped deployment prefixes.
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -535,7 +541,13 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+                Resource:
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/deployments/production/*
+                  # Transitional read-only compatibility for immutable artifacts
+                  # published before environment-scoped deployment prefixes.
+                  - !Sub >-
+                    ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -659,7 +671,13 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+            Resource:
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+              # Retain rollback access to the previous pre-migration template's
+              # immutable Lambda artifacts until both environments have rolled.
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
           - Sid: StagingLambda
             Effect: Allow
             Action:
@@ -738,7 +756,13 @@ Resources:
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
-            Resource: !Sub "${ArtifactBucket.Arn}/candidates/*"
+            Resource:
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/deployments/production/*
+              # Retain rollback access to the previous pre-migration template's
+              # immutable Lambda artifacts until both environments have rolled.
+              - !Sub >-
+                ${ArtifactBucket.Arn}/candidates/????????????????????????????????????????/*
           - Sid: ProductionLambda
             Effect: Allow
             Action:
@@ -804,6 +828,8 @@ Resources:
               - cloudwatch:DeleteAlarms
               - cloudwatch:DeleteDashboards
               - cloudwatch:DescribeAlarms
+              - cloudwatch:GetDashboard
+              - cloudwatch:ListTagsForResource
               - cloudwatch:PutDashboard
               - cloudwatch:PutMetricAlarm
               - cloudwatch:TagResource
@@ -1142,6 +1168,15 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
                 token.actions.githubusercontent.com:sub: !Sub >-
                   repo:${GitHubOrganization}/${GitHubRepository}:environment:staging
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: staging
+                token.actions.githubusercontent.com:workflow:
+                  - Deploy AWS
+                  - Recover AWS
       Policies:
         - PolicyName: deploy-staging
           PolicyDocument:
@@ -1149,18 +1184,35 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - cloudformation:CancelUpdateStack
                   - cloudformation:CreateChangeSet
-                  - cloudformation:CreateStack
+                  - cloudformation:ContinueUpdateRollback
                   - cloudformation:DeleteStack
                   - cloudformation:DeleteChangeSet
                   - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackResourceDrifts
+                  - cloudformation:DescribeStackResources
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStacks
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
                   - cloudformation:ExecuteChangeSet
                   - cloudformation:GetTemplate
                   - cloudformation:GetTemplateSummary
-                  - cloudformation:UpdateStack
+                  - cloudformation:RollbackStack
+                  - cloudformation:UpdateTerminationProtection
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-staging/*"
+              - Sid: InspectStagingDriftDetection
+                Effect: Allow
+                Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"
+              - Sid: ExpandStagingServerlessTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
               - Effect: Allow
                 Action:
                   - iam:PassRole
@@ -1168,14 +1220,27 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
-              - Effect: Allow
+              - Sid: InspectStagingArtifactAndApplicationBuckets
+                Effect: Allow
                 Action:
                   - s3:GetBucketLocation
                   - s3:GetBucketLogging
-                  - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: ListStagingArtifactNamespaces
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - candidates/deployments/staging/*
+                      - candidates/recovery/staging/*
+              - Sid: ListStagingApplicationBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: AuditS3AccessLogArchive
                 Effect: Allow
                 Action:
@@ -1197,19 +1262,35 @@ Resources:
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
                 Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
-              - Effect: Allow
+              - Sid: PublishStagingDeploymentArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+              - Sid: ManageStagingRecoveryArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/recovery/staging/*
+              - Sid: PublishAndRecoverStagingFrontend
                 Action:
                   - s3:DeleteObject
                   - s3:GetObject
                   - s3:GetObjectVersion
                   - s3:PutObject
-                Resource:
-                  - !Sub "${ArtifactBucket.Arn}/candidates/*"
-                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+                Effect: Allow
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
               - Sid: DeleteFailedStagingGreenfieldRetainedResources
                 Effect: Allow
                 Action:
                   - s3:DeleteBucket
+                  - s3:GetBucketTagging
                   - s3:ListBucketVersions
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: DeleteFailedStagingGreenfieldObjectVersions
@@ -1219,10 +1300,17 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
               - Sid: DeleteFailedStagingGreenfieldRetainedLogs
                 Effect: Allow
-                Action:
-                  - logs:DeleteLogGroup
+                Action: logs:DeleteLogGroup
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-staging"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-staging-api"
+              - Sid: InspectFailedStagingGreenfieldRetainedLogTags
+                Effect: Allow
+                Action: logs:ListTagsForResource
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-staging"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-staging"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-staging-api"
               - Effect: Allow
                 Action:
@@ -1230,12 +1318,16 @@ Resources:
                   - cloudfront:GetDistribution
                   - cloudfront:GetDistributionConfig
                   - cloudfront:GetInvalidation
-                Resource: "*"
+                Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/Environment: staging
               - Effect: Allow
                 Action:
                   - lambda:GetAlias
                   - lambda:UpdateAlias
-                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-*"
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-staging-api"
               - Sid: VerifyStagingApiStage
                 Effect: Allow
                 Action:
@@ -1273,6 +1365,15 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
                 token.actions.githubusercontent.com:sub: !Sub >-
                   repo:${GitHubOrganization}/${GitHubRepository}:environment:production
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: production
+                token.actions.githubusercontent.com:workflow:
+                  - Deploy AWS
+                  - Recover AWS
       Policies:
         - PolicyName: deploy-production
           PolicyDocument:
@@ -1280,18 +1381,35 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - cloudformation:CancelUpdateStack
                   - cloudformation:CreateChangeSet
-                  - cloudformation:CreateStack
+                  - cloudformation:ContinueUpdateRollback
                   - cloudformation:DeleteStack
                   - cloudformation:DeleteChangeSet
                   - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackResourceDrifts
+                  - cloudformation:DescribeStackResources
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStacks
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
                   - cloudformation:ExecuteChangeSet
                   - cloudformation:GetTemplate
                   - cloudformation:GetTemplateSummary
-                  - cloudformation:UpdateStack
+                  - cloudformation:RollbackStack
+                  - cloudformation:UpdateTerminationProtection
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-production/*"
+              - Sid: InspectProductionDriftDetection
+                Effect: Allow
+                Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"
+              - Sid: ExpandProductionServerlessTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
               - Effect: Allow
                 Action:
                   - iam:PassRole
@@ -1299,14 +1417,27 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
-              - Effect: Allow
+              - Sid: InspectProductionArtifactAndApplicationBuckets
+                Effect: Allow
                 Action:
                   - s3:GetBucketLocation
                   - s3:GetBucketLogging
-                  - s3:ListBucket
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
+              - Sid: ListProductionArtifactNamespaces
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - candidates/deployments/production/*
+                      - candidates/recovery/production/*
+              - Sid: ListProductionApplicationBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: AuditS3AccessLogArchive
                 Effect: Allow
                 Action:
@@ -1328,19 +1459,35 @@ Resources:
                 Effect: Allow
                 Action: securityhub:BatchGetAutomationRules
                 Resource: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
-              - Effect: Allow
+              - Sid: PublishProductionDeploymentArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/deployments/production/*
+              - Sid: ManageProductionRecoveryArtifacts
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/candidates/recovery/production/*
+              - Sid: PublishAndRecoverProductionFrontend
                 Action:
                   - s3:DeleteObject
                   - s3:GetObject
                   - s3:GetObjectVersion
                   - s3:PutObject
-                Resource:
-                  - !Sub "${ArtifactBucket.Arn}/candidates/*"
-                  - !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+                Effect: Allow
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
               - Sid: DeleteFailedProductionGreenfieldRetainedResources
                 Effect: Allow
                 Action:
                   - s3:DeleteBucket
+                  - s3:GetBucketTagging
                   - s3:ListBucketVersions
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}"
               - Sid: DeleteFailedProductionGreenfieldObjectVersions
@@ -1350,10 +1497,17 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
               - Sid: DeleteFailedProductionGreenfieldRetainedLogs
                 Effect: Allow
-                Action:
-                  - logs:DeleteLogGroup
+                Action: logs:DeleteLogGroup
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-production-api"
+              - Sid: InspectFailedProductionGreenfieldRetainedLogTags
+                Effect: Allow
+                Action: logs:ListTagsForResource
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppName}-production"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-production-api"
               - Effect: Allow
                 Action:
@@ -1361,12 +1515,16 @@ Resources:
                   - cloudfront:GetDistribution
                   - cloudfront:GetDistributionConfig
                   - cloudfront:GetInvalidation
-                Resource: "*"
+                Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/Environment: production
               - Effect: Allow
                 Action:
                   - lambda:GetAlias
                   - lambda:UpdateAlias
-                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-*"
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppName}-production-api"
               - Sid: VerifyProductionApiStage
                 Effect: Allow
                 Action:

@@ -21,8 +21,12 @@ import {
   EXPECTED_DOCKERFILE_BASE_REFS,
   EXPECTED_SETUP_NODE_STEPS,
   EXPECTED_WORKFLOW_ACTION_REFS,
+  DURABLE_RECOVERY_LOCAL_BASENAMES,
+  DURABLE_RECOVERY_SCRIPT_PATHS,
   generatedArtifactPaths,
   GENERATED_ARTIFACT_BASENAMES,
+  hasExactAwsDeliveryConcurrency,
+  hasExactAwsRecoveryTrigger,
   hasExactCiTrigger,
   hasUniqueCiTriggerOwnership,
   isSubmissionEligible,
@@ -57,8 +61,526 @@ test("readiness: centralized S3 access logging is a first-class product gate", (
       candidate.id === "product.s3-access-logging-foundation"
   );
   assert.ok(check);
-  assert.equal(check.criterion, "Product Readiness");
+  assert.equal(check.criterion, "Production Readiness");
   assert.equal(check.status, "pass", check.detail);
+});
+
+test("readiness: durable S3 CAS recovery is armed before mutation and closed by receipts", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.durable-out-of-band-recovery"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Production Readiness");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const recovery = readFileSync(
+    new URL("../.github/workflows/recover-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const foundationWorkflow = readFileSync(
+    new URL("../.github/workflows/bootstrap-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const ledger = readFileSync(
+    new URL("../aws/recovery-intent-ledger.sh", import.meta.url),
+    "utf8"
+  );
+  const cloudFormationControls = readFileSync(
+    new URL("../aws/enforce-cloudformation-controls.sh", import.meta.url),
+    "utf8"
+  );
+  const cloudFormationControlsTests = readFileSync(
+    new URL("../tests/cloudformation-controls.test.ts", import.meta.url),
+    "utf8"
+  );
+  const bootstrap = readFileSync(
+    new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
+    "utf8"
+  );
+  const template = readFileSync(
+    new URL("../aws/template.yaml", import.meta.url),
+    "utf8"
+  );
+  const scriptSources = DURABLE_RECOVERY_SCRIPT_PATHS.map((scriptPath) =>
+    readFileSync(new URL(`../${scriptPath}`, import.meta.url), "utf8")
+  );
+
+  assert.equal(hasExactAwsRecoveryTrigger(recovery), true);
+  assert.equal(hasExactAwsDeliveryConcurrency(foundationWorkflow), true);
+  assert.equal(hasExactAwsDeliveryConcurrency(deploy), true);
+  assert.equal(hasExactAwsDeliveryConcurrency(recovery), true);
+  assert.match(deploy, /name: Deploy and smoke staging/u);
+  assert.match(
+    deploy,
+    /name: Promote identical candidate to production/u
+  );
+  assert.match(
+    recovery,
+    /TERMINAL_JOB_NAME: Deploy and smoke staging/u
+  );
+  assert.match(
+    recovery,
+    /TERMINAL_JOB_NAME: Promote identical candidate to production/u
+  );
+  assert.equal(
+    (recovery.match(/timeout-minutes:\s+65/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (recovery.match(/role-duration-seconds:\s+3600/gu) ?? []).length,
+    6
+  );
+  assert.match(ledger, /--argjson leaseUntil "\$\(\(now \+ 7200\)\)"/u);
+  assert.equal(
+    (
+      recovery.match(
+        /uses: actions\/checkout@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          ref: \$\{\{ github\.sha \}\}\r?\n          fetch-depth: 0/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /test "\$GITHUB_REF" = "refs\/heads\/main"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /test "\$GITHUB_REF_TYPE" = "branch"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /test "\$GITHUB_WORKFLOW_REF" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory\/\.github\/workflows\/recover-aws\.yml@refs\/heads\/main"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /git fetch --no-tags origin \\\r?\n\s+\+refs\/heads\/main:refs\/remotes\/origin\/main/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /test "\$\(git rev-parse origin\/main\)" = "\$GITHUB_SHA"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    recovery,
+    /recover-staging:[\s\S]*?if: >-\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
+  );
+  assert.match(
+    recovery,
+    /recover-production:[\s\S]*?needs:\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
+  );
+  assert.doesNotMatch(recovery, /needs\.recover-staging\.result/u);
+  assert.doesNotMatch(recovery, /github\.event\.workflow_run\.head_sha/u);
+
+  assert.match(
+    bootstrap,
+    /GitHubRepositoryId:\r?\n\s+Type: String\r?\n\s+Default: "1285750381"\r?\n\s+AllowedPattern: "\^\[0-9\]\{1,20\}\$"/u
+  );
+  assert.match(
+    bootstrap,
+    /GitHubRepositoryOwnerId:\r?\n\s+Type: String\r?\n\s+Default: "25751981"\r?\n\s+AllowedPattern: "\^\[0-9\]\{1,20\}\$"/u
+  );
+  const environmentTrustBlocks = [
+    {
+      environment: "staging",
+      source:
+        bootstrap.match(
+          /(?:^|\r?\n)  StagingDeployRole:\r?\n[\s\S]*?\r?\n      Policies:/u
+        )?.[0] ?? "",
+    },
+    {
+      environment: "production",
+      source:
+        bootstrap.match(
+          /(?:^|\r?\n)  ProductionDeployRole:\r?\n[\s\S]*?\r?\n      Policies:/u
+        )?.[0] ?? "",
+    },
+  ];
+  for (const { environment, source } of environmentTrustBlocks) {
+    assert.ok(source.length > 0, environment);
+    assert.equal(
+      (source.match(/token\.actions\.githubusercontent\.com:/gu) ?? [])
+        .length,
+      8
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:sub: !Sub >-/u
+    );
+    assert.ok(
+      source.includes(
+        `repo:\${GitHubOrganization}/\${GitHubRepository}:environment:${environment}`
+      )
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:repository: !Sub >-/u
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:repository_id: !Ref GitHubRepositoryId/u
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:repository_owner_id: !Ref GitHubRepositoryOwnerId/u
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:ref: refs\/heads\/main/u
+    );
+    assert.ok(
+      source.includes(
+        `token.actions.githubusercontent.com:environment: ${environment}`
+      )
+    );
+    assert.match(
+      source,
+      /token\.actions\.githubusercontent\.com:workflow:\r?\n\s+- Deploy AWS\r?\n\s+- Recover AWS\r?\n      Policies:$/u
+    );
+    assert.doesNotMatch(
+      source,
+      /token\.actions\.githubusercontent\.com:(?:workflow_ref|job_workflow_ref):/u
+    );
+  }
+
+  const armPositions = [
+    ...deploy.matchAll(
+      /name: Persist and arm the immutable (?:staging|production) recovery intent/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const samPositions = [
+    ...deploy.matchAll(
+      /name: Deploy (?:staging|production) with recovery-safe SAM canary/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  assert.equal(armPositions.length, 2);
+  assert.equal(samPositions.length, 2);
+  for (const [index, armPosition] of armPositions.entries()) {
+    assert.ok(armPosition < samPositions[index]);
+  }
+  const samCredentialRefreshPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials for (?:staging|production) SAM deployment/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  assert.equal(samCredentialRefreshPositions.length, 2);
+  for (const [index, refreshPosition] of samCredentialRefreshPositions.entries()) {
+    assert.ok(refreshPosition < samPositions[index]);
+    assert.equal(
+      (
+        deploy
+          .slice(refreshPosition, samPositions[index])
+          .match(/\r?\n      - name:/gu) ?? []
+      ).length,
+      0
+    );
+  }
+  const reconciliationPositions = [
+    ...deploy.matchAll(
+      /name: Reconcile an interrupted same-run (?:staging|production) greenfield recovery/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  const postReconciliationRefreshPositions = [
+    ...deploy.matchAll(
+      /name: Refresh short-lived AWS credentials after (?:staging|production) reconciliation/gu
+    ),
+  ].map((match) => match.index ?? -1);
+  assert.equal(reconciliationPositions.length, 2);
+  assert.equal(postReconciliationRefreshPositions.length, 2);
+  for (const [
+    index,
+    refreshPosition,
+  ] of postReconciliationRefreshPositions.entries()) {
+    assert.ok(reconciliationPositions[index] < refreshPosition);
+    assert.ok(refreshPosition < samPositions[index]);
+  }
+  assert.equal(
+    (deploy.match(/role-duration-seconds:\s+3600/gu) ?? []).length,
+    12
+  );
+  assert.equal(
+    (deploy.match(/bash aws\/recovery-intent-ledger\.sh arm/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (deploy.match(/\.state == "ARMED"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /EXPECTED_HAD_PREVIOUS_INDEX: \$\{\{ steps\.durable_recovery\.outputs\.had_previous_index \}\}/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /Unable to re-prove the durable frontend baseline\./gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (deploy.match(/bash aws\/recovery-intent-ledger\.sh commit/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (deploy.match(/\.state == "COMMITTED"/gu) ?? []).length,
+    4
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/finalize-durable-recovery-receipt\.sh/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /length == 1 and \(\.\[0\] \| type == "object"\)/gu
+      ) ?? []
+    ).length,
+    16
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/classify-durable-recovery-source\.sh >"\$classification"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/recovery-intent-ledger\.sh claim \\\r?\n\s+>"\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-recovery-claim\.json"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/download-durable-recovery-bundle\.sh "\$bundle_dir" \\\r?\n\s+>"\$\{RUNNER_TEMP:\?\}\/(?:staging|production)-recovery-download\.json"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-recovery-(?:execution|finalization)\.json/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/enforce-cloudformation-controls\.sh audit/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /name: Upload (?:staging|production) daily protection and drift audit/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /bash aws\/enforce-cloudformation-controls\.sh recover/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (recovery.match(/\.state == "RECOVERED"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      cloudFormationControls.match(/require_single_json_object/gu) ?? []
+    ).length,
+    6
+  );
+  assert.match(
+    cloudFormationControls,
+    /require_single_json_object\(\) \{[\s\S]*?jq -s -e \\\r?\n\s+'length == 1 and \(\.\[0\] \| type == "object"\)'/u
+  );
+  assert.match(
+    cloudFormationControlsTests,
+    /every live CloudFormation boundary rejects duplicate valid JSON documents/u
+  );
+
+  for (const environment of ["staging", "production"]) {
+    const refreshPosition = recovery.indexOf(
+      `name: Refresh credentials for the full ${environment} recovery cycle`
+    );
+    const executorPosition = recovery.indexOf(
+      `name: Restore and prove the exact ${environment} prestate`
+    );
+    assert.ok(refreshPosition >= 0);
+    assert.ok(refreshPosition < executorPosition);
+    assert.equal(
+      (
+        recovery
+          .slice(refreshPosition, executorPosition)
+          .match(/\r?\n      - name:/gu) ?? []
+      ).length,
+      0
+    );
+
+    const terminalBlock =
+      recovery.match(
+        new RegExp(
+          String.raw`- name: Restore and prove the exact ${environment} prestate[\s\S]*?(?=\r?\n      - name: Upload supplemental ${environment} recovery receipt)`,
+          "u"
+        )
+      )?.[0] ?? "";
+    const executionInputs = terminalBlock.indexOf(
+      'for output in "$receipt" "$execution"; do'
+    );
+    const executionGate = terminalBlock.indexOf(
+      "jq -e -s",
+      executionInputs
+    );
+    const controlStep = terminalBlock.indexOf(
+      `name: Enforce exact ${environment} post-recovery stack controls`
+    );
+    const controlGate = terminalBlock.indexOf("jq -e -s", controlStep);
+    const finalizerStep = terminalBlock.indexOf(
+      `name: Persist receipt and mark ${environment} recovered atomically`
+    );
+    const finalizerInputs = terminalBlock.indexOf(
+      'for input in "$receipt" "$execution" "$controls"; do',
+      finalizerStep
+    );
+    const finalizerInputGate = terminalBlock.indexOf(
+      "jq -e -s",
+      finalizerInputs
+    );
+    const finalizerCommand = terminalBlock.indexOf(
+      "bash aws/finalize-durable-recovery-receipt.sh",
+      finalizerInputGate
+    );
+    const finalizationGate = terminalBlock.indexOf(
+      "jq -e -s",
+      finalizerCommand
+    );
+    assert.equal(
+      (
+        terminalBlock.match(
+          /length == 1 and \(\.\[0\] \| type == "object"\)/gu
+        ) ?? []
+      ).length,
+      4,
+      environment
+    );
+    assert.ok(executionInputs >= 0, environment);
+    assert.ok(executionInputs < executionGate, environment);
+    assert.ok(executionGate < controlStep, environment);
+    assert.ok(controlStep < controlGate, environment);
+    assert.ok(controlGate < finalizerStep, environment);
+    assert.ok(finalizerStep < finalizerInputs, environment);
+    assert.ok(finalizerInputs < finalizerInputGate, environment);
+    assert.ok(finalizerInputGate < finalizerCommand, environment);
+    assert.ok(finalizerCommand < finalizationGate, environment);
+  }
+
+  assert.match(
+    ledger,
+    /ledger_key="candidates\/recovery\/\$\{RECOVERY_ENVIRONMENT\}\/ledger\.json"/u
+  );
+  assert.match(ledger, /put_args\+=\(--if-match "\$prior_etag"\)/u);
+  assert.match(ledger, /put_args\+=\(--if-none-match '\*'\)/u);
+  assert.match(ledger, /--server-side-encryption AES256/u);
+  assert.match(ledger, /--checksum-algorithm SHA256/u);
+  assert.match(ledger, /\.schema == "archon\.recovery-intent\.ledger"/u);
+  assert.match(ledger, /validate_previous_ledger_provenance\(\)/u);
+  assert.match(ledger, /read\|first-create\|terminal-rearm/u);
+  assert.match(
+    ledger,
+    /if \$armedMode == "first-create"[\s\S]*?then null_previous_ledger[\s\S]*?elif \$armedMode == "terminal-rearm"[\s\S]*?then complete_previous_ledger/u
+  );
+  assert.match(
+    ledger,
+    /armed_provenance_mode="terminal-rearm"[\s\S]*?armed_provenance_mode="first-create"/u
+  );
+  assert.match(
+    ledger,
+    /\.receiptVersionId[\s\S]*?type == "string" and length > 0/u
+  );
+  for (const [index, scriptPath] of DURABLE_RECOVERY_SCRIPT_PATHS.entries()) {
+    assert.match(scriptSources[index], /^#!\/usr\/bin\/env bash\r?\n/u);
+    assert.match(scriptSources[index], /^set -euo pipefail$/mu);
+    assert.ok(ci.includes(`bash -n ${scriptPath}`), scriptPath);
+  }
+  assert.doesNotMatch(
+    [bootstrap, template, deploy, recovery, ...scriptSources].join("\n"),
+    /AWS::DynamoDB::Table|\bdynamodb:/iu
+  );
 });
 
 test("readiness: judging mirrors the five equally presented official criteria", () => {
@@ -191,7 +713,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 59);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 79);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -546,6 +1068,11 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
   );
   assert.equal(hasExactCiTrigger(workflow), true);
   const repositoryWorkflows = repositoryWorkflowSources();
+  const recoveryWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "recover-aws.yml"
+  );
+  assert.ok(recoveryWorkflow);
+  assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -555,6 +1082,22 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
       ...repositoryWorkflows,
       { name: "duplicate.yaml", source: workflow },
     ]),
+    false
+  );
+  assert.equal(
+    hasUniqueCiTriggerOwnership(
+      repositoryWorkflows.map((entry) =>
+        entry.name === "recover-aws.yml"
+          ? {
+              ...entry,
+              source: entry.source.replace(
+                /    branches:\r?\n      - main\r?\n/u,
+                '    branches:\n      - release\n'
+              ),
+            }
+          : entry
+      )
+    ),
     false
   );
   assert.equal(
@@ -594,6 +1137,23 @@ test("readiness: generated receipts and nested build directories fail closed", (
     for (const basename of GENERATED_ARTIFACT_BASENAMES) {
       writeFileSync(join(sandbox, basename), "generated", "utf8");
     }
+    for (const basename of DURABLE_RECOVERY_LOCAL_BASENAMES) {
+      writeFileSync(join(sandbox, basename), "generated", "utf8");
+    }
+    for (const basename of [
+      "staging-recovery-123-1.tar",
+      "production-recovery-roundtrip-456-2.tar",
+      "staging-recovery-download.json",
+      "archon-recovery-archive.A1b2C3",
+    ]) {
+      writeFileSync(join(sandbox, basename), "generated", "utf8");
+    }
+    mkdirSync(join(sandbox, "production-durable-recovery-bundle"), {
+      recursive: true,
+    });
+    mkdirSync(join(sandbox, "archon-durable-recovery.X9y8Z7"), {
+      recursive: true,
+    });
     mkdirSync(join(sandbox, "packages", "api", "dist"), {
       recursive: true,
     });
@@ -611,6 +1171,17 @@ test("readiness: generated receipts and nested build directories fail closed", (
     for (const basename of GENERATED_ARTIFACT_BASENAMES) {
       assert.ok(found.includes(basename), basename);
     }
+    for (const basename of DURABLE_RECOVERY_LOCAL_BASENAMES) {
+      assert.ok(found.includes(basename), basename);
+    }
+    assert.ok(found.includes("staging-recovery-123-1.tar"));
+    assert.ok(
+      found.includes("production-recovery-roundtrip-456-2.tar")
+    );
+    assert.ok(found.includes("staging-recovery-download.json"));
+    assert.ok(found.includes("archon-recovery-archive.A1b2C3"));
+    assert.ok(found.includes("production-durable-recovery-bundle"));
+    assert.ok(found.includes("archon-durable-recovery.X9y8Z7"));
     assert.ok(found.includes("packages/api/dist"));
     assert.ok(found.includes("packages/web/build"));
     assert.ok(!found.includes("src/distribution.ts"));
@@ -624,10 +1195,31 @@ test("readiness: generated receipts and nested build directories fail closed", (
   ).split(/\r?\n/u);
   for (const ignored of [
     ...GENERATED_ARTIFACT_BASENAMES,
+    "frontend-prestate.json",
+    "previous-index.html",
+    "previous-live-alias.json",
+    "recovery-intent.json",
+    "recovery-intent.tar",
+    "recovery-snapshot-proof.json",
+    "staging-recovery-*.json",
+    "production-recovery-*.json",
+    "staging-durable-recovery-*.json",
+    "production-durable-recovery-*.json",
+    "staging-terminal-receipt-object.json",
+    "production-terminal-receipt-object.json",
+    "staging-cloudformation-controls-*.json",
+    "production-cloudformation-controls-*.json",
     "dist/",
     "build/",
   ]) {
     assert.ok(gitignore.includes(ignored), ignored);
+  }
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  for (const basename of DURABLE_RECOVERY_LOCAL_BASENAMES) {
+    assert.ok(ci.includes(basename), basename);
   }
   const makefile = readFileSync(
     new URL("../Makefile", import.meta.url),
@@ -757,6 +1349,25 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     standalone,
     /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u
   );
+  for (const evidencePath of [
+    "../README.md",
+    "../docs/TOOLS.md",
+    "../docs/MANAGED_MCP_SMOKE.md",
+  ]) {
+    const evidence = readFileSync(
+      new URL(evidencePath, import.meta.url),
+      "utf8"
+    );
+    assert.match(evidence, /actions\/runs\/30204081177/u);
+    assert.match(
+      evidence,
+      /a2b69e3fad31010d14d0c3bca261421e635ca885/u
+    );
+    assert.doesNotMatch(
+      evidence,
+      /had not yet been recorded|becomes live evidence only|awaits a new protected|new protected pass is required/iu
+    );
+  }
 });
 
 test("readiness: protected legacy reconciliation requires preserved production history", () => {
@@ -1114,6 +1725,10 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     new URL("../aws/delete-greenfield-stack.sh", import.meta.url),
     "utf8"
   );
+  const recoverySnapshot = readFileSync(
+    new URL("../aws/prove-recovery-snapshot.sh", import.meta.url),
+    "utf8"
+  );
 
   assert.match(template, /^  ArchonHttpApi:$/mu);
   assert.doesNotMatch(template, /^  ServerlessHttpApi:$/mu);
@@ -1218,7 +1833,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     2
   );
   assert.equal(
-    (workflow.match(/else error\("invalid API stage proof"\)/gu) ?? [])
+    (workflow.match(/else error\("invalid deployment control proof"\)/gu) ?? [])
       .length,
     2
   );
@@ -1228,7 +1843,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/--template-stage Original/gu) ?? []).length,
-    2
+    4
   );
   assert.equal(
     (workflow.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? [])
@@ -1238,6 +1853,54 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.equal(
     (workflow.match(/bash aws\/delete-greenfield-stack\.sh/gu) ?? [])
       .length,
+    4
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /name: Reconcile an interrupted same-run (?:staging|production) greenfield recovery/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /if: \(failure\(\) \|\| cancelled\(\)\) && steps\.deploy\.outputs\.started == 'true'/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /RECOVERY_CANCELLED: \$\{\{ job\.status == 'cancelled' \}\}/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/post_sam_tags="\$\{RUNNER_TEMP:\?\}/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/terminally_proved=false/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /actions\/runs\/\$\{GITHUB_RUN_ID\}\/attempts\/\$\{prior_attempt\}\/jobs\?per_page=100/gu
+      ) ?? []
+    ).length,
     2
   );
   assert.equal(
@@ -1252,7 +1915,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/EXPECTED_STACK_STATE:/gu) ?? []).length,
-    2
+    20
   );
   assert.equal(
     (workflow.match(/Stack state changed after the greenfield preflight/gu) ?? [])
@@ -1268,12 +1931,171 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     2
   );
   assert.equal(
-    (workflow.match(/timeout-minutes:\s+90/gu) ?? []).length,
+    (workflow.match(/timeout-minutes:\s+105/gu) ?? []).length,
     2
   );
   assert.equal(
     (workflow.match(/test "\$RECOVERY_FAILED" -eq 0/gu) ?? []).length,
+    6
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /name: Build and validate sanitized (?:staging|production) deployment receipt/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /prove-application-s3-access-logging\.sh \\\r?\n\s+validate-preflight/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/terminalLiveReproved: true/gu) ?? []).length,
+    2
+  );
+  assert.match(recoverySnapshot, /candidateSha/u);
+  assert.match(recoverySnapshot, /executionRoleArn/u);
+  assert.match(recoverySnapshot, /manifestSha256/u);
+  assert.match(recoverySnapshot, /tagsSha256/u);
+  const greenfieldOwnerPayload =
+    recoverySnapshot.match(
+      /owner_payload="\$\([\s\S]*?\r?\n    \)"\r?\n    greenfield_owner="\$\(/u
+    )?.[0] ?? "";
+  assert.ok(greenfieldOwnerPayload.length > 0);
+  for (const fragment of [
+    "--arg account",
+    "--arg app",
+    "--arg candidate",
+    "--arg environment",
+    "--arg region",
+    "--arg repository",
+    "--arg runId",
+    "--arg stack",
+  ]) {
+    assert.ok(greenfieldOwnerPayload.includes(fragment), fragment);
+  }
+  assert.doesNotMatch(greenfieldOwnerPayload, /runAttempt/u);
+  assert.match(
+    recoverySnapshot,
+    /--arg runAttempt "\$source_deploy_run_attempt"/u
+  );
+  assert.match(recoverySnapshot, /runAttempt: \$runAttempt/u);
+  assert.equal(
+    (
+      workflow.match(
+        /SOURCE_REPOSITORY: \$\{\{ github\.repository \}\}/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /SOURCE_DEPLOY_RUN_ATTEMPT: \$\{\{ github\.run_attempt \}\}/gu
+      ) ?? []
+    ).length,
     4
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /SOURCE_DEPLOY_RUN_ID: \$\{\{ github\.run_id \}\}/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.match(ci, /bash -n aws\/prove-recovery-snapshot\.sh/u);
+  assert.match(ci, /bash -n aws\/serialize-sam-stack-tags\.sh/u);
+  assert.match(restore, /EXPECTED_PREVIOUS_STACK_ID/u);
+  assert.match(restore, /change_set_id/u);
+  assert.match(restore, /\.ExecutionStatus == "AVAILABLE"/u);
+  assert.match(restore, /EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256/u);
+  assert.match(restore, /EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256/u);
+  assert.match(restore, /EXPECTED_PREVIOUS_STACK_TAGS_SHA256/u);
+  assert.match(
+    restore,
+    /--tags "file:\/\/\$\{immutable_tags_file\}"/u
+  );
+  assert.match(restore, /--slurpfile expectedTags "\$immutable_tags_file"/u);
+  assert.match(cleanup, /cloudformation describe-stack-resources/u);
+  assert.match(cleanup, /ArchonGreenfieldOwner/u);
+  assert.match(cleanup, /s3api get-bucket-tagging/u);
+  assert.match(cleanup, /logs list-tags-for-resource/u);
+  for (const retainedLogIdentity of [
+    'legacy_api_log_group="/aws/apigateway/${APP_NAME}-${ENVIRONMENT}"',
+    'vended_api_log_group="/aws/vendedlogs/apigateway/${APP_NAME}-${ENVIRONMENT}"',
+    'lambda_log_group="/aws/lambda/${APP_NAME}-${ENVIRONMENT}-api"',
+    "ApiAccessLogGroup",
+    "ApiVendedAccessLogGroup",
+    "ArchonFunctionLogGroup",
+  ]) {
+    assert.ok(cleanup.includes(retainedLogIdentity), retainedLogIdentity);
+  }
+  assert.equal(
+    (cleanup.match(/^delete_owned_log_group \\$/gmu) ?? []).length,
+    3
+  );
+  assert.match(cleanup, /assert_log_absent\(\)/u);
+  assert.match(
+    cleanup,
+    /retainedLogGroupsDeleted: \$logGroupsDeleted/u
+  );
+  assert.match(cleanup, /--expected-bucket-owner "\$AWS_ACCOUNT_ID"/u);
+  assert.match(cleanup, /REVIEW_IN_PROGRESS/u);
+  assert.match(cleanup, /DELETE_FAILED/u);
+  assert.match(cleanup, /archon-retry-/u);
+  assert.match(bootstrap, /cloudformation:DescribeStackResources/u);
+  assert.match(bootstrap, /logs:ListTagsForResource/u);
+  const retainedLogDeleteIamBlocks = [
+    ...bootstrap.matchAll(
+      /- Sid: DeleteFailed(?:Staging|Production)GreenfieldRetainedLogs[\s\S]*?(?=\r?\n              - Sid: InspectFailed(?:Staging|Production)GreenfieldRetainedLogTags)/gu
+    ),
+  ].map((match) => match[0]);
+  const retainedLogInspectIamBlocks = [
+    ...bootstrap.matchAll(
+      /- Sid: InspectFailed(?:Staging|Production)GreenfieldRetainedLogTags[\s\S]*?(?=\r?\n              - Effect: Allow)/gu
+    ),
+  ].map((match) => match[0]);
+  assert.equal(retainedLogDeleteIamBlocks.length, 2);
+  assert.equal(retainedLogInspectIamBlocks.length, 2);
+  for (const block of retainedLogDeleteIamBlocks) {
+    assert.match(block, /Action: logs:DeleteLogGroup/u);
+    assert.equal((block.match(/log-group:/gu) ?? []).length, 3);
+    assert.match(block, /\/aws\/apigateway\/\$\{AppName\}-/u);
+    assert.match(block, /\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-/u);
+    assert.match(block, /\/aws\/lambda\/\$\{AppName\}-/u);
+    assert.doesNotMatch(block, /:\*"/u);
+  }
+  for (const block of retainedLogInspectIamBlocks) {
+    assert.match(block, /Action: logs:ListTagsForResource/u);
+    assert.equal((block.match(/log-group:/gu) ?? []).length, 3);
+    assert.doesNotMatch(block, /:\*"/u);
+  }
+  assert.equal(
+    (
+      bootstrap.match(
+        /Sid: Expand(?:Staging|Production)ServerlessTransform/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudformation:ContinueUpdateRollback$/gmu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudformation:CreateStack$/gmu) ?? []).length,
+    0
+  );
+  assert.equal(
+    (bootstrap.match(/- cloudformation:UpdateStack$/gmu) ?? []).length,
+    0
   );
   assert.ok(
     (workflow.match(/aws cloudfront wait invalidation-completed/gu) ?? [])
@@ -1338,7 +2160,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
         /log-group:\/aws\/vendedlogs\/apigateway\/\$\{AppName\}-(?:staging|production)"/gu
       ) ?? []
     ).length,
-    2
+    6
   );
   assert.equal(
     (
@@ -1356,11 +2178,77 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     bootstrap,
     /Sid: VerifyProductionApiAccessLogs[\s\S]*?- logs:DescribeLogStreams\s+- logs:FilterLogEvents[\s\S]*?\$\{AppName\}-production:\*"/u
   );
-  assert.match(restore, /--parameters "file:\/\/\$\{parameters_file\}"/u);
+  assert.match(
+    restore,
+    /--template-body "file:\/\/\$\{immutable_template_file\}"/u
+  );
+  assert.match(
+    restore,
+    /--parameters "file:\/\/\$\{immutable_parameters_file\}"/u
+  );
+  assert.match(
+    restore,
+    /--tags "file:\/\/\$\{immutable_tags_file\}"/u
+  );
+  assert.match(
+    restore,
+    /\(\(\.\[0\]\.Stacks\[0\]\.Tags \/\/ \[\]\) \| map\(\{Key, Value\}\) \| sort_by\(\.Key\)\)[\s\S]*?\(\$expectedTags\[0\] \| sort_by\(\.Key\)\)/u
+  );
+  assert.match(restore, /assert_recovery_snapshot_integrity/u);
   assert.match(restore, /cloudformation create-change-set/u);
+  assert.match(restore, /--client-token "\$change_set_name"/u);
   assert.match(restore, /cloudformation execute-change-set/u);
-  assert.match(restore, /cloudformation wait stack-update-complete/u);
+  assert.match(restore, /--client-request-token "\$execute_token"/u);
+  assert.match(restore, /--no-disable-rollback/u);
+  assert.match(restore, /--retain-except-on-create/u);
+  assert.match(restore, /cloudformation continue-update-rollback/u);
+  assert.doesNotMatch(restore, /\bcloudformation\s+wait\b/u);
+  assert.doesNotMatch(cleanup, /\bcloudformation\s+wait\b/u);
+  for (const fragment of [
+    "read_bounded_poll_setting",
+    "assert_poll_phase_budget",
+    "ensure_recovery_time_budget",
+    "sleep_within_recovery_budget",
+    "describe_exact_stack_status",
+    "poll_exact_stack_status",
+    "poll_exact_change_set_creation",
+    "ARCHON_RECOVERY_TOTAL_BUDGET_SECONDS 2400 60 3000",
+    "ARCHON_RECOVERY_STABILIZE_POLL_ATTEMPTS 12 1 30",
+    "ARCHON_RECOVERY_STABILIZE_POLL_INTERVAL_SECONDS 5 0 10",
+    "ARCHON_RECOVERY_CHANGE_SET_POLL_ATTEMPTS 60 1 90",
+    "ARCHON_RECOVERY_CHANGE_SET_POLL_INTERVAL_SECONDS 5 0 10",
+    "ARCHON_RECOVERY_FINAL_POLL_ATTEMPTS 120 1 180",
+    "ARCHON_RECOVERY_FINAL_POLL_INTERVAL_SECONDS 10 0 15",
+    'recovery_started_epoch="${ARCHON_RECOVERY_STARTED_EPOCH:-$current_epoch}"',
+  ]) {
+    assert.ok(restore.includes(fragment), fragment);
+  }
+  for (const fragment of [
+    "read_bounded_poll_setting",
+    "assert_poll_phase_budget",
+    "ensure_greenfield_time_budget",
+    "sleep_within_greenfield_budget",
+    "describe_exact_greenfield_stack_status",
+    "poll_exact_greenfield_stack_status",
+    "poll_exact_greenfield_stack_deletion",
+    "ARCHON_GREENFIELD_TOTAL_BUDGET_SECONDS 2400 60 3000",
+    "ARCHON_GREENFIELD_STABILIZE_POLL_ATTEMPTS 12 1 30",
+    "ARCHON_GREENFIELD_STABILIZE_POLL_INTERVAL_SECONDS 5 0 10",
+    "ARCHON_GREENFIELD_DELETE_POLL_ATTEMPTS 120 1 180",
+    "ARCHON_GREENFIELD_DELETE_POLL_INTERVAL_SECONDS 10 0 15",
+    'greenfield_started_epoch="${ARCHON_GREENFIELD_STARTED_EPOCH:-$current_epoch}"',
+  ]) {
+    assert.ok(cleanup.includes(fragment), fragment);
+  }
+  assert.ok((restore.match(/AWS_MAX_ATTEMPTS=1 aws/gu) ?? []).length >= 2);
+  assert.ok((cleanup.match(/AWS_MAX_ATTEMPTS=1 aws/gu) ?? []).length >= 2);
+  assert.match(restore, /jq -ser/u);
+  assert.match(cleanup, /jq -ser/u);
   assert.match(cleanup, /cloudformation delete-stack/u);
+  assert.match(cleanup, /--client-request-token "\$delete_token"/u);
+  assert.match(cleanup, /aws:cloudformation:stack-id/u);
+  assert.match(cleanup, /aws:cloudformation:stack-name/u);
+  assert.match(cleanup, /aws:cloudformation:logical-id/u);
   assert.match(cleanup, /s3api list-object-versions/u);
   assert.match(cleanup, /s3api delete-bucket/u);
   assert.equal(

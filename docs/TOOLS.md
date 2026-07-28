@@ -93,9 +93,11 @@ Implementation:
 Evidence status:
 
 - [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
-  historical live read-only proof from the hardened v2 contract. Deploy AWS run
-  `30144685107` predates v2, so a new protected pass is required before the exact
-  scope/bound/`9 / 9 / 9` receipt is described as live-verified.
+  historical live read-only proof from the hardened v2 contract. The latter
+  passed at exact commit `a2b69e3fad31010d14d0c3bca261421e635ca885`
+  in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177);
+  its fixed scope, bounds, strict parser, `9 / 9 / 9` aggregate, and sanitized
+  artifact were all protected-workflow verified.
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
 application MCP server below.
@@ -143,6 +145,108 @@ authenticated ccloud receipt is produced.
   follow, with explicit prior-release restoration.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
+
+### Durable delivery recovery control plane — checked-in source, live activation pending
+
+This control plane is represented in source but source alone is **not deployed
+evidence**. Exact-revision hosted CI is required for source readiness; an
+authorized live promotion and post-promotion proof are additionally required
+for deployed evidence. It deliberately uses the private, versioned artifact
+bucket with environment-isolated deployment objects under
+`candidates/deployments/<environment>/` and recovery objects under
+`candidates/recovery/<environment>/`, so it does not require a new recovery
+database or cross-environment recovery authority. A temporary, read-only,
+exact-length `candidates/<40-character-id>/` compatibility path remains only
+for CloudFormation and CodeDeploy rollback of the immediately preceding
+pre-migration revision; it grants neither write nor list access. The bootstrap
+template also models the required `Recover AWS` OIDC trust and least-privilege
+recovery actions, but the live foundation roles have not been proved promoted
+to that template state.
+
+- Private, encrypted, versioned Amazon S3 stores data-only, intent-bound
+  archives and checksum-addressed receipts under
+  `candidates/recovery/<environment>/`. Conditional creation prevents an
+  existing immutable object from being replaced.
+- One fixed ledger object per `staging` or `production` environment is created
+  with `If-None-Match: *` and advanced only with
+  `If-Match: <current ETag>`. This implements the
+  `ARMED → COMMITTED` or `ARMED → RECOVERING → RECOVERED`
+  compare-and-swap state machine, lease, and prior-revision chain.
+- Each ledger revision binds the candidate, source CI and deploy identities,
+  immutable bundle identity, archive/manifest digests, lease owner and expiry,
+  and—only for `RECOVERED`—the immutable receipt and post-recovery
+  CloudFormation-control object identities and digests.
+- The checked-in watchdog classifies the exact source run and terminal
+  environment job after `Deploy AWS` completion, every 15 minutes, or on
+  manual dispatch. It claims a two-hour lease bound to its exact run, attempt,
+  and environment. An active owner blocks competing work; an expired lease or
+  an exactly proved completed non-success owner can be reclaimed through CAS.
+- Recovery emits a strict schema-v2
+  `archon.durable-recovery.receipt`. Its validator cross-checks the sanitized
+  target, executor, archive, exact `RECOVERING` ledger identity, and restoration
+  proofs against the immutable manifest and ledger revision.
+- The idempotent finalizer conditionally creates checksum-addressed receipt and
+  post-recovery CloudFormation-control objects, reads back both exact S3
+  versions, verifies bytes, SHA-256, S3 checksum, encryption, content type, and
+  metadata, and only then CAS-advances the same lease to `RECOVERED`, binding
+  both objects. An ambiguous retry passes only when the existing terminal
+  ledger has the exact receipt, control proof, and prior-ledger binding.
+- CloudFormation preflight and terminal gates bind exact stack identity,
+  revision, execution role, and canonical tags, enforce and re-prove
+  termination protection, and require fresh bounded drift detection. Recovery
+  proves the restored stack through the same controls or proves exact
+  greenfield absence. An audit that does not mutate protection is defined daily
+  at `04:17 UTC` when no recovery is pending.
+- The watchdog uses trusted `main` code and fresh environment-bound OIDC
+  credentials for long recovery and finalization boundaries. It does not
+  depend on GitHub artifact retention, the failed runner's workspace, or
+  application availability.
+- All recovery workloads and state are restricted to `eu-west-1`. CloudFront
+  remains a global edge service; no recovery compute or data workload is
+  introduced in `us-west-2`.
+
+CockroachDB and the S3 ledger serve different roles. CockroachDB is the
+application data plane and agent memory: relational facts, provenance,
+lifecycle, audit, and vector retrieval. S3 is only the independent AWS delivery
+control plane for two environments. DynamoDB could also implement that small
+conditional state machine, but no DynamoDB recovery ledger is claimed as
+deployed or required.
+
+The unselected DynamoDB option would require a controlled foundation promotion:
+the activation-only role cannot create the table or grant itself and the deploy
+roles new IAM actions, and the foundation stack has no persistent
+CloudFormation service role. The selected S3 CAS design avoids new database
+authority, while its checked-in recovery, finalization, transient/greenfield,
+termination-protection, and drift permissions still need an independently
+authorized foundation IAM promotion. The current `Bootstrap AWS Foundation`
+workflow is intentionally limited to the exact artifact-bucket logging plan and
+rejects other changes, so it cannot perform that IAM rollout. This revision
+becomes evidence only after a separate authorized promotion, post-promotion
+assume-role and allowed/denied API probes, hosted CI, and protected
+staging/production recovery, finalizer, and audit proof.
+
+The source components are:
+
+- `aws/classify-durable-recovery-source.sh`
+- `aws/create-durable-recovery-bundle.sh`
+- `aws/delete-greenfield-stack.sh`
+- `aws/download-durable-recovery-bundle.sh`
+- `aws/enforce-cloudformation-controls.sh`
+- `aws/extract-durable-recovery-bundle.sh`
+- `aws/finalize-durable-recovery-receipt.sh`
+- `aws/put-durable-recovery-object.sh`
+- `aws/recover-durable-environment.sh`
+- `aws/verify-durable-recovery-bundle.sh`
+- `aws/verify-durable-recovery-receipt.sh`
+- `aws/recovery-intent-ledger.sh`
+- `.github/workflows/deploy-aws.yml`
+- `.github/workflows/recover-aws.yml`
+
+Bundle creation, immutable-object download, extraction, verification,
+finalization, watchdog simulation, and receipt checks are CI-only. Their
+temporary files belong under the hosted runner's `${RUNNER_TEMP}` and must not
+be committed or retained as local build artifacts. No hosted run or deployment
+success is claimed here for this new revision.
 
 Infrastructure and delivery proof live in:
 

@@ -1,0 +1,1011 @@
+name: Recover AWS
+
+# Recovery code always comes from a trusted default-branch commit. The private
+# S3 archive is validated strictly as data and can never supply executable code.
+on:
+  workflow_run:
+    workflows:
+      - Deploy AWS
+    branches:
+      - main
+    types:
+      - completed
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: aws-production-delivery
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: ${{ vars.AWS_APP_NAME || 'archon-memory' }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+jobs:
+  recover-staging:
+    name: Recover unresolved staging delivery
+    if: >-
+      github.repository == 'upgradedev/archon-cockroach-memory' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    environment:
+      name: staging
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      RECOVERY_ENVIRONMENT: staging
+      RECOVERY_EXECUTION_ID: watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+      RECOVERY_LEASE_OWNER: watchdog-${{ github.run_id }}-${{ github.run_attempt }}-staging
+      STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-staging' }}
+      TERMINAL_JOB_NAME: Deploy and smoke staging
+    steps:
+      - name: Check out trusted recovery code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Prove trusted recovery source identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/recover-aws.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$AWS_REGION" = "eu-west-1"
+          test -n "$AWS_ACCOUNT_ID"
+
+      - name: Configure short-lived staging recovery credentials
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-watchdog-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Classify the exact staging source run
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          classification="${RUNNER_TEMP:?}/staging-recovery-classification.json"
+          bash aws/classify-durable-recovery-source.sh >"$classification"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$classification" >/dev/null
+          jq -e \
+            '.ok == true
+             and .schema == "archon.durable-recovery.classification"
+             and .version == 1
+             and .environment == "staging"
+             and (.action == "noop" or .action == "recover")' \
+            "$classification" >/dev/null
+          {
+            echo "action=$(jq -er '.action' "$classification")"
+            echo "intent_id=$(jq -r '.intentId // ""' "$classification")"
+            echo "previous_lease_owner=$(jq -r '.previousLeaseOwner // ""' "$classification")"
+            echo "previous_owner_proved_dead=$(jq -r '.previousOwnerProvedDead // false' "$classification")"
+            echo "source_run_id=$(jq -r '.sourceRunId // ""' "$classification")"
+            echo "source_run_attempt=$(jq -r '.sourceRunAttempt // ""' "$classification")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Run the daily staging protection and drift audit
+        if: >-
+          steps.classify.outputs.action == 'noop' &&
+          github.event_name == 'schedule' &&
+          github.event.schedule == '17 4 * * *'
+        env:
+          ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          stack="${RUNNER_TEMP:?}/staging-cloudformation-audit-stack.json"
+          tags="${RUNNER_TEMP:?}/staging-cloudformation-audit-tags.json"
+          proof="${RUNNER_TEMP:?}/staging-cloudformation-controls-audit.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack"
+          jq -e \
+            --arg stack "$STACK_NAME" \
+            --arg prefix \
+              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg app "$APP_NAME" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (.Stacks[0].StackId | startswith($prefix))
+              and .Stacks[0].RoleARN == $role
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Application")
+                 | .Value] == [$app]
+              )
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Environment")
+                 | .Value] == ["staging"]
+              )
+              and (
+                [.Stacks[0].Tags[]?.Key] as $keys
+                | ($keys | unique | length) == ($keys | length)
+              )
+            ' "$stack" >/dev/null
+          jq -eS \
+            '(.Stacks[0].Tags // [])
+             | map({Key, Value})
+             | sort_by(.Key)' \
+            "$stack" >"$tags"
+          EXPECTED_STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack")" \
+          EXPECTED_STACK_REVISION="$(
+            jq -er \
+              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              "$stack"
+          )" \
+          EXPECTED_TAGS_SHA256="$(
+            sha256sum "$tags" | awk '{print $1}'
+          )" \
+            bash aws/enforce-cloudformation-controls.sh audit |
+              tee "$proof"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "audit"
+              and .identity.environment == "staging"
+              and .identity.state == "existing"
+              and .protection == {
+                action: "verified",
+                enabled: true
+              }
+              and .drift.detectionStatus == "DETECTION_COMPLETE"
+              and .drift.stackDriftStatus == "IN_SYNC"
+              and .drift.driftedResourceCount == 0
+              and .drift.checkedResourceCount > 0
+            ' "$proof" >/dev/null
+
+      - name: Upload staging daily protection and drift audit
+        if: >-
+          steps.classify.outputs.action == 'noop' &&
+          github.event_name == 'schedule' &&
+          github.event.schedule == '17 4 * * *'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-cloudformation-controls-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-cloudformation-controls-audit.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Claim the staging recovery lease
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+          RECOVERY_PREVIOUS_LEASE_OWNER: ${{ steps.classify.outputs.previous_lease_owner }}
+          RECOVERY_PREVIOUS_OWNER_PROVED_DEAD: ${{ steps.classify.outputs.previous_owner_proved_dead }}
+        run: |
+          set -euo pipefail
+          bash aws/recovery-intent-ledger.sh claim \
+            >"${RUNNER_TEMP:?}/staging-recovery-claim.json"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "${RUNNER_TEMP:?}/staging-recovery-claim.json" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg owner "$RECOVERY_LEASE_OWNER" \
+            '
+              .state == "RECOVERING"
+              and .intentId == $intent
+              and .leaseOwner == $owner
+              and (.leaseUntil | type == "number")
+            ' "${RUNNER_TEMP:?}/staging-recovery-claim.json" >/dev/null
+
+      - name: Download and verify the exact staging recovery object
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          bundle_dir="${RUNNER_TEMP:?}/staging-durable-recovery-bundle"
+          bash aws/download-durable-recovery-bundle.sh "$bundle_dir" \
+            >"${RUNNER_TEMP:?}/staging-recovery-download.json"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "${RUNNER_TEMP:?}/staging-recovery-download.json" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            '
+              .ok == true
+              and .schema == "archon.durable-recovery-download.proof"
+              and .version == 1
+              and .environment == "staging"
+              and .intentId == $intent
+            ' "${RUNNER_TEMP:?}/staging-recovery-download.json" >/dev/null
+
+      - name: Refresh credentials for the full staging recovery cycle
+        if: steps.classify.outputs.action == 'recover'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-restore-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Restore and prove the exact staging prestate
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_CODE_SHA: ${{ github.sha }}
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/staging-durable-recovery-receipt.json"
+          execution="${RUNNER_TEMP:?}/staging-recovery-execution.json"
+          rm -f -- "$receipt" "$execution"
+          bash aws/recover-durable-environment.sh \
+            "${RUNNER_TEMP:?}/staging-durable-recovery-bundle" \
+            "$receipt" >"$execution"
+          for output in "$receipt" "$execution"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$output" >/dev/null
+          done
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            '
+              .ok == true
+              and .schema == "archon.durable-recovery.execution"
+              and .version == 2
+              and .environment == "staging"
+              and .intentId == $intent
+              and (.receiptSha256 | test("^[0-9a-f]{64}$"))
+            ' "$execution" >/dev/null
+
+      - name: Refresh credentials for staging recovery terminalization
+        if: steps.classify.outputs.action == 'recover'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-staging-terminal-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Enforce exact staging post-recovery stack controls
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          ENVIRONMENT: staging
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/staging-durable-recovery-receipt.json"
+          proof="${RUNNER_TEMP:?}/staging-cloudformation-controls-recovery.json"
+          stack_state="$(jq -er '.stackState' "$receipt")"
+          case "$stack_state" in
+            greenfield)
+              EXPECTED_STACK_STATE=greenfield \
+                bash aws/enforce-cloudformation-controls.sh recover \
+                  >"$proof"
+              ;;
+            existing)
+              EXPECTED_STACK_STATE=existing \
+              EXPECTED_STACK_ID="$(
+                jq -er '.proofs.stack.stackId' "$receipt"
+              )" \
+              EXPECTED_STACK_REVISION="$(
+                jq -er '.proofs.stack.stackRevision' "$receipt"
+              )" \
+              EXPECTED_TAGS_SHA256="$(
+                jq -er '.proofs.stack.tagsSha256' "$receipt"
+              )" \
+                bash aws/enforce-cloudformation-controls.sh recover \
+                  >"$proof"
+              ;;
+            *)
+              echo "Invalid staging recovery stack state." >&2
+              exit 1
+              ;;
+          esac
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            --arg stackState "$stack_state" \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "recover"
+              and .identity.environment == "staging"
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .identity.state == "absent"
+                  and .protection.enabled == null
+                  and .drift == null
+                )
+                or (
+                  $stackState == "existing"
+                  and .identity.state == "existing"
+                  and .protection.enabled == true
+                  and .drift.detectionStatus == "DETECTION_COMPLETE"
+                  and .drift.stackDriftStatus == "IN_SYNC"
+                  and .drift.driftedResourceCount == 0
+                  and .drift.checkedResourceCount > 0
+                )
+              )
+            ' "$proof" >/dev/null
+
+      - name: Persist receipt and mark staging recovered atomically
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_CODE_SHA: ${{ github.sha }}
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/staging-durable-recovery-receipt.json"
+          execution="${RUNNER_TEMP:?}/staging-recovery-execution.json"
+          finalization="${RUNNER_TEMP:?}/staging-recovery-finalization.json"
+          controls="${RUNNER_TEMP:?}/staging-cloudformation-controls-recovery.json"
+          for input in "$receipt" "$execution" "$controls"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$input" >/dev/null
+          done
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "recover"
+              and .identity.environment == "staging"
+            ' "$controls" >/dev/null
+          bash aws/finalize-durable-recovery-receipt.sh \
+            "${RUNNER_TEMP:?}/staging-durable-recovery-bundle" \
+            "$receipt" \
+            "$execution" \
+            "$controls" >"$finalization"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$finalization" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg receiptSha "$(jq -er '.receiptSha256' "$execution")" \
+            --arg controlSha "$(sha256sum "$controls" | awk '{print $1}')" \
+            '
+              keys == [
+                "controlProof",
+                "environment",
+                "intentId",
+                "ok",
+                "receipt",
+                "schema",
+                "terminalLedger",
+                "version"
+              ]
+              and .ok == true
+              and .schema == "archon.durable-recovery.finalization"
+              and .version == 1
+              and .environment == "staging"
+              and .intentId == $intent
+              and (
+                .controlProof
+                | keys == ["object", "proof"]
+                  and (
+                    .object
+                    | keys == [
+                        "bucket",
+                        "checksumSha256",
+                        "key",
+                        "sha256",
+                        "versionId"
+                      ]
+                      and .sha256 == $controlSha
+                      and (
+                        .checksumSha256
+                        | test("^[A-Za-z0-9+/]{43}=$")
+                      )
+                      and (
+                        .versionId
+                        | type == "string" and length > 0
+                      )
+                  )
+                  and (
+                    .proof
+                    | keys == [
+                        "evidence",
+                        "identityState",
+                        "mode",
+                        "schema",
+                        "version"
+                      ]
+                      and .evidence == "live-control-plane"
+                      and (
+                        .identityState == "existing"
+                        or .identityState == "absent"
+                      )
+                      and .mode == "recover"
+                      and .schema ==
+                        "archon.cloudformation-controls.proof"
+                      and .version == 1
+                  )
+              )
+              and (
+                .receipt
+                | keys == [
+                    "bucket",
+                    "checksumSha256",
+                    "key",
+                    "sha256",
+                    "versionId"
+                  ]
+                  and .sha256 == $receiptSha
+                  and (.checksumSha256 | test("^[A-Za-z0-9+/]{43}=$"))
+                  and (.versionId | type == "string" and length > 0)
+              )
+              and (
+                .terminalLedger
+                | keys == [
+                    "etag",
+                    "previousEtag",
+                    "previousSha256",
+                    "previousVersionId",
+                    "sha256",
+                    "state",
+                    "versionId"
+                  ]
+                  and .state == "RECOVERED"
+                  and (.etag | test("^\"[0-9a-f]{32}\"$"))
+                  and (.sha256 | test("^[0-9a-f]{64}$"))
+                  and (.versionId | type == "string" and length > 0)
+              )
+            ' "$finalization" >/dev/null
+
+      - name: Upload supplemental staging recovery receipt
+        if: steps.classify.outputs.action == 'recover'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-recovery-receipt-${{ steps.classify.outputs.source_run_id }}-${{ steps.classify.outputs.source_run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/staging-durable-recovery-receipt.json
+            ${{ runner.temp }}/staging-recovery-execution.json
+            ${{ runner.temp }}/staging-recovery-finalization.json
+            ${{ runner.temp }}/staging-cloudformation-controls-recovery.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove staging runner recovery material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf -- "${RUNNER_TEMP:?}/staging-durable-recovery-bundle"
+          rm -f -- \
+            "${RUNNER_TEMP:?}/staging-durable-recovery-receipt.json" \
+            "${RUNNER_TEMP:?}/staging-recovery-claim.json" \
+            "${RUNNER_TEMP:?}/staging-recovery-classification.json" \
+            "${RUNNER_TEMP:?}/staging-recovery-download.json" \
+            "${RUNNER_TEMP:?}/staging-recovery-execution.json" \
+            "${RUNNER_TEMP:?}/staging-recovery-finalization.json" \
+            "${RUNNER_TEMP:?}/staging-cloudformation-audit-stack.json" \
+            "${RUNNER_TEMP:?}/staging-cloudformation-audit-tags.json" \
+            "${RUNNER_TEMP:?}/staging-cloudformation-controls-audit.json" \
+            "${RUNNER_TEMP:?}/staging-cloudformation-controls-recovery.json"
+
+  recover-production:
+    name: Recover unresolved production delivery
+    needs:
+      - recover-staging
+    if: >-
+      always() &&
+      github.repository == 'upgradedev/archon-cockroach-memory' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    environment:
+      name: production
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      RECOVERY_ENVIRONMENT: production
+      RECOVERY_EXECUTION_ID: watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+      RECOVERY_LEASE_OWNER: watchdog-${{ github.run_id }}-${{ github.run_attempt }}-production
+      STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-production' }}
+      TERMINAL_JOB_NAME: Promote identical candidate to production
+    steps:
+      - name: Check out trusted recovery code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Prove trusted recovery source identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/recover-aws.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$AWS_REGION" = "eu-west-1"
+          test -n "$AWS_ACCOUNT_ID"
+
+      - name: Configure short-lived production recovery credentials
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-watchdog-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Classify the exact production source run
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          classification="${RUNNER_TEMP:?}/production-recovery-classification.json"
+          bash aws/classify-durable-recovery-source.sh >"$classification"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$classification" >/dev/null
+          jq -e \
+            '.ok == true
+             and .schema == "archon.durable-recovery.classification"
+             and .version == 1
+             and .environment == "production"
+             and (.action == "noop" or .action == "recover")' \
+            "$classification" >/dev/null
+          {
+            echo "action=$(jq -er '.action' "$classification")"
+            echo "intent_id=$(jq -r '.intentId // ""' "$classification")"
+            echo "previous_lease_owner=$(jq -r '.previousLeaseOwner // ""' "$classification")"
+            echo "previous_owner_proved_dead=$(jq -r '.previousOwnerProvedDead // false' "$classification")"
+            echo "source_run_id=$(jq -r '.sourceRunId // ""' "$classification")"
+            echo "source_run_attempt=$(jq -r '.sourceRunAttempt // ""' "$classification")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Run the daily production protection and drift audit
+        if: >-
+          steps.classify.outputs.action == 'noop' &&
+          github.event_name == 'schedule' &&
+          github.event.schedule == '17 4 * * *'
+        env:
+          ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          stack="${RUNNER_TEMP:?}/production-cloudformation-audit-stack.json"
+          tags="${RUNNER_TEMP:?}/production-cloudformation-audit-tags.json"
+          proof="${RUNNER_TEMP:?}/production-cloudformation-controls-audit.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack"
+          jq -e \
+            --arg stack "$STACK_NAME" \
+            --arg prefix \
+              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg app "$APP_NAME" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (.Stacks[0].StackId | startswith($prefix))
+              and .Stacks[0].RoleARN == $role
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Application")
+                 | .Value] == [$app]
+              )
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Environment")
+                 | .Value] == ["production"]
+              )
+              and (
+                [.Stacks[0].Tags[]?.Key] as $keys
+                | ($keys | unique | length) == ($keys | length)
+              )
+            ' "$stack" >/dev/null
+          jq -eS \
+            '(.Stacks[0].Tags // [])
+             | map({Key, Value})
+             | sort_by(.Key)' \
+            "$stack" >"$tags"
+          EXPECTED_STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack")" \
+          EXPECTED_STACK_REVISION="$(
+            jq -er \
+              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              "$stack"
+          )" \
+          EXPECTED_TAGS_SHA256="$(
+            sha256sum "$tags" | awk '{print $1}'
+          )" \
+            bash aws/enforce-cloudformation-controls.sh audit |
+              tee "$proof"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "audit"
+              and .identity.environment == "production"
+              and .identity.state == "existing"
+              and .protection == {
+                action: "verified",
+                enabled: true
+              }
+              and .drift.detectionStatus == "DETECTION_COMPLETE"
+              and .drift.stackDriftStatus == "IN_SYNC"
+              and .drift.driftedResourceCount == 0
+              and .drift.checkedResourceCount > 0
+            ' "$proof" >/dev/null
+
+      - name: Upload production daily protection and drift audit
+        if: >-
+          steps.classify.outputs.action == 'noop' &&
+          github.event_name == 'schedule' &&
+          github.event.schedule == '17 4 * * *'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-cloudformation-controls-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-cloudformation-controls-audit.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Claim the production recovery lease
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+          RECOVERY_PREVIOUS_LEASE_OWNER: ${{ steps.classify.outputs.previous_lease_owner }}
+          RECOVERY_PREVIOUS_OWNER_PROVED_DEAD: ${{ steps.classify.outputs.previous_owner_proved_dead }}
+        run: |
+          set -euo pipefail
+          bash aws/recovery-intent-ledger.sh claim \
+            >"${RUNNER_TEMP:?}/production-recovery-claim.json"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "${RUNNER_TEMP:?}/production-recovery-claim.json" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg owner "$RECOVERY_LEASE_OWNER" \
+            '
+              .state == "RECOVERING"
+              and .intentId == $intent
+              and .leaseOwner == $owner
+              and (.leaseUntil | type == "number")
+            ' "${RUNNER_TEMP:?}/production-recovery-claim.json" \
+            >/dev/null
+
+      - name: Download and verify the exact production recovery object
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          bundle_dir="${RUNNER_TEMP:?}/production-durable-recovery-bundle"
+          bash aws/download-durable-recovery-bundle.sh "$bundle_dir" \
+            >"${RUNNER_TEMP:?}/production-recovery-download.json"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "${RUNNER_TEMP:?}/production-recovery-download.json" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            '
+              .ok == true
+              and .schema == "archon.durable-recovery-download.proof"
+              and .version == 1
+              and .environment == "production"
+              and .intentId == $intent
+            ' "${RUNNER_TEMP:?}/production-recovery-download.json" \
+            >/dev/null
+
+      - name: Refresh credentials for the full production recovery cycle
+        if: steps.classify.outputs.action == 'recover'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-restore-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Restore and prove the exact production prestate
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_CODE_SHA: ${{ github.sha }}
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/production-durable-recovery-receipt.json"
+          execution="${RUNNER_TEMP:?}/production-recovery-execution.json"
+          rm -f -- "$receipt" "$execution"
+          bash aws/recover-durable-environment.sh \
+            "${RUNNER_TEMP:?}/production-durable-recovery-bundle" \
+            "$receipt" >"$execution"
+          for output in "$receipt" "$execution"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$output" >/dev/null
+          done
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            '
+              .ok == true
+              and .schema == "archon.durable-recovery.execution"
+              and .version == 2
+              and .environment == "production"
+              and .intentId == $intent
+              and (.receiptSha256 | test("^[0-9a-f]{64}$"))
+            ' "$execution" >/dev/null
+
+      - name: Refresh credentials for production recovery terminalization
+        if: steps.classify.outputs.action == 'recover'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-production-terminal-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Enforce exact production post-recovery stack controls
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          ENVIRONMENT: production
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/production-durable-recovery-receipt.json"
+          proof="${RUNNER_TEMP:?}/production-cloudformation-controls-recovery.json"
+          stack_state="$(jq -er '.stackState' "$receipt")"
+          case "$stack_state" in
+            greenfield)
+              EXPECTED_STACK_STATE=greenfield \
+                bash aws/enforce-cloudformation-controls.sh recover \
+                  >"$proof"
+              ;;
+            existing)
+              EXPECTED_STACK_STATE=existing \
+              EXPECTED_STACK_ID="$(
+                jq -er '.proofs.stack.stackId' "$receipt"
+              )" \
+              EXPECTED_STACK_REVISION="$(
+                jq -er '.proofs.stack.stackRevision' "$receipt"
+              )" \
+              EXPECTED_TAGS_SHA256="$(
+                jq -er '.proofs.stack.tagsSha256' "$receipt"
+              )" \
+                bash aws/enforce-cloudformation-controls.sh recover \
+                  >"$proof"
+              ;;
+            *)
+              echo "Invalid production recovery stack state." >&2
+              exit 1
+              ;;
+          esac
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            --arg stackState "$stack_state" \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "recover"
+              and .identity.environment == "production"
+              and (
+                (
+                  $stackState == "greenfield"
+                  and .identity.state == "absent"
+                  and .protection.enabled == null
+                  and .drift == null
+                )
+                or (
+                  $stackState == "existing"
+                  and .identity.state == "existing"
+                  and .protection.enabled == true
+                  and .drift.detectionStatus == "DETECTION_COMPLETE"
+                  and .drift.stackDriftStatus == "IN_SYNC"
+                  and .drift.driftedResourceCount == 0
+                  and .drift.checkedResourceCount > 0
+                )
+              )
+            ' "$proof" >/dev/null
+
+      - name: Persist receipt and mark production recovered atomically
+        if: steps.classify.outputs.action == 'recover'
+        env:
+          RECOVERY_CODE_SHA: ${{ github.sha }}
+          RECOVERY_INTENT_ID: ${{ steps.classify.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/production-durable-recovery-receipt.json"
+          execution="${RUNNER_TEMP:?}/production-recovery-execution.json"
+          finalization="${RUNNER_TEMP:?}/production-recovery-finalization.json"
+          controls="${RUNNER_TEMP:?}/production-cloudformation-controls-recovery.json"
+          for input in "$receipt" "$execution" "$controls"; do
+            jq -e -s \
+              'length == 1 and (.[0] | type == "object")' \
+              "$input" >/dev/null
+          done
+          jq -e \
+            '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "recover"
+              and .identity.environment == "production"
+            ' "$controls" >/dev/null
+          bash aws/finalize-durable-recovery-receipt.sh \
+            "${RUNNER_TEMP:?}/production-durable-recovery-bundle" \
+            "$receipt" \
+            "$execution" \
+            "$controls" >"$finalization"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$finalization" >/dev/null
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" \
+            --arg receiptSha "$(jq -er '.receiptSha256' "$execution")" \
+            --arg controlSha "$(sha256sum "$controls" | awk '{print $1}')" \
+            '
+              keys == [
+                "controlProof",
+                "environment",
+                "intentId",
+                "ok",
+                "receipt",
+                "schema",
+                "terminalLedger",
+                "version"
+              ]
+              and .ok == true
+              and .schema == "archon.durable-recovery.finalization"
+              and .version == 1
+              and .environment == "production"
+              and .intentId == $intent
+              and (
+                .controlProof
+                | keys == ["object", "proof"]
+                  and (
+                    .object
+                    | keys == [
+                        "bucket",
+                        "checksumSha256",
+                        "key",
+                        "sha256",
+                        "versionId"
+                      ]
+                      and .sha256 == $controlSha
+                      and (
+                        .checksumSha256
+                        | test("^[A-Za-z0-9+/]{43}=$")
+                      )
+                      and (
+                        .versionId
+                        | type == "string" and length > 0
+                      )
+                  )
+                  and (
+                    .proof
+                    | keys == [
+                        "evidence",
+                        "identityState",
+                        "mode",
+                        "schema",
+                        "version"
+                      ]
+                      and .evidence == "live-control-plane"
+                      and (
+                        .identityState == "existing"
+                        or .identityState == "absent"
+                      )
+                      and .mode == "recover"
+                      and .schema ==
+                        "archon.cloudformation-controls.proof"
+                      and .version == 1
+                  )
+              )
+              and (
+                .receipt
+                | keys == [
+                    "bucket",
+                    "checksumSha256",
+                    "key",
+                    "sha256",
+                    "versionId"
+                  ]
+                  and .sha256 == $receiptSha
+                  and (.checksumSha256 | test("^[A-Za-z0-9+/]{43}=$"))
+                  and (.versionId | type == "string" and length > 0)
+              )
+              and (
+                .terminalLedger
+                | keys == [
+                    "etag",
+                    "previousEtag",
+                    "previousSha256",
+                    "previousVersionId",
+                    "sha256",
+                    "state",
+                    "versionId"
+                  ]
+                  and .state == "RECOVERED"
+                  and (.etag | test("^\"[0-9a-f]{32}\"$"))
+                  and (.sha256 | test("^[0-9a-f]{64}$"))
+                  and (.versionId | type == "string" and length > 0)
+              )
+            ' "$finalization" >/dev/null
+
+      - name: Upload supplemental production recovery receipt
+        if: steps.classify.outputs.action == 'recover'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-recovery-receipt-${{ steps.classify.outputs.source_run_id }}-${{ steps.classify.outputs.source_run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/production-durable-recovery-receipt.json
+            ${{ runner.temp }}/production-recovery-execution.json
+            ${{ runner.temp }}/production-recovery-finalization.json
+            ${{ runner.temp }}/production-cloudformation-controls-recovery.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove production runner recovery material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf -- "${RUNNER_TEMP:?}/production-durable-recovery-bundle"
+          rm -f -- \
+            "${RUNNER_TEMP:?}/production-durable-recovery-receipt.json" \
+            "${RUNNER_TEMP:?}/production-recovery-claim.json" \
+            "${RUNNER_TEMP:?}/production-recovery-classification.json" \
+            "${RUNNER_TEMP:?}/production-recovery-download.json" \
+            "${RUNNER_TEMP:?}/production-recovery-execution.json" \
+            "${RUNNER_TEMP:?}/production-recovery-finalization.json" \
+            "${RUNNER_TEMP:?}/production-cloudformation-audit-stack.json" \
+            "${RUNNER_TEMP:?}/production-cloudformation-audit-tags.json" \
+            "${RUNNER_TEMP:?}/production-cloudformation-controls-audit.json" \
+            "${RUNNER_TEMP:?}/production-cloudformation-controls-recovery.json"
