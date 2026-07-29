@@ -693,7 +693,7 @@ function cleanHttpsUrl(value: string): URL | undefined {
 }
 
 function htmlTagUrls(
-  elements: readonly string[],
+  elements: readonly ParsedHtmlNode[],
   attribute: "href" | "src"
 ): URL[] {
   return htmlTagAttributeValues(elements, attribute)
