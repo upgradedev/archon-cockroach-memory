@@ -437,11 +437,12 @@ case "$*" in
         Status: $status,
         ExecutionStatus: $executionStatus,
         StatusReason: $reason,
-        Changes:
+        Changes: (
           if $hasChanges
           then [{ResourceChange: {Action: "Modify"}}]
           else []
           end
+        )
       }' ;;
   *"cloudformation delete-change-set"*)
     assert_stack_target "$@"
