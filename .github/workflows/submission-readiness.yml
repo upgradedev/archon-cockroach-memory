@@ -1,0 +1,132 @@
+name: Submission readiness
+run-name: Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s
+
+# Manual, read-only final boundary. This workflow never receives AWS or
+# CockroachDB credentials and writes its only receipt under RUNNER_TEMP.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Validate everything before Devpost, or the final public project afterward.
+        required: true
+        type: choice
+        options:
+          - pre-submit
+          - post-submit
+      video_url:
+        description: Canonical public, embeddable YouTube or Vimeo URL.
+        required: true
+        type: string
+      video_duration_seconds:
+        description: Verified integer duration from 1 through 179 seconds.
+        required: true
+        type: string
+      video_public_embeddable_attested:
+        description: Confirm the video was opened signed-out and embedding is allowed.
+        required: true
+        default: false
+        type: boolean
+      video_english_captions_attested:
+        description: Confirm accurate English captions are enabled on the final video.
+        required: true
+        default: false
+        type: boolean
+      devpost_url:
+        description: Empty before submission; canonical public Devpost project URL afterward.
+        required: false
+        default: ""
+        type: string
+      devpost_submitted_attested:
+        description: Confirm the final entry is submitted to this CockroachDB challenge with the exact repo, demo, and video.
+        required: true
+        default: false
+        type: boolean
+      pre_submit_run_id:
+        description: Empty for pre-submit; successful pre-submit workflow run ID for post-submit.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: submission-readiness
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Verify exact release and deliverables
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SUBMISSION_PHASE: ${{ inputs.phase }}
+      SUBMISSION_DEMO_URL: https://d2s5v0o0eg2aaw.cloudfront.net
+      SUBMISSION_PUBLIC_REPO_URL: https://github.com/upgradedev/archon-cockroach-memory
+      SUBMISSION_VIDEO_URL: ${{ inputs.video_url }}
+      SUBMISSION_VIDEO_DURATION_SECONDS: ${{ inputs.video_duration_seconds }}
+      SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED: ${{ inputs.video_public_embeddable_attested }}
+      SUBMISSION_VIDEO_CAPTIONS_ATTESTED: ${{ inputs.video_english_captions_attested }}
+      DEVPOST_SUBMISSION_URL: ${{ inputs.devpost_url }}
+      DEVPOST_SUBMITTED: ${{ inputs.devpost_submitted_attested && '1' || '' }}
+      PRE_SUBMIT_RUN_ID: ${{ inputs.pre_submit_run_id }}
+    steps:
+      - name: Initialize a fail-closed sanitized receipt
+        shell: bash
+        env:
+          SUBMISSION_RECEIPT_PATH: ${{ runner.temp }}/submission-readiness-receipt.json
+        run: |
+          set -euo pipefail
+          umask 077
+          readonly receipt_path="${SUBMISSION_RECEIPT_PATH:?}"
+          printf '%s\n' '{"schema":"archon.submission-readiness","version":1,"generatedAt":"not-finalized","phase":"invalid","repository":"unknown","commitSha":"","passed":false,"checks":[{"id":"gate-not-finalized","status":"fail","detail":"The hosted gate did not reach atomic receipt finalization."}],"selectedRuns":{},"live":{}}' >"${receipt_path}"
+
+      - name: Check out the dispatched commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install the locked gate runtime
+        run: npm ci --ignore-scripts
+
+      - name: Run the read-only final gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SUBMISSION_RECEIPT_PATH: ${{ runner.temp }}/submission-readiness-receipt.json
+        run: node --import tsx scripts/final-submission-gate.ts
+
+      - name: Upload the sanitized receipt
+        id: receipt_artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: submission-readiness-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/submission-readiness-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish receipt artifact coordinates
+        if: always() && steps.receipt_artifact.outcome == 'success'
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.receipt_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.receipt_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.receipt_artifact.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Submission readiness receipt"
+            echo
+            echo "- Artifact ID: \`${ARTIFACT_ID}\`"
+            echo "- Artifact digest: \`${ARTIFACT_DIGEST}\`"
+            echo "- Artifact URL: ${ARTIFACT_URL}"
+          } >>"$GITHUB_STEP_SUMMARY"

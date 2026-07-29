@@ -16,8 +16,8 @@ function finalizedProofBody() {
       version: "25.4.10",
       region: "eu-west-1",
       regionEvidence: "cockroach-cloud-api-release-gate",
-      runtimePrincipal: "archon_production_example",
-      activeMemories: 6,
+      runtimePrincipal: "archon_production_a1b2c3d4e5",
+      activeMemories: 9,
     },
     vectorIndex: {
       enabled: true,
@@ -33,11 +33,15 @@ function finalizedProofBody() {
     embeddingModel: "amazon.titan-embed-text-v2:0",
     narrationModel: "eu.anthropic.claude-sonnet-4-6",
     memory: {
-      persisted: 6,
-      idempotencyKeys: 6,
-      contentDigests: 6,
+      persisted: 9,
+      idempotencyKeys: 9,
+      contentDigests: 9,
       storeVerified: true,
       evidence: "live bounded fixed-scope payload-digest verification",
+    },
+    release: {
+      commitSha: "0123456789abcdef0123456789abcdef01234567",
+      evidence: "server-configured Lambda environment",
     },
     scope: {
       tenantId: "public-demo",
@@ -45,7 +49,7 @@ function finalizedProofBody() {
       mode: "fixed-synthetic-demo",
     },
     features: ["C-SPANN vector search", { name: "RF=3 survivability" }],
-    generatedAt: "2026-07-23T10:00:00.000Z",
+    generatedAt: new Date().toISOString(),
   };
 }
 
@@ -257,22 +261,61 @@ describe("public API client", () => {
     const proof = await getProof();
 
     expect(proof.hasEvidence).toBe(true);
-    expect(proof.database.activeMemories).toBe(6);
+    expect(proof.database.activeMemories).toBe(9);
     expect(proof.memory).toEqual({
-      persisted: 6,
-      idempotencyKeys: 6,
-      contentDigests: 6,
+      persisted: 9,
+      idempotencyKeys: 9,
+      contentDigests: 9,
       storeVerified: true,
       evidence: "live bounded fixed-scope payload-digest verification",
     });
     expect(proof.vectorIndex.dimensions).toBe(1024);
+    expect(proof.release).toEqual({
+      commitSha: "0123456789abcdef0123456789abcdef01234567",
+      evidence: "server-configured Lambda environment",
+    });
     expect(proof.scope).toEqual({ company: "Helios SA", mode: "fixed-synthetic-demo" });
     expect(proof.features).toEqual(["C-SPANN vector search", "RF=3 survivability"]);
   });
 
+  it("fails the release proof closed unless the SHA and evidence pair are exact", async () => {
+    const invalidReleases = [
+      {
+        commitSha: "0123456789abcdef0123456789abcdef0123456",
+        evidence: "server-configured Lambda environment",
+      },
+      {
+        commitSha: "0123456789ABCDEF0123456789ABCDEF01234567",
+        evidence: "server-configured Lambda environment",
+      },
+      {
+        commitSha: " 0123456789abcdef0123456789abcdef01234567",
+        evidence: "server-configured Lambda environment",
+      },
+      {
+        commitSha: "0123456789abcdef0123456789abcdef01234567",
+        evidence: "request-provided release claim",
+      },
+    ];
+
+    for (const release of invalidReleases) {
+      const body = finalizedProofBody();
+      body.release = release;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse(body)),
+      );
+
+      const proof = await getProof();
+
+      expect(proof.release).toEqual({ commitSha: null, evidence: null });
+      expect(proof.hasEvidence).toBe(false);
+    }
+  });
+
   it("fails the infrastructure proof closed when durable-store coverage disagrees", async () => {
     const body = finalizedProofBody();
-    body.memory.contentDigests = 5;
+    body.memory.contentDigests = 8;
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse(body)),
@@ -281,8 +324,8 @@ describe("public API client", () => {
     const proof = await getProof();
 
     expect(proof.memory.storeVerified).toBe(false);
-    expect(proof.memory.persisted).toBe(6);
-    expect(proof.memory.contentDigests).toBe(5);
+    expect(proof.memory.persisted).toBe(9);
+    expect(proof.memory.contentDigests).toBe(8);
     expect(proof.hasEvidence).toBe(false);
   });
 
@@ -300,6 +343,51 @@ describe("public API client", () => {
     expect(proof.database.activeMemories).toBe(99);
     expect(proof.memoryCount).toBe(99);
     expect(proof.hasEvidence).toBe(false);
+  });
+
+  it("requires the exact fixed-demo models, principal, count, and fresh timestamp", async () => {
+    const mutations = [
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.embeddingModel = "amazon.titan-embed-text-v1";
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.narrationModel = "eu.anthropic.other-model";
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.database.runtimePrincipal = "archon_admin";
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.database.runtimePrincipal =
+          "archon_production_A1B2C3D4E5";
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.database.activeMemories = 8;
+        body.memory.persisted = 8;
+        body.memory.idempotencyKeys = 8;
+        body.memory.contentDigests = 8;
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.generatedAt = new Date(
+          Date.now() - 5 * 60 * 1_000 - 1
+        ).toISOString();
+      },
+      (body: ReturnType<typeof finalizedProofBody>) => {
+        body.generatedAt = new Date(
+          Date.now() + 3 * 60 * 1_000
+        ).toISOString();
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const body = finalizedProofBody();
+      mutate(body);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse(body)),
+      );
+
+      expect((await getProof()).hasEvidence).toBe(false);
+    }
   });
 
   it("does not normalize an unrecognized store evidence marker as verified", async () => {

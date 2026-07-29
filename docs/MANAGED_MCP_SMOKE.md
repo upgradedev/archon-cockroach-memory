@@ -105,8 +105,8 @@ Managed MCP and CockroachDB prove the application memory data plane. They do
 not act as the deployment rollback ledger and are not a hidden dependency of
 AWS recovery.
 
-The current durable recovery revision is activated and hosted-proven at the
-exact protected release commit above. Deploy AWS run 30331875727 committed both environment
+The durable recovery revision was initially activated and hosted-proven at the
+historical exact protected release commit above. Deploy AWS run 30331875727 committed both environment
 intents after the full protected release; automatic
 [Recover AWS run 30333619982](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30333619982)
 proved trusted-source checkout, both recovery-role assumptions, exact

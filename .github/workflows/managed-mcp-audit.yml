@@ -22,12 +22,12 @@ jobs:
     environment:
       name: production-audit
     env:
-      CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
-      COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
       COCKROACH_DATABASE: ${{ vars.COCKROACH_DATABASE || 'archon' }}
     steps:
       - name: Check out the default branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -36,10 +36,13 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Run the bounded read-only Managed MCP proof
         shell: bash
+        env:
+          CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
+          COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
         run: |
           set -euo pipefail
           test -n "$CCLOUD_API_KEY"
@@ -122,4 +125,4 @@ jobs:
           name: managed-mcp-proof-${{ github.run_id }}
           path: managed-mcp-receipt.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

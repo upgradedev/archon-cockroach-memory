@@ -60,9 +60,9 @@ Proof:
   executes both recalls, verifies the returned fixed scope and probe row, and
   behaviorally rejects all three isolation canaries through both views.
 
-The recorded Cloud SQL capture remains historical supporting evidence. Current
-live serving-path evidence is the protected database release, production
-deployment, and Managed MCP receipt from
+The recorded Cloud SQL capture remains historical supporting evidence. One
+historical live serving-path milestone is the protected database release,
+production deployment, and Managed MCP receipt from
 [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2)
 at exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`.
 
@@ -99,7 +99,7 @@ Evidence status:
   in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177);
   its fixed scope, bounds, strict parser, `9 / 9 / 9` aggregate, and sanitized
   artifact were all protected-workflow verified. The same contract passed for
-  current protected release commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`
+  later historical protected release commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`
   in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
@@ -156,7 +156,7 @@ authenticated ccloud receipt is produced.
   authorized administrator to apply the exact stack policy and foundation
   template. Until that synchronization, discovery emits the distinct
   `legacy-inactive-not-provisioned` state, sends the complete SAM parameter map
-  through a temporary runner-local `file://` JSON document, explicitly clears
+  through a temporary runner-local `file://` YAML document, explicitly clears
   `AlarmTopicArn`, and relies on the existing CloudFormation drift gates;
   afterward an unconditional read-only alarm policy enables direct
   four-alarm verification even while routing is disabled. No live activation,
@@ -166,7 +166,7 @@ authenticated ccloud receipt is produced.
 
 ### Durable delivery recovery control plane — live protected activation
 
-This control plane is activated and hosted-proven at exact protected release commit
+This control plane's initial activation was hosted-proven at historical exact protected release commit
 `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`.
 [Main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668301),
 [CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668308),

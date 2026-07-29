@@ -275,7 +275,7 @@ test("BedrockNarrator treats a cited currency symbol and its ISO code as equival
   assert.equal(result.grounding.checks.numerics, true);
 });
 
-test("BedrockNarrator performs one bounded repair after a rejected numeric draft", async () => {
+test("BedrockNarrator canonicalizes a bounded repair that omits recalled evidence", async () => {
   let calls = 0;
   let repairPrompt = "";
   const temperatures: number[] = [];
@@ -304,9 +304,10 @@ test("BedrockNarrator performs one bounded repair after a rejected numeric draft
   assert.deepEqual(temperatures, [0, 0]);
   assert.ok(repairPrompt.includes('"€63,800"'));
   assert.ok(!repairPrompt.includes("35.7%"));
-  assert.equal(result.grounding.status, "verified");
-  assert.equal(result.answer, "True employer cost was €63,800 [2].");
+  assert.equal(result.grounding.status, "extractive");
+  assert.equal(result.answer, CANONICAL_EXTRACTIVE);
   assert.ok(!result.answer.includes("35.7%"));
+  assert.match(result.grounding.reason ?? "", /exact cited evidence/iu);
 });
 
 test("BedrockNarrator attempts at most one repair before canonical extraction", async () => {

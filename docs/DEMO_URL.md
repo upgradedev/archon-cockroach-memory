@@ -28,14 +28,14 @@ payload-bound SHA-256 digests. Staging and production then passed the exact
 audit. A separate read-only request after deployment observed the same 9/9/9
 Store proof and complete 9/9 audit coverage.
 
-The current hardened exact-SHA evidence is commit
+A historical hardened exact-SHA milestone is commit
 [`a2b69e3fad31010d14d0c3bca261421e635ca885`](https://github.com/upgradedev/archon-cockroach-memory/commit/a2b69e3fad31010d14d0c3bca261421e635ca885)
 in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177).
 That protected run passed build-once promotion, database release, staging,
 production, hosted Chromium, and the hardened exact-scope Managed MCP v2
 `9 / 9 / 9` receipt, with sanitized artifacts uploaded.
 
-The current protected release evidence is commit
+A later historical protected release milestone is commit
 [`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`](https://github.com/upgradedev/archon-cockroach-memory/commit/8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf)
 in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
 That protected run passed build-once promotion, database release, staging,
@@ -50,7 +50,7 @@ closed.
 
 ## Durable delivery recovery evidence
 
-The current protected release proves the activated cross-run control plane:
+That historical protected release proved the activated cross-run control plane:
 both environments created immutable recovery archives, armed their CAS-ledger
 intents, passed terminal controls, and committed the exact receipt-bound
 release. Automatic

@@ -18,6 +18,7 @@ import {
   evaluate,
   EXPECTED_COCKROACH_IMAGE_REFS,
   EXPECTED_COMPOSE_IMAGE_REFS,
+  EXPECTED_DEPENDABOT_RELEASE_FREEZE,
   EXPECTED_DOCKERFILE_BASE_REFS,
   EXPECTED_SETUP_NODE_STEPS,
   EXPECTED_WORKFLOW_ACTION_REFS,
@@ -28,15 +29,28 @@ import {
   hasExactAwsDeliveryConcurrency,
   hasExactAwsRecoveryTrigger,
   hasExactCiTrigger,
+  hasExactCodeqlActionPins,
+  hasExactDependabotReleaseFreeze,
+  hasExactHostedSmokeContracts,
+  hasExactSubmissionReadinessTrigger,
+  hasExactSubmissionWorkflowContract,
   hasUniqueCiTriggerOwnership,
+  inspectSubmissionThumbnail,
   isSubmissionEligible,
+  MAX_SUBMISSION_THUMBNAIL_BYTES,
   OFFICIAL_CRITERIA,
+  parseCanonicalSubmissionVideoUrl,
+  PINNED_CODEQL_ACTION_SHA,
   PINNED_NODE_VERSION,
   repositoryDockerComposeSources,
   repositoryDockerfileSources,
   repositoryWorkflowSources,
   setupNodeVersions,
   SOURCE_FLOOR,
+  SUBMISSION_THUMBNAIL_PATH,
+  validDevpostSubmissionUrl,
+  validSubmissionThumbnail,
+  validSubmissionVideoDuration,
 } from "../scripts/readiness.js";
 
 function repositoryWorkflowTexts(): string[] {
@@ -69,6 +83,16 @@ test("readiness: dormant encrypted alarm routing is a first-class product gate",
   const check = evaluate().checks.find(
     (candidate) =>
       candidate.id === "product.dormant-encrypted-alarm-routing"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+});
+
+test("readiness: judge-facing concurrency has bounded in-flight headroom", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.demo-concurrency-headroom"
   );
   assert.ok(check);
   assert.equal(check.criterion, "Production Readiness");
@@ -633,6 +657,7 @@ test("readiness: source readiness cannot masquerade as submission eligibility", 
   for (const id of [
     "unrestricted-functional-demo",
     "public-under-three-minute-video",
+    "submission-thumbnail",
     "devpost-submitted",
   ]) {
     assert.ok(
@@ -702,6 +727,169 @@ test("readiness: only the verified canonical CloudFront root is an eligible demo
   }
 });
 
+test("readiness: final submission URLs, duration, and thumbnail fail closed", () => {
+  const youtube = "https://www.youtube.com/watch?v=AbCdEfGhI_1";
+  const youtubeShort = "https://youtu.be/AbCdEfGhI_1";
+  const vimeo = "https://vimeo.com/123456789";
+  assert.deepEqual(parseCanonicalSubmissionVideoUrl(youtube), {
+    provider: "youtube",
+    id: "AbCdEfGhI_1",
+    canonicalUrl: youtube,
+  });
+  assert.deepEqual(parseCanonicalSubmissionVideoUrl(youtubeShort), {
+    provider: "youtube",
+    id: "AbCdEfGhI_1",
+    canonicalUrl: youtubeShort,
+  });
+  assert.deepEqual(parseCanonicalSubmissionVideoUrl(vimeo), {
+    provider: "vimeo",
+    id: "123456789",
+    canonicalUrl: vimeo,
+  });
+  for (const invalid of [
+    "http://www.youtube.com/watch?v=AbCdEfGhI_1",
+    "https://youtube.com/watch?v=AbCdEfGhI_1",
+    "https://www.youtube.com.evil.test/watch?v=AbCdEfGhI_1",
+    "https://user@www.youtube.com/watch?v=AbCdEfGhI_1",
+    "https://www.youtube.com:444/watch?v=AbCdEfGhI_1",
+    "https://www.youtube.com/watch?v=AbCdEfGhI_1&feature=share",
+    "https://www.youtube.com/watch?v=AbCdEfGhI_1#",
+    "https://www.youtube.com/shorts/AbCdEfGhI_1",
+    "https://youtu.be/too-short",
+    "https://vimeo.com/123456789/",
+    "https://www.vimeo.com/123456789",
+    " https://vimeo.com/123456789",
+  ]) {
+    assert.equal(
+      parseCanonicalSubmissionVideoUrl(invalid),
+      undefined,
+      invalid
+    );
+  }
+
+  for (const valid of ["1", "90", "179"]) {
+    assert.equal(validSubmissionVideoDuration(valid), true, valid);
+  }
+  for (const invalid of [
+    "0",
+    "00",
+    "01",
+    "180",
+    "179.5",
+    " 170",
+    "170 ",
+    "NaN",
+    "",
+  ]) {
+    assert.equal(validSubmissionVideoDuration(invalid), false, invalid);
+  }
+
+  const devpost = "https://devpost.com/software/archon-memory";
+  assert.equal(validDevpostSubmissionUrl(devpost), true);
+  for (const invalid of [
+    "http://devpost.com/software/archon-memory",
+    "https://www.devpost.com/software/archon-memory",
+    "https://devpost.com.evil.test/software/archon-memory",
+    "https://user@devpost.com/software/archon-memory",
+    "https://devpost.com:444/software/archon-memory",
+    "https://devpost.com/software/archon-memory/",
+    "https://devpost.com/software/archon-memory?preview=1",
+    "https://devpost.com/software/archon-memory#details",
+    "https://devpost.com/hackathons/archon-memory",
+    " https://devpost.com/software/archon-memory",
+  ]) {
+    assert.equal(validDevpostSubmissionUrl(invalid), false, invalid);
+  }
+
+  const thumbnail = readFileSync(
+    new URL(`../${SUBMISSION_THUMBNAIL_PATH}`, import.meta.url)
+  );
+  assert.deepEqual(inspectSubmissionThumbnail(thumbnail), {
+    width: 1536,
+    height: 1024,
+    bytes: thumbnail.length,
+  });
+  assert.deepEqual(validSubmissionThumbnail(), {
+    width: 1536,
+    height: 1024,
+    bytes: thumbnail.length,
+  });
+  const badSignature = Buffer.from(thumbnail);
+  badSignature[0] = 0;
+  assert.equal(inspectSubmissionThumbnail(badSignature), undefined);
+  const wrongRatio = Buffer.from(thumbnail);
+  wrongRatio.writeUInt32BE(1000, 20);
+  assert.equal(inspectSubmissionThumbnail(wrongRatio), undefined);
+  assert.equal(inspectSubmissionThumbnail(thumbnail.subarray(0, 24)), undefined);
+  const corruptChunkCrc = Buffer.from(thumbnail);
+  corruptChunkCrc[29] = corruptChunkCrc[29]! ^ 0xff;
+  assert.equal(inspectSubmissionThumbnail(corruptChunkCrc), undefined);
+  const missingIend = thumbnail.subarray(0, thumbnail.length - 12);
+  assert.equal(inspectSubmissionThumbnail(missingIend), undefined);
+  const corruptCompressedData = Buffer.from(thumbnail);
+  const firstIdat = corruptCompressedData.indexOf(Buffer.from("IDAT", "ascii"));
+  assert.ok(firstIdat > 0);
+  corruptCompressedData[firstIdat + 4] =
+    corruptCompressedData[firstIdat + 4]! ^ 0xff;
+  assert.equal(inspectSubmissionThumbnail(corruptCompressedData), undefined);
+  assert.equal(
+    inspectSubmissionThumbnail(
+      Buffer.alloc(MAX_SUBMISSION_THUMBNAIL_BYTES + 1)
+    ),
+    undefined
+  );
+});
+
+test("readiness: pre-submit and post-submit eligibility cannot be conflated", () => {
+  const names = [
+    "SUBMISSION_DEMO_URL",
+    "SUBMISSION_PUBLIC_REPO_URL",
+    "SUBMISSION_VIDEO_URL",
+    "SUBMISSION_VIDEO_DURATION_SECONDS",
+    "SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED",
+    "SUBMISSION_VIDEO_CAPTIONS_ATTESTED",
+    "DEVPOST_SUBMITTED",
+    "DEVPOST_SUBMISSION_URL",
+  ] as const;
+  const previous = Object.fromEntries(
+    names.map((name) => [name, process.env[name]])
+  );
+  try {
+    process.env.SUBMISSION_DEMO_URL =
+      "https://d2s5v0o0eg2aaw.cloudfront.net";
+    process.env.SUBMISSION_PUBLIC_REPO_URL =
+      "https://github.com/upgradedev/archon-cockroach-memory";
+    process.env.SUBMISSION_VIDEO_URL =
+      "https://www.youtube.com/watch?v=AbCdEfGhI_1";
+    process.env.SUBMISSION_VIDEO_DURATION_SECONDS = "170";
+    process.env.SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED = "true";
+    process.env.SUBMISSION_VIDEO_CAPTIONS_ATTESTED = "true";
+    delete process.env.DEVPOST_SUBMITTED;
+    delete process.env.DEVPOST_SUBMISSION_URL;
+    const preSubmit = evaluate();
+    assert.equal(preSubmit.submissionEligible, false);
+    assert.deepEqual(
+      preSubmit.eligibility.requirements
+        .filter((requirement) => requirement.status === "pending")
+        .map((requirement) => requirement.id),
+      ["devpost-submitted"]
+    );
+
+    process.env.DEVPOST_SUBMITTED = "1";
+    process.env.DEVPOST_SUBMISSION_URL =
+      "https://devpost.com/software/archon-memory";
+    const postSubmit = evaluate();
+    assert.equal(postSubmit.eligibility.pass, true);
+    assert.equal(postSubmit.submissionEligible, true);
+  } finally {
+    for (const name of names) {
+      const value = previous[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test("readiness: aggregate CI gate fails closed over every prerequisite", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/ci.yml", import.meta.url),
@@ -739,7 +927,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 79);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 82);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -1087,6 +1275,124 @@ FROM example/mutable:latest
   }
 });
 
+test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
+  const codeql = readFileSync(
+    new URL("../.github/workflows/codeql.yml", import.meta.url),
+    "utf8"
+  );
+  const dependabot = readFileSync(
+    new URL("../.github/dependabot.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.equal(hasExactCodeqlActionPins(codeql), true);
+  assert.equal(
+    (
+      codeql.match(
+        new RegExp(
+          `github/codeql-action/(?:init|autobuild|analyze)@${PINNED_CODEQL_ACTION_SHA}`,
+          "gu"
+        )
+      ) ?? []
+    ).length,
+    3
+  );
+  assert.equal(
+    hasExactCodeqlActionPins(
+      codeql.replaceAll(PINNED_CODEQL_ACTION_SHA, "v3.37.3")
+    ),
+    false
+  );
+  assert.equal(
+    hasExactCodeqlActionPins(
+      codeql.replace(
+        `github/codeql-action/analyze@${PINNED_CODEQL_ACTION_SHA}`,
+        `github/codeql-action/analyze@${"a".repeat(40)}`
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactCodeqlActionPins(
+      codeql.replace(
+        "github/codeql-action/autobuild",
+        "github/codeql-action/init"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactCodeqlActionPins(
+      codeql.replace(
+        "      - name: Perform CodeQL Analysis",
+        `      - uses: github/codeql-action/upload-sarif@${PINNED_CODEQL_ACTION_SHA}
+
+      - name: Perform CodeQL Analysis`
+      )
+    ),
+    false
+  );
+  assert.equal(hasExactCodeqlActionPins("jobs: ["), false);
+
+  assert.equal(hasExactDependabotReleaseFreeze(dependabot), true);
+  assert.equal(
+    EXPECTED_DEPENDABOT_RELEASE_FREEZE.length,
+    5
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace(
+        "open-pull-requests-limit: 0",
+        "open-pull-requests-limit: 1"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replaceAll(
+        "open-pull-requests-limit: 0",
+        'open-pull-requests-limit: "0"'
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace(
+        "package-ecosystem: docker-compose",
+        "package-ecosystem: github-actions"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace(
+        "    open-pull-requests-limit: 0",
+        `    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"`
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace(
+        "    open-pull-requests-limit: 0",
+        `    open-pull-requests-limit: 0
+    target-branch: release`
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze("version: 2\nupdates: ["),
+    false
+  );
+});
+
 test("readiness: CI runs once for main pushes and for every pull request", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/ci.yml", import.meta.url),
@@ -1097,8 +1403,20 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
   const recoveryWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "recover-aws.yml"
   );
+  const submissionWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "submission-readiness.yml"
+  );
   assert.ok(recoveryWorkflow);
+  assert.ok(submissionWorkflow);
   assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
+  assert.equal(
+    hasExactSubmissionReadinessTrigger(submissionWorkflow.source),
+    true
+  );
+  assert.equal(
+    hasExactSubmissionWorkflowContract(submissionWorkflow.source),
+    true
+  );
   assert.equal(
     hasExactAwsRecoveryTrigger(
       recoveryWorkflow.source.replace(
@@ -1117,6 +1435,104 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
     ),
     false
   );
+  for (const mutation of [
+    submissionWorkflow.source.replace(
+      "          - post-submit",
+      "          - draft"
+    ),
+    submissionWorkflow.source.replace(
+      /(phase:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_url:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_duration_seconds:[\s\S]*?\n\s+type:) string/u,
+      "$1 number"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_public_embeddable_attested:[\s\S]*?\n\s+default:) false/u,
+      "$1 true"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_english_captions_attested:[\s\S]*?\n\s+default:) false/u,
+      "$1 true"
+    ),
+    submissionWorkflow.source.replace(
+      /(devpost_url:[\s\S]*?\n\s+required:) false/u,
+      "$1 true"
+    ),
+    submissionWorkflow.source.replace(
+      /(devpost_submitted_attested:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    submissionWorkflow.source.replace(
+      /(pre_submit_run_id:[\s\S]*?\n\s+default:) ""/u,
+      '$1 "1"'
+    ),
+    submissionWorkflow.source.replace(
+      "    inputs:\n      phase:",
+      "    inputs:\n      bypass:\n        description: Unsafe bypass input.\n        required: false\n        type: boolean\n      phase:"
+    ),
+    submissionWorkflow.source.replace(
+      "  workflow_dispatch:",
+      "  push:"
+    ),
+    "on: [",
+  ]) {
+    assert.equal(
+      hasExactSubmissionReadinessTrigger(mutation),
+      false
+    );
+  }
+  for (const mutation of [
+    submissionWorkflow.source.replace("  contents: read", "  contents: write"),
+    submissionWorkflow.source.replace(
+      "      SUBMISSION_PHASE: ${{ inputs.phase }}",
+      "      GITHUB_TOKEN: ${{ github.token }}\n      SUBMISSION_PHASE: ${{ inputs.phase }}"
+    ),
+    submissionWorkflow.source.replace(
+      '"passed":false',
+      '"passed":true'
+    ),
+    submissionWorkflow.source.replace(
+      '"status":"fail"',
+      '"status":"pass"'
+    ),
+    submissionWorkflow.source.replace(
+      'readonly receipt_path="${SUBMISSION_RECEIPT_PATH:?}"',
+      'readonly receipt_path="/tmp/untrusted-receipt.json"'
+    ),
+    submissionWorkflow.source.replace(
+      "umask 077",
+      "umask 022"
+    ),
+    submissionWorkflow.source.replace(
+      '>"${receipt_path}"',
+      '>>"${receipt_path}"'
+    ),
+    submissionWorkflow.source.replace(
+      "    timeout-minutes: 25",
+      "    timeout-minutes: 30"
+    ),
+    submissionWorkflow.source.replace(
+      "      - name: Set up pinned Node.js",
+      "      - name: Set up mutable Node.js"
+    ),
+    submissionWorkflow.source.replace(
+      "          retention-days: 90",
+      "          retention-days: 30"
+    ),
+    submissionWorkflow.source.replace(
+      "      - name: Publish receipt artifact coordinates",
+      "      - name: Extra bypass step\n        run: true\n\n      - name: Publish receipt artifact coordinates"
+    ),
+  ]) {
+    assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
+  }
+  assert.equal(repositoryWorkflows.length, 9);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -1189,6 +1605,11 @@ test("readiness: generated receipts and nested build directories fail closed", (
       "production-recovery-roundtrip-456-2.tar",
       "staging-recovery-download.json",
       "archon-recovery-archive.A1b2C3",
+      "draft.mov",
+      "screen.webm",
+      "voice.wav",
+      "narration.m4a",
+      "mix.flac",
     ]) {
       writeFileSync(join(sandbox, basename), "generated", "utf8");
     }
@@ -1224,6 +1645,15 @@ test("readiness: generated receipts and nested build directories fail closed", (
     );
     assert.ok(found.includes("staging-recovery-download.json"));
     assert.ok(found.includes("archon-recovery-archive.A1b2C3"));
+    for (const media of [
+      "draft.mov",
+      "screen.webm",
+      "voice.wav",
+      "narration.m4a",
+      "mix.flac",
+    ]) {
+      assert.ok(found.includes(media), media);
+    }
     assert.ok(found.includes("production-durable-recovery-bundle"));
     assert.ok(found.includes("archon-durable-recovery.X9y8Z7"));
     assert.ok(found.includes("packages/api/dist"));
@@ -1388,10 +1818,26 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     assert.ok(receipt < clusterIdCheck);
     assert.ok(apiKeyCheck < exactJqGate);
     assert.ok(clusterIdCheck < exactJqGate);
+    const install = workflow.indexOf("npm ci --ignore-scripts");
+    const secret = workflow.indexOf(
+      "CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}"
+    );
+    assert.ok(install >= 0);
+    assert.ok(secret > install);
+    assert.ok(secret < receipt);
+    assert.equal(
+      (
+        workflow.match(
+          /CCLOUD_API_KEY: \$\{\{ secrets\.CCLOUD_API_KEY \}\}/gu
+        ) ?? []
+      ).length,
+      1
+    );
+    assert.match(workflow, /persist-credentials: false/u);
   }
   assert.match(
     standalone,
-    /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u
+    /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error[\s\S]*?retention-days: 90/u
   );
   for (const evidencePath of [
     "../README.md",
@@ -1545,22 +1991,33 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
   ];
   const safeStatusGate =
     '(.grounding.status == "verified" or .grounding.status == "extractive")';
+  assert.equal(hasExactHostedSmokeContracts(workflow), true);
 
   for (const [index, block] of smokeBlocks.entries()) {
     assert.ok(block, `AWS smoke block ${index + 1} must exist`);
     assert.match(block, /-X POST "\$APPLICATION_URL\/api\/recall"/u);
     assert.ok(block.includes(safeStatusGate));
     for (const contract of [
-      ".database.activeMemories == .memory.persisted",
+      ".database.activeMemories == 9",
       ".memory.persisted == 9",
-      ".memory.idempotencyKeys == .memory.persisted",
-      ".memory.contentDigests == .memory.persisted",
+      ".memory.idempotencyKeys == 9",
+      ".memory.contentDigests == 9",
       ".memory.storeVerified == true",
       '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
-      ".recalled > 0",
-      "(.citations | length) > 0",
-      '(.answer | type == "string" and length > 0)',
+      "(.citations | length) >= 2",
+      "(.citations | length) <= 5",
+      ".recalled == (.citations | length)",
+      '(.answer | contains("€15,375"))',
+      '(.answer | contains("€6,775"))',
       ".modelId == $narrator",
+      ".trace.retrieval.requestedTopK == 5",
+      ".answer as $answer |",
+      "all(.citations[].marker;",
+      "([.citations[].marker] ==",
+      "([.citations[].memoryId] | unique | length) == (.citations | length)",
+      ".report.audited == 9",
+      '.report.contradictions[0].resolution.rule == "importance"',
+      '.report.absences[0].subject == "PAY-118"',
     ]) {
       assert.ok(
         block.includes(contract),
@@ -1579,6 +2036,31 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
         `AWS smoke block ${index + 1} must verify ${amount} evidence`
       );
     }
+  }
+
+  for (const mutation of [
+    workflow.replace(
+      '.status == "reachable"',
+      '.status == "degraded"'
+    ),
+    workflow.replace(
+      '.database.database == "archon"',
+      '.database.database == "other"'
+    ),
+    workflow.replace(
+      ".trace.retrieval.requestedTopK == 5",
+      ".trace.retrieval.requestedTopK == 4"
+    ),
+    workflow.replace(
+      '.report.contradictions[0].resolution.rule == "importance"',
+      '.report.contradictions[0].resolution.rule == "recency"'
+    ),
+    workflow.replace(
+      'test("^archon_production_[0-9a-f]{10}$")',
+      'test("^archon_production_.+$")'
+    ),
+  ]) {
+    assert.equal(hasExactHostedSmokeContracts(mutation), false);
   }
 });
 
@@ -1807,6 +2289,96 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     template,
     /DefaultRouteSettings:\s+DetailedMetricsEnabled:\s+true\s+ThrottlingBurstLimit:\s+!Ref ApiThrottleBurst\s+ThrottlingRateLimit:\s+!Ref ApiThrottleRate/u
   );
+  assert.match(
+    template,
+    /ReservedConcurrency:\s+Type:\s+Number[\s\S]*?Default:\s+5[\s\S]*?ApiThrottleRate:\s+Type:\s+Number[\s\S]*?Default:\s+5/u
+  );
+  assert.match(
+    template,
+    /ReservedConcurrentExecutions:\s+!Ref ReservedConcurrency/u
+  );
+  assert.equal(
+    (workflow.match(/--arg reservedConcurrency "5"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /and \.ReservedConcurrency == \$reservedConcurrency/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /select\(\.ParameterKey == "ReservedConcurrency"\)\s+\| \.ParameterValue\] == \[\$reservedConcurrency\]/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    template,
+    /ReleaseCommitSha:\s+Type:\s+String[\s\S]*?AllowedPattern: "\^\[0-9a-f\]\{40\}\$"/u
+  );
+  assert.match(template, /RELEASE_COMMIT_SHA:\s+!Ref ReleaseCommitSha/u);
+  assert.equal(
+    (workflow.match(/ReleaseCommitSha: \$releaseCommitSha/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /select\(\.ParameterKey == "ReleaseCommitSha"\)\s+\| \.ParameterValue\] == \[\$releaseCommitSha\]/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /\.release\.commitSha == \$releaseCommitSha and\s+\.release\.evidence == "server-configured Lambda environment"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    workflow,
+    /test\("\^archon_staging_\[0-9a-f\]\{10\}\$"\)/u
+  );
+  assert.match(
+    workflow,
+    /test\("\^archon_production_\[0-9a-f\]\{10\}\$"\)/u
+  );
+  for (const fragment of [
+    '.database.engine == "CockroachDB"',
+    '.database.deployment == "CockroachDB Cloud on AWS"',
+    '.database.role == "persistent agent memory"',
+    '.database.transactionIsolation == "SERIALIZABLE"',
+    '.database.database == "archon"',
+    '.vectorIndex.engine == "native CockroachDB C-SPANN"',
+    '.vectorIndex.prefixes == ["tenant_id","embed_model","status","company"]',
+    '.embeddingModel == "amazon.titan-embed-text-v2:0"',
+    '.narrationModel == "eu.anthropic.claude-sonnet-4-6"',
+    'keys == ["access","company","dataClassification","mode","source","tenantId"]',
+    '.status == "reachable"',
+    'test("^[a-f0-9]{64}$")',
+    ".trace.retrieval.requestedTopK == 5",
+    ".report.audited == 9",
+    '([.report.contradictions[0].values[].value] | sort) == [18400,18900]',
+    '.report.contradictions[0].resolution.rule == "importance"',
+    '.report.absences[0].subject == "PAY-118"',
+    '.report.absences[0].referencedBy[0].sourceRef == "RECON-2043"',
+  ]) {
+    assert.equal(
+      (workflow.match(new RegExp(
+        fragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"),
+        "gu"
+      )) ?? []).length >= 2,
+      true,
+      fragment
+    );
+  }
   assert.match(
     template,
     /AccessLogSettings:[\s\S]*?DestinationArn:\s+!Sub "arn:\$\{AWS::Partition\}:logs:\$\{AWS::Region\}:\$\{AWS::AccountId\}:log-group:\$\{ApiVendedAccessLogGroup\}"/u

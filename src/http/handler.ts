@@ -333,6 +333,13 @@ export async function handleProof(
       },
       embeddingModel: agent.embeddingModelId,
       narrationModel: agent.narrationModelId,
+      release: {
+        commitSha:
+          /^[0-9a-f]{40}$/u.test(process.env.RELEASE_COMMIT_SHA ?? "")
+            ? process.env.RELEASE_COMMIT_SHA
+            : null,
+        evidence: "server-configured Lambda environment",
+      },
       scope: publicDemoScope(),
       features: [
         "role-bound fixed synthetic scope",

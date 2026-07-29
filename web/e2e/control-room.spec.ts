@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const live = process.env.PLAYWRIGHT_LIVE === "1";
 const question =
   "What was Helios SA’s true employer cost and how much was invisible on the bank statement?";
+const releaseCommitSha = "0123456789abcdef0123456789abcdef01234567";
 
 const scope = {
   tenantId: "public-demo",
@@ -34,7 +35,7 @@ async function installDeterministicApi(page: Page): Promise<void> {
           version: "CockroachDB CCL v26.2.3",
           region: "eu-west-1",
           regionEvidence: "cockroach-cloud-api-release-gate",
-          runtimePrincipal: "archon_production_example",
+          runtimePrincipal: "archon_production_a1b2c3d4e5",
           activeMemories: 9,
         },
         vectorIndex: {
@@ -57,12 +58,16 @@ async function installDeterministicApi(page: Page): Promise<void> {
           storeVerified: true,
           evidence: "live bounded fixed-scope payload-digest verification",
         },
+        release: {
+          commitSha: releaseCommitSha,
+          evidence: "server-configured Lambda environment",
+        },
         scope,
         features: [
           "role-bound fixed synthetic scope",
           "contradiction and absence audit",
         ],
-        generatedAt: "2026-07-23T10:00:00.000Z",
+        generatedAt: new Date().toISOString(),
       },
     })
   );
@@ -203,11 +208,31 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
   ).toBeVisible();
   await expect(page.getByText("region evidence · cockroach-cloud-api-release-gate")).toBeVisible();
   if (live) {
+    await expect(page.getByTestId("release-sha-short")).toHaveText(
+      /^Commit [0-9a-f]{12}$/u
+    );
+    await expect(page.getByTestId("release-sha-full")).toHaveText(
+      /^full SHA · [0-9a-f]{40}$/u
+    );
+  } else {
+    await expect(page.getByTestId("release-sha-short")).toHaveText(
+      `Commit ${releaseCommitSha.slice(0, 12)}`
+    );
+    await expect(page.getByTestId("release-sha-full")).toHaveText(
+      `full SHA · ${releaseCommitSha}`
+    );
+  }
+  await expect(page.getByTestId("release-sha-evidence")).toHaveText(
+    "release evidence · server-configured Lambda environment"
+  );
+  if (live) {
     await expect(
-      page.getByText(/role archon_(?:staging|production)_[a-z0-9]{6,40}/)
+      page.getByText(/role archon_(?:staging|production)_[0-9a-f]{10}/)
     ).toBeVisible();
   } else {
-    await expect(page.getByText("role archon_production_example")).toBeVisible();
+    await expect(
+      page.getByText("role archon_production_a1b2c3d4e5")
+    ).toBeVisible();
   }
   await expect(page.getByText("active · live pg_catalog.pg_indexes definition")).toBeVisible();
   await expect(page.getByTestId("proof-unverifiable")).toHaveCount(0);
