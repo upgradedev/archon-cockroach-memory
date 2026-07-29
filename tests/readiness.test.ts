@@ -65,6 +65,16 @@ test("readiness: centralized S3 access logging is a first-class product gate", (
   assert.equal(check.status, "pass", check.detail);
 });
 
+test("readiness: dormant encrypted alarm routing is a first-class product gate", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.dormant-encrypted-alarm-routing"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+});
+
 test("readiness: durable S3 CAS recovery is armed before mutation and closed by receipts", () => {
   const reportCheck = evaluate().checks.find(
     (candidate) =>

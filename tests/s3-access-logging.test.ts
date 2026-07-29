@@ -328,13 +328,26 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   assert.deepEqual(
     [...STACK_POLICY.Statement[1].Resource].sort(),
     [
+      "LogicalResourceId/AlarmArchiveQueuePolicy",
+      "LogicalResourceId/AlarmNotificationsKey",
+      "LogicalResourceId/AlarmNotificationsKeyAlias",
+      "LogicalResourceId/AlarmStateInspectionPolicy",
+      "LogicalResourceId/AlarmTopicPolicy",
       "LogicalResourceId/ArtifactBucket",
       "LogicalResourceId/ArtifactBucketPolicy",
       "LogicalResourceId/FoundationPromotionRole",
       "LogicalResourceId/GitHubOidcProvider",
+      "LogicalResourceId/ProductionAlarmArchiveQueue",
+      "LogicalResourceId/ProductionAlarmArchiveSubscription",
+      "LogicalResourceId/ProductionAlarmRoutingInspectionPolicy",
+      "LogicalResourceId/ProductionAlarmTopic",
       "LogicalResourceId/S3AccessLogArchive",
       "LogicalResourceId/S3AccessLogArchivePolicy",
       "LogicalResourceId/S3AccessLogArchiveS39Suppression",
+      "LogicalResourceId/StagingAlarmArchiveQueue",
+      "LogicalResourceId/StagingAlarmArchiveSubscription",
+      "LogicalResourceId/StagingAlarmRoutingInspectionPolicy",
+      "LogicalResourceId/StagingAlarmTopic",
     ].sort()
   );
   assert.deepEqual(STACK_POLICY.Statement[1].Action, [

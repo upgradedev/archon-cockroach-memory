@@ -905,12 +905,14 @@ function sourceChecks(): SourceCheck[] {
   const applicationS3AccessLoggingProof = read(
     "aws/prove-application-s3-access-logging.sh"
   );
+  const alarmRoutingProof = read("aws/prove-alarm-routing.sh");
   const bootstrapStackPolicy = read(
     "aws/bootstrap-stack-policy.json"
   );
   const s3AccessLoggingTests = read(
     "tests/s3-access-logging.test.ts"
   );
+  const alarmRoutingTests = read("tests/alarm-routing.test.ts");
   const stackRestore = read("aws/restore-cloudformation-stack.sh");
   const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
   const recoverySnapshot = read("aws/prove-recovery-snapshot.sh");
@@ -2633,6 +2635,130 @@ function sourceChecks(): SourceCheck[] {
         deploy.includes("reserved logical ID|unexpected behaviors"),
       "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the drift-stable canonical access-log ARN, complete read-only drift discovery, non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
       "The deployable AWS architecture, canonical access-log ARN, complete drift-discovery permissions, or live API stage-control proof is incomplete."
+    ),
+    sourceCheck(
+      "product.dormant-encrypted-alarm-routing",
+      "Production Readiness",
+      /AlarmRoutingEnabled:\s+Type: String\s+Default: "false"\s+AllowedValues:\s+- "true"\s+- "false"/u.test(
+        deliveryBootstrap
+      ) &&
+        /EnableAlarmRouting: !Equals \[!Ref AlarmRoutingEnabled, "true"\]/u.test(
+          deliveryBootstrap
+        ) &&
+        /AlarmNotificationsKey:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?DeletionPolicy: RetainExceptOnCreate[\s\S]*?EnableKeyRotation: true[\s\S]*?KeySpec: SYMMETRIC_DEFAULT[\s\S]*?AllowCloudWatchAlarmEncryption[\s\S]*?AllowSnsEncryptedQueueDelivery/u.test(
+          deliveryBootstrap
+        ) &&
+        (
+          deliveryBootstrap.match(
+            /KmsMasterKeyId: !GetAtt AlarmNotificationsKey\.Arn/gu
+          ) ?? []
+        ).length === 4 &&
+        /StagingAlarmTopic:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?TopicName: !Sub "\$\{AppName\}-staging-alarms"/u.test(
+          deliveryBootstrap
+        ) &&
+        /ProductionAlarmTopic:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?TopicName: !Sub "\$\{AppName\}-production-alarms"/u.test(
+          deliveryBootstrap
+        ) &&
+        /StagingAlarmArchiveQueue:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?MessageRetentionPeriod: 1209600/u.test(
+          deliveryBootstrap
+        ) &&
+        /ProductionAlarmArchiveQueue:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?MessageRetentionPeriod: 1209600/u.test(
+          deliveryBootstrap
+        ) &&
+        /AllowStagingCloudWatchAlarmPublish[\s\S]*?aws:SourceAccount[\s\S]*?AllowProductionCloudWatchAlarmPublish[\s\S]*?aws:SourceAccount/u.test(
+          deliveryBootstrap
+        ) &&
+        /DenyStagingAlarmArchiveInjection[\s\S]*?ArnNotLike:[\s\S]*?aws:SourceArn: !Ref StagingAlarmTopic[\s\S]*?DenyProductionAlarmArchiveInjection[\s\S]*?ArnNotLike:[\s\S]*?aws:SourceArn: !Ref ProductionAlarmTopic/u.test(
+          deliveryBootstrap
+        ) &&
+        /StagingAlarmArchiveSubscription:[\s\S]*?RawMessageDelivery: false/u.test(
+          deliveryBootstrap
+        ) &&
+        /ProductionAlarmArchiveSubscription:[\s\S]*?RawMessageDelivery: false/u.test(
+          deliveryBootstrap
+        ) &&
+        /AlarmStateInspectionPolicy:[\s\S]*?Roles:\s+- !Ref StagingDeployRole\s+- !Ref ProductionDeployRole[\s\S]*?Action: cloudwatch:DescribeAlarms\s+Resource: "\*"/u.test(
+          deliveryBootstrap
+        ) &&
+        /LogicalResourceId\/AlarmStateInspectionPolicy/u.test(
+          bootstrapStackPolicy
+        ) &&
+        (
+          deliveryBootstrap.match(
+            /Condition: EnableAlarmRouting\r?\n\s+Value:/gu
+          ) ?? []
+        ).length === 6 &&
+        /LogicalResourceId\/AlarmNotificationsKey/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/StagingAlarmTopic/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/ProductionAlarmTopic/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /mode="\$\{1:-discover\}"/u.test(alarmRoutingProof) &&
+        /discover\|verify/u.test(alarmRoutingProof) &&
+        /legacy-inactive-not-provisioned/u.test(alarmRoutingProof) &&
+        /inactive-not-provisioned/u.test(alarmRoutingProof) &&
+        /CloudWatch alarms are not exclusively wired/u.test(
+          alarmRoutingProof
+        ) &&
+        /CloudWatch alarms retain actions while alarm routing is inactive/u.test(
+          alarmRoutingProof
+        ) &&
+        /AllowAccountTopicAdministration/u.test(alarmRoutingProof) &&
+        /DenyStagingAlarmArchiveInjection/u.test(alarmRoutingProof) &&
+        /DenyProductionAlarmArchiveInjection/u.test(alarmRoutingProof) &&
+        !/secrets\.ALARM_TOPIC_ARN/u.test(deploy) &&
+        !/if \[ -n "\$ALARM_TOPIC_ARN" \]/u.test(deploy) &&
+        (
+          deploy.match(/"AlarmTopicArn=\$ALARM_TOPIC_ARN"/gu) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /bash aws\/prove-alarm-routing\.sh discover/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(/bash aws\/prove-alarm-routing\.sh verify/gu) ??
+          []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /ALARM_TOPIC_ARN: \$\{\{ steps\.alarm_routing\.outputs\.topic_arn \}\}/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /\.state == "legacy-inactive-not-provisioned"\s+and \.alarmCount == null/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(/\.state == "inactive-not-provisioned"/gu) ?? []
+        ).length === 4 &&
+        /bash -n aws\/prove-alarm-routing\.sh/u.test(ci) &&
+        /tests\/alarm-routing\.test\.ts/u.test(packageSource) &&
+        /legacy foundation remains safely inactive with one read/u.test(
+          alarmRoutingTests
+        ) &&
+        /partial foundation output fails before resource reads/u.test(
+          alarmRoutingTests
+        ) &&
+        /active verify rejects a cross-environment topic/u.test(
+          alarmRoutingTests
+        ) &&
+        /inactive verify rejects stale alarm actions/u.test(
+          alarmRoutingTests
+        ) &&
+        /proof rejects broadened SNS account administration/u.test(
+          alarmRoutingTests
+        ) &&
+        /proof rejects a weakened archive producer deny/u.test(
+          alarmRoutingTests
+        ),
+      "A dormant, protected, customer-key-encrypted SNS-to-SQS alarm-routing contract is source-controlled with exact producer policies, migration-safe legacy discovery, stale-action rejection after foundation synchronization, and fake-AWS CI coverage.",
+      "The dormant alarm-routing foundation, protection, discovery, post-deploy proof, or CI coverage is incomplete."
     ),
     sourceCheck(
       "product.s3-access-logging-foundation",

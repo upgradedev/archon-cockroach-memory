@@ -43,6 +43,16 @@ Parameters:
       Fail-closed two-phase migration switch. The initial archive and
       destination-policy deployment remains false until the protected
       activation workflow permanently enables it.
+  AlarmRoutingEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Dormant alarm-routing contract. A separately authorized administrator
+      must explicitly accept the billable KMS, SNS, and SQS resources before
+      permanently enabling this switch.
 
 Rules:
   EuWestOneOnly:
@@ -53,6 +63,7 @@ Rules:
 Conditions:
   CreateGitHubOidcProvider: !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
   EnableArtifactAccessLogging: !Equals [!Ref ArtifactAccessLoggingEnabled, "true"]
+  EnableAlarmRouting: !Equals [!Ref AlarmRoutingEnabled, "true"]
 
 Resources:
   GitHubOidcProvider:
@@ -287,6 +298,304 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
+
+  AlarmNotificationsKey:
+    Type: AWS::KMS::Key
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub >-
+        Customer-managed encryption key for ${AppName} CloudWatch alarm
+        notifications and durable archive delivery
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: AllowCloudWatchAlarmEncryption
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-production-*
+          - Sid: AllowSnsEncryptedQueueDelivery
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: alarm-notifications
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlarmNotificationsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: !Sub "alias/${AppName}-alarm-notifications"
+      TargetKeyId: !Ref AlarmNotificationsKey
+
+  StagingAlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TopicName: !Sub "${AppName}-staging-alarms"
+      DisplayName: !Sub "${AppName} staging alarms"
+      KmsMasterKeyId: !GetAtt AlarmNotificationsKey.Arn
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: alarm-notifications
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ProductionAlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TopicName: !Sub "${AppName}-production-alarms"
+      DisplayName: !Sub "${AppName} production alarms"
+      KmsMasterKeyId: !GetAtt AlarmNotificationsKey.Arn
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: alarm-notifications
+        - Key: Environment
+          Value: production
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Topics:
+        - !Ref StagingAlarmTopic
+        - !Ref ProductionAlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountTopicAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action:
+              - sns:AddPermission
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:RemovePermission
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+            Resource:
+              - !Ref StagingAlarmTopic
+              - !Ref ProductionAlarmTopic
+          - Sid: AllowStagingCloudWatchAlarmPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref StagingAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-*
+          - Sid: AllowProductionCloudWatchAlarmPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ProductionAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-production-*
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sns:*
+            Resource:
+              - !Ref StagingAlarmTopic
+              - !Ref ProductionAlarmTopic
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  StagingAlarmArchiveQueue:
+    Type: AWS::SQS::Queue
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${AppName}-staging-alarm-archive"
+      KmsMasterKeyId: !GetAtt AlarmNotificationsKey.Arn
+      KmsDataKeyReusePeriodSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 60
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: alarm-notifications
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ProductionAlarmArchiveQueue:
+    Type: AWS::SQS::Queue
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${AppName}-production-alarm-archive"
+      KmsMasterKeyId: !GetAtt AlarmNotificationsKey.Arn
+      KmsDataKeyReusePeriodSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 60
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: alarm-notifications
+        - Key: Environment
+          Value: production
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlarmArchiveQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Queues:
+        - !Ref StagingAlarmArchiveQueue
+        - !Ref ProductionAlarmArchiveQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowStagingAlarmArchiveDelivery
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt StagingAlarmArchiveQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Ref StagingAlarmTopic
+          - Sid: AllowProductionAlarmArchiveDelivery
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ProductionAlarmArchiveQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Ref ProductionAlarmTopic
+          - Sid: DenyStagingAlarmArchiveInjection
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt StagingAlarmArchiveQueue.Arn
+            Condition:
+              ArnNotLike:
+                aws:SourceArn: !Ref StagingAlarmTopic
+          - Sid: DenyProductionAlarmArchiveInjection
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt ProductionAlarmArchiveQueue.Arn
+            Condition:
+              ArnNotLike:
+                aws:SourceArn: !Ref ProductionAlarmTopic
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource:
+              - !GetAtt StagingAlarmArchiveQueue.Arn
+              - !GetAtt ProductionAlarmArchiveQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  StagingAlarmArchiveSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableAlarmRouting
+    DependsOn: AlarmArchiveQueuePolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TopicArn: !Ref StagingAlarmTopic
+      Protocol: sqs
+      Endpoint: !GetAtt StagingAlarmArchiveQueue.Arn
+      RawMessageDelivery: false
+
+  ProductionAlarmArchiveSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableAlarmRouting
+    DependsOn: AlarmArchiveQueuePolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TopicArn: !Ref ProductionAlarmTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ProductionAlarmArchiveQueue.Arn
+      RawMessageDelivery: false
 
   StagingLambdaRuntimeRole:
     Type: AWS::IAM::Role
@@ -1546,6 +1855,87 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production"
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/apigateway/${AppName}-production:*"
 
+  AlarmStateInspectionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${AppName}-alarm-state-inspection"
+      Roles:
+        - !Ref StagingDeployRole
+        - !Ref ProductionDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InspectCloudWatchAlarms
+            Effect: Allow
+            Action: cloudwatch:DescribeAlarms
+            Resource: "*"
+
+  StagingAlarmRoutingInspectionPolicy:
+    Type: AWS::IAM::Policy
+    Condition: EnableAlarmRouting
+    Properties:
+      PolicyName: !Sub "${AppName}-staging-alarm-routing-inspection"
+      Roles:
+        - !Ref StagingDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InspectStagingAlarmTopic
+            Effect: Allow
+            Action:
+              - sns:GetSubscriptionAttributes
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:ListTagsForResource
+            Resource: !Ref StagingAlarmTopic
+          - Sid: InspectStagingAlarmArchive
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+            Resource: !GetAtt StagingAlarmArchiveQueue.Arn
+          - Sid: InspectAlarmNotificationKey
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+            Resource: !GetAtt AlarmNotificationsKey.Arn
+  ProductionAlarmRoutingInspectionPolicy:
+    Type: AWS::IAM::Policy
+    Condition: EnableAlarmRouting
+    Properties:
+      PolicyName: !Sub "${AppName}-production-alarm-routing-inspection"
+      Roles:
+        - !Ref ProductionDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InspectProductionAlarmTopic
+            Effect: Allow
+            Action:
+              - sns:GetSubscriptionAttributes
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:ListTagsForResource
+            Resource: !Ref ProductionAlarmTopic
+          - Sid: InspectProductionAlarmArchive
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+            Resource: !GetAtt ProductionAlarmArchiveQueue.Arn
+          - Sid: InspectAlarmNotificationKey
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+            Resource: !GetAtt AlarmNotificationsKey.Arn
 Outputs:
   ArtifactBucketName:
     Value: !Ref ArtifactBucket
@@ -1575,6 +1965,24 @@ Outputs:
     Value: !GetAtt ProductionCodeDeployRole.Arn
   DatabaseOperatorRoleArn:
     Value: !GetAtt DatabaseOperatorRole.Arn
+  AlarmRoutingContractVersion:
+    Condition: EnableAlarmRouting
+    Value: "1"
+  AlarmNotificationsKeyArn:
+    Condition: EnableAlarmRouting
+    Value: !GetAtt AlarmNotificationsKey.Arn
+  StagingAlarmTopicArn:
+    Condition: EnableAlarmRouting
+    Value: !Ref StagingAlarmTopic
+  ProductionAlarmTopicArn:
+    Condition: EnableAlarmRouting
+    Value: !Ref ProductionAlarmTopic
+  StagingAlarmArchiveQueueArn:
+    Condition: EnableAlarmRouting
+    Value: !GetAtt StagingAlarmArchiveQueue.Arn
+  ProductionAlarmArchiveQueueArn:
+    Condition: EnableAlarmRouting
+    Value: !GetAtt ProductionAlarmArchiveQueue.Arn
   GitHubOidcProviderArn:
     Value: !If
       - CreateGitHubOidcProvider
