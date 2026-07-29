@@ -22,6 +22,11 @@ const RESTORE_SCRIPT = join(
 );
 const CLEANUP_SCRIPT = join(ROOT, "aws", "delete-greenfield-stack.sh");
 const SNAPSHOT_SCRIPT = join(ROOT, "aws", "prove-recovery-snapshot.sh");
+const TAG_MERGER_SCRIPT = join(
+  ROOT,
+  "aws",
+  "merge-canonical-stack-tags.sh"
+);
 const TAG_SERIALIZER_SCRIPT = join(
   ROOT,
   "aws",
@@ -1136,6 +1141,79 @@ function runSnapshot(
   });
   return { fixture, result };
 }
+
+test(
+  "canonical stack tag merger backfills identity without weakening recovery snapshots",
+  { skip: process.platform === "win32" },
+  () => {
+    const fixture = mkdtempSync(join(tmpdir(), "archon-canonical-tags-"));
+    const tagsFile = join(fixture, "tags.json");
+    const run = (
+      tags: Array<{ Key: string; Value: string }>,
+      environment = "staging",
+      greenfieldOwner = ""
+    ) => {
+      writeFileSync(tagsFile, JSON.stringify(tags), "utf8");
+      return spawnSync("bash", [TAG_MERGER_SCRIPT, tagsFile], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          APP_NAME: "archon-memory",
+          ENVIRONMENT: environment,
+          GREENFIELD_OWNER: greenfieldOwner,
+        },
+      });
+    };
+
+    try {
+      const legacy = run([]);
+      assert.equal(legacy.status, 0, legacy.stderr);
+      assert.deepEqual(JSON.parse(legacy.stdout), [
+        { Key: "Application", Value: "archon-memory" },
+        { Key: "Environment", Value: "staging" },
+      ]);
+
+      const existing = run([
+        { Key: "Environment", Value: "wrong" },
+        { Key: "Owner", Value: "Finance Platform" },
+        { Key: "Application", Value: "wrong" },
+        { Key: "ArchonGreenfieldOwner", Value: "legacy-owner" },
+      ]);
+      assert.equal(existing.status, 0, existing.stderr);
+      assert.deepEqual(JSON.parse(existing.stdout), [
+        { Key: "Application", Value: "archon-memory" },
+        { Key: "ArchonGreenfieldOwner", Value: "legacy-owner" },
+        { Key: "Environment", Value: "staging" },
+        { Key: "Owner", Value: "Finance Platform" },
+      ]);
+
+      const greenfield = run(
+        [{ Key: "ArchonGreenfieldOwner", Value: "wrong" }],
+        "production",
+        GREENFIELD_OWNER
+      );
+      assert.equal(greenfield.status, 0, greenfield.stderr);
+      assert.deepEqual(JSON.parse(greenfield.stdout), [
+        { Key: "Application", Value: "archon-memory" },
+        { Key: "ArchonGreenfieldOwner", Value: GREENFIELD_OWNER },
+        { Key: "Environment", Value: "production" },
+      ]);
+
+      for (const rejected of [
+        [
+          { Key: "Owner", Value: "one" },
+          { Key: "Owner", Value: "two" },
+        ],
+        [{ Key: "aws:reserved", Value: "value" }],
+      ]) {
+        const result = run(rejected);
+        assert.notEqual(result.status, 0, JSON.stringify(rejected));
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  }
+);
 
 test(
   "SAM tag serializer preserves legal parser-sensitive values and rejects ambiguity",

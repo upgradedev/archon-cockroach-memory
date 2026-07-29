@@ -899,6 +899,9 @@ function sourceChecks(): SourceCheck[] {
   const stackRestore = read("aws/restore-cloudformation-stack.sh");
   const greenfieldCleanup = read("aws/delete-greenfield-stack.sh");
   const recoverySnapshot = read("aws/prove-recovery-snapshot.sh");
+  const canonicalStackTagMerger = read(
+    "aws/merge-canonical-stack-tags.sh"
+  );
   const samStackTagSerializer = read("aws/serialize-sam-stack-tags.sh");
   const awsRecoveryTests = read("tests/aws-recovery-scripts.test.ts");
   const durableRecoveryClassifier = read(
@@ -3002,10 +3005,27 @@ function sourceChecks(): SourceCheck[] {
         /SAM tag serializer preserves legal parser-sensitive values/u.test(
           awsRecoveryTests
         ) &&
+        /canonical stack tag merger backfills identity without weakening recovery snapshots/u.test(
+          awsRecoveryTests
+        ) &&
+        /Application/u.test(canonicalStackTagMerger) &&
+        /Environment/u.test(canonicalStackTagMerger) &&
+        /ArchonGreenfieldOwner/u.test(canonicalStackTagMerger) &&
+        /bash -n aws\/merge-canonical-stack-tags\.sh/u.test(ci) &&
         /bash -n aws\/serialize-sam-stack-tags\.sh/u.test(ci) &&
         (
           deploy.match(
-            /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gu
+            /bash aws\/merge-canonical-stack-tags\.sh \\\r?\n\s+"\$prior_tags" >"\$target_tags"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+"\$target_tags" >"\$serialized_tags_file"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /TARGET_STACK_TAGS_SHA256: \$\{\{ steps\.deploy\.outputs\.target_tags_sha256 \}\}/gu
           ) ?? []
         ).length === 2 &&
         (

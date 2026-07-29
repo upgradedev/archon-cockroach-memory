@@ -399,6 +399,7 @@ jobs:
           bash -n aws/prove-s3-access-logging.sh
           bash -n aws/prove-application-s3-access-logging.sh
           bash -n aws/prove-recovery-snapshot.sh
+          bash -n aws/merge-canonical-stack-tags.sh
           bash -n aws/serialize-sam-stack-tags.sh
           bash -n aws/classify-durable-recovery-source.sh
           bash -n aws/create-durable-recovery-bundle.sh

@@ -1900,7 +1900,23 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.equal(
     (
       workflow.match(
-        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gu
+        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+"\$target_tags" >"\$serialized_tags_file"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /bash aws\/merge-canonical-stack-tags\.sh \\\r?\n\s+"\$prior_tags" >"\$target_tags"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /TARGET_STACK_TAGS_SHA256: \$\{\{ steps\.deploy\.outputs\.target_tags_sha256 \}\}/gu
       ) ?? []
     ).length,
     2
@@ -2028,6 +2044,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     4
   );
   assert.match(ci, /bash -n aws\/prove-recovery-snapshot\.sh/u);
+  assert.match(ci, /bash -n aws\/merge-canonical-stack-tags\.sh/u);
   assert.match(ci, /bash -n aws\/serialize-sam-stack-tags\.sh/u);
   assert.match(restore, /EXPECTED_PREVIOUS_STACK_ID/u);
   assert.match(restore, /change_set_id/u);
