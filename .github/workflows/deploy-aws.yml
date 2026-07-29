@@ -1161,6 +1161,7 @@ jobs:
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
+          ENVIRONMENT: staging
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
           GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
@@ -1192,15 +1193,11 @@ jobs:
           if [ -n "$ALARM_TOPIC_ARN" ]; then
             PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
           fi
-          SAM_TAGS=()
+          target_tags="${RUNNER_TEMP:?}/staging-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
-            SAM_TAGS=(
-              --tags
-              "ArchonGreenfieldOwner=$GREENFIELD_OWNER"
-              "Application=$APP_NAME"
-              "Environment=staging"
-            )
+            prior_tags="${RUNNER_TEMP:?}/staging-greenfield-base-tags.json"
+            jq -n '[]' >"$prior_tags"
           else
             test "$EXPECTED_STACK_STATE" = "existing"
             test -z "$GREENFIELD_OWNER"
@@ -1208,14 +1205,22 @@ jobs:
             test "$(
               sha256sum previous-stack-tags.json | awk '{print $1}'
             )" = "$PREVIOUS_STACK_TAGS_SHA256"
-            serialized_tags_file="${RUNNER_TEMP:?}/staging-sam-stack-tags.argv"
-            bash aws/serialize-sam-stack-tags.sh \
-              previous-stack-tags.json >"$serialized_tags_file"
-            mapfile -t preserved_stack_tags <"$serialized_tags_file"
-            if [ "${#preserved_stack_tags[@]}" -gt 0 ]; then
-              SAM_TAGS=(--tags "${preserved_stack_tags[@]}")
-            fi
+            prior_tags=previous-stack-tags.json
           fi
+          GREENFIELD_OWNER="$GREENFIELD_OWNER" \
+            bash aws/merge-canonical-stack-tags.sh \
+              "$prior_tags" >"$target_tags"
+          serialized_tags_file="${RUNNER_TEMP:?}/staging-sam-stack-tags.argv"
+          bash aws/serialize-sam-stack-tags.sh \
+            "$target_tags" >"$serialized_tags_file"
+          mapfile -t canonical_stack_tags <"$serialized_tags_file"
+          test "${#canonical_stack_tags[@]}" -ge 2
+          SAM_TAGS=(--tags "${canonical_stack_tags[@]}")
+          target_tags_sha256="$(
+            sha256sum "$target_tags" | awk '{print $1}'
+          )"
+          [[ "$target_tags_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "target_tags_sha256=$target_tags_sha256" >>"$GITHUB_OUTPUT"
           CANARY_PROBE_PID=""
           stop_canary_probe() {
             if [ -n "$CANARY_PROBE_PID" ]; then
@@ -1339,7 +1344,7 @@ jobs:
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
           GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
-          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          TARGET_STACK_TAGS_SHA256: ${{ steps.deploy.outputs.target_tags_sha256 }}
         run: |
           set -euo pipefail
           post_sam_stack="${RUNNER_TEMP:?}/staging-stack-after-sam.json"
@@ -1362,6 +1367,20 @@ jobs:
               and .Stacks[0].StackName == $stack
               and (.Stacks[0].StackId | startswith($stackPrefix))
               and .Stacks[0].RoleARN == $role
+              and (
+                [.Stacks[0].Tags[]?
+                  | select(.Key == "Application")
+                  | .Value] == [$app]
+              )
+              and (
+                [.Stacks[0].Tags[]?
+                  | select(.Key == "Environment")
+                  | .Value] == [$environment]
+              )
+              and (
+                [.Stacks[0].Tags[]?.Key] as $keys
+                | ($keys | unique | length) == ($keys | length)
+              )
               and (
                 (
                   $stackState == "greenfield"
@@ -1387,17 +1406,17 @@ jobs:
               )
             ' "$post_sam_stack" >/dev/null
           post_sam_tags="${RUNNER_TEMP:?}/staging-tags-after-sam.json"
-          jq -e \
+          jq -eS \
             '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
             "$post_sam_stack" >"$post_sam_tags"
+          [[ "$TARGET_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(
+            sha256sum "$post_sam_tags" | awk '{print $1}'
+          )" = "$TARGET_STACK_TAGS_SHA256"
           if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
-            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
-            test "$(
-              sha256sum "$post_sam_tags" | awk '{print $1}'
-            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            test -z "$GREENFIELD_OWNER"
           else
             test "$EXPECTED_STACK_STATE" = "greenfield"
-            test -z "$PREVIOUS_STACK_TAGS_SHA256"
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
           fi
           OUTPUTS="$(jq -cer '.Stacks[0].Outputs' "$post_sam_stack")"
@@ -3335,6 +3354,7 @@ jobs:
         id: deploy
         env:
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
+          ENVIRONMENT: production
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
           GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
@@ -3366,15 +3386,11 @@ jobs:
           if [ -n "$ALARM_TOPIC_ARN" ]; then
             PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
           fi
-          SAM_TAGS=()
+          target_tags="${RUNNER_TEMP:?}/production-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
-            SAM_TAGS=(
-              --tags
-              "ArchonGreenfieldOwner=$GREENFIELD_OWNER"
-              "Application=$APP_NAME"
-              "Environment=production"
-            )
+            prior_tags="${RUNNER_TEMP:?}/production-greenfield-base-tags.json"
+            jq -n '[]' >"$prior_tags"
           else
             test "$EXPECTED_STACK_STATE" = "existing"
             test -z "$GREENFIELD_OWNER"
@@ -3382,14 +3398,22 @@ jobs:
             test "$(
               sha256sum previous-stack-tags.json | awk '{print $1}'
             )" = "$PREVIOUS_STACK_TAGS_SHA256"
-            serialized_tags_file="${RUNNER_TEMP:?}/production-sam-stack-tags.argv"
-            bash aws/serialize-sam-stack-tags.sh \
-              previous-stack-tags.json >"$serialized_tags_file"
-            mapfile -t preserved_stack_tags <"$serialized_tags_file"
-            if [ "${#preserved_stack_tags[@]}" -gt 0 ]; then
-              SAM_TAGS=(--tags "${preserved_stack_tags[@]}")
-            fi
+            prior_tags=previous-stack-tags.json
           fi
+          GREENFIELD_OWNER="$GREENFIELD_OWNER" \
+            bash aws/merge-canonical-stack-tags.sh \
+              "$prior_tags" >"$target_tags"
+          serialized_tags_file="${RUNNER_TEMP:?}/production-sam-stack-tags.argv"
+          bash aws/serialize-sam-stack-tags.sh \
+            "$target_tags" >"$serialized_tags_file"
+          mapfile -t canonical_stack_tags <"$serialized_tags_file"
+          test "${#canonical_stack_tags[@]}" -ge 2
+          SAM_TAGS=(--tags "${canonical_stack_tags[@]}")
+          target_tags_sha256="$(
+            sha256sum "$target_tags" | awk '{print $1}'
+          )"
+          [[ "$target_tags_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "target_tags_sha256=$target_tags_sha256" >>"$GITHUB_OUTPUT"
           CANARY_PROBE_PID=""
           stop_canary_probe() {
             if [ -n "$CANARY_PROBE_PID" ]; then
@@ -3513,7 +3537,7 @@ jobs:
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
           GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
-          PREVIOUS_STACK_TAGS_SHA256: ${{ steps.previous.outputs.tags_sha256 }}
+          TARGET_STACK_TAGS_SHA256: ${{ steps.deploy.outputs.target_tags_sha256 }}
         run: |
           set -euo pipefail
           post_sam_stack="${RUNNER_TEMP:?}/production-stack-after-sam.json"
@@ -3536,6 +3560,20 @@ jobs:
               and .Stacks[0].StackName == $stack
               and (.Stacks[0].StackId | startswith($stackPrefix))
               and .Stacks[0].RoleARN == $role
+              and (
+                [.Stacks[0].Tags[]?
+                  | select(.Key == "Application")
+                  | .Value] == [$app]
+              )
+              and (
+                [.Stacks[0].Tags[]?
+                  | select(.Key == "Environment")
+                  | .Value] == [$environment]
+              )
+              and (
+                [.Stacks[0].Tags[]?.Key] as $keys
+                | ($keys | unique | length) == ($keys | length)
+              )
               and (
                 (
                   $stackState == "greenfield"
@@ -3561,17 +3599,17 @@ jobs:
               )
             ' "$post_sam_stack" >/dev/null
           post_sam_tags="${RUNNER_TEMP:?}/production-tags-after-sam.json"
-          jq -e \
+          jq -eS \
             '(.Stacks[0].Tags // []) | map({Key, Value}) | sort_by(.Key)' \
             "$post_sam_stack" >"$post_sam_tags"
+          [[ "$TARGET_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(
+            sha256sum "$post_sam_tags" | awk '{print $1}'
+          )" = "$TARGET_STACK_TAGS_SHA256"
           if [ "$EXPECTED_STACK_STATE" = "existing" ]; then
-            [[ "$PREVIOUS_STACK_TAGS_SHA256" =~ ^[0-9a-f]{64}$ ]]
-            test "$(
-              sha256sum "$post_sam_tags" | awk '{print $1}'
-            )" = "$PREVIOUS_STACK_TAGS_SHA256"
+            test -z "$GREENFIELD_OWNER"
           else
             test "$EXPECTED_STACK_STATE" = "greenfield"
-            test -z "$PREVIOUS_STACK_TAGS_SHA256"
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
           fi
           OUTPUTS="$(jq -cer '.Stacks[0].Outputs' "$post_sam_stack")"

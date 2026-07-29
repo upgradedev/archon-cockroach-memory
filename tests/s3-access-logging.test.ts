@@ -1076,9 +1076,11 @@ test("application logging workflow cross-binds stack state and immutable receipt
     '$stackState == "existing"',
     "bash aws/prove-recovery-snapshot.sh",
     'validate-preflight >/dev/null',
-    'ArchonGreenfieldOwner=$GREENFIELD_OWNER',
+    'GREENFIELD_OWNER="$GREENFIELD_OWNER"',
     'GREENFIELD_OWNER="$EXPECTED_GREENFIELD_OWNER"',
+    "bash aws/merge-canonical-stack-tags.sh",
     "bash aws/serialize-sam-stack-tags.sh",
+    "TARGET_STACK_TAGS_SHA256: ${{ steps.deploy.outputs.target_tags_sha256 }}",
     'post_sam_tags="${RUNNER_TEMP:?}',
     ".Stacks[0].StackId == $previousStackId",
     "terminalLiveReproved: true",
@@ -1125,7 +1127,23 @@ test("application logging workflow cross-binds stack state and immutable receipt
   assert.equal(
     (
       DEPLOY_WORKFLOW.match(
-        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+previous-stack-tags\.json >"\$serialized_tags_file"/gmu
+        /bash aws\/serialize-sam-stack-tags\.sh \\\r?\n\s+"\$target_tags" >"\$serialized_tags_file"/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /bash aws\/merge-canonical-stack-tags\.sh \\\r?\n\s+"\$prior_tags" >"\$target_tags"/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /TARGET_STACK_TAGS_SHA256: \$\{\{ steps\.deploy\.outputs\.target_tags_sha256 \}\}/gmu
       ) ?? []
     ).length,
     2
