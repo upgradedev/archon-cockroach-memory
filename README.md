@@ -254,7 +254,10 @@ The checked-in control plane is AWS-native and fixed to `eu-west-1`:
    then run fresh bounded drift detection. Recovery applies the same gate to a
    restored stack or proves exact greenfield absence. The read-only protection
    audit requires protection already enabled and runs fresh drift detection
-   daily at `04:17 UTC` when no recovery is pending.
+   daily at `04:17 UTC` when no recovery is pending. The same audit can be
+   replayed from the current trusted `main` SHA with the explicit
+   `workflow_dispatch` `operation=audit` input; stale workflow reruns remain
+   rejected by the source-identity gate.
 
 The watchdog uses trusted `main` recovery code, the exact `staging` or
 `production` GitHub environment and its OIDC subject, and refreshed one-hour

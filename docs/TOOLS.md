@@ -209,7 +209,9 @@ and foundation `IN_SYNC` drift state were verified.
   termination protection, and require fresh bounded drift detection. Recovery
   proves the restored stack through the same controls or proves exact
   greenfield absence. An audit that does not mutate protection is defined daily
-  at `04:17 UTC` when no recovery is pending.
+  at `04:17 UTC` when no recovery is pending. Operators can replay that exact
+  audit from the current trusted `main` SHA by dispatching `Recover AWS` with
+  `operation=audit`; the workflow still refuses stale default-branch code.
 - The watchdog uses trusted `main` code and fresh environment-bound OIDC
   credentials for long recovery and finalization boundaries. It does not
   depend on GitHub artifact retention, the failed runner's workspace, or

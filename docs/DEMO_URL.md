@@ -87,6 +87,9 @@ CloudFormation drift detection. Greenfield recovery instead proves exact
 absence, and its cleanup can disable protection only after re-proving the exact
 run-owned stack. The checked-in audit does not mutate protection and is
 scheduled daily at `04:17 UTC`, when the classifier finds no pending recovery.
+The identical audit is also explicitly replayable from the current trusted
+`main` SHA through `workflow_dispatch` with `operation=audit`; reruns of stale
+workflow SHAs remain rejected.
 
 The selected prefix remains within each environment-scoped role and requires no
 new database authority. The recovery IAM revision was promoted through a
