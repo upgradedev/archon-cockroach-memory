@@ -712,7 +712,15 @@ if jq -e \
     )
     and .Status == "FAILED"
     and .ExecutionStatus == "UNAVAILABLE"
-    and (.StatusReason | contains("contain changes"))
+    and (.Changes | type == "array" and length == 0)
+    and (
+      .StatusReason == "No updates are to be performed."
+      or
+      .StatusReason == "The submitted information did not contain changes."
+      or
+      .StatusReason ==
+        "The submitted information didn\u0027t contain changes. Submit different information to create a change set."
+    )
   ' \
   <<<"$change_set" >/dev/null; then
   aws cloudformation delete-change-set \

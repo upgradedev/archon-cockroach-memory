@@ -730,9 +730,34 @@ test("alarm routing: source contract is dormant, protected, and CI-gated", () =>
   assert.doesNotMatch(deploy, /secrets\.ALARM_TOPIC_ARN/u);
   assert.doesNotMatch(deploy, /if \[ -n "\$ALARM_TOPIC_ARN" \]/u);
   assert.equal(
-    (deploy.match(/"AlarmTopicArn=\$ALARM_TOPIC_ARN"/gu) ?? []).length,
+    (deploy.match(/AlarmTopicArn: \$alarmTopicArn/gu) ?? []).length,
     2
   );
+  assert.match(
+    deploy,
+    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.json"/u
+  );
+  assert.match(
+    deploy,
+    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.json"/u
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /and \.AlarmTopicArn == \$alarmTopicArn/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /--parameter-overrides "file:\/\/\$\{parameter_overrides_file\}"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.doesNotMatch(deploy, /"AlarmTopicArn=\$ALARM_TOPIC_ARN"/u);
   assert.equal(
     (deploy.match(/bash aws\/prove-alarm-routing\.sh discover/gu) ?? [])
       .length,
