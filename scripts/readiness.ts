@@ -10,21 +10,31 @@
 // Final submission validation additionally sets REQUIRE_SUBMISSION_READY=1 and
 // supplies the SUBMISSION_* environment variables below.
 
+import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 import { parseDocument } from "yaml";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 79;
-export const EXPECTED_SETUP_NODE_STEPS = 14;
+export const PINNED_CODEQL_ACTION_SHA =
+  "4187e74d05793876e9989daffde9c3e66b4acd07";
+export const EXPECTED_WORKFLOW_ACTION_REFS = 82;
+export const EXPECTED_SETUP_NODE_STEPS = 15;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
@@ -37,6 +47,14 @@ export const EXPECTED_WORKFLOW_FILES = [
   "deploy-aws.yml",
   "managed-mcp-audit.yml",
   "recover-aws.yml",
+  "submission-readiness.yml",
+] as const;
+export const EXPECTED_DEPENDABOT_RELEASE_FREEZE = [
+  ["docker", "/aws"],
+  ["docker-compose", "/"],
+  ["github-actions", "/"],
+  ["npm", "/"],
+  ["npm", "/web"],
 ] as const;
 const ALLOWED_LOCAL_ACTION_REFS = new Set([
   "./.github/workflows/database-release.yml",
@@ -55,6 +73,7 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "bench-clustered.txt",
   "bench-uniform.txt",
   "distribution.txt",
+  "submission-readiness-receipt.json",
   "server.pid",
 ] as const;
 export const DURABLE_RECOVERY_LOCAL_BASENAMES = [
@@ -96,6 +115,9 @@ export const DURABLE_RECOVERY_SCRIPT_PATHS = [
 ] as const;
 const CANONICAL_DEMO_URL =
   "https://d2s5v0o0eg2aaw.cloudfront.net";
+export const SUBMISSION_THUMBNAIL_PATH =
+  "demo/assets/devpost-thumbnail.png";
+export const MAX_SUBMISSION_THUMBNAIL_BYTES = 5_000_000;
 
 export const OFFICIAL_CRITERIA = [
   "Agentic Memory Design",
@@ -209,7 +231,9 @@ export function generatedArtifactPaths(root = ROOT): string[] {
         /^(?:staging|production)-recovery-(?:roundtrip-)?[0-9]+-[1-9][0-9]*\.tar$/u.test(
           entry.name
         ) ||
-        /\.(?:mp4|pyc)$/iu.test(entry.name) ||
+        /\.(?:aac|avi|flac|m4a|mkv|mov|mp3|mp4|ogg|opus|pyc|wav|webm|wmv)$/iu.test(
+          entry.name
+        ) ||
         /^(?:readiness|database-release-receipt|legacy-reconciliation-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
           entry.name
         )
@@ -475,6 +499,111 @@ export function allWorkflowActionsPinned(
         /^[a-f0-9]{40}$/u.test(ref.slice(separator + 1))
       );
     })
+  );
+}
+
+export function hasExactCodeqlActionPins(
+  source: string,
+  expectedSha = PINNED_CODEQL_ACTION_SHA
+): boolean {
+  const parsed = parseWorkflow(source);
+  if (!parsed || !/^[a-f0-9]{40}$/u.test(expectedSha)) return false;
+  const refs = parsed.uses
+    .map(({ ref }) => ref)
+    .filter(
+      (ref): ref is string =>
+        typeof ref === "string" &&
+        ref.toLowerCase().startsWith("github/codeql-action/")
+    )
+    .sort((left, right) => left.localeCompare(right));
+  const expected = ["analyze", "autobuild", "init"]
+    .map(
+      (action) =>
+        `github/codeql-action/${action}@${expectedSha}`
+    )
+    .sort((left, right) => left.localeCompare(right));
+  return (
+    refs.length === expected.length &&
+    refs.every((ref, index) => ref === expected[index])
+  );
+}
+
+function exactDependabotGroup(
+  groups: unknown,
+  expectedName: string
+): boolean {
+  if (!(groups instanceof Map) || groups.size !== 1) return false;
+  const group = groups.get(expectedName);
+  const patterns =
+    group instanceof Map ? group.get("patterns") : undefined;
+  return (
+    group instanceof Map &&
+    group.size === 1 &&
+    Array.isArray(patterns) &&
+    patterns.length === 1 &&
+    patterns[0] === "*"
+  );
+}
+
+export function hasExactDependabotReleaseFreeze(
+  source: string
+): boolean {
+  const root = parseYamlMap(source);
+  const updates = root?.get("updates");
+  if (
+    !root ||
+    root.size !== 2 ||
+    root.get("version") !== 2 ||
+    !Array.isArray(updates) ||
+    updates.length !== EXPECTED_DEPENDABOT_RELEASE_FREEZE.length
+  ) {
+    return false;
+  }
+
+  const pairs: string[] = [];
+  for (const update of updates) {
+    if (!(update instanceof Map) || update.has("ignore")) return false;
+    const ecosystem = update.get("package-ecosystem");
+    const directory = update.get("directory");
+    const schedule = update.get("schedule");
+    if (
+      typeof ecosystem !== "string" ||
+      typeof directory !== "string" ||
+      typeof update.get("open-pull-requests-limit") !== "number" ||
+      update.get("open-pull-requests-limit") !== 0 ||
+      !(schedule instanceof Map) ||
+      schedule.size !== 2 ||
+      schedule.get("interval") !== "weekly" ||
+      schedule.get("day") !== "monday"
+    ) {
+      return false;
+    }
+
+    const pair = `${ecosystem}\u0000${directory}`;
+    pairs.push(pair);
+    if (ecosystem === "npm" && directory === "/") {
+      if (update.size !== 5) return false;
+      if (!exactDependabotGroup(update.get("groups"), "backend-runtime")) {
+        return false;
+      }
+    } else if (ecosystem === "npm" && directory === "/web") {
+      if (update.size !== 5) return false;
+      if (!exactDependabotGroup(update.get("groups"), "control-room")) {
+        return false;
+      }
+    } else if (update.size !== 4 || update.has("groups")) {
+      return false;
+    }
+  }
+
+  const expectedPairs = EXPECTED_DEPENDABOT_RELEASE_FREEZE.map(
+    ([ecosystem, directory]) => `${ecosystem}\u0000${directory}`
+  ).sort((left, right) => left.localeCompare(right));
+  return (
+    new Set(pairs).size === pairs.length &&
+    pairs
+      .sort((left, right) => left.localeCompare(right))
+      .every((pair, index) => pair === expectedPairs[index])
   );
 }
 
@@ -767,6 +896,478 @@ export function hasExactAwsRecoveryTrigger(source: string): boolean {
   );
 }
 
+function exactWorkflowInput(
+  inputs: Map<unknown, unknown>,
+  name: string,
+  expected: Record<string, unknown>
+): boolean {
+  const input = inputs.get(name);
+  if (!(input instanceof Map)) return false;
+  const expectedKeys = Object.keys(expected).sort();
+  const actualKeys = [...input.keys()];
+  if (
+    actualKeys.some((key) => typeof key !== "string") ||
+    actualKeys.length !== expectedKeys.length ||
+    (actualKeys as string[])
+      .sort((left, right) => left.localeCompare(right))
+      .some((key, index) => key !== expectedKeys[index])
+  ) {
+    return false;
+  }
+  return Object.entries(expected).every(([key, value]) => {
+    const actual = input.get(key);
+    return Array.isArray(value)
+      ? Array.isArray(actual) &&
+          actual.length === value.length &&
+          actual.every((item, index) => item === value[index])
+      : actual === value;
+  });
+}
+
+export function hasExactSubmissionReadinessTrigger(
+  source: string
+): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 1) return false;
+  const dispatch = trigger.get("workflow_dispatch");
+  if (!(dispatch instanceof Map) || dispatch.size !== 1) return false;
+  const inputs = dispatch.get("inputs");
+  if (!(inputs instanceof Map) || inputs.size !== 8) return false;
+
+  return (
+    exactWorkflowInput(inputs, "phase", {
+      description:
+        "Validate everything before Devpost, or the final public project afterward.",
+      required: true,
+      type: "choice",
+      options: ["pre-submit", "post-submit"],
+    }) &&
+    exactWorkflowInput(inputs, "video_url", {
+      description: "Canonical public, embeddable YouTube or Vimeo URL.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "video_duration_seconds", {
+      description: "Verified integer duration from 1 through 179 seconds.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "video_public_embeddable_attested", {
+      description:
+        "Confirm the video was opened signed-out and embedding is allowed.",
+      required: true,
+      default: false,
+      type: "boolean",
+    }) &&
+    exactWorkflowInput(inputs, "video_english_captions_attested", {
+      description:
+        "Confirm accurate English captions are enabled on the final video.",
+      required: true,
+      default: false,
+      type: "boolean",
+    }) &&
+    exactWorkflowInput(inputs, "devpost_url", {
+      description:
+        "Empty before submission; canonical public Devpost project URL afterward.",
+      required: false,
+      default: "",
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "devpost_submitted_attested", {
+      description:
+        "Confirm the final entry is submitted to this CockroachDB challenge with the exact repo, demo, and video.",
+      required: true,
+      default: false,
+      type: "boolean",
+    }) &&
+    exactWorkflowInput(inputs, "pre_submit_run_id", {
+      description:
+        "Empty for pre-submit; successful pre-submit workflow run ID for post-submit.",
+      required: false,
+      default: "",
+      type: "string",
+    })
+  );
+}
+
+function exactScalarMap(
+  value: unknown,
+  expected: Record<string, string | number | boolean>
+): boolean {
+  if (!(value instanceof Map)) return false;
+  const keys = [...value.keys()];
+  const expectedKeys = Object.keys(expected).sort();
+  return (
+    keys.every((key) => typeof key === "string") &&
+    keys.length === expectedKeys.length &&
+    (keys as string[])
+      .sort((left, right) => left.localeCompare(right))
+      .every((key, index) => key === expectedKeys[index]) &&
+    Object.entries(expected).every(
+      ([key, expectedValue]) => value.get(key) === expectedValue
+    )
+  );
+}
+
+function exactMapKeys(value: unknown, expected: string[]): value is Map<unknown, unknown> {
+  if (!(value instanceof Map)) return false;
+  const keys = [...value.keys()];
+  const sorted = [...expected].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  return (
+    keys.every((key) => typeof key === "string") &&
+    keys.length === sorted.length &&
+    (keys as string[])
+      .sort((left, right) => left.localeCompare(right))
+      .every((key, index) => key === sorted[index])
+  );
+}
+
+export function hasExactSubmissionWorkflowContract(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  if (
+    !parsed ||
+    !hasExactSubmissionReadinessTrigger(source) ||
+    !exactMapKeys(parsed.root, [
+      "concurrency",
+      "jobs",
+      "name",
+      "on",
+      "permissions",
+      "run-name",
+    ]) ||
+    parsed.root.get("name") !== "Submission readiness" ||
+    parsed.root.get("run-name") !==
+      "Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s" ||
+    !exactScalarMap(parsed.root.get("permissions"), {
+      actions: "read",
+      contents: "read",
+    }) ||
+    !exactScalarMap(parsed.root.get("concurrency"), {
+      group: "submission-readiness",
+      "cancel-in-progress": false,
+    })
+  ) {
+    return false;
+  }
+
+  const jobs = parsed.root.get("jobs");
+  if (!exactMapKeys(jobs, ["gate"])) return false;
+  const gate = jobs.get("gate");
+  if (
+    !exactMapKeys(gate, [
+      "env",
+      "name",
+      "runs-on",
+      "steps",
+      "timeout-minutes",
+    ]) ||
+    gate.get("name") !== "Verify exact release and deliverables" ||
+    gate.get("runs-on") !== "ubuntu-latest" ||
+    gate.get("timeout-minutes") !== 25
+  ) {
+    return false;
+  }
+  if (
+    !exactScalarMap(gate.get("env"), {
+      SUBMISSION_PHASE: "${{ inputs.phase }}",
+      SUBMISSION_DEMO_URL:
+        "https://d2s5v0o0eg2aaw.cloudfront.net",
+      SUBMISSION_PUBLIC_REPO_URL:
+        "https://github.com/upgradedev/archon-cockroach-memory",
+      SUBMISSION_VIDEO_URL: "${{ inputs.video_url }}",
+      SUBMISSION_VIDEO_DURATION_SECONDS:
+        "${{ inputs.video_duration_seconds }}",
+      SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED:
+        "${{ inputs.video_public_embeddable_attested }}",
+      SUBMISSION_VIDEO_CAPTIONS_ATTESTED:
+        "${{ inputs.video_english_captions_attested }}",
+      DEVPOST_SUBMISSION_URL: "${{ inputs.devpost_url }}",
+      DEVPOST_SUBMITTED:
+        "${{ inputs.devpost_submitted_attested && '1' || '' }}",
+      PRE_SUBMIT_RUN_ID: "${{ inputs.pre_submit_run_id }}",
+    })
+  ) {
+    return false;
+  }
+
+  const steps = gate.get("steps");
+  if (!Array.isArray(steps) || steps.length !== 7) return false;
+  const [
+    initialize,
+    checkout,
+    setup,
+    install,
+    runGate,
+    upload,
+    summary,
+  ] = steps;
+  const expectedInitializer = [
+    "set -euo pipefail",
+    "umask 077",
+    'readonly receipt_path="${SUBMISSION_RECEIPT_PATH:?}"',
+    `printf '%s\\n' '{"schema":"archon.submission-readiness","version":1,"generatedAt":"not-finalized","phase":"invalid","repository":"unknown","commitSha":"","passed":false,"checks":[{"id":"gate-not-finalized","status":"fail","detail":"The hosted gate did not reach atomic receipt finalization."}],"selectedRuns":{},"live":{}}' >"\${receipt_path}"`,
+  ].join("\n");
+  const initializerRun =
+    typeof initialize.get("run") === "string"
+      ? String(initialize.get("run"))
+          .replace(/\r\n/gu, "\n")
+          .trim()
+      : "";
+  if (
+    !exactMapKeys(initialize, ["env", "name", "run", "shell"]) ||
+    initialize.get("name") !== "Initialize a fail-closed sanitized receipt" ||
+    initialize.get("shell") !== "bash" ||
+    !exactScalarMap(initialize.get("env"), {
+      SUBMISSION_RECEIPT_PATH:
+        "${{ runner.temp }}/submission-readiness-receipt.json",
+    }) ||
+    initializerRun !== expectedInitializer ||
+    !exactMapKeys(checkout, ["name", "uses", "with"]) ||
+    checkout.get("name") !== "Check out the dispatched commit" ||
+    checkout.get("uses") !==
+      "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+    !exactScalarMap(checkout.get("with"), {
+      ref: "${{ github.sha }}",
+      "fetch-depth": 1,
+      "persist-credentials": false,
+    }) ||
+    !exactMapKeys(setup, ["name", "uses", "with"]) ||
+    setup.get("name") !== "Set up pinned Node.js" ||
+    setup.get("uses") !==
+      "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e" ||
+    !exactScalarMap(setup.get("with"), {
+      "node-version": "22.23.1",
+      cache: "npm",
+    }) ||
+    !exactMapKeys(install, ["name", "run"]) ||
+    install.get("name") !== "Install the locked gate runtime" ||
+    install.get("run") !== "npm ci --ignore-scripts" ||
+    !exactMapKeys(runGate, ["env", "name", "run"]) ||
+    runGate.get("name") !== "Run the read-only final gate" ||
+    runGate.get("run") !==
+      "node --import tsx scripts/final-submission-gate.ts" ||
+    !exactScalarMap(runGate.get("env"), {
+      GITHUB_TOKEN: "${{ github.token }}",
+      SUBMISSION_RECEIPT_PATH:
+        "${{ runner.temp }}/submission-readiness-receipt.json",
+    }) ||
+    !exactMapKeys(upload, ["id", "if", "name", "uses", "with"]) ||
+    upload.get("name") !== "Upload the sanitized receipt" ||
+    upload.get("id") !== "receipt_artifact" ||
+    upload.get("if") !== "always()" ||
+    upload.get("uses") !==
+      "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+    !exactScalarMap(upload.get("with"), {
+      name: "submission-readiness-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/submission-readiness-receipt.json",
+      "if-no-files-found": "error",
+      "retention-days": 90,
+    }) ||
+    !exactMapKeys(summary, ["env", "if", "name", "run", "shell"]) ||
+    summary.get("name") !== "Publish receipt artifact coordinates" ||
+    summary.get("if") !==
+      "always() && steps.receipt_artifact.outcome == 'success'" ||
+    summary.get("shell") !== "bash" ||
+    !exactScalarMap(summary.get("env"), {
+      ARTIFACT_ID: "${{ steps.receipt_artifact.outputs.artifact-id }}",
+      ARTIFACT_URL: "${{ steps.receipt_artifact.outputs.artifact-url }}",
+      ARTIFACT_DIGEST:
+        "${{ steps.receipt_artifact.outputs.artifact-digest }}",
+    }) ||
+    typeof summary.get("run") !== "string" ||
+    !String(summary.get("run")).includes("ARTIFACT_DIGEST") ||
+    !String(summary.get("run")).includes("GITHUB_STEP_SUMMARY")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function includesEvery(source: string, fragments: readonly string[]): boolean {
+  return fragments.every((fragment) => source.includes(fragment));
+}
+
+export function hasExactHostedSmokeContracts(source: string): boolean {
+  const blocks = [
+    source.match(
+      /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
+    )?.[0] ?? "",
+    source.match(
+      /- name: Smoke production through CloudFront[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on production)/u
+    )?.[0] ?? "",
+  ];
+  const scope = [
+    'keys == ["access","company","dataClassification","mode","source","tenantId"]',
+    '.tenantId == "public-demo"',
+    '.company == "Helios SA"',
+    '.mode == "fixed-synthetic-demo"',
+    '.access == "read-only"',
+    '.dataClassification == "synthetic-public-demo"',
+    '.source == "server-configured"',
+  ] as const;
+  const health = [
+    '$APPLICATION_URL/api/health',
+    ".ok == true",
+    '.status == "reachable"',
+    '.service == "archon-cockroach-memory"',
+    '.access == "public-read-only"',
+    '.dependencies == "unchecked"',
+    ".scope |",
+    ...scope,
+  ] as const;
+  const proof = [
+    '$APPLICATION_URL/api/proof',
+    'RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"',
+    '[[ "$RELEASE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]',
+    '--arg releaseCommitSha "$RELEASE_COMMIT_SHA"',
+    '$embed == "amazon.titan-embed-text-v2:0"',
+    '$narrator == "eu.anthropic.claude-sonnet-4-6"',
+    '.database.engine == "CockroachDB"',
+    '.database.deployment == "CockroachDB Cloud on AWS"',
+    '.database.role == "persistent agent memory"',
+    '.database.transactionIsolation == "SERIALIZABLE"',
+    '.database.database == "archon"',
+    'test("CockroachDB"; "i")',
+    '.database.region == "eu-west-1"',
+    '.database.regionEvidence == "cockroach-cloud-api-release-gate"',
+    ".database.activeMemories == 9",
+    ".memory.persisted == 9",
+    ".memory.idempotencyKeys == 9",
+    ".memory.contentDigests == 9",
+    ".memory.storeVerified == true",
+    '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
+    '.vectorIndex.engine == "native CockroachDB C-SPANN"',
+    ".vectorIndex.enabled == true",
+    '.vectorIndex.name == "idx_agent_memory_company_scope_embedding"',
+    '.vectorIndex.metric == "cosine"',
+    ".vectorIndex.dimensions == 1024",
+    '.vectorIndex.prefixes == ["tenant_id","embed_model","status","company"]',
+    '.vectorIndex.lifecycleState == "active"',
+    '.vectorIndex.evidence == "live pg_catalog.pg_indexes definition"',
+    'test("^[a-f0-9]{64}$")',
+    '.embeddingModel == "amazon.titan-embed-text-v2:0"',
+    '.narrationModel == "eu.anthropic.claude-sonnet-4-6"',
+    ".release.commitSha == $releaseCommitSha",
+    '.release.evidence == "server-configured Lambda environment"',
+    ".scope |",
+    ...scope,
+    '.generatedAt | type == "string" and test("Z$")',
+  ] as const;
+  const recall = [
+    '$APPLICATION_URL/api/recall',
+    '--arg question "What was the true employer cost and the off-bank wedge?"',
+    '--arg embed "$BEDROCK_EMBED_MODEL_ID"',
+    '--arg narrator "$BEDROCK_NARRATOR_MODEL_ID"',
+    ".question == $question",
+    '(.answer | contains("€15,375"))',
+    '(.answer | contains("€6,775"))',
+    ".modelId == $narrator",
+    "(.citations | length) >= 2",
+    "(.citations | length) <= 5",
+    ".recalled == (.citations | length)",
+    '(.grounding.status == "verified" or .grounding.status == "extractive")',
+    ".grounding.checks.citations == true",
+    ".grounding.checks.numerics == true",
+    ".grounding.checks.claims == true",
+    '.trace.retrieval.database == "CockroachDB"',
+    '.trace.retrieval.index == "native C-SPANN vector index"',
+    '.trace.retrieval.metric == "cosine"',
+    ".trace.retrieval.embeddingModel == $embed",
+    ".trace.retrieval.requestedTopK == 5",
+    ".trace.retrieval.recalled == .recalled",
+    ".trace.narration.model == $narrator",
+    ".trace.scope |",
+    ...scope,
+    'any(.citations[]; .content | contains("€15,375"))',
+    'any(.citations[]; .content | contains("€6,775"))',
+    '.marker | test("^\\\\[[1-5]\\\\]$")',
+    '.memoryId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")',
+    '.sourceRef | type == "string" and length > 0',
+    '.company == "Helios SA"',
+    '.kind == "document"',
+    '.kind == "payroll_event"',
+    '.kind == "validation"',
+    '.kind == "insight"',
+    '.period == "2026-04"',
+    '.score | type == "number" and . >= 0.15 and . <= 1',
+    ".answer as $answer |",
+    "all(.citations[].marker;",
+    ". as $marker | $answer | contains($marker)",
+    "([.citations[].marker] ==",
+    '[range(1; ((.citations | length) + 1)) | "[\\(.)]"])',
+    "([.citations[].memoryId] | unique | length) == (.citations | length)",
+    ".consistencyOk == true",
+  ] as const;
+  const audit = [
+    '$APPLICATION_URL/api/audit',
+    ".report.audited == 9",
+    ".report.ok == false",
+    ".coverage.total == 9",
+    ".coverage.scanned == 9",
+    ".coverage.complete == true",
+    ".scope |",
+    ...scope,
+    "(.report.contradictions | length) == 1",
+    '.report.contradictions[0].subject == "INV-2043"',
+    '.report.contradictions[0].type == "contradiction"',
+    '.report.contradictions[0].attribute == "total"',
+    "([.report.contradictions[0].values[].value] | sort) == [18400,18900]",
+    ".report.contradictions[0].resolution.recommendedValue == 18400",
+    '.report.contradictions[0].resolution.rule == "importance"',
+    ".report.contradictions[0].resolution.recommendedMemoryId |",
+    'test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")',
+    ".report.contradictions[0].resolution.confidence |",
+    'type == "number" and . >= 0 and . <= 1',
+    ".report.contradictions[0].resolution.rationale |",
+    'type == "string" and length >= 20',
+    "(.report.absences | length) == 1",
+    '.report.absences[0].type == "absence"',
+    '.report.absences[0].subject == "PAY-118"',
+    "(.report.absences[0].referencedBy | length) == 1",
+    '.report.absences[0].referencedBy[0].sourceRef == "RECON-2043"',
+    '.generatedAt | type == "string" and test("Z$")',
+  ] as const;
+
+  return blocks.every((block, index) => {
+    if (!block) return false;
+    const healthStart = block.indexOf('HEALTH="$(');
+    const proofBindingStart = block.indexOf(
+      'RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"'
+    );
+    const proofRequestStart = block.indexOf('PROOF="$(');
+    const recallStart = block.indexOf('RECALL="$(');
+    const auditStart = block.indexOf('AUDIT="$(');
+    if (
+      healthStart < 0 ||
+      proofBindingStart <= healthStart ||
+      proofRequestStart <= proofBindingStart ||
+      recallStart <= proofRequestStart ||
+      auditStart <= recallStart
+    ) {
+      return false;
+    }
+    const sections = {
+      health: block.slice(healthStart, proofBindingStart),
+      proof: block.slice(proofBindingStart, recallStart),
+      recall: block.slice(recallStart, auditStart),
+      audit: block.slice(auditStart),
+    };
+    const environment = index === 0 ? "staging" : "production";
+    return (
+      includesEvery(sections.health, health) &&
+      includesEvery(sections.proof, [
+        ...proof,
+        `test("^archon_${environment}_[0-9a-f]{10}$")`,
+      ]) &&
+      includesEvery(sections.recall, recall) &&
+      includesEvery(sections.audit, audit)
+    );
+  });
+}
+
 export function hasExactAwsDeliveryConcurrency(source: string): boolean {
   const parsed = parseWorkflow(source);
   const concurrency = parsed?.root.get("concurrency");
@@ -809,6 +1410,7 @@ export function hasUniqueCiTriggerOwnership(
       "recover-aws.yml",
       ["schedule", "workflow_dispatch", "workflow_run"],
     ],
+    ["submission-readiness.yml", ["workflow_dispatch"]],
   ]);
   for (const workflow of workflows) {
     const parsed = parseWorkflow(workflow.source);
@@ -832,13 +1434,18 @@ export function hasUniqueCiTriggerOwnership(
   const recovery = workflows.find(
     ({ name }) => name === "recover-aws.yml"
   );
+  const submission = workflows.find(
+    ({ name }) => name === "submission-readiness.yml"
+  );
   return (
     ci !== undefined &&
     codeql !== undefined &&
     recovery !== undefined &&
+    submission !== undefined &&
     hasExactCiTrigger(ci.source) &&
     hasExactCodeqlTrigger(codeql.source) &&
-    hasExactAwsRecoveryTrigger(recovery.source)
+    hasExactAwsRecoveryTrigger(recovery.source) &&
+    hasExactSubmissionReadinessTrigger(submission.source)
   );
 }
 
@@ -851,6 +1458,12 @@ export function isSubmissionEligible(
 
 function contains(rel: string, pattern: RegExp): boolean {
   return pattern.test(read(rel));
+}
+
+function hasExactTrimmedLine(source: string, expected: string): boolean {
+  return source
+    .split(/\r?\n/u)
+    .some((line) => line.trim() === expected);
 }
 
 function sourceCheck(
@@ -871,8 +1484,13 @@ function sourceCheck(
 function sourceChecks(): SourceCheck[] {
   const schema = read("src/db/schema.sql");
   const ci = read(".github/workflows/ci.yml");
+  const codeqlWorkflow = read(".github/workflows/codeql.yml");
+  const dependabotConfig = read(".github/dependabot.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
   const recoveryWorkflow = read(".github/workflows/recover-aws.yml");
+  const submissionWorkflow = read(
+    ".github/workflows/submission-readiness.yml"
+  );
   const foundationWorkflow = read(
     ".github/workflows/bootstrap-aws.yml"
   );
@@ -964,6 +1582,11 @@ function sourceChecks(): SourceCheck[] {
   );
   const gitignore = read(".gitignore");
   const makefile = read("Makefile");
+  const devpostSubmission = read("docs/DEVPOST_SUBMISSION.md");
+  const videoPlan = read("demo/VIDEO_PLAN.md");
+  const finalSubmissionGate = read(
+    "scripts/final-submission-gate.ts"
+  );
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
@@ -1345,14 +1968,6 @@ function sourceChecks(): SourceCheck[] {
         position < recoveryControlPositions[index] &&
         recoveryControlPositions[index] < recoveryFinalizerPositions[index]
     );
-  const fullRecallSmokeBlocks = [
-    deploy.match(
-      /- name: Smoke the same-origin application and real recall path[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on staging)/u
-    )?.[0] ?? "",
-    deploy.match(
-      /- name: Smoke production through CloudFront[\s\S]*?(?=\r?\n      - name: Hosted Chromium judge journey on production)/u
-    )?.[0] ?? "",
-  ];
   const recoveryBlocks = [
     deploy.match(
       /- name: Restore the previous staging release on verification failure[\s\S]*?(?=\r?\n      - name: Upload staging receipt)/u
@@ -1373,25 +1988,6 @@ function sourceChecks(): SourceCheck[] {
     "sam deploy",
     "stop_canary_probe",
     "trap - EXIT",
-  ];
-  const fullRecallFragments = [
-    ".database.activeMemories == .memory.persisted",
-    ".memory.persisted == 9",
-    ".memory.idempotencyKeys == .memory.persisted",
-    ".memory.contentDigests == .memory.persisted",
-    ".memory.storeVerified == true",
-    '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
-    '-X POST "$APPLICATION_URL/api/recall"',
-    ".recalled > 0",
-    "(.citations | length) > 0",
-    '(.answer | type == "string" and length > 0)',
-    ".modelId == $narrator",
-    '(.grounding.status == "verified" or .grounding.status == "extractive")',
-    ".grounding.checks.citations == true",
-    ".grounding.checks.numerics == true",
-    ".grounding.checks.claims == true",
-    'contains("€15,375")',
-    'contains("€6,775")',
   ];
   const managedMcpGateFragments = [
     'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
@@ -1442,6 +2038,28 @@ function sourceChecks(): SourceCheck[] {
         receipt < clusterIdCheck &&
         apiKeyCheck < exactJqGate &&
         clusterIdCheck < exactJqGate
+      );
+    }
+  );
+  const managedMcpSecretsAreStepScoped = managedMcpGateBlocks.every(
+    (block) => {
+      const install = block.indexOf("npm ci --ignore-scripts");
+      const secret = block.indexOf(
+        "CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}"
+      );
+      const receipt = block.indexOf(
+        "npm run --silent mcp:cloud:audit"
+      );
+      return (
+        install >= 0 &&
+        secret > install &&
+        secret < receipt &&
+        (
+          block.match(
+            /CCLOUD_API_KEY: \$\{\{ secrets\.CCLOUD_API_KEY \}\}/gu
+          ) ?? []
+        ).length === 1 &&
+        block.includes("persist-credentials: false")
       );
     }
   );
@@ -2386,10 +3004,14 @@ function sourceChecks(): SourceCheck[] {
           )
       ) &&
         managedMcpLeakChecksPrecedeJq &&
+        managedMcpSecretsAreStepScoped &&
         /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u.test(
           managedMcpWorkflow
+        ) &&
+        /- name: Upload the sanitized proof receipt[\s\S]*?retention-days: 90/u.test(
+          managedMcpWorkflow
         ),
-      "Both protected Managed MCP paths enforce the exact v2 receipt shape, scope, bounds, 9/9/9 aggregate, four proof calls, and secret-value exclusions.",
+      "Both protected Managed MCP paths step-scope their secret, disable install scripts/persisted checkout credentials, enforce the exact sanitized v2 proof contract, and retain standalone release evidence for 90 days.",
       "A Managed MCP workflow does not fail closed on the exact sanitized v2 receipt contract."
     ),
     sourceCheck(
@@ -2422,6 +3044,19 @@ function sourceChecks(): SourceCheck[] {
       "A mutable Action/image/runtime reference remains."
     ),
     sourceCheck(
+      "tech.release-dependency-governance",
+      "Technical Implementation",
+      hasExactCodeqlActionPins(codeqlWorkflow) &&
+        hasExactDependabotReleaseFreeze(dependabotConfig) &&
+        has("docs/DEPENDENCY_RELEASE_POLICY.md") &&
+        contains(
+          "docs/DEPENDENCY_RELEASE_POLICY.md",
+          /security updates remain enabled/iu
+        ),
+      "Release dependencies are frozen without suppressing security updates, and all CodeQL phases share one verified immutable release.",
+      "The release freeze, security-update path, or atomic CodeQL pin is incomplete."
+    ),
+    sourceCheck(
       "tech.exact-ci-trigger",
       "Technical Implementation",
       hasExactCiTrigger(ci) &&
@@ -2433,9 +3068,13 @@ function sourceChecks(): SourceCheck[] {
       "tech.bedrock-grounding",
       "Technical Implementation",
       /checks:\s*\{[\s\S]*claims:\s*boolean/iu.test(narrator) &&
+        /validateCompleteGroundedAnswer/iu.test(narrator) &&
+        /answer did not cite the complete bounded evidence set/iu.test(
+          narrator
+        ) &&
         /RECALL_MIN_SCORE/iu.test(handler) &&
         /citation/iu.test(narrator),
-      "Bedrock narration is guarded by relevance abstention, per-claim citations, numeric checks, and fallback.",
+      "Bedrock narration is guarded by relevance abstention, complete bounded evidence citation, per-claim numeric/claim checks, and deterministic extraction fallback.",
       "Grounding or relevance-abstention controls are incomplete."
     ),
     sourceCheck(
@@ -2637,6 +3276,62 @@ function sourceChecks(): SourceCheck[] {
       "The deployable AWS architecture, canonical access-log ARN, complete drift-discovery permissions, or live API stage-control proof is incomplete."
     ),
     sourceCheck(
+      "product.demo-concurrency-headroom",
+      "Production Readiness",
+      /ReservedConcurrency:\s*Type:\s*Number[\s\S]*?Default:\s*5[\s\S]*?ApiThrottleRate:\s*Type:\s*Number[\s\S]*?Default:\s*5/u.test(
+        lambdaTemplate
+      ) &&
+        /ReservedConcurrentExecutions:\s*!Ref ReservedConcurrency/u.test(
+          lambdaTemplate
+        ) &&
+        (
+          deploy.match(/--arg reservedConcurrency "5"/gu) ?? []
+        ).length === 6 &&
+        (
+          deploy.match(
+            /ReservedConcurrency: \$reservedConcurrency/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /and \.ReservedConcurrency == \$reservedConcurrency/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /select\(\.ParameterKey == "ReservedConcurrency"\)\s+\| \.ParameterValue\] == \[\$reservedConcurrency\]/gu
+          ) ?? []
+        ).length === 2,
+      "Reserved concurrency is explicitly promoted and then live-proved at five: three Control Room reads, one recall, and one bounded spare in-flight slot; API rate is enforced independently.",
+      "The live promotion can retain insufficient Lambda concurrency for the judge-facing Control Room."
+    ),
+    sourceCheck(
+      "product.exact-live-release-binding",
+      "Production Readiness",
+      /ReleaseCommitSha:\s*Type:\s*String[\s\S]*?AllowedPattern: "\^\[0-9a-f\]\{40\}\$"/u.test(
+        lambdaTemplate
+      ) &&
+        /RELEASE_COMMIT_SHA:\s*!Ref ReleaseCommitSha/u.test(lambdaTemplate) &&
+        /commitSha:\s*\n?\s*\/\^\[0-9a-f\]\{40\}\$\/u\.test\(process\.env\.RELEASE_COMMIT_SHA/u.test(
+          handler
+        ) &&
+        (
+          deploy.match(/ReleaseCommitSha: \$releaseCommitSha/gu) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /select\(\.ParameterKey == "ReleaseCommitSha"\)\s+\| \.ParameterValue\] == \[\$releaseCommitSha\]/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /\.release\.commitSha == \$releaseCommitSha and\s+\.release\.evidence == "server-configured Lambda environment"/gu
+          ) ?? []
+        ).length === 2,
+      "The exact protected commit is an explicit stack parameter, Lambda proof field, post-SAM parameter proof, and staging/production live release gate.",
+      "The public proof can drift from the protected commit promoted by AWS CI/CD."
+    ),
+    sourceCheck(
       "product.dormant-encrypted-alarm-routing",
       "Production Readiness",
       /AlarmRoutingEnabled:\s+Type: String\s+Default: "false"\s+AllowedValues:\s+- "true"\s+- "false"/u.test(
@@ -2715,10 +3410,14 @@ function sourceChecks(): SourceCheck[] {
         (
           deploy.match(/AlarmTopicArn: \$alarmTopicArn/gu) ?? []
         ).length === 2 &&
-        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.json"/u.test(
+        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.yaml"/u.test(
           deploy
         ) &&
-        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.json"/u.test(
+        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.yaml"/u.test(
+          deploy
+        ) &&
+        !/sam-parameters\.json/u.test(deploy) &&
+        /JSON support is intentionally disabled upstream/u.test(
           deploy
         ) &&
         (
@@ -3251,11 +3950,7 @@ function sourceChecks(): SourceCheck[] {
             block
           )
       ) &&
-        fullRecallSmokeBlocks.every(
-          (block) =>
-            block.length > 0 &&
-            fullRecallFragments.every((fragment) => block.includes(fragment))
-        ) &&
+        hasExactHostedSmokeContracts(deploy) &&
         (
           deploy.match(
             /canaryTrafficProbe:\s*"weighted-alias-proof-and-recall"/gu
@@ -3336,6 +4031,91 @@ function sourceChecks(): SourceCheck[] {
       "Generated-output ignore/detection gates or the Makefile cleanup are incomplete."
     ),
     sourceCheck(
+      "product.hosted-submission-boundary",
+      "Production Readiness",
+      hasExactSubmissionWorkflowContract(submissionWorkflow) &&
+        !/configure-aws-credentials|secrets\./u.test(
+          submissionWorkflow
+        ) &&
+        /const WORKFLOW_REF =\s+`\$\{REPOSITORY\}\/\.github\/workflows\/submission-readiness\.yml@refs\/heads\/main`/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectSuccessfulRun\([\s\S]*?"CI"[\s\S]*?"CodeQL"[\s\S]*?"Deploy AWS"[\s\S]*?"Cockroach Cloud Managed MCP Audit"[\s\S]*?"Recover AWS"/u.test(
+          finalSubmissionGate
+        ) &&
+        /Deploy timing must be valid and both audits must start after deploy completes/u.test(
+          finalSubmissionGate
+        ) &&
+        /requireSuccessfulRecoveryAuditJobs/u.test(finalSubmissionGate) &&
+        /must have completed within 24 hours/u.test(finalSubmissionGate) &&
+        /release\?\.commitSha !== sha/u.test(finalSubmissionGate) &&
+        /\^archon_production_\[0-9a-f\]\{10\}\$/u.test(
+          finalSubmissionGate
+        ) &&
+        /Post-submit must chain to a successful pre-submit gate from the last 24 hours/u.test(
+          finalSubmissionGate
+        ) &&
+        /\/api\/health[\s\S]*?\/api\/proof[\s\S]*?\/api\/recall[\s\S]*?\/api\/audit/u.test(
+          finalSubmissionGate
+        ) &&
+        hasExactTrimmedLine(
+          finalSubmissionGate,
+          'const YOUTUBE_OEMBED_ENDPOINT = "https://www.youtube.com/oembed";'
+        ) &&
+        hasExactTrimmedLine(
+          finalSubmissionGate,
+          'const VIMEO_OEMBED_ENDPOINT = "https://vimeo.com/api/oembed.json";'
+        ) &&
+        includesEvery(finalSubmissionGate, [
+          'import { parse } from "parse5";',
+          "const document = parse(html, {",
+          "scriptingEnabled: true,",
+          "const oembedUrl = new URL(",
+          "? YOUTUBE_OEMBED_ENDPOINT",
+          ": VIMEO_OEMBED_ENDPOINT",
+          'oembedUrl.searchParams.set("url", identity.canonicalUrl);',
+          'oembedUrl.searchParams.set("format", "json");',
+          "await fetchJson(oembedUrl.href,",
+        ]) &&
+        /"parse5":\s*"7\.3\.0"/u.test(packageSource) &&
+        /submission-readiness-receipt\.json/u.test(
+          finalSubmissionGate
+        ),
+      "A manual, read-only pre/post submission gate re-proves exact-main hosted evidence, live contracts, public video, thumbnail, and final Devpost state with a sanitized runner-temp receipt.",
+      "The hosted final submission boundary is incomplete or can bypass its evidence contract."
+    ),
+    sourceCheck(
+      "product.versioned-submission-package",
+      "Production Readiness",
+      /^status: submission-copy-complete$/mu.test(devpostSubmission) &&
+        /^# Archon Memory$/mu.test(devpostSubmission) &&
+        /^## Inspiration$/mu.test(devpostSubmission) &&
+        /^## What it does$/mu.test(devpostSubmission) &&
+        /^## How we used CockroachDB$/mu.test(devpostSubmission) &&
+        /Distributed Vector Indexing/u.test(devpostSubmission) &&
+        /CockroachDB Cloud Managed MCP/u.test(devpostSubmission) &&
+        /^## How we used AWS$/mu.test(devpostSubmission) &&
+        /^## Prior-work disclosure$/mu.test(devpostSubmission) &&
+        /1 July 2026/u.test(devpostSubmission) &&
+        /^## What's next$/mu.test(devpostSubmission) &&
+        !/\b(?:TODO|TBD|PENDING)\b/iu.test(devpostSubmission) &&
+        /^Target runtime: \*\*2:50 \(170 seconds\)\*\*[ \t]*\r?$/mu.test(
+          videoPlan
+        ) &&
+        /^Hard limit: \*\*strictly under 3:00\*\*[ \t]*\r?$/mu.test(
+          videoPlan
+        ) &&
+        /separate deterministic release controller uses CockroachDB Cloud Managed MCP/u.test(
+          videoPlan
+        ) &&
+        /No generated video, frames, audio, or editing output belongs in this repository/u.test(
+          videoPlan
+        ) &&
+        validSubmissionThumbnail() !== undefined,
+      "The English Devpost copy, final recording plan, and owned 3:2 thumbnail are complete and versioned without local video output.",
+      "The versioned submission copy, recording plan, or owned thumbnail is incomplete."
+    ),
+    sourceCheck(
       "product.no-local-build-products",
       "Production Readiness",
       localArtifacts.length === 0,
@@ -3394,6 +4174,330 @@ function validHostedUrl(value: string | undefined): boolean {
   }
 }
 
+export type SubmissionVideoProvider = "youtube" | "vimeo";
+
+export interface SubmissionVideoIdentity {
+  provider: SubmissionVideoProvider;
+  id: string;
+  canonicalUrl: string;
+}
+
+export interface SubmissionThumbnailMetadata {
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+export interface ValidatedSubmissionThumbnail
+  extends SubmissionThumbnailMetadata {
+  sha256: string;
+}
+
+const PNG_CRC_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = (crc & 1) !== 0 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function pngCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = PNG_CRC_TABLE[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function parseCanonicalSubmissionVideoUrl(
+  value: string | undefined
+): SubmissionVideoIdentity | undefined {
+  if (!value || value.trim() !== value) return undefined;
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.port !== "" ||
+      url.hash !== ""
+    ) {
+      return undefined;
+    }
+
+    const host = url.hostname.toLowerCase();
+    const youtubeId = /^[A-Za-z0-9_-]{11}$/u;
+    if (
+      host === "www.youtube.com" &&
+      url.pathname === "/watch" &&
+      [...url.searchParams.keys()].length === 1 &&
+      url.searchParams.has("v")
+    ) {
+      const id = url.searchParams.get("v") ?? "";
+      const canonicalUrl = `https://www.youtube.com/watch?v=${id}`;
+      return youtubeId.test(id) && value === canonicalUrl
+        ? { provider: "youtube", id, canonicalUrl }
+        : undefined;
+    }
+
+    if (
+      host === "youtu.be" &&
+      url.search === "" &&
+      youtubeId.test(url.pathname.slice(1)) &&
+      /^\/[A-Za-z0-9_-]{11}$/u.test(url.pathname)
+    ) {
+      const id = url.pathname.slice(1);
+      const identity = {
+        provider: "youtube",
+        id,
+        canonicalUrl: `https://youtu.be/${id}`,
+      } as const;
+      return value === identity.canonicalUrl ? identity : undefined;
+    }
+
+    if (
+      host === "vimeo.com" &&
+      url.search === "" &&
+      /^\/[1-9][0-9]*$/u.test(url.pathname)
+    ) {
+      const id = url.pathname.slice(1);
+      const identity = {
+        provider: "vimeo",
+        id,
+        canonicalUrl: `https://vimeo.com/${id}`,
+      } as const;
+      return value === identity.canonicalUrl ? identity : undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+export function validSubmissionVideoDuration(
+  value: string | undefined
+): boolean {
+  if (!value || value.trim() !== value || !/^[1-9][0-9]{0,2}$/u.test(value)) {
+    return false;
+  }
+  const seconds = Number(value);
+  return Number.isSafeInteger(seconds) && seconds < 180;
+}
+
+export function validDevpostSubmissionUrl(
+  value: string | undefined
+): boolean {
+  if (!value || value.trim() !== value) return false;
+  try {
+    const url = new URL(value);
+    const canonical =
+      `https://devpost.com${url.pathname}`;
+    return (
+      value === canonical &&
+      url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "devpost.com" &&
+      /^\/software\/[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(url.pathname) &&
+      url.username === "" &&
+      url.password === "" &&
+      url.port === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function inspectSubmissionThumbnail(
+  bytes: Uint8Array
+): SubmissionThumbnailMetadata | undefined {
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (
+    buffer.length < 57 ||
+    buffer.length > MAX_SUBMISSION_THUMBNAIL_BYTES ||
+    signature.some((value, index) => buffer[index] !== value)
+  ) {
+    return undefined;
+  }
+
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let channels = 0;
+  let sawHeader = false;
+  let sawImageData = false;
+  let sawEnd = false;
+  let imageDataClosed = false;
+  const compressedParts: Buffer[] = [];
+  try {
+    while (offset < buffer.length) {
+      if (offset + 12 > buffer.length) return undefined;
+      const length = buffer.readUInt32BE(offset);
+      const typeStart = offset + 4;
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      const chunkEnd = dataEnd + 4;
+      if (dataEnd < dataStart || chunkEnd > buffer.length) return undefined;
+      const type = buffer.toString("ascii", typeStart, dataStart);
+      if (!/^[A-Za-z]{4}$/u.test(type)) return undefined;
+      const expectedCrc = buffer.readUInt32BE(dataEnd);
+      if (
+        pngCrc32(buffer.subarray(typeStart, dataEnd)) !== expectedCrc
+      ) {
+        return undefined;
+      }
+
+      if (!sawHeader) {
+        if (type !== "IHDR" || length !== 13) return undefined;
+        width = buffer.readUInt32BE(dataStart);
+        height = buffer.readUInt32BE(dataStart + 4);
+        const bitDepth = buffer[dataStart + 8];
+        const colorType = buffer[dataStart + 9];
+        const compression = buffer[dataStart + 10];
+        const filter = buffer[dataStart + 11];
+        const interlace = buffer[dataStart + 12];
+        if (
+          width < 1200 ||
+          height < 800 ||
+          width > 4096 ||
+          height > 4096 ||
+          width * 2 !== height * 3 ||
+          bitDepth !== 8 ||
+          (colorType !== 2 && colorType !== 6) ||
+          compression !== 0 ||
+          filter !== 0 ||
+          interlace !== 0
+        ) {
+          return undefined;
+        }
+        channels = colorType === 2 ? 3 : 4;
+        sawHeader = true;
+      } else if (type === "IHDR") {
+        return undefined;
+      } else if (type === "IDAT") {
+        if (sawEnd || imageDataClosed || length === 0) return undefined;
+        sawImageData = true;
+        compressedParts.push(buffer.subarray(dataStart, dataEnd));
+      } else if (type === "IEND") {
+        if (!sawImageData || length !== 0 || chunkEnd !== buffer.length) {
+          return undefined;
+        }
+        sawEnd = true;
+      } else {
+        if (sawImageData) imageDataClosed = true;
+        // Reject unknown critical chunks; ancillary metadata remains allowed.
+        if ((type.charCodeAt(0) & 0x20) === 0 && type !== "PLTE") {
+          return undefined;
+        }
+      }
+      offset = chunkEnd;
+    }
+
+    if (!sawHeader || !sawImageData || !sawEnd || offset !== buffer.length) {
+      return undefined;
+    }
+    const rowBytes = width * channels;
+    const expectedInflatedBytes = (rowBytes + 1) * height;
+    if (
+      !Number.isSafeInteger(expectedInflatedBytes) ||
+      expectedInflatedBytes > 64 * 1024 * 1024
+    ) {
+      return undefined;
+    }
+    const inflated = inflateSync(Buffer.concat(compressedParts), {
+      maxOutputLength: expectedInflatedBytes,
+    });
+    if (inflated.length !== expectedInflatedBytes) return undefined;
+    for (let row = 0; row < height; row += 1) {
+      if (inflated[row * (rowBytes + 1)]! > 4) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return { width, height, bytes: buffer.length };
+}
+
+export function validatedSubmissionThumbnail(
+  root = ROOT
+): ValidatedSubmissionThumbnail | undefined {
+  const thumbnailPath = join(root, SUBMISSION_THUMBNAIL_PATH);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      thumbnailPath,
+      constants.O_RDONLY |
+        (typeof constants.O_NOFOLLOW === "number"
+          ? constants.O_NOFOLLOW
+          : 0)
+    );
+    const opened = fstatSync(descriptor);
+    const current = lstatSync(thumbnailPath);
+    if (
+      !opened.isFile() ||
+      !Number.isSafeInteger(opened.size) ||
+      opened.size < 57 ||
+      opened.size > MAX_SUBMISSION_THUMBNAIL_BYTES ||
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      opened.dev !== current.dev ||
+      opened.ino !== current.ino
+    ) {
+      return undefined;
+    }
+    const file = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < file.length) {
+      const bytesRead = readSync(
+        descriptor,
+        file,
+        offset,
+        file.length - offset,
+        offset
+      );
+      if (bytesRead === 0) return undefined;
+      offset += bytesRead;
+    }
+    if (
+      readSync(descriptor, Buffer.alloc(1), 0, 1, file.length) !== 0
+    ) {
+      return undefined;
+    }
+    const terminal = fstatSync(descriptor);
+    if (
+      terminal.size !== opened.size ||
+      terminal.mtimeMs !== opened.mtimeMs ||
+      terminal.ctimeMs !== opened.ctimeMs
+    ) {
+      return undefined;
+    }
+    const metadata = inspectSubmissionThumbnail(file);
+    return metadata
+      ? {
+          ...metadata,
+          sha256: createHash("sha256").update(file).digest("hex"),
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+export function validSubmissionThumbnail(
+  root = ROOT
+): SubmissionThumbnailMetadata | undefined {
+  const validated = validatedSubmissionThumbnail(root);
+  return validated
+    ? {
+        width: validated.width,
+        height: validated.height,
+        bytes: validated.bytes,
+      }
+    : undefined;
+}
+
 function validPublicRepositoryUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -3414,10 +4518,16 @@ function validPublicRepositoryUrl(value: string): boolean {
 
 function eligibilityRequirements(): EligibilityRequirement[] {
   const demoUrl = process.env.SUBMISSION_DEMO_URL?.trim();
-  const videoUrl = process.env.SUBMISSION_VIDEO_URL?.trim();
+  const videoUrl = process.env.SUBMISSION_VIDEO_URL;
+  const videoDuration = process.env.SUBMISSION_VIDEO_DURATION_SECONDS;
+  const videoAttestations =
+    process.env.SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED === "true" &&
+    process.env.SUBMISSION_VIDEO_CAPTIONS_ATTESTED === "true";
+  const devpostUrl = process.env.DEVPOST_SUBMISSION_URL;
   const publicRepoUrl =
     process.env.SUBMISSION_PUBLIC_REPO_URL?.trim() ||
     "https://github.com/upgradedev/archon-cockroach-memory";
+  const thumbnail = validSubmissionThumbnail();
 
   const requirement = (
     id: string,
@@ -3446,13 +4556,18 @@ function eligibilityRequirements(): EligibilityRequirement[] {
     requirement(
       "public-under-three-minute-video",
       Boolean(
-        videoUrl &&
-          /^https:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|vimeo\.com)\//iu.test(
-            videoUrl
-          )
+        parseCanonicalSubmissionVideoUrl(videoUrl) &&
+          validSubmissionVideoDuration(videoDuration) &&
+          videoAttestations
       ),
-      `Public YouTube/Vimeo demo supplied: ${videoUrl}`,
-      "Set SUBMISSION_VIDEO_URL only after the final public <3-minute browser/memory demo is uploaded."
+      `Canonical public video supplied with operator-verified duration, visibility, embed, and English captions at ${videoDuration}s: ${videoUrl}`,
+      "Set the canonical URL, integer duration, and both video attestations only after the final public, embeddable, captioned <3-minute demo is uploaded."
+    ),
+    requirement(
+      "submission-thumbnail",
+      thumbnail !== undefined,
+      `Owned ${thumbnail?.width}x${thumbnail?.height} 3:2 PNG is versioned under the 5 MB boundary.`,
+      `Add the owned 3:2 PNG at ${SUBMISSION_THUMBNAIL_PATH}.`
     ),
     requirement(
       "english-description-and-tool-identification",
@@ -3473,9 +4588,10 @@ function eligibilityRequirements(): EligibilityRequirement[] {
     ),
     requirement(
       "devpost-submitted",
-      process.env.DEVPOST_SUBMITTED === "1",
-      "Operator confirmed the Devpost form is submitted.",
-      "Set DEVPOST_SUBMITTED=1 only after the final form has been submitted."
+      process.env.DEVPOST_SUBMITTED === "1" &&
+        validDevpostSubmissionUrl(devpostUrl),
+      `Operator confirmed the public Devpost submission: ${devpostUrl}`,
+      "Set DEVPOST_SUBMITTED=1 with a canonical DEVPOST_SUBMISSION_URL only after the final form has been submitted."
     ),
   ];
 }

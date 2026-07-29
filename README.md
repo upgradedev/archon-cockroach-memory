@@ -4,7 +4,9 @@
 inspect the exact evidence behind the answer, and see when persistent memory
 disagrees with itself.**
 
-This is the CockroachDB AI Challenge entry at
+This is an entry for the
+[CockroachDB × AWS Hackathon — Build with Agentic Memory](https://cockroachdb-ai.devpost.com/)
+at
 [upgradedev/archon-cockroach-memory](https://github.com/upgradedev/archon-cockroach-memory).
 It uses CockroachDB as durable, distributed agent memory and AWS Bedrock for
 embeddings and grounded narration.
@@ -46,6 +48,13 @@ durable facts learned across independent sessions and makes their state explicit
 The differentiator is simple: **the memory can disagree out loud before an agent
 acts on it.**
 
+The working loop is **Store → Retrieve → Act**: `ingestEvent`/`remember`
+idempotently persist embedded facts, provenance, content digests, and lifecycle
+state; native C-SPANN retrieves only the fixed active scope; the agent returns a
+cited answer, abstains, uses deterministic evidence wording, or surfaces a
+contradiction recommendation for human review. Public mutation is disabled only
+at the judge boundary.
+
 ## Architecture
 
 ```mermaid
@@ -66,11 +75,13 @@ flowchart LR
     Lambda --> Titan
     Lambda --> CRDB
     Lambda --> Claude
-    MCP -. "independent read-only proof" .-> CRDB
+    MCP -. "deterministic read-only release proof" .-> CRDB
 ```
 
-The application workload is fixed to `eu-west-1`. CloudFront is a global AWS edge
-service; it does not reintroduce an application workload in `us-west-2`.
+Regional AWS application resources and API entry points, plus the CockroachDB
+cluster, are anchored in `eu-west-1`; CloudFront is global and Claude uses an EU
+cross-region inference profile. The scoped inventory contains no application
+resources in `us-west-2`.
 
 ## Required CockroachDB tools: 2 of 4
 
@@ -156,8 +167,10 @@ The deployment follows the AWS serverless web application reference pattern:
 - API Gateway HTTP API with a named `live` stage, stage-wide throttling,
   detailed metrics, vended CloudWatch access logs, no per-route overrides, and
   no public mutation route.
-- Lambda Node.js 22 with reserved concurrency, X-Ray, retained logs, and bounded
-  request/retrieval work.
+- Lambda Node.js 22 with five bounded in-flight slots: three initial Control
+  Room evidence reads, one recall, and one spare. API request-rate and burst
+  limits are enforced independently; X-Ray, retained logs, and bounded
+  request/retrieval work remain enabled.
 - Secrets Manager stores the least-privilege CockroachDB connection under a
   deterministic environment name; the URI is never a Lambda environment
   variable, GitHub secret, or CloudFormation parameter.
@@ -189,9 +202,10 @@ replacement or deletion. Each deployment discovers only complete foundation
 outputs before SAM mutation. A pre-contract foundation is reported distinctly
 as `legacy-inactive-not-provisioned`, supplies no topic ARN, and explicitly
 passes a complete parameter map from `${RUNNER_TEMP}` through SAM's `file://`
-interface, with an empty `AlarmTopicArn`, so an existing stack cannot retain a
-stale destination. It remains guarded by the existing pre/post CloudFormation
-drift gates. After the exact foundation template has been synchronized, its
+YAML interface, with an empty `AlarmTopicArn`, so an existing stack cannot
+retain a stale destination. It remains guarded by the existing pre/post
+CloudFormation drift gates. After the exact foundation template has been
+synchronized, its
 unconditional read-only alarm-inspection policy lets every deployment prove
 that exactly four environment alarms either route exclusively to the discovered
 topic or, while the contract is disabled, retain no actions at all. Any partial,
@@ -204,10 +218,10 @@ dormant phase and must not be represented as completed.
 
 ### Durable AWS delivery recovery — live protected rollout
 
-The repository now contains the source-controlled workflow, scripts, strict
-receipt validators, finalizer, tests, and readiness rules for surviving loss or
-cancellation of the original GitHub Actions runner. That source and its AWS
-activation are live at exact protected code-bearing commit
+The repository contains the source-controlled workflow, scripts, strict receipt
+validators, finalizer, tests, and readiness rules for surviving loss or
+cancellation of the original GitHub Actions runner. Initial AWS activation was
+proved at the historical exact protected code-bearing commit
 [`8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`](https://github.com/upgradedev/archon-cockroach-memory/commit/8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf):
 [main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668301),
 [CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331668308),
@@ -348,6 +362,9 @@ secret scan
 
 Supply-chain references are immutable commit/image digests. Staging, production,
 and database-operator OIDC subjects are bound to their GitHub environments.
+Routine version updates are frozen under the checked and documented
+[dependency release policy](./docs/DEPENDENCY_RELEASE_POLICY.md); security
+updates remain enabled and must cross the full hosted gates.
 Bootstrap owns the environment-specific Lambda and CodeDeploy roles, retained
 S3 log archive, narrow S3.9 exception, and a versioned artifact bucket; the SAM
 application stack is CI-gated to synthesize no IAM resources. Those resources
@@ -436,7 +453,7 @@ manufacture a `RECOVERED` receipt.
   `application_name` as an identity.
 - The Lambda principals remain `NOBYPASSRLS`. Only
   `archon_public_memory_view_owner` has the direct, non-inheritable
-  `BYPASSRLS` role option required by CockroachDB v26.2.3; it has no system
+  `BYPASSRLS` role option required by the CockroachDB v26.2 release line; it has no system
   privileges, is `NOLOGIN`, has no members, receives only `SELECT` on
   `agent_memory`, owns only the two fixed-predicate serving views, and ends
   migration without `CREATE` authority on the schema.
@@ -493,23 +510,27 @@ Requirements: Node.js 22+, Docker, and npm.
 ```bash
 npm ci
 docker compose up -d --wait
+export DATABASE_URL="postgresql://root@localhost:26257/archon_memory?sslmode=disable"
 npm run local:bootstrap
+npm run serve
 ```
 
 `local:bootstrap` is loopback-only and add-only. It creates the dedicated local
 database, applies the schema, seeds the deterministic nine public fixtures plus
 three RLS isolation canaries, preserves unrelated rows, and proves the exact
-`12/12/12` fixture contract. Builds and tests remain CI-owned.
+`12/12/12` fixture contract. The API is then available at
+`http://127.0.0.1:8787/health` and `http://127.0.0.1:8787/api/proof`.
 
-The frontend has its own locked workspace:
+In a second terminal, start the locked frontend workspace against that API:
 
 ```bash
 npm ci --prefix web
-npm test --prefix web
-npm run test:e2e --prefix web
+VITE_API_PROXY_TARGET=http://127.0.0.1:8787 npm run dev --prefix web -- --host 127.0.0.1
 ```
 
-Repository policy runs build and browser verification in CI. Do not commit
+Open `http://127.0.0.1:5173`; the CockroachDB console is
+`http://127.0.0.1:8080`. Repository policy keeps builds, tests, and browser
+verification in hosted CI. Do not commit
 `node_modules`, `dist`, `.aws-sam`, Playwright output, readiness output, or
 generated video assets.
 
@@ -519,17 +540,18 @@ generated video assets.
 |---|---|
 | Live CockroachDB Cloud Basic cluster, AWS `eu-west-1` | Verified |
 | Historical native-vector plans / recall benchmark | Verified |
-| Runtime-principal company + kind C-SPANN serving gate | Verified for both principals in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2) |
-| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | Verified `9 / 9 / 9` in the same exact-main release and exposed read-only in `/api/proof` |
-| CockroachDB Cloud Managed MCP | Current exact-scope receipt v2, fixed bounds, strict parser, and `9 / 9 / 9` proof passed in the same release |
-| Real Titan V2 + Claude Sonnet 4.6 in `eu-west-1` | Re-proved by the protected real-provider quality gate in the same release |
-| Control Room, protected DB release, zero-IAM SAM stack, OIDC CI/CD, canary/rollback | Current protected code-bearing revision verified end to end in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2) |
+| Runtime-principal company + kind C-SPANN serving gate | Both principals are re-proved in every [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) release |
+| Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | `/api/proof` exposes `9 / 9 / 9` and the exact promoted commit SHA; deployment rejects a mismatch |
+| CockroachDB Cloud Managed MCP | The exact-scope receipt v2, strict parser, fixed B-tree aggregate, and `9 / 9 / 9` are re-proved by the release and standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) |
+| Real Titan V2 + Claude Sonnet 4.6 | Protected staging and production gates exercise Titan in `eu-west-1` and the Claude EU cross-region inference profile |
+| Control Room, protected DB release, SAM stack, OIDC CI/CD, canary/rollback | Exact-main build-once promotion, live release-SHA binding, and hosted browser verification are mandatory in [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) |
 | Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
 | Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
-| Fault-triggered `RECOVERING → RECOVERED` and scheduled daily audit | Implemented and CI-covered, but no intentional live failure drill or `04:17 UTC` audit receipt is claimed |
+| Fault-triggered `RECOVERING → RECOVERED` and daily/manual audit | Implemented and CI-covered; the final gate requires a fresh manual `operation=audit` receipt, but no intentional live failure drill is claimed |
 | `main` governance | [Active ruleset](https://github.com/upgradedev/archon-cockroach-memory/rules/19722191): PR only, no force-push/delete, strict `readiness` + CodeQL |
-| Final public video, post, and Devpost form | Deliberately last |
+| Submission copy, video plan, owned thumbnail, and hosted final gate | Versioned under [docs/DEVPOST_SUBMISSION.md](./docs/DEVPOST_SUBMISSION.md), [demo/VIDEO_PLAN.md](./demo/VIDEO_PLAN.md), and [Submission readiness](./.github/workflows/submission-readiness.yml) |
+| Final public video and Devpost form | Deliberately last; a blog/post is not a required deliverable |
 
 Run `npm run readiness` for separate source-readiness and submission-eligibility
 results. A source-ready result never implies that the final video/form is done.

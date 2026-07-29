@@ -14,14 +14,15 @@ Canonical current sources:
   `../.github/workflows/deploy-aws.yml`
 - Checked-in durable recovery/watchdog: `../.github/workflows/recover-aws.yml`
 
-The current durable-delivery implementation is activated and hosted-proven at
-exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`. The separately
+The durable-delivery implementation's initial activation was hosted-proven at
+historical exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`. The separately
 authorized foundation IAM promotion completed safely and drift-free;
 Deploy AWS run 30331875727 passed the full staging/production release and
 committed both recovery intents, while Recover AWS run 30333619982 proved the
 automatic trusted-source/OIDC classifier and safe no-op path. A deliberately
-failed live release, `RECOVERING → RECOVERED` finalizer receipt, and scheduled
-daily-audit receipt remain unexercised live drills. See
+failed live release and `RECOVERING → RECOVERED` finalizer receipt remain
+unexercised live drills. A fresh manual protection/drift audit is required by
+the final submission gate. See
 [../README.md](../README.md) and [TOOLS.md](./TOOLS.md) for canonical status.
 
 Historical smoke and benchmark captures remain in their dated evidence files.

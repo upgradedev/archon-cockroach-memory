@@ -31,15 +31,26 @@ export function ProofLedger({
     proof?.memory.storeVerified !== undefined;
   const storeVerified =
     proof?.memory.storeVerified === true &&
-    persisted !== null &&
-    persisted !== undefined &&
-    persisted > 0 &&
-    proof.memory.idempotencyKeys === persisted &&
-    proof.memory.contentDigests === persisted &&
+    persisted === 9 &&
+    proof.memory.idempotencyKeys === 9 &&
+    proof.memory.contentDigests === 9 &&
     proof.memory.evidence ===
       "live bounded fixed-scope payload-digest verification" &&
-    proof.database.activeMemories === persisted;
-  const cspannVerified = proof?.vectorIndex.enabled === true;
+    proof.database.activeMemories === 9;
+  const cspannVerified =
+    proof?.vectorIndex.enabled === true &&
+    proof.vectorIndex.name ===
+      "idx_agent_memory_company_scope_embedding" &&
+    proof.vectorIndex.engine === "native CockroachDB C-SPANN" &&
+    proof.vectorIndex.dimensions === 1024 &&
+    proof.vectorIndex.metric === "cosine" &&
+    proof.vectorIndex.lifecycleState === "active" &&
+    proof.vectorIndex.evidence ===
+      "live pg_catalog.pg_indexes definition" &&
+    /^[0-9a-f]{64}$/u.test(
+      proof.vectorIndex.definitionFingerprint ?? ""
+    );
+  const releaseCommitSha = proof?.release.commitSha ?? null;
   const company = proof?.scope.company ?? PUBLIC_COMPANY;
 
   return (
@@ -182,6 +193,40 @@ export function ProofLedger({
                 {proof?.database.regionEvidence && (
                   <span className="block font-mono text-[10px] leading-5 text-muted">
                     region evidence · {proof.database.regionEvidence}
+                  </span>
+                )}
+              </dd>
+            </div>
+
+            <div className="grid grid-cols-[6.5rem_1fr] gap-4 border-b border-line py-5">
+              <dt className="text-[9px] font-bold uppercase tracking-[0.17em] text-muted">
+                Release
+              </dt>
+              <dd className="text-right">
+                <span
+                  className={`font-mono text-xs font-bold uppercase ${
+                    releaseCommitSha ? "text-mint" : "text-paper"
+                  }`}
+                  data-testid="release-sha-short"
+                >
+                  {releaseCommitSha
+                    ? `Commit ${releaseCommitSha.slice(0, 12)}`
+                    : "Not reported"}
+                </span>
+                {releaseCommitSha && (
+                  <span
+                    className="mt-2 block break-all font-mono text-[10px] leading-5 text-muted"
+                    data-testid="release-sha-full"
+                  >
+                    full SHA · {releaseCommitSha}
+                  </span>
+                )}
+                {proof?.release.evidence && (
+                  <span
+                    className="block font-mono text-[10px] leading-5 text-muted"
+                    data-testid="release-sha-evidence"
+                  >
+                    release evidence · {proof.release.evidence}
                   </span>
                 )}
               </dd>

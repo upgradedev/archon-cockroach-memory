@@ -1,4 +1,10 @@
 export const PUBLIC_COMPANY = "Helios SA";
+const RELEASE_EVIDENCE = "server-configured Lambda environment";
+const EXACT_COMMIT_SHA = /^[0-9a-f]{40}$/u;
+const EXACT_RUNTIME_PRINCIPAL =
+  /^archon_(?:staging|production)_[0-9a-f]{10}$/u;
+const EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0";
+const NARRATION_MODEL = "eu.anthropic.claude-sonnet-4-6";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -138,6 +144,10 @@ export interface ProofSnapshot {
     idempotencyKeys: number | null;
     contentDigests: number | null;
     storeVerified: boolean | null;
+    evidence: string | null;
+  };
+  release: {
+    commitSha: string | null;
     evidence: string | null;
   };
   features: string[];
@@ -633,12 +643,24 @@ function normalizePercent(value: unknown): number | null {
   return numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
 }
 
+function isFreshGeneratedAt(value: string | null): boolean {
+  if (!value) return false;
+  const timestamp = Date.parse(value);
+  const now = Date.now();
+  return (
+    Number.isFinite(timestamp) &&
+    timestamp <= now + 2 * 60 * 1_000 &&
+    now - timestamp <= 5 * 60 * 1_000
+  );
+}
+
 export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
   const body = unwrap(await requestJson("/api/proof", { method: "GET" }, signal));
   const database = nested(body, "database");
   const vector = nested(body, "vectorIndex") ?? nested(body, "vector") ?? nested(body, "cspann");
   const scope = nested(body, "scope");
   const memory = nested(body, "memory");
+  const release = nested(body, "release");
   const benchmark = nested(body, "benchmark");
   const databaseActiveMemories = asNumber(database?.activeMemories);
   const persisted = asNumber(memory?.persisted);
@@ -655,20 +677,20 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
   const storeVerified = storeProofReported
     ? Boolean(
         reportedStoreVerified === true &&
-          persisted !== null &&
-          Number.isSafeInteger(persisted) &&
-          persisted > 0 &&
-          idempotencyKeys !== null &&
-          Number.isSafeInteger(idempotencyKeys) &&
-          idempotencyKeys === persisted &&
-          contentDigests !== null &&
-          Number.isSafeInteger(contentDigests) &&
-          contentDigests === persisted &&
-          databaseActiveMemories === persisted &&
+          persisted === 9 &&
+          idempotencyKeys === 9 &&
+          contentDigests === 9 &&
+          databaseActiveMemories === 9 &&
           storeEvidence ===
             "live bounded fixed-scope payload-digest verification"
       )
     : null;
+  const releaseCommitSha =
+    typeof release?.commitSha === "string" &&
+    EXACT_COMMIT_SHA.test(release.commitSha) &&
+    release.evidence === RELEASE_EVIDENCE
+      ? release.commitSha
+      : null;
   const features = asArray(body.features)
     .map((item) => {
       const feature = asRecord(item);
@@ -716,6 +738,10 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
       storeVerified,
       evidence: storeEvidence,
     },
+    release: {
+      commitSha: releaseCommitSha,
+      evidence: releaseCommitSha ? RELEASE_EVIDENCE : null,
+    },
     features,
     memoryCount: asNumber(
       databaseActiveMemories,
@@ -730,38 +756,38 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
 
   snapshot.hasEvidence = Boolean(
     snapshot.database.provider === "CockroachDB" &&
-      snapshot.database.region === "eu-west-1" &&
-      snapshot.database.regionEvidence === "cockroach-cloud-api-release-gate" &&
-      snapshot.database.runtimePrincipal?.startsWith("archon_") &&
-      snapshot.vectorIndex.enabled === true &&
-      snapshot.vectorIndex.name === "idx_agent_memory_company_scope_embedding" &&
-      snapshot.vectorIndex.engine?.includes("CockroachDB C-SPANN") &&
-      snapshot.vectorIndex.lifecycleState === "active" &&
-      snapshot.vectorIndex.evidence === "live pg_catalog.pg_indexes definition" &&
-      /^[a-f0-9]{64}$/u.test(
-        snapshot.vectorIndex.definitionFingerprint ?? ""
-      ) &&
-      snapshot.vectorIndex.dimensions === 1024 &&
-      snapshot.vectorIndex.metric === "cosine" &&
-      snapshot.embeddingModel &&
-      snapshot.narrationModel &&
-      !/fake|offline/iu.test(snapshot.embeddingModel) &&
-      !/fake|offline/iu.test(snapshot.narrationModel) &&
-      snapshot.scope.company === PUBLIC_COMPANY &&
-      snapshot.scope.mode === "fixed-synthetic-demo" &&
-      snapshot.memory.storeVerified === true &&
-      snapshot.memory.persisted !== null &&
-      Number.isSafeInteger(snapshot.memory.persisted) &&
-      snapshot.memory.persisted > 0 &&
-      snapshot.memory.idempotencyKeys === snapshot.memory.persisted &&
-      snapshot.memory.contentDigests === snapshot.memory.persisted &&
-      snapshot.memory.evidence ===
-        "live bounded fixed-scope payload-digest verification" &&
-      snapshot.database.activeMemories === snapshot.memory.persisted &&
-      snapshot.memoryCount !== null &&
-      snapshot.memoryCount === snapshot.memory.persisted &&
-      snapshot.generatedAt &&
-      Number.isFinite(Date.parse(snapshot.generatedAt))
+    snapshot.database.topology === "CockroachDB Cloud on AWS" &&
+    snapshot.database.region === "eu-west-1" &&
+    snapshot.database.regionEvidence === "cockroach-cloud-api-release-gate" &&
+    EXACT_RUNTIME_PRINCIPAL.test(
+      snapshot.database.runtimePrincipal ?? ""
+    ) &&
+    snapshot.vectorIndex.enabled === true &&
+    snapshot.vectorIndex.name === "idx_agent_memory_company_scope_embedding" &&
+    snapshot.vectorIndex.engine === "native CockroachDB C-SPANN" &&
+    snapshot.vectorIndex.lifecycleState === "active" &&
+    snapshot.vectorIndex.evidence === "live pg_catalog.pg_indexes definition" &&
+    /^[a-f0-9]{64}$/u.test(
+      snapshot.vectorIndex.definitionFingerprint ?? ""
+    ) &&
+    snapshot.vectorIndex.dimensions === 1024 &&
+    snapshot.vectorIndex.metric === "cosine" &&
+    snapshot.embeddingModel === EMBEDDING_MODEL &&
+    snapshot.narrationModel === NARRATION_MODEL &&
+    snapshot.scope.company === PUBLIC_COMPANY &&
+    snapshot.scope.mode === "fixed-synthetic-demo" &&
+    snapshot.memory.storeVerified === true &&
+    snapshot.memory.persisted === 9 &&
+    snapshot.memory.idempotencyKeys === 9 &&
+    snapshot.memory.contentDigests === 9 &&
+    snapshot.memory.evidence ===
+      "live bounded fixed-scope payload-digest verification" &&
+    snapshot.database.activeMemories === 9 &&
+    snapshot.release.commitSha !== null &&
+    EXACT_COMMIT_SHA.test(snapshot.release.commitSha) &&
+    snapshot.release.evidence === RELEASE_EVIDENCE &&
+    snapshot.memoryCount === 9 &&
+    isFreshGeneratedAt(snapshot.generatedAt)
   );
   return snapshot;
 }

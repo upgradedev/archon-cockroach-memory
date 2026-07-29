@@ -735,11 +735,36 @@ test("alarm routing: source contract is dormant, protected, and CI-gated", () =>
   );
   assert.match(
     deploy,
-    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.json"/u
+    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.yaml"/u
   );
   assert.match(
     deploy,
-    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.json"/u
+    /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.yaml"/u
+  );
+  assert.doesNotMatch(deploy, /sam-parameters\.json/u);
+  assert.match(
+    deploy,
+    /JSON support is intentionally disabled upstream/u
+  );
+  assert.equal(
+    (deploy.match(/--arg reservedConcurrency "5"/gu) ?? []).length,
+    6
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /ReservedConcurrency: \$reservedConcurrency/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /and \.ReservedConcurrency == \$reservedConcurrency/gu
+      ) ?? []
+    ).length,
+    2
   );
   assert.equal(
     (

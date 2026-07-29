@@ -72,6 +72,7 @@ jobs:
             bench-clustered.txt
             bench-uniform.txt
             distribution.txt
+            submission-readiness-receipt.json
             server.pid
             dist/nested/generated.js
             build/nested/generated.js

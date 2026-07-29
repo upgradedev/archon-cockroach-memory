@@ -142,7 +142,7 @@ export class BedrockNarrator implements Narrator {
       });
     const initialResult = await generate(SYSTEM_PROMPT, userText);
     const initialAnswer = initialResult.text.trim();
-    const initialValidation = validateGroundedAnswer(
+    const initialValidation = validateCompleteGroundedAnswer(
       initialAnswer,
       citations
     );
@@ -210,7 +210,7 @@ export class BedrockNarrator implements Narrator {
       };
     }
     const repairedAnswer = repairedResult.text.trim();
-    const repairedValidation = validateGroundedAnswer(
+    const repairedValidation = validateCompleteGroundedAnswer(
       repairedAnswer,
       citations
     );
@@ -400,6 +400,34 @@ export function validateGroundedAnswer(
     ok: true,
     checks: { citations: true, numerics: true, claims: true },
   };
+}
+
+export function validateCompleteGroundedAnswer(
+  answer: string,
+  citations: Citation[]
+): ReturnType<typeof validateGroundedAnswer> {
+  const validation = validateGroundedAnswer(answer, citations);
+  if (!validation.ok) return validation;
+  const referenced = new Set(
+    [...answer.matchAll(/\[(\d+)\]/gu)].map((match) =>
+      Number(match[1])
+    )
+  );
+  const complete =
+    citations.length > 0 &&
+    citations.every((_, index) => referenced.has(index + 1));
+  return complete
+    ? validation
+    : {
+        ok: false,
+        checks: {
+          citations: false,
+          numerics: true,
+          claims: true,
+        },
+        reason:
+          "answer did not cite the complete bounded evidence set",
+      };
 }
 
 function splitClaims(answer: string): string[] {

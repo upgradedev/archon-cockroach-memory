@@ -16,6 +16,10 @@ Parameters:
       - staging
       - production
     Default: staging
+  ReleaseCommitSha:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{40}$"
+    Description: Exact protected source commit promoted by the release workflow.
   HttpApiStageName:
     Type: String
     Default: live
@@ -83,7 +87,11 @@ Parameters:
     MaxValue: 3008
   ReservedConcurrency:
     Type: Number
-    Default: 3
+    # The Control Room loads health, proof, and audit concurrently. Five allows
+    # those three in-flight reads, one recall, and one bounded spare slot without
+    # opening an unbounded model/database concurrency surface. API request rate
+    # is enforced independently.
+    Default: 5
     MinValue: 1
     MaxValue: 20
   ApiThrottleRate:
@@ -312,6 +320,7 @@ Resources:
           PUBLIC_DEMO_COMPANY: !Ref PublicDemoCompany
           COCKROACH_REGION: !Ref CockroachRegion
           COCKROACH_REGION_EVIDENCE: !Ref CockroachRegionEvidence
+          RELEASE_COMMIT_SHA: !Ref ReleaseCommitSha
           PGPOOL_MAX: "1"
           PGPOOL_MAX_LIFETIME_SECONDS: "300"
           RECALL_MAX_QUESTION_CHARS: "500"
