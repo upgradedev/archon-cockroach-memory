@@ -1228,19 +1228,56 @@ jobs:
           test -n "$AWS_SAM_ARTIFACT_BUCKET"
           test -n "$AWS_LAMBDA_EXECUTION_ROLE_ARN"
           test -n "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
-          PARAMETERS=(
-            "AppName=$APP_NAME"
-            "Environment=staging"
-            "DatabaseSecretId=$DATABASE_SECRET_ID"
-            "LambdaExecutionRoleArn=$AWS_LAMBDA_EXECUTION_ROLE_ARN"
-            "CodeDeployServiceRoleArn=$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
-            "BedrockRegion=$BEDROCK_REGION"
-            "BedrockEmbeddingModelId=$BEDROCK_EMBED_MODEL_ID"
-            "BedrockNarratorModelId=$BEDROCK_NARRATOR_MODEL_ID"
-            "CockroachRegion=eu-west-1"
-            "CockroachRegionEvidence=cockroach-cloud-api-release-gate"
-            "AlarmTopicArn=$ALARM_TOPIC_ARN"
-          )
+          parameter_overrides_file="${RUNNER_TEMP:?}/staging-sam-parameters.json"
+          jq -n \
+            --arg appName "$APP_NAME" \
+            --arg environment "staging" \
+            --arg databaseSecretId "$DATABASE_SECRET_ID" \
+            --arg lambdaRole "$AWS_LAMBDA_EXECUTION_ROLE_ARN" \
+            --arg codeDeployRole "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN" \
+            --arg bedrockRegion "$BEDROCK_REGION" \
+            --arg embeddingModel "$BEDROCK_EMBED_MODEL_ID" \
+            --arg narratorModel "$BEDROCK_NARRATOR_MODEL_ID" \
+            --arg cockroachRegion "eu-west-1" \
+            --arg cockroachEvidence \
+              "cockroach-cloud-api-release-gate" \
+            --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            '{
+              AppName: $appName,
+              Environment: $environment,
+              DatabaseSecretId: $databaseSecretId,
+              LambdaExecutionRoleArn: $lambdaRole,
+              CodeDeployServiceRoleArn: $codeDeployRole,
+              BedrockRegion: $bedrockRegion,
+              BedrockEmbeddingModelId: $embeddingModel,
+              BedrockNarratorModelId: $narratorModel,
+              CockroachRegion: $cockroachRegion,
+              CockroachRegionEvidence: $cockroachEvidence,
+              AlarmTopicArn: $alarmTopicArn
+            }' >"$parameter_overrides_file"
+          jq -e \
+            --arg environment "staging" \
+            --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            '
+              (keys | sort) == (
+                [
+                  "AlarmTopicArn",
+                  "AppName",
+                  "BedrockEmbeddingModelId",
+                  "BedrockNarratorModelId",
+                  "BedrockRegion",
+                  "CockroachRegion",
+                  "CockroachRegionEvidence",
+                  "CodeDeployServiceRoleArn",
+                  "DatabaseSecretId",
+                  "Environment",
+                  "LambdaExecutionRoleArn"
+                ] | sort
+              )
+              and all(.[]; type == "string")
+              and .Environment == $environment
+              and .AlarmTopicArn == $alarmTopicArn
+            ' "$parameter_overrides_file" >/dev/null
           target_tags="${RUNNER_TEMP:?}/staging-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -1366,7 +1403,7 @@ jobs:
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
             --s3-prefix "candidates/deployments/staging/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
-            --parameter-overrides "${PARAMETERS[@]}" \
+            --parameter-overrides "file://${parameter_overrides_file}" \
             "${SAM_TAGS[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
@@ -3508,19 +3545,56 @@ jobs:
           test -n "$AWS_SAM_ARTIFACT_BUCKET"
           test -n "$AWS_LAMBDA_EXECUTION_ROLE_ARN"
           test -n "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
-          PARAMETERS=(
-            "AppName=$APP_NAME"
-            "Environment=production"
-            "DatabaseSecretId=$DATABASE_SECRET_ID"
-            "LambdaExecutionRoleArn=$AWS_LAMBDA_EXECUTION_ROLE_ARN"
-            "CodeDeployServiceRoleArn=$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
-            "BedrockRegion=$BEDROCK_REGION"
-            "BedrockEmbeddingModelId=$BEDROCK_EMBED_MODEL_ID"
-            "BedrockNarratorModelId=$BEDROCK_NARRATOR_MODEL_ID"
-            "CockroachRegion=eu-west-1"
-            "CockroachRegionEvidence=cockroach-cloud-api-release-gate"
-            "AlarmTopicArn=$ALARM_TOPIC_ARN"
-          )
+          parameter_overrides_file="${RUNNER_TEMP:?}/production-sam-parameters.json"
+          jq -n \
+            --arg appName "$APP_NAME" \
+            --arg environment "production" \
+            --arg databaseSecretId "$DATABASE_SECRET_ID" \
+            --arg lambdaRole "$AWS_LAMBDA_EXECUTION_ROLE_ARN" \
+            --arg codeDeployRole "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN" \
+            --arg bedrockRegion "$BEDROCK_REGION" \
+            --arg embeddingModel "$BEDROCK_EMBED_MODEL_ID" \
+            --arg narratorModel "$BEDROCK_NARRATOR_MODEL_ID" \
+            --arg cockroachRegion "eu-west-1" \
+            --arg cockroachEvidence \
+              "cockroach-cloud-api-release-gate" \
+            --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            '{
+              AppName: $appName,
+              Environment: $environment,
+              DatabaseSecretId: $databaseSecretId,
+              LambdaExecutionRoleArn: $lambdaRole,
+              CodeDeployServiceRoleArn: $codeDeployRole,
+              BedrockRegion: $bedrockRegion,
+              BedrockEmbeddingModelId: $embeddingModel,
+              BedrockNarratorModelId: $narratorModel,
+              CockroachRegion: $cockroachRegion,
+              CockroachRegionEvidence: $cockroachEvidence,
+              AlarmTopicArn: $alarmTopicArn
+            }' >"$parameter_overrides_file"
+          jq -e \
+            --arg environment "production" \
+            --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            '
+              (keys | sort) == (
+                [
+                  "AlarmTopicArn",
+                  "AppName",
+                  "BedrockEmbeddingModelId",
+                  "BedrockNarratorModelId",
+                  "BedrockRegion",
+                  "CockroachRegion",
+                  "CockroachRegionEvidence",
+                  "CodeDeployServiceRoleArn",
+                  "DatabaseSecretId",
+                  "Environment",
+                  "LambdaExecutionRoleArn"
+                ] | sort
+              )
+              and all(.[]; type == "string")
+              and .Environment == $environment
+              and .AlarmTopicArn == $alarmTopicArn
+            ' "$parameter_overrides_file" >/dev/null
           target_tags="${RUNNER_TEMP:?}/production-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -3646,7 +3720,7 @@ jobs:
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
             --s3-prefix "candidates/deployments/production/${{ github.event.workflow_run.head_sha }}" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
-            --parameter-overrides "${PARAMETERS[@]}" \
+            --parameter-overrides "file://${parameter_overrides_file}" \
             "${SAM_TAGS[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \

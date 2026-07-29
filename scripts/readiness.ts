@@ -2713,8 +2713,25 @@ function sourceChecks(): SourceCheck[] {
         !/secrets\.ALARM_TOPIC_ARN/u.test(deploy) &&
         !/if \[ -n "\$ALARM_TOPIC_ARN" \]/u.test(deploy) &&
         (
-          deploy.match(/"AlarmTopicArn=\$ALARM_TOPIC_ARN"/gu) ?? []
+          deploy.match(/AlarmTopicArn: \$alarmTopicArn/gu) ?? []
         ).length === 2 &&
+        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/staging-sam-parameters\.json"/u.test(
+          deploy
+        ) &&
+        /parameter_overrides_file="\$\{RUNNER_TEMP:\?\}\/production-sam-parameters\.json"/u.test(
+          deploy
+        ) &&
+        (
+          deploy.match(
+            /and \.AlarmTopicArn == \$alarmTopicArn/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          deploy.match(
+            /--parameter-overrides "file:\/\/\$\{parameter_overrides_file\}"/gu
+          ) ?? []
+        ).length === 2 &&
+        !/"AlarmTopicArn=\$ALARM_TOPIC_ARN"/u.test(deploy) &&
         (
           deploy.match(
             /bash aws\/prove-alarm-routing\.sh discover/gu

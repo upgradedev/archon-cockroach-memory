@@ -62,6 +62,7 @@ function sha256(path: string): string {
 }
 
 interface RestoreOptions {
+  changeSetHasChanges?: boolean;
   changeSetReason?: string;
   changeSetPollMode?: "success" | "timeout";
   existingExecutedChangeSet?: boolean;
@@ -85,8 +86,8 @@ interface RestoreOptions {
 
 function runRestore(options: RestoreOptions = {}) {
   const {
-    changeSetReason =
-      "The submitted information did not contain changes.",
+    changeSetHasChanges = false,
+    changeSetReason = "No updates are to be performed.",
     changeSetPollMode = "success",
     existingExecutedChangeSet = false,
     initialStackStatus = "UPDATE_COMPLETE",
@@ -424,6 +425,7 @@ case "$*" in
         "$(cat "$(cat "$FAKE_IMMUTABLE_TAGS_PATH_FILE")")" \
       --arg status "$change_set_status" \
       --arg executionStatus "$change_set_execution_status" \
+      --argjson hasChanges "$FAKE_CHANGE_SET_HAS_CHANGES" \
       '{
         ChangeSetId: $id,
         ChangeSetName: $name,
@@ -434,7 +436,13 @@ case "$*" in
         Tags: $tags,
         Status: $status,
         ExecutionStatus: $executionStatus,
-        StatusReason: $reason
+        StatusReason: $reason,
+        Changes: (
+          if $hasChanges
+          then [{ResourceChange: {Action: "Modify"}}]
+          else []
+          end
+        )
       }' ;;
   *"cloudformation delete-change-set"*)
     assert_stack_target "$@"
@@ -490,6 +498,7 @@ esac
       FAKE_PARAMETERS_FILE: parameters,
       FAKE_NO_CHANGES: String(noChanges),
       FAKE_CHANGE_SET_POLL_MODE: changeSetPollMode,
+      FAKE_CHANGE_SET_HAS_CHANGES: String(changeSetHasChanges),
       RECOVERY_CANCELLED: String(recoveryCancelled),
       FAKE_SOURCE_TEMPLATE_FILE: template,
       FAKE_SOURCE_PARAMETERS_FILE: parameters,
@@ -727,6 +736,25 @@ test(
   () => {
     const run = runRestore({
       changeSetReason: "Access denied while creating the change set",
+      initialStackStatus: "UPDATE_ROLLBACK_COMPLETE",
+      noChanges: true,
+    });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.doesNotMatch(run.calls, /cloudformation delete-change-set/u);
+      assert.doesNotMatch(run.calls, /cloudformation execute-change-set/u);
+    } finally {
+      rmSync(run.fixture, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "stack recovery rejects a no-change reason paired with resource changes",
+  { skip: process.platform === "win32" },
+  () => {
+    const run = runRestore({
+      changeSetHasChanges: true,
       initialStackStatus: "UPDATE_ROLLBACK_COMPLETE",
       noChanges: true,
     });

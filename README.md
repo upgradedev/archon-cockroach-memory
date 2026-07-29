@@ -188,8 +188,9 @@ and archive subscriptions are all exact-resource policies protected against
 replacement or deletion. Each deployment discovers only complete foundation
 outputs before SAM mutation. A pre-contract foundation is reported distinctly
 as `legacy-inactive-not-provisioned`, supplies no topic ARN, and explicitly
-passes an empty `AlarmTopicArn` SAM parameter so an existing stack cannot retain
-a stale destination. It remains guarded by the existing pre/post CloudFormation
+passes a complete parameter map from `${RUNNER_TEMP}` through SAM's `file://`
+interface, with an empty `AlarmTopicArn`, so an existing stack cannot retain a
+stale destination. It remains guarded by the existing pre/post CloudFormation
 drift gates. After the exact foundation template has been synchronized, its
 unconditional read-only alarm-inspection policy lets every deployment prove
 that exactly four environment alarms either route exclusively to the discovered
@@ -399,8 +400,11 @@ The processed template and exact live source configuration are proved before
 frontend mutation and re-read byte-for-byte after hosted E2E at the terminal
 receipt. Recovery validates the preflight and both recovery hashes before any
 AWS call, targets the immutable stack/change-set IDs, and proves the restored
-state. Greenfield deletion additionally requires the exact run owner on the
-stack and every retained stack member, including immutable CloudFormation
+state. A no-op recovery is accepted only for an allowlisted CloudFormation
+reason, an exact `FAILED`/`UNAVAILABLE` change set with zero resource changes,
+and a terminal stack that already matches the bound snapshot. Greenfield
+deletion additionally requires the exact run owner on the stack and every
+retained stack member, including immutable CloudFormation
 stack/logical identity tags immediately before deletion. An absent stack
 succeeds only when each retained resource is absent or is exact-owner proved
 and cleaned; mismatched or unreadable ownership fails closed. The owner remains

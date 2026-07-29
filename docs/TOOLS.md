@@ -155,9 +155,10 @@ authenticated ccloud receipt is produced.
   records or human-notification endpoints. Activation first requires an
   authorized administrator to apply the exact stack policy and foundation
   template. Until that synchronization, discovery emits the distinct
-  `legacy-inactive-not-provisioned` state, explicitly clears the SAM
-  `AlarmTopicArn` parameter, and relies on the existing CloudFormation drift
-  gates; afterward an unconditional read-only alarm policy enables direct
+  `legacy-inactive-not-provisioned` state, sends the complete SAM parameter map
+  through a temporary runner-local `file://` JSON document, explicitly clears
+  `AlarmTopicArn`, and relies on the existing CloudFormation drift gates;
+  afterward an unconditional read-only alarm policy enables direct
   four-alarm verification even while routing is disabled. No live activation,
   queue consumer, or human paging endpoint is claimed.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
