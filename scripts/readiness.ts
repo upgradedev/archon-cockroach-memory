@@ -11,8 +11,12 @@
 // supplies the SUBMISSION_* environment variables below.
 
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
   writeFileSync,
@@ -1448,6 +1452,12 @@ export function isSubmissionEligible(
 
 function contains(rel: string, pattern: RegExp): boolean {
   return pattern.test(read(rel));
+}
+
+function hasExactTrimmedLine(source: string, expected: string): boolean {
+  return source
+    .split(/\r?\n/u)
+    .some((line) => line.trim() === expected);
 }
 
 function sourceCheck(
@@ -4042,9 +4052,13 @@ function sourceChecks(): SourceCheck[] {
         /\/api\/health[\s\S]*?\/api\/proof[\s\S]*?\/api\/recall[\s\S]*?\/api\/audit/u.test(
           finalSubmissionGate
         ) &&
-        /youtube\.com\/oembed/u.test(finalSubmissionGate) &&
-        /vimeo\.com\/api\/oembed\.json/u.test(
-          finalSubmissionGate
+        hasExactTrimmedLine(
+          finalSubmissionGate,
+          'const YOUTUBE_OEMBED_ENDPOINT = "https://www.youtube.com/oembed";'
+        ) &&
+        hasExactTrimmedLine(
+          finalSubmissionGate,
+          'const VIMEO_OEMBED_ENDPOINT = "https://vimeo.com/api/oembed.json";'
         ) &&
         /submission-readiness-receipt\.json/u.test(
           finalSubmissionGate
@@ -4385,12 +4399,31 @@ export function validSubmissionThumbnail(
   root = ROOT
 ): SubmissionThumbnailMetadata | undefined {
   const thumbnailPath = join(root, SUBMISSION_THUMBNAIL_PATH);
+  let descriptor: number | undefined;
   try {
-    const stat = lstatSync(thumbnailPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
-    return inspectSubmissionThumbnail(readFileSync(thumbnailPath));
+    descriptor = openSync(
+      thumbnailPath,
+      constants.O_RDONLY |
+        (typeof constants.O_NOFOLLOW === "number"
+          ? constants.O_NOFOLLOW
+          : 0)
+    );
+    const opened = fstatSync(descriptor);
+    const current = lstatSync(thumbnailPath);
+    if (
+      !opened.isFile() ||
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      opened.dev !== current.dev ||
+      opened.ino !== current.ino
+    ) {
+      return undefined;
+    }
+    return inspectSubmissionThumbnail(readFileSync(descriptor));
   } catch {
     return undefined;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 

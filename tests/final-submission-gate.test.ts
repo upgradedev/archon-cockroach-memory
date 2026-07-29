@@ -361,14 +361,14 @@ test("final gate: video oEmbed identity is exact for YouTube and Vimeo", () => {
     type: "video",
     provider_name: "YouTube",
     html:
-      '<iframe src="https://www.youtube.com/embed/abcdefghijk"></iframe>',
+      '<iframe src="https://www.youtube.com/embed/abcdefghijk?feature=oembed"></iframe>',
   };
   const vimeoOembed = {
     title: "Archon Memory — verifiable agent recall",
     type: "video",
     provider_name: "Vimeo",
     html:
-      '<iframe src="https://player.vimeo.com/video/123456789"></iframe>',
+      '<iframe src="https://player.vimeo.com/video/123456789?app_id=122963"></iframe>',
   };
   assert.equal(validOembedContract(youtubeOembed, youtube), true);
   assert.equal(validOembedContract(vimeoOembed, vimeo), true);
@@ -384,9 +384,35 @@ test("final gate: video oEmbed identity is exact for YouTube and Vimeo", () => {
       ...youtubeOembed,
       html: '<iframe src="https://example.com/abcdefghijk"></iframe>',
     },
+    {
+      ...youtubeOembed,
+      html:
+        '<iframe src="https://www.youtube.com.evil.test/embed/abcdefghijk"></iframe>',
+    },
+    {
+      ...youtubeOembed,
+      html:
+        '<iframe src="https://www.youtube.com@evil.test/embed/abcdefghijk"></iframe>',
+    },
+    {
+      ...youtubeOembed,
+      html:
+        '<p>https://www.youtube.com/embed/abcdefghijk</p>',
+    },
   ]) {
     assert.equal(validOembedContract(mutation, youtube), false);
   }
+  assert.equal(
+    validOembedContract(
+      {
+        ...vimeoOembed,
+        html:
+          '<iframe src="https://player.vimeo.com.evil.test/video/123456789"></iframe>',
+      },
+      vimeo
+    ),
+    false
+  );
 });
 
 test("final gate: public Devpost HTML binds challenge, repo, demo, and video", () => {
@@ -422,6 +448,10 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
       "https://example.com/challenge"
     ),
     html.replace(
+      "https://cockroachdb-ai.devpost.com/",
+      "https://cockroachdb-ai.devpost.com.evil.test/"
+    ),
+    html.replace(
       "CockroachDB &times; AWS Hackathon - Build with Agentic Memory",
       "Other Hackathon"
     ),
@@ -430,10 +460,23 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
       "https://github.com/example/project"
     ),
     html.replace(
+      "https://github.com/upgradedev/archon-cockroach-memory",
+      "https://github.com.evil.test/upgradedev/archon-cockroach-memory"
+    ),
+    html.replace(
       "https://d2s5v0o0eg2aaw.cloudfront.net",
       "https://example.com/demo"
     ),
+    html.replace(
+      "https://d2s5v0o0eg2aaw.cloudfront.net",
+      "https://d2s5v0o0eg2aaw.cloudfront.net.evil.test"
+    ),
     html.replace(/abcdefghijk/gu, "wrongvideo1"),
+    html.replace(
+      "https://www.youtube.com/embed/abcdefghijk",
+      "https://www.youtube.com.evil.test/embed/abcdefghijk"
+    ),
+    html.replace("&times;", "&amp;times;"),
   ]) {
     assert.equal(
       validDevpostPageContract(

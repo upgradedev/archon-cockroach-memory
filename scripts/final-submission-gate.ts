@@ -22,6 +22,8 @@ const REPOSITORY = "upgradedev/archon-cockroach-memory";
 const DEMO_URL = "https://d2s5v0o0eg2aaw.cloudfront.net";
 const REPOSITORY_URL =
   "https://github.com/upgradedev/archon-cockroach-memory";
+const YOUTUBE_OEMBED_ENDPOINT = "https://www.youtube.com/oembed";
+const VIMEO_OEMBED_ENDPOINT = "https://vimeo.com/api/oembed.json";
 const WORKFLOW_REF =
   `${REPOSITORY}/.github/workflows/submission-readiness.yml@refs/heads/main`;
 const RECALL_QUESTION =
@@ -578,6 +580,91 @@ type SubmissionVideoIdentity = NonNullable<
   ReturnType<typeof parseCanonicalSubmissionVideoUrl>
 >;
 
+function htmlTagAttributeValues(
+  html: string,
+  tag: "a" | "iframe",
+  attribute: "href" | "src"
+): string[] {
+  const tags =
+    tag === "a"
+      ? html.matchAll(/<a\b[^>]*>/giu)
+      : html.matchAll(/<iframe\b[^>]*>/giu);
+  const values: string[] = [];
+  for (const match of tags) {
+    const element = match[0];
+    const attributeMatch =
+      attribute === "href"
+        ? /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/iu.exec(element)
+        : /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/iu.exec(element);
+    const value = attributeMatch?.[1] ?? attributeMatch?.[2];
+    if (value !== undefined) values.push(value);
+  }
+  return values;
+}
+
+function cleanHttpsUrl(value: string): URL | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.port === ""
+      ? url
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function htmlTagUrls(
+  html: string,
+  tag: "a" | "iframe",
+  attribute: "href" | "src"
+): URL[] {
+  return htmlTagAttributeValues(html, tag, attribute)
+    .map(cleanHttpsUrl)
+    .filter((url): url is URL => url !== undefined);
+}
+
+function exactUrl(url: URL, expected: string): boolean {
+  return url.href === new URL(expected).href;
+}
+
+function trustedVideoEmbed(
+  url: URL,
+  identity: SubmissionVideoIdentity
+): boolean {
+  if (url.hash !== "") return false;
+  return identity.provider === "youtube"
+    ? url.hostname.toLowerCase() === "www.youtube.com" &&
+        url.pathname === `/embed/${identity.id}`
+    : url.hostname.toLowerCase() === "player.vimeo.com" &&
+        url.pathname === `/video/${identity.id}`;
+}
+
+function canonicalVideoLink(
+  url: URL,
+  identity: SubmissionVideoIdentity
+): boolean {
+  const parsed = parseCanonicalSubmissionVideoUrl(url.href);
+  return (
+    parsed?.provider === identity.provider &&
+    parsed.id === identity.id &&
+    parsed.canonicalUrl === identity.canonicalUrl
+  );
+}
+
+function hasExactMetadataLine(
+  document: string,
+  key: string,
+  value: string
+): boolean {
+  const expected = `${key}: ${value}`;
+  return document
+    .split(/\r?\n/u)
+    .some((line) => line === expected);
+}
+
 export function validOembedContract(
   value: unknown,
   identity: SubmissionVideoIdentity
@@ -585,16 +672,13 @@ export function validOembedContract(
   const oembed = asRecord(value);
   if (!oembed) return false;
   const html = stringValue(oembed, "html") ?? "";
+  const iframeUrls = htmlTagUrls(html, "iframe", "src");
   return (
     /Archon Memory/iu.test(stringValue(oembed, "title") ?? "") &&
     oembed.type === "video" &&
     oembed.provider_name ===
       (identity.provider === "youtube" ? "YouTube" : "Vimeo") &&
-    html.includes("<iframe") &&
-    html.includes(identity.id) &&
-    (identity.provider === "youtube"
-      ? /(?:www\.)?youtube\.com\/embed\//iu.test(html)
-      : /player\.vimeo\.com\/video\//iu.test(html))
+    iframeUrls.some((url) => trustedVideoEmbed(url, identity))
   );
 }
 
@@ -605,30 +689,35 @@ export function validDevpostPageContract(
   contentType: string,
   identity: SubmissionVideoIdentity
 ): boolean {
-  const normalizedHtml = html
-    .replace(/&amp;|&#38;|&#x26;/giu, "&")
-    .replace(/&#47;|&#x2f;/giu, "/")
-    .replace(/&times;|&#215;|&#x[dD]7;/giu, "×");
-  const challengeAnchor =
-    /<a\b[^>]*\bhref=["']https:\/\/cockroachdb-ai\.devpost\.com\/?(?:[^"']*)["'][^>]*>/iu;
-  const repositoryAnchor =
-    /<a\b[^>]*\bhref=["']https:\/\/github\.com\/upgradedev\/archon-cockroach-memory\/?["'][^>]*>/iu;
-  const demoAnchor =
-    /<a\b[^>]*\bhref=["']https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net\/?["'][^>]*>/iu;
+  const normalizedHtml = html.replace(
+    /&times;|&#215;|&#x0*[dD]7;/giu,
+    "×"
+  );
+  const anchorUrls = htmlTagUrls(html, "a", "href");
+  const iframeUrls = htmlTagUrls(html, "iframe", "src");
+  const challengeAnchor = anchorUrls.some((url) =>
+    exactUrl(url, "https://cockroachdb-ai.devpost.com/")
+  );
+  const repositoryAnchor = anchorUrls.some((url) =>
+    exactUrl(url, REPOSITORY_URL)
+  );
+  const demoAnchor = anchorUrls.some((url) =>
+    exactUrl(url, DEMO_URL)
+  );
+  const videoPresent =
+    anchorUrls.some((url) => canonicalVideoLink(url, identity)) ||
+    iframeUrls.some((url) => trustedVideoEmbed(url, identity));
   return (
     responseUrl === requestedUrl &&
     /^text\/html(?:;|$)/iu.test(contentType) &&
     /Archon Memory/iu.test(normalizedHtml) &&
-    challengeAnchor.test(normalizedHtml) &&
+    challengeAnchor &&
     /CockroachDB × AWS Hackathon - Build with Agentic Memory/iu.test(
       normalizedHtml
     ) &&
-    repositoryAnchor.test(normalizedHtml) &&
-    demoAnchor.test(normalizedHtml) &&
-    normalizedHtml.includes(identity.id) &&
-    (identity.provider === "youtube"
-      ? /(?:www\.)?youtube\.com|youtu\.be/iu.test(normalizedHtml)
-      : /(?:player\.)?vimeo\.com/iu.test(normalizedHtml))
+    repositoryAnchor &&
+    demoAnchor &&
+    videoPresent
   );
 }
 
@@ -831,8 +920,8 @@ async function main(): Promise<void> {
     );
     if (
       !/^status: submission-copy-complete$/mu.test(copy) ||
-      !copy.includes(REPOSITORY_URL) ||
-      !copy.includes(DEMO_URL) ||
+      !hasExactMetadataLine(copy, "repository", REPOSITORY_URL) ||
+      !hasExactMetadataLine(copy, "demo", DEMO_URL) ||
       !/Distributed Vector Indexing/u.test(copy) ||
       !/CockroachDB Cloud Managed MCP/u.test(copy) ||
       !/^## How we used AWS$/mu.test(copy) ||
@@ -1117,12 +1206,17 @@ async function main(): Promise<void> {
         "Canonical video, 1-179s duration, public/embed, and English-caption attestations are required"
       );
     }
-    const oembedUrl =
+    const oembedUrl = new URL(
       identity.provider === "youtube"
-        ? `https://www.youtube.com/oembed?url=${encodeURIComponent(identity.canonicalUrl)}&format=json`
-        : `https://vimeo.com/api/oembed.json?url=${encodeURIComponent(identity.canonicalUrl)}`;
+        ? YOUTUBE_OEMBED_ENDPOINT
+        : VIMEO_OEMBED_ENDPOINT
+    );
+    oembedUrl.searchParams.set("url", identity.canonicalUrl);
+    if (identity.provider === "youtube") {
+      oembedUrl.searchParams.set("format", "json");
+    }
     const oembed = asRecord(
-      await fetchJson(oembedUrl, {}, `${identity.provider} oEmbed`)
+      await fetchJson(oembedUrl.href, {}, `${identity.provider} oEmbed`)
     );
     if (!validOembedContract(oembed, identity)) {
       throw new Error("Video is not publicly available through oEmbed");

@@ -5,10 +5,12 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   allCockroachImagesPinned,
   allComposeImagesPinned,
@@ -814,6 +816,22 @@ test("readiness: final submission URLs, duration, and thumbnail fail closed", ()
     height: 1024,
     bytes: thumbnail.length,
   });
+  const symlinkRoot = mkdtempSync(
+    join(tmpdir(), "archon-thumbnail-symlink-")
+  );
+  try {
+    const assets = join(symlinkRoot, "demo", "assets");
+    mkdirSync(assets, { recursive: true });
+    symlinkSync(
+      fileURLToPath(
+        new URL(`../${SUBMISSION_THUMBNAIL_PATH}`, import.meta.url)
+      ),
+      join(symlinkRoot, SUBMISSION_THUMBNAIL_PATH)
+    );
+    assert.equal(validSubmissionThumbnail(symlinkRoot), undefined);
+  } finally {
+    rmSync(symlinkRoot, { recursive: true, force: true });
+  }
   const badSignature = Buffer.from(thumbnail);
   badSignature[0] = 0;
   assert.equal(inspectSubmissionThumbnail(badSignature), undefined);
