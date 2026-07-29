@@ -146,6 +146,20 @@ authenticated ccloud receipt is produced.
   and recall while a fresh alarm isolates the candidate `ExecutedVersion`
   behind the weighted alias. Mandatory full-recall and hosted-browser gates
   follow, with explicit prior-release restoration.
+- Amazon SNS, Amazon SQS, and AWS KMS: a source-controlled but currently
+  dormant alarm-routing contract. Explicit foundation activation creates
+  environment-isolated encrypted topics and 14-day audit queues; deploy
+  auto-discovery and terminal proof refuse partial outputs or cross-environment
+  alarm actions, and inactive proof rejects stale actions. The queues deny
+  non-topic producers and are finite delivery/evidence buffers, not immutable
+  records or human-notification endpoints. Activation first requires an
+  authorized administrator to apply the exact stack policy and foundation
+  template. Until that synchronization, discovery emits the distinct
+  `legacy-inactive-not-provisioned` state, explicitly clears the SAM
+  `AlarmTopicArn` parameter, and relies on the existing CloudFormation drift
+  gates; afterward an unconditional read-only alarm policy enables direct
+  four-alarm verification even while routing is disabled. No live activation,
+  queue consumer, or human paging endpoint is claimed.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
 

@@ -396,6 +396,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -n aws/prove-api-stage-controls.sh
+          bash -n aws/prove-alarm-routing.sh
           bash -n aws/prove-s3-access-logging.sh
           bash -n aws/prove-application-s3-access-logging.sh
           bash -n aws/prove-recovery-snapshot.sh

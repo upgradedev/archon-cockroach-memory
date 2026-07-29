@@ -167,6 +167,40 @@ The deployment follows the AWS serverless web application reference pattern:
   `ExecutedVersion` behind the weighted alias; separate function/API/throttle
   alarms and an operations dashboard retain broad operational coverage.
 
+### Alarm routing — dormant protected contract
+
+The delivery foundation now source-controls a fail-closed alarm-routing
+contract, but it is deliberately **not claimed as live**. Its
+`AlarmRoutingEnabled` parameter defaults to `false`; no SNS topic ARN is guessed
+or prewired, and the deploy workflow no longer accepts an
+`ALARM_TOPIC_ARN` GitHub secret. A separately authorized administrator must
+first approve the billable AWS resources, apply the exact checked-in stack
+policy, and execute the exact foundation-template change. The existing
+foundation-promotion role cannot set that stack policy or provision these new
+KMS, SNS, SQS, and IAM resources, so it cannot silently self-activate the
+contract.
+
+When activated, the foundation creates one rotating customer-managed KMS key,
+separate encrypted staging/production SNS topics, and separate encrypted
+14-day SQS archives. CloudWatch publishing, SNS queue delivery, deploy-role
+inspection, non-SNS producer denial, TLS enforcement, resource tags, retention,
+and archive subscriptions are all exact-resource policies protected against
+replacement or deletion. Each deployment discovers only complete foundation
+outputs before SAM mutation. A pre-contract foundation is reported distinctly
+as `legacy-inactive-not-provisioned`, supplies no topic ARN, and explicitly
+passes an empty `AlarmTopicArn` SAM parameter so an existing stack cannot retain
+a stale destination. It remains guarded by the existing pre/post CloudFormation
+drift gates. After the exact foundation template has been synchronized, its
+unconditional read-only alarm-inspection policy lets every deployment prove
+that exactly four environment alarms either route exclusively to the discovered
+topic or, while the contract is disabled, retain no actions at all. Any partial,
+inconsistent, cross-environment, or stale-action contract fails closed. The SQS
+archives are finite 14-day
+delivery/evidence buffers, not immutable records or human-notification
+endpoints; without a separately approved consumer, messages expire. Human
+paging endpoints and a live delivery drill remain intentionally outside this
+dormant phase and must not be represented as completed.
+
 ### Durable AWS delivery recovery — live protected rollout
 
 The repository now contains the source-controlled workflow, scripts, strict

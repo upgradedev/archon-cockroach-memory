@@ -203,7 +203,6 @@ jobs:
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-staging' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
-      ALARM_TOPIC_ARN: ${{ secrets.ALARM_TOPIC_ARN }}
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
       AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
       AWS_SAM_ARTIFACT_BUCKET: ${{ vars.AWS_SAM_ARTIFACT_BUCKET }}
@@ -585,6 +584,56 @@ jobs:
             api-stage-preflight.json >/dev/null
           echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
             >> "$GITHUB_OUTPUT"
+
+      - name: Discover the protected staging alarm-routing contract
+        id: alarm_routing
+        env:
+          ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/staging-alarm-routing-discovery.json"
+          bash aws/prove-alarm-routing.sh discover | tee "$receipt"
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg expectedTopic \
+              "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${APP_NAME}-${ENVIRONMENT}-alarms" \
+            '
+              .ok == true
+              and .schema == "archon.alarm-routing.proof"
+              and .version == 1
+              and .mode == "discover"
+              and .environment == $environment
+              and (
+                (
+                  (
+                    .state == "legacy-inactive-not-provisioned"
+                    or .state == "inactive-not-provisioned"
+                  )
+                  and .contractVersion == null
+                  and .keyArn == null
+                  and .topicArn == null
+                  and .archiveQueueArn == null
+                  and .alarmCount == null
+                )
+                or (
+                  .state == "active"
+                  and .contractVersion == "1"
+                  and .topicArn == $expectedTopic
+                  and (.keyArn | type == "string" and length > 0)
+                  and (
+                    .archiveQueueArn
+                    | type == "string" and length > 0
+                  )
+                  and .alarmCount == null
+                )
+              )
+            ' "$receipt" >/dev/null
+          state="$(jq -er '.state' "$receipt")"
+          topic_arn="$(jq -er '.topicArn // ""' "$receipt")"
+          {
+            echo "state=$state"
+            echo "topic_arn=$topic_arn"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Capture the current recoverable release
         id: previous
@@ -1160,6 +1209,7 @@ jobs:
       - name: Deploy staging with recovery-safe SAM canary
         id: deploy
         env:
+          ALARM_TOPIC_ARN: ${{ steps.alarm_routing.outputs.topic_arn }}
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
           ENVIRONMENT: staging
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
@@ -1189,10 +1239,8 @@ jobs:
             "BedrockNarratorModelId=$BEDROCK_NARRATOR_MODEL_ID"
             "CockroachRegion=eu-west-1"
             "CockroachRegionEvidence=cockroach-cloud-api-release-gate"
+            "AlarmTopicArn=$ALARM_TOPIC_ARN"
           )
-          if [ -n "$ALARM_TOPIC_ARN" ]; then
-            PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
-          fi
           target_tags="${RUNNER_TEMP:?}/staging-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -1448,6 +1496,45 @@ jobs:
             echo "stack_revision=$STACK_REVISION"
             echo "tags_sha256=$STACK_TAGS_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove staging alarm routing after stack mutation
+        env:
+          ENVIRONMENT: staging
+        run: |
+          set -euo pipefail
+          discovery="${RUNNER_TEMP:?}/staging-alarm-routing-discovery.json"
+          proof="${RUNNER_TEMP:?}/staging-alarm-routing-proof.json"
+          test -f "$discovery"
+          bash aws/prove-alarm-routing.sh verify | tee "$proof"
+          jq -e \
+            --slurpfile discovery "$discovery" \
+            '
+              ($discovery | length) == 1
+              and .ok == true
+              and .schema == "archon.alarm-routing.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .environment == $discovery[0].environment
+              and .foundationStackId == $discovery[0].foundationStackId
+              and .state == $discovery[0].state
+              and .contractVersion == $discovery[0].contractVersion
+              and .keyArn == $discovery[0].keyArn
+              and .topicArn == $discovery[0].topicArn
+              and .archiveQueueArn == $discovery[0].archiveQueueArn
+              and (
+                (
+                  .state == "legacy-inactive-not-provisioned"
+                  and .alarmCount == null
+                )
+                or (
+                  (
+                    .state == "inactive-not-provisioned"
+                    or .state == "active"
+                  )
+                  and .alarmCount == 4
+                )
+              )
+            ' "$proof" >/dev/null
 
       - name: Prove live application S3 access logging before frontend mutation
         id: application_s3_verify
@@ -2386,7 +2473,6 @@ jobs:
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-production' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/production/database' }}
-      ALARM_TOPIC_ARN: ${{ secrets.ALARM_TOPIC_ARN }}
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
       AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
       AWS_SAM_ARTIFACT_BUCKET: ${{ vars.AWS_SAM_ARTIFACT_BUCKET }}
@@ -2778,6 +2864,56 @@ jobs:
             api-stage-preflight.json >/dev/null
           echo "stack_state=$(jq -er '.state' api-stage-preflight.json)" \
             >> "$GITHUB_OUTPUT"
+
+      - name: Discover the protected production alarm-routing contract
+        id: alarm_routing
+        env:
+          ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/production-alarm-routing-discovery.json"
+          bash aws/prove-alarm-routing.sh discover | tee "$receipt"
+          jq -e \
+            --arg environment "$ENVIRONMENT" \
+            --arg expectedTopic \
+              "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${APP_NAME}-${ENVIRONMENT}-alarms" \
+            '
+              .ok == true
+              and .schema == "archon.alarm-routing.proof"
+              and .version == 1
+              and .mode == "discover"
+              and .environment == $environment
+              and (
+                (
+                  (
+                    .state == "legacy-inactive-not-provisioned"
+                    or .state == "inactive-not-provisioned"
+                  )
+                  and .contractVersion == null
+                  and .keyArn == null
+                  and .topicArn == null
+                  and .archiveQueueArn == null
+                  and .alarmCount == null
+                )
+                or (
+                  .state == "active"
+                  and .contractVersion == "1"
+                  and .topicArn == $expectedTopic
+                  and (.keyArn | type == "string" and length > 0)
+                  and (
+                    .archiveQueueArn
+                    | type == "string" and length > 0
+                  )
+                  and .alarmCount == null
+                )
+              )
+            ' "$receipt" >/dev/null
+          state="$(jq -er '.state' "$receipt")"
+          topic_arn="$(jq -er '.topicArn // ""' "$receipt")"
+          {
+            echo "state=$state"
+            echo "topic_arn=$topic_arn"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Capture the current recoverable release
         id: previous
@@ -3353,6 +3489,7 @@ jobs:
       - name: Deploy production with recovery-safe SAM canary
         id: deploy
         env:
+          ALARM_TOPIC_ARN: ${{ steps.alarm_routing.outputs.topic_arn }}
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
           ENVIRONMENT: production
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
@@ -3382,10 +3519,8 @@ jobs:
             "BedrockNarratorModelId=$BEDROCK_NARRATOR_MODEL_ID"
             "CockroachRegion=eu-west-1"
             "CockroachRegionEvidence=cockroach-cloud-api-release-gate"
+            "AlarmTopicArn=$ALARM_TOPIC_ARN"
           )
-          if [ -n "$ALARM_TOPIC_ARN" ]; then
-            PARAMETERS+=("AlarmTopicArn=$ALARM_TOPIC_ARN")
-          fi
           target_tags="${RUNNER_TEMP:?}/production-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
             [[ "$GREENFIELD_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -3641,6 +3776,45 @@ jobs:
             echo "stack_revision=$STACK_REVISION"
             echo "tags_sha256=$STACK_TAGS_SHA256"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Prove production alarm routing after stack mutation
+        env:
+          ENVIRONMENT: production
+        run: |
+          set -euo pipefail
+          discovery="${RUNNER_TEMP:?}/production-alarm-routing-discovery.json"
+          proof="${RUNNER_TEMP:?}/production-alarm-routing-proof.json"
+          test -f "$discovery"
+          bash aws/prove-alarm-routing.sh verify | tee "$proof"
+          jq -e \
+            --slurpfile discovery "$discovery" \
+            '
+              ($discovery | length) == 1
+              and .ok == true
+              and .schema == "archon.alarm-routing.proof"
+              and .version == 1
+              and .mode == "verify"
+              and .environment == $discovery[0].environment
+              and .foundationStackId == $discovery[0].foundationStackId
+              and .state == $discovery[0].state
+              and .contractVersion == $discovery[0].contractVersion
+              and .keyArn == $discovery[0].keyArn
+              and .topicArn == $discovery[0].topicArn
+              and .archiveQueueArn == $discovery[0].archiveQueueArn
+              and (
+                (
+                  .state == "legacy-inactive-not-provisioned"
+                  and .alarmCount == null
+                )
+                or (
+                  (
+                    .state == "inactive-not-provisioned"
+                    or .state == "active"
+                  )
+                  and .alarmCount == 4
+                )
+              )
+            ' "$proof" >/dev/null
 
       - name: Prove live application S3 access logging before frontend mutation
         id: application_s3_verify
