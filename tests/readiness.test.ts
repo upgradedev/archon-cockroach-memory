@@ -442,6 +442,22 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.equal(
     (
       recovery.match(
+        /github\.event_name == 'schedule' &&\r?\n\s+github\.event\.schedule == '17 4 \* \* \*'/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.operation == 'audit'/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (
+      recovery.match(
         /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
       ) ?? []
     ).length,
@@ -1073,6 +1089,24 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
   );
   assert.ok(recoveryWorkflow);
   assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
+  assert.equal(
+    hasExactAwsRecoveryTrigger(
+      recoveryWorkflow.source.replace(
+        "          - audit",
+        "          - deploy"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    hasExactAwsRecoveryTrigger(
+      recoveryWorkflow.source.replace(
+        "        default: recover",
+        "        default: audit"
+      )
+    ),
+    false
+  );
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true

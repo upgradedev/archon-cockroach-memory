@@ -716,14 +716,22 @@ export function hasExactAwsRecoveryTrigger(source: string): boolean {
 
   const workflowRun = trigger.get("workflow_run");
   const schedule = trigger.get("schedule");
+  const workflowDispatch = trigger.get("workflow_dispatch");
   if (
     !(workflowRun instanceof Map) ||
     workflowRun.size !== 3 ||
     !Array.isArray(schedule) ||
-    schedule.length !== 2
+    schedule.length !== 2 ||
+    !(workflowDispatch instanceof Map) ||
+    workflowDispatch.size !== 1
   ) {
     return false;
   }
+  const inputs = workflowDispatch.get("inputs");
+  if (!(inputs instanceof Map) || inputs.size !== 1) return false;
+  const operation = inputs.get("operation");
+  if (!(operation instanceof Map) || operation.size !== 5) return false;
+  const operationOptions = operation.get("options");
   const workflows = workflowRun.get("workflows");
   const branches = workflowRun.get("branches");
   const types = workflowRun.get("types");
@@ -748,7 +756,14 @@ export function hasExactAwsRecoveryTrigger(source: string): boolean {
     scheduleCrons.length === 2 &&
     scheduleCrons[0] === "17 4 * * *" &&
     scheduleCrons[1] === "7,22,37,52 * * * *" &&
-    trigger.get("workflow_dispatch") === null
+    operation.get("description") === "Recovery watchdog operation" &&
+    operation.get("required") === true &&
+    operation.get("default") === "recover" &&
+    operation.get("type") === "choice" &&
+    Array.isArray(operationOptions) &&
+    operationOptions.length === 2 &&
+    operationOptions[0] === "recover" &&
+    operationOptions[1] === "audit"
   );
 }
 
@@ -1696,6 +1711,16 @@ function sourceChecks(): SourceCheck[] {
         /name: Upload (?:staging|production) daily protection and drift audit/gu
       ) ?? []
     ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /github\.event_name == 'schedule' &&\r?\n\s+github\.event\.schedule == '17 4 \* \* \*'/gu
+      ) ?? []
+    ).length === 4 &&
+    (
+      recoveryWorkflow.match(
+        /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.operation == 'audit'/gu
+      ) ?? []
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
