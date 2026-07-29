@@ -11,6 +11,7 @@ import {
   requirePostDeployAuditTiming,
   requireSuccessfulRecoveryAuditJobs,
   selectSuccessfulRun,
+  validSubmissionCopyMetadata,
   validDevpostPageContract,
   validLiveResponseMetadata,
   validOembedContract,
@@ -399,6 +400,16 @@ test("final gate: video oEmbed identity is exact for YouTube and Vimeo", () => {
       html:
         '<p>https://www.youtube.com/embed/abcdefghijk</p>',
     },
+    {
+      ...youtubeOembed,
+      html:
+        '<!-- <iframe src="https://www.youtube.com/embed/abcdefghijk"></iframe> -->',
+    },
+    {
+      ...youtubeOembed,
+      html:
+        '<script>const markup = \'<iframe src="https://www.youtube.com/embed/abcdefghijk"></iframe>\';</script>',
+    },
   ]) {
     assert.equal(validOembedContract(mutation, youtube), false);
   }
@@ -509,6 +520,103 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
     ),
     false
   );
+  const requiredMarkup = `
+    <a href="https://cockroachdb-ai.devpost.com/">Challenge</a>
+    <a href="https://github.com/upgradedev/archon-cockroach-memory">Source</a>
+    <a href="https://d2s5v0o0eg2aaw.cloudfront.net">Demo</a>
+    <iframe src="https://www.youtube.com/embed/abcdefghijk"></iframe>`;
+  for (const deadMarkup of [
+    `<!-- ${requiredMarkup} -->`,
+    `<script>const dead = ${JSON.stringify(requiredMarkup)};</script>`,
+    `<template>${requiredMarkup}</template>`,
+  ]) {
+    assert.equal(
+      validDevpostPageContract(
+        `<html><body>
+          <h1>Archon Memory</h1>
+          <p>CockroachDB × AWS Hackathon - Build with Agentic Memory</p>
+          ${deadMarkup}
+        </body></html>`,
+        url,
+        url,
+        "text/html",
+        identity
+      ),
+      false
+    );
+  }
+  assert.equal(
+    validDevpostPageContract(
+      html
+        .replace(
+          "<h1>Archon Memory</h1>",
+          "<h1>Other project</h1><!-- Archon Memory -->"
+        )
+        .replace(
+          "<p>CockroachDB &times; AWS Hackathon - Build with Agentic Memory</p>",
+          "<p>Other challenge</p><script>CockroachDB × AWS Hackathon - Build with Agentic Memory</script>"
+        ),
+      url,
+      url,
+      "text/html",
+      identity
+    ),
+    false
+  );
+  assert.equal(
+    validDevpostPageContract(
+      `<html><body>
+        <h1>Archon Memory</h1>
+        <p>CockroachDB × AWS Hackathon - Build with Agentic Memory</p>
+        <a data-href="https://cockroachdb-ai.devpost.com/">Challenge</a>
+        <a data-href="https://github.com/upgradedev/archon-cockroach-memory">Source</a>
+        <a data-href="https://d2s5v0o0eg2aaw.cloudfront.net">Demo</a>
+        <iframe data-src="https://www.youtube.com/embed/abcdefghijk"></iframe>
+      </body></html>`,
+      url,
+      url,
+      "text/html",
+      identity
+    ),
+    false
+  );
+  assert.equal(
+    validDevpostPageContract(
+      `<html><body>
+        <h1>Archon Memory</h1>
+        <p>CockroachDB × AWS Hackathon - Build with Agentic Memory</p>
+        <!-- ${requiredMarkup}
+      </body></html>`,
+      url,
+      url,
+      "text/html",
+      identity
+    ),
+    false
+  );
+});
+
+test("final gate: submission metadata requires one exact value per key", () => {
+  const exact = `status: submission-copy-complete
+repository: https://github.com/upgradedev/archon-cockroach-memory
+demo: https://d2s5v0o0eg2aaw.cloudfront.net`;
+  assert.equal(validSubmissionCopyMetadata(exact), true);
+  for (const invalid of [
+    `${exact}
+repository: https://github.com/example/project`,
+    `${exact}
+demo: https://example.com`,
+    exact.replace(
+      "repository: https://github.com/upgradedev/archon-cockroach-memory",
+      "repository: https://github.com/upgradedev/archon-cockroach-memory.evil.test"
+    ),
+    exact.replace(
+      "demo: https://d2s5v0o0eg2aaw.cloudfront.net",
+      "demo: https://d2s5v0o0eg2aaw.cloudfront.net.evil.test"
+    ),
+  ]) {
+    assert.equal(validSubmissionCopyMetadata(invalid), false);
+  }
 });
 
 test("final gate: pre-submit display title binds SHA, video, and duration", () => {

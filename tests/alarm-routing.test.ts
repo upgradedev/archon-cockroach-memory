@@ -748,7 +748,7 @@ test("alarm routing: source contract is dormant, protected, and CI-gated", () =>
   );
   assert.equal(
     (deploy.match(/--arg reservedConcurrency "5"/gu) ?? []).length,
-    2
+    6
   );
   assert.equal(
     (

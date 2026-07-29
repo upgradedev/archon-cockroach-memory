@@ -3,7 +3,6 @@
 // Submission readiness workflow on the exact current main commit. It writes one
 // sanitized receipt under RUNNER_TEMP and never receives AWS credentials.
 
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,7 +12,7 @@ import {
   parseCanonicalSubmissionVideoUrl,
   SUBMISSION_THUMBNAIL_PATH,
   validDevpostSubmissionUrl,
-  validSubmissionThumbnail,
+  validatedSubmissionThumbnail,
   validSubmissionVideoDuration,
 } from "./readiness.js";
 
@@ -580,23 +579,163 @@ type SubmissionVideoIdentity = NonNullable<
   ReturnType<typeof parseCanonicalSubmissionVideoUrl>
 >;
 
+interface SemanticHtmlEvidence {
+  anchors: string[];
+  iframes: string[];
+  text: string;
+}
+
+const IGNORED_HTML_CONTENT = new Set([
+  "head",
+  "iframe",
+  "math",
+  "noscript",
+  "object",
+  "script",
+  "style",
+  "svg",
+  "template",
+  "textarea",
+  "title",
+  "xmp",
+]);
+
+function htmlTagEnd(html: string, start: number): number {
+  let quote: '"' | "'" | undefined;
+  for (let index = start + 1; index < html.length; index += 1) {
+    const character = html[index];
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function semanticHtmlEvidence(html: string): SemanticHtmlEvidence {
+  const lower = html.toLowerCase();
+  const anchors: string[] = [];
+  const iframes: string[] = [];
+  const text: string[] = [];
+  let cursor = 0;
+  let ignoredTag: string | undefined;
+
+  while (cursor < html.length) {
+    if (ignoredTag !== undefined) {
+      const needle = `</${ignoredTag}`;
+      let closing = lower.indexOf(needle, cursor);
+      while (
+        closing >= 0 &&
+        /[a-z0-9:-]/u.test(lower[closing + needle.length] ?? "")
+      ) {
+        closing = lower.indexOf(needle, closing + needle.length);
+      }
+      if (closing < 0) break;
+      const end = htmlTagEnd(html, closing);
+      if (end < 0) break;
+      ignoredTag = undefined;
+      cursor = end + 1;
+      continue;
+    }
+
+    const start = html.indexOf("<", cursor);
+    if (start < 0) {
+      text.push(html.slice(cursor));
+      break;
+    }
+    text.push(html.slice(cursor, start));
+    if (html.startsWith("<!--", start)) {
+      const commentEnd = html.indexOf("-->", start + 4);
+      if (commentEnd < 0) break;
+      cursor = commentEnd + 3;
+      continue;
+    }
+    const end = htmlTagEnd(html, start);
+    if (end < 0) break;
+    const element = html.slice(start, end + 1);
+    const identity = /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/iu.exec(
+      element
+    );
+    const closing = identity?.[1] === "/";
+    const name = identity?.[2]?.toLowerCase();
+    if (!closing && name === "a") anchors.push(element);
+    if (!closing && name === "iframe") iframes.push(element);
+    if (
+      !closing &&
+      name !== undefined &&
+      IGNORED_HTML_CONTENT.has(name)
+    ) {
+      ignoredTag = name;
+    }
+    text.push(" ");
+    cursor = end + 1;
+  }
+
+  return { anchors, iframes, text: text.join("") };
+}
+
+function quotedHtmlAttribute(
+  element: string,
+  attribute: "href" | "src"
+): string | undefined {
+  const identity = /^<\s*[a-z][a-z0-9:-]*\b/iu.exec(element);
+  if (!identity) return undefined;
+  let cursor = identity[0].length;
+  while (cursor < element.length) {
+    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
+    if (
+      cursor >= element.length ||
+      element[cursor] === ">" ||
+      (element[cursor] === "/" && element[cursor + 1] === ">")
+    ) {
+      return undefined;
+    }
+    const nameStart = cursor;
+    while (
+      cursor < element.length &&
+      !/[\t\n\f\r =/>]/u.test(element[cursor] ?? "")
+    ) {
+      cursor += 1;
+    }
+    if (cursor === nameStart) {
+      cursor += 1;
+      continue;
+    }
+    const name = element.slice(nameStart, cursor).toLowerCase();
+    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
+    if (element[cursor] !== "=") continue;
+    cursor += 1;
+    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
+    const quote = element[cursor];
+    if (quote !== '"' && quote !== "'") {
+      while (
+        cursor < element.length &&
+        !/[\t\n\f\r >]/u.test(element[cursor] ?? "")
+      ) {
+        cursor += 1;
+      }
+      continue;
+    }
+    const valueStart = cursor + 1;
+    const valueEnd = element.indexOf(quote, valueStart);
+    if (valueEnd < 0) return undefined;
+    const value = element.slice(valueStart, valueEnd);
+    if (name === attribute) return value;
+    cursor = valueEnd + 1;
+  }
+  return undefined;
+}
+
 function htmlTagAttributeValues(
-  html: string,
-  tag: "a" | "iframe",
+  elements: readonly string[],
   attribute: "href" | "src"
 ): string[] {
-  const tags =
-    tag === "a"
-      ? html.matchAll(/<a\b[^>]*>/giu)
-      : html.matchAll(/<iframe\b[^>]*>/giu);
   const values: string[] = [];
-  for (const match of tags) {
-    const element = match[0];
-    const attributeMatch =
-      attribute === "href"
-        ? /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/iu.exec(element)
-        : /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/iu.exec(element);
-    const value = attributeMatch?.[1] ?? attributeMatch?.[2];
+  for (const element of elements) {
+    const value = quotedHtmlAttribute(element, attribute);
     if (value !== undefined) values.push(value);
   }
   return values;
@@ -617,11 +756,10 @@ function cleanHttpsUrl(value: string): URL | undefined {
 }
 
 function htmlTagUrls(
-  html: string,
-  tag: "a" | "iframe",
+  elements: readonly string[],
   attribute: "href" | "src"
 ): URL[] {
-  return htmlTagAttributeValues(html, tag, attribute)
+  return htmlTagAttributeValues(elements, attribute)
     .map(cleanHttpsUrl)
     .filter((url): url is URL => url !== undefined);
 }
@@ -659,10 +797,19 @@ function hasExactMetadataLine(
   key: string,
   value: string
 ): boolean {
+  const prefix = `${key}:`;
   const expected = `${key}: ${value}`;
-  return document
+  const matches = document
     .split(/\r?\n/u)
-    .some((line) => line === expected);
+    .filter((line) => line.startsWith(prefix));
+  return matches.length === 1 && matches[0] === expected;
+}
+
+export function validSubmissionCopyMetadata(document: string): boolean {
+  return (
+    hasExactMetadataLine(document, "repository", REPOSITORY_URL) &&
+    hasExactMetadataLine(document, "demo", DEMO_URL)
+  );
 }
 
 export function validOembedContract(
@@ -672,7 +819,8 @@ export function validOembedContract(
   const oembed = asRecord(value);
   if (!oembed) return false;
   const html = stringValue(oembed, "html") ?? "";
-  const iframeUrls = htmlTagUrls(html, "iframe", "src");
+  const evidence = semanticHtmlEvidence(html);
+  const iframeUrls = htmlTagUrls(evidence.iframes, "src");
   return (
     /Archon Memory/iu.test(stringValue(oembed, "title") ?? "") &&
     oembed.type === "video" &&
@@ -689,12 +837,13 @@ export function validDevpostPageContract(
   contentType: string,
   identity: SubmissionVideoIdentity
 ): boolean {
-  const normalizedHtml = html.replace(
+  const evidence = semanticHtmlEvidence(html);
+  const normalizedText = evidence.text.replace(
     /&times;|&#215;|&#x0*[dD]7;/giu,
     "×"
   );
-  const anchorUrls = htmlTagUrls(html, "a", "href");
-  const iframeUrls = htmlTagUrls(html, "iframe", "src");
+  const anchorUrls = htmlTagUrls(evidence.anchors, "href");
+  const iframeUrls = htmlTagUrls(evidence.iframes, "src");
   const challengeAnchor = anchorUrls.some((url) =>
     exactUrl(url, "https://cockroachdb-ai.devpost.com/")
   );
@@ -710,10 +859,10 @@ export function validDevpostPageContract(
   return (
     responseUrl === requestedUrl &&
     /^text\/html(?:;|$)/iu.test(contentType) &&
-    /Archon Memory/iu.test(normalizedHtml) &&
+    /Archon Memory/iu.test(normalizedText) &&
     challengeAnchor &&
     /CockroachDB × AWS Hackathon - Build with Agentic Memory/iu.test(
-      normalizedHtml
+      normalizedText
     ) &&
     repositoryAnchor &&
     demoAnchor &&
@@ -920,8 +1069,7 @@ async function main(): Promise<void> {
     );
     if (
       !/^status: submission-copy-complete$/mu.test(copy) ||
-      !hasExactMetadataLine(copy, "repository", REPOSITORY_URL) ||
-      !hasExactMetadataLine(copy, "demo", DEMO_URL) ||
+      !validSubmissionCopyMetadata(copy) ||
       !/Distributed Vector Indexing/u.test(copy) ||
       !/CockroachDB Cloud Managed MCP/u.test(copy) ||
       !/^## How we used AWS$/mu.test(copy) ||
@@ -940,17 +1088,15 @@ async function main(): Promise<void> {
   });
 
   await check("submission-thumbnail", () => {
-    const metadata = validSubmissionThumbnail();
-    if (!metadata) {
+    const validated = validatedSubmissionThumbnail();
+    if (!validated) {
       throw new Error("Owned thumbnail is not a valid 3:2 PNG under 5 MB");
     }
-    const bytes = readFileSync(resolve(ROOT, SUBMISSION_THUMBNAIL_PATH));
     thumbnail = {
       path: SUBMISSION_THUMBNAIL_PATH,
-      ...metadata,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      ...validated,
     };
-    return `${metadata.width}x${metadata.height}, ${metadata.bytes} bytes`;
+    return `${validated.width}x${validated.height}, ${validated.bytes} bytes`;
   });
 
   await check("live-root", async () => {

@@ -51,6 +51,7 @@ import {
   SOURCE_FLOOR,
   SUBMISSION_THUMBNAIL_PATH,
   validDevpostSubmissionUrl,
+  validatedSubmissionThumbnail,
   validSubmissionThumbnail,
   validSubmissionVideoDuration,
 } from "../scripts/readiness.js";
@@ -816,6 +817,13 @@ test("readiness: final submission URLs, duration, and thumbnail fail closed", ()
     height: 1024,
     bytes: thumbnail.length,
   });
+  assert.deepEqual(validatedSubmissionThumbnail(), {
+    width: 1536,
+    height: 1024,
+    bytes: thumbnail.length,
+    sha256:
+      "a5cea4336a66f72443611b01706c63a207ab717c8730b5b8d0f3ca7e599ca976",
+  });
   const symlinkRoot = mkdtempSync(
     join(tmpdir(), "archon-thumbnail-symlink-")
   );
@@ -831,6 +839,23 @@ test("readiness: final submission URLs, duration, and thumbnail fail closed", ()
     assert.equal(validSubmissionThumbnail(symlinkRoot), undefined);
   } finally {
     rmSync(symlinkRoot, { recursive: true, force: true });
+  }
+  const oversizedRoot = mkdtempSync(
+    join(tmpdir(), "archon-thumbnail-oversized-")
+  );
+  try {
+    const assets = join(oversizedRoot, "demo", "assets");
+    mkdirSync(assets, { recursive: true });
+    writeFileSync(
+      join(oversizedRoot, SUBMISSION_THUMBNAIL_PATH),
+      Buffer.alloc(MAX_SUBMISSION_THUMBNAIL_BYTES + 1)
+    );
+    assert.equal(
+      validatedSubmissionThumbnail(oversizedRoot),
+      undefined
+    );
+  } finally {
+    rmSync(oversizedRoot, { recursive: true, force: true });
   }
   const badSignature = Buffer.from(thumbnail);
   badSignature[0] = 0;
@@ -2317,7 +2342,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/--arg reservedConcurrency "5"/gu) ?? []).length,
-    2
+    6
   );
   assert.equal(
     (

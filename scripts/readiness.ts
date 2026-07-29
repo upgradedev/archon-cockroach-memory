@@ -10,6 +10,7 @@
 // Final submission validation additionally sets REQUIRE_SUBMISSION_READY=1 and
 // supplies the SUBMISSION_* environment variables below.
 
+import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -18,6 +19,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
@@ -1332,20 +1334,24 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
   return blocks.every((block, index) => {
     if (!block) return false;
     const healthStart = block.indexOf('HEALTH="$(');
-    const proofStart = block.indexOf('PROOF="$(');
+    const proofBindingStart = block.indexOf(
+      'RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"'
+    );
+    const proofRequestStart = block.indexOf('PROOF="$(');
     const recallStart = block.indexOf('RECALL="$(');
     const auditStart = block.indexOf('AUDIT="$(');
     if (
       healthStart < 0 ||
-      proofStart <= healthStart ||
-      recallStart <= proofStart ||
+      proofBindingStart <= healthStart ||
+      proofRequestStart <= proofBindingStart ||
+      recallStart <= proofRequestStart ||
       auditStart <= recallStart
     ) {
       return false;
     }
     const sections = {
-      health: block.slice(healthStart, proofStart),
-      proof: block.slice(proofStart, recallStart),
+      health: block.slice(healthStart, proofBindingStart),
+      proof: block.slice(proofBindingStart, recallStart),
       recall: block.slice(recallStart, auditStart),
       audit: block.slice(auditStart),
     };
@@ -3280,7 +3286,7 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         (
           deploy.match(/--arg reservedConcurrency "5"/gu) ?? []
-        ).length === 2 &&
+        ).length === 6 &&
         (
           deploy.match(
             /ReservedConcurrency: \$reservedConcurrency/gu
@@ -4060,6 +4066,14 @@ function sourceChecks(): SourceCheck[] {
           finalSubmissionGate,
           'const VIMEO_OEMBED_ENDPOINT = "https://vimeo.com/api/oembed.json";'
         ) &&
+        includesEvery(finalSubmissionGate, [
+          "const oembedUrl = new URL(",
+          "? YOUTUBE_OEMBED_ENDPOINT",
+          ": VIMEO_OEMBED_ENDPOINT",
+          'oembedUrl.searchParams.set("url", identity.canonicalUrl);',
+          'oembedUrl.searchParams.set("format", "json");',
+          "await fetchJson(oembedUrl.href,",
+        ]) &&
         /submission-readiness-receipt\.json/u.test(
           finalSubmissionGate
         ),
@@ -4168,6 +4182,11 @@ export interface SubmissionThumbnailMetadata {
   width: number;
   height: number;
   bytes: number;
+}
+
+export interface ValidatedSubmissionThumbnail
+  extends SubmissionThumbnailMetadata {
+  sha256: string;
 }
 
 const PNG_CRC_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
@@ -4395,9 +4414,9 @@ export function inspectSubmissionThumbnail(
   return { width, height, bytes: buffer.length };
 }
 
-export function validSubmissionThumbnail(
+export function validatedSubmissionThumbnail(
   root = ROOT
-): SubmissionThumbnailMetadata | undefined {
+): ValidatedSubmissionThumbnail | undefined {
   const thumbnailPath = join(root, SUBMISSION_THUMBNAIL_PATH);
   let descriptor: number | undefined;
   try {
@@ -4412,6 +4431,9 @@ export function validSubmissionThumbnail(
     const current = lstatSync(thumbnailPath);
     if (
       !opened.isFile() ||
+      !Number.isSafeInteger(opened.size) ||
+      opened.size < 57 ||
+      opened.size > MAX_SUBMISSION_THUMBNAIL_BYTES ||
       !current.isFile() ||
       current.isSymbolicLink() ||
       opened.dev !== current.dev ||
@@ -4419,12 +4441,57 @@ export function validSubmissionThumbnail(
     ) {
       return undefined;
     }
-    return inspectSubmissionThumbnail(readFileSync(descriptor));
+    const file = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < file.length) {
+      const bytesRead = readSync(
+        descriptor,
+        file,
+        offset,
+        file.length - offset,
+        offset
+      );
+      if (bytesRead === 0) return undefined;
+      offset += bytesRead;
+    }
+    if (
+      readSync(descriptor, Buffer.alloc(1), 0, 1, file.length) !== 0
+    ) {
+      return undefined;
+    }
+    const terminal = fstatSync(descriptor);
+    if (
+      terminal.size !== opened.size ||
+      terminal.mtimeMs !== opened.mtimeMs ||
+      terminal.ctimeMs !== opened.ctimeMs
+    ) {
+      return undefined;
+    }
+    const metadata = inspectSubmissionThumbnail(file);
+    return metadata
+      ? {
+          ...metadata,
+          sha256: createHash("sha256").update(file).digest("hex"),
+        }
+      : undefined;
   } catch {
     return undefined;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+export function validSubmissionThumbnail(
+  root = ROOT
+): SubmissionThumbnailMetadata | undefined {
+  const validated = validatedSubmissionThumbnail(root);
+  return validated
+    ? {
+        width: validated.width,
+        height: validated.height,
+        bytes: validated.bytes,
+      }
+    : undefined;
 }
 
 function validPublicRepositoryUrl(value: string): boolean {
