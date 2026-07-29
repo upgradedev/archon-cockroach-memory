@@ -536,6 +536,8 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
     `<template>${requiredMarkup}</template>`,
     `<template><template></template>${requiredMarkup}</template>`,
     `<template><script>const close = "</template>";</script>${requiredMarkup}</template>`,
+    `<script></script_>${requiredMarkup}</script>`,
+    `<script><!--<script></script>${requiredMarkup}`,
     `<plaintext>${requiredMarkup}`,
   ]) {
     assert.equal(

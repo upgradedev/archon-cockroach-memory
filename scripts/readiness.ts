@@ -4067,6 +4067,9 @@ function sourceChecks(): SourceCheck[] {
           'const VIMEO_OEMBED_ENDPOINT = "https://vimeo.com/api/oembed.json";'
         ) &&
         includesEvery(finalSubmissionGate, [
+          'import { parse } from "parse5";',
+          "const document = parse(html, {",
+          "scriptingEnabled: true,",
           "const oembedUrl = new URL(",
           "? YOUTUBE_OEMBED_ENDPOINT",
           ": VIMEO_OEMBED_ENDPOINT",
@@ -4074,6 +4077,7 @@ function sourceChecks(): SourceCheck[] {
           'oembedUrl.searchParams.set("format", "json");',
           "await fetchJson(oembedUrl.href,",
         ]) &&
+        /"parse5":\s*"7\.3\.0"/u.test(packageSource) &&
         /submission-readiness-receipt\.json/u.test(
           finalSubmissionGate
         ),

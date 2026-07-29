@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse } from "parse5";
 import {
   evaluate,
   parseCanonicalSubmissionVideoUrl,
@@ -580,211 +581,98 @@ type SubmissionVideoIdentity = NonNullable<
 >;
 
 interface SemanticHtmlEvidence {
-  anchors: string[];
-  iframes: string[];
+  anchors: ParsedHtmlNode[];
+  iframes: ParsedHtmlNode[];
   text: string;
 }
 
-const RAW_TEXT_IGNORED_HTML = new Set([
+interface ParsedHtmlAttribute {
+  name: string;
+  value: string;
+}
+
+interface ParsedHtmlNode {
+  nodeName: string;
+  tagName?: string;
+  attrs?: ParsedHtmlAttribute[];
+  childNodes?: ParsedHtmlNode[];
+  value?: string;
+}
+
+const MAX_SUBMISSION_HTML_CHARACTERS = 5_000_000;
+const IGNORED_SEMANTIC_HTML = new Set([
+  "head",
   "iframe",
+  "math",
   "noembed",
   "noframes",
   "noscript",
+  "object",
   "plaintext",
   "script",
   "style",
+  "svg",
+  "template",
   "textarea",
   "title",
   "xmp",
 ]);
 
-const CONTAINER_IGNORED_HTML = new Set([
-  "head",
-  "math",
-  "object",
-  "svg",
-  "template",
-]);
-
-function ignoredHtmlElement(name: string): boolean {
-  return (
-    RAW_TEXT_IGNORED_HTML.has(name) ||
-    CONTAINER_IGNORED_HTML.has(name)
-  );
-}
-
-function htmlTagEnd(html: string, start: number): number {
-  let quote: '"' | "'" | undefined;
-  for (let index = start + 1; index < html.length; index += 1) {
-    const character = html[index];
-    if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-    } else if (character === '"' || character === "'") {
-      quote = character;
-    } else if (character === ">") {
-      return index;
-    }
-  }
-  return -1;
-}
-
 function semanticHtmlEvidence(html: string): SemanticHtmlEvidence {
-  const lower = html.toLowerCase();
-  const anchors: string[] = [];
-  const iframes: string[] = [];
+  const empty = { anchors: [], iframes: [], text: "" };
+  if (
+    html.length < 1 ||
+    html.length > MAX_SUBMISSION_HTML_CHARACTERS
+  ) {
+    return empty;
+  }
+
+  const anchors: ParsedHtmlNode[] = [];
+  const iframes: ParsedHtmlNode[] = [];
   const text: string[] = [];
-  let cursor = 0;
-  const ignoredStack: string[] = [];
-
-  while (cursor < html.length) {
-    const ignoredTag = ignoredStack.at(-1);
-    if (ignoredTag !== undefined) {
-      if (ignoredTag === "plaintext") break;
-      if (RAW_TEXT_IGNORED_HTML.has(ignoredTag)) {
-        const needle = `</${ignoredTag}`;
-        let closing = lower.indexOf(needle, cursor);
-        while (
-          closing >= 0 &&
-          /[a-z0-9:-]/u.test(lower[closing + needle.length] ?? "")
-        ) {
-          closing = lower.indexOf(needle, closing + needle.length);
-        }
-        if (closing < 0) break;
-        const end = htmlTagEnd(html, closing);
-        if (end < 0) break;
-        ignoredStack.pop();
-        cursor = end + 1;
+  try {
+    const document = parse(html, {
+      scriptingEnabled: true,
+    }) as unknown as ParsedHtmlNode;
+    const pending = [document];
+    let visited = 0;
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (!node || (visited += 1) > 200_000) return empty;
+      const name = node.tagName?.toLowerCase();
+      if (name === "a") anchors.push(node);
+      if (name === "iframe") iframes.push(node);
+      if (name !== undefined && IGNORED_SEMANTIC_HTML.has(name)) {
         continue;
       }
-
-      const nestedStart = html.indexOf("<", cursor);
-      if (nestedStart < 0) break;
-      if (html.startsWith("<!--", nestedStart)) {
-        const commentEnd = html.indexOf("-->", nestedStart + 4);
-        if (commentEnd < 0) break;
-        cursor = commentEnd + 3;
-        continue;
+      if (node.nodeName === "#text" && node.value !== undefined) {
+        text.push(node.value);
       }
-      const nestedEnd = htmlTagEnd(html, nestedStart);
-      if (nestedEnd < 0) break;
-      const nestedElement = html.slice(nestedStart, nestedEnd + 1);
-      const nestedIdentity =
-        /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/iu.exec(nestedElement);
-      const nestedClosing = nestedIdentity?.[1] === "/";
-      const nestedName = nestedIdentity?.[2]?.toLowerCase();
-      if (nestedClosing && nestedName === ignoredTag) {
-        ignoredStack.pop();
-      } else if (
-        !nestedClosing &&
-        nestedName !== undefined &&
-        ignoredHtmlElement(nestedName)
-      ) {
-        ignoredStack.push(nestedName);
+      const children = node.childNodes ?? [];
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        pending.push(children[index]!);
       }
-      cursor = nestedEnd + 1;
-      continue;
     }
-
-    const start = html.indexOf("<", cursor);
-    if (start < 0) {
-      text.push(html.slice(cursor));
-      break;
-    }
-    text.push(html.slice(cursor, start));
-    if (html.startsWith("<!--", start)) {
-      const commentEnd = html.indexOf("-->", start + 4);
-      if (commentEnd < 0) break;
-      cursor = commentEnd + 3;
-      continue;
-    }
-    const end = htmlTagEnd(html, start);
-    if (end < 0) break;
-    const element = html.slice(start, end + 1);
-    const identity = /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/iu.exec(
-      element
-    );
-    const closing = identity?.[1] === "/";
-    const name = identity?.[2]?.toLowerCase();
-    if (!closing && name === "a") anchors.push(element);
-    if (!closing && name === "iframe") iframes.push(element);
-    if (
-      !closing &&
-      name !== undefined &&
-      ignoredHtmlElement(name)
-    ) {
-      ignoredStack.push(name);
-    }
-    text.push(" ");
-    cursor = end + 1;
+  } catch {
+    return empty;
   }
 
-  return { anchors, iframes, text: text.join("") };
-}
-
-function quotedHtmlAttribute(
-  element: string,
-  attribute: "href" | "src"
-): string | undefined {
-  const identity = /^<\s*[a-z][a-z0-9:-]*\b/iu.exec(element);
-  if (!identity) return undefined;
-  let cursor = identity[0].length;
-  while (cursor < element.length) {
-    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
-    if (
-      cursor >= element.length ||
-      element[cursor] === ">" ||
-      (element[cursor] === "/" && element[cursor + 1] === ">")
-    ) {
-      return undefined;
-    }
-    const nameStart = cursor;
-    while (
-      cursor < element.length &&
-      !/[\t\n\f\r =/>]/u.test(element[cursor] ?? "")
-    ) {
-      cursor += 1;
-    }
-    if (cursor === nameStart) {
-      cursor += 1;
-      continue;
-    }
-    const name = element.slice(nameStart, cursor).toLowerCase();
-    const target = name === attribute;
-    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
-    if (element[cursor] !== "=") {
-      if (target) return undefined;
-      continue;
-    }
-    cursor += 1;
-    while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
-    const quote = element[cursor];
-    if (quote !== '"' && quote !== "'") {
-      if (target) return undefined;
-      while (
-        cursor < element.length &&
-        !/[\t\n\f\r >]/u.test(element[cursor] ?? "")
-      ) {
-        cursor += 1;
-      }
-      continue;
-    }
-    const valueStart = cursor + 1;
-    const valueEnd = element.indexOf(quote, valueStart);
-    if (valueEnd < 0) return undefined;
-    const value = element.slice(valueStart, valueEnd);
-    if (target) return value;
-    cursor = valueEnd + 1;
-  }
-  return undefined;
+  return {
+    anchors,
+    iframes,
+    text: text.join(" ").replace(/\s+/gu, " ").trim(),
+  };
 }
 
 function htmlTagAttributeValues(
-  elements: readonly string[],
+  elements: readonly ParsedHtmlNode[],
   attribute: "href" | "src"
 ): string[] {
   const values: string[] = [];
   for (const element of elements) {
-    const value = quotedHtmlAttribute(element, attribute);
+    const value = element.attrs?.find(
+      (candidate) => candidate.name.toLowerCase() === attribute
+    )?.value;
     if (value !== undefined) values.push(value);
   }
   return values;
@@ -887,10 +775,7 @@ export function validDevpostPageContract(
   identity: SubmissionVideoIdentity
 ): boolean {
   const evidence = semanticHtmlEvidence(html);
-  const normalizedText = evidence.text.replace(
-    /&times;|&#215;|&#x0*[dD]7;/giu,
-    "×"
-  );
+  const normalizedText = evidence.text;
   const anchorUrls = htmlTagUrls(evidence.anchors, "href");
   const iframeUrls = htmlTagUrls(evidence.iframes, "src");
   const challengeAnchor = anchorUrls.some((url) =>
