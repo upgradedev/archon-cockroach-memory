@@ -1,7 +1,7 @@
 # Dependency release policy
 
-Status: active release freeze  
-Started: 2026-07-29  
+Status: active release freeze
+Started: 2026-07-29
 Normal thaw: after the CockroachDB × AWS judging period ends
 
 Archon Memory is freezing routine version-update pull requests while the

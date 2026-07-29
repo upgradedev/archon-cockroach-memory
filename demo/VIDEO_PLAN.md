@@ -1,8 +1,8 @@
 # Archon Memory — final demo video plan
 
-Target runtime: **2:50 (170 seconds)**  
-Hard limit: **strictly under 3:00**  
-Delivery: public, embeddable YouTube or Vimeo link  
+Target runtime: **2:50 (170 seconds)**
+Hard limit: **strictly under 3:00**
+Delivery: public, embeddable YouTube or Vimeo link
 Language: English narration with accurate English captions
 
 The recording is intentionally the final production step. It must use the
