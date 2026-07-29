@@ -410,6 +410,11 @@ test("final gate: video oEmbed identity is exact for YouTube and Vimeo", () => {
       html:
         '<script>const markup = \'<iframe src="https://www.youtube.com/embed/abcdefghijk"></iframe>\';</script>',
     },
+    {
+      ...youtubeOembed,
+      html:
+        '<iframe src=https://evil.test src="https://www.youtube.com/embed/abcdefghijk"></iframe>',
+    },
   ]) {
     assert.equal(validOembedContract(mutation, youtube), false);
   }
@@ -529,6 +534,9 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
     `<!-- ${requiredMarkup} -->`,
     `<script>const dead = ${JSON.stringify(requiredMarkup)};</script>`,
     `<template>${requiredMarkup}</template>`,
+    `<template><template></template>${requiredMarkup}</template>`,
+    `<template><script>const close = "</template>";</script>${requiredMarkup}</template>`,
+    `<plaintext>${requiredMarkup}`,
   ]) {
     assert.equal(
       validDevpostPageContract(
@@ -556,6 +564,32 @@ test("final gate: public Devpost HTML binds challenge, repo, demo, and video", (
           "<p>CockroachDB &times; AWS Hackathon - Build with Agentic Memory</p>",
           "<p>Other challenge</p><script>CockroachDB × AWS Hackathon - Build with Agentic Memory</script>"
         ),
+      url,
+      url,
+      "text/html",
+      identity
+    ),
+    false
+  );
+  assert.equal(
+    validDevpostPageContract(
+      html.replace(
+        '<a href="https://cockroachdb-ai.devpost.com/">',
+        '<a href=https://evil.test href="https://cockroachdb-ai.devpost.com/">'
+      ),
+      url,
+      url,
+      "text/html",
+      identity
+    ),
+    false
+  );
+  assert.equal(
+    validDevpostPageContract(
+      html.replace(
+        '<iframe src="https://www.youtube.com/embed/abcdefghijk">',
+        '<iframe src=https://evil.test src="https://www.youtube.com/embed/abcdefghijk">'
+      ),
       url,
       url,
       "text/html",

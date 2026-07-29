@@ -585,20 +585,33 @@ interface SemanticHtmlEvidence {
   text: string;
 }
 
-const IGNORED_HTML_CONTENT = new Set([
-  "head",
+const RAW_TEXT_IGNORED_HTML = new Set([
   "iframe",
-  "math",
+  "noembed",
+  "noframes",
   "noscript",
-  "object",
+  "plaintext",
   "script",
   "style",
-  "svg",
-  "template",
   "textarea",
   "title",
   "xmp",
 ]);
+
+const CONTAINER_IGNORED_HTML = new Set([
+  "head",
+  "math",
+  "object",
+  "svg",
+  "template",
+]);
+
+function ignoredHtmlElement(name: string): boolean {
+  return (
+    RAW_TEXT_IGNORED_HTML.has(name) ||
+    CONTAINER_IGNORED_HTML.has(name)
+  );
+}
 
 function htmlTagEnd(html: string, start: number): number {
   let quote: '"' | "'" | undefined;
@@ -621,23 +634,54 @@ function semanticHtmlEvidence(html: string): SemanticHtmlEvidence {
   const iframes: string[] = [];
   const text: string[] = [];
   let cursor = 0;
-  let ignoredTag: string | undefined;
+  const ignoredStack: string[] = [];
 
   while (cursor < html.length) {
+    const ignoredTag = ignoredStack.at(-1);
     if (ignoredTag !== undefined) {
-      const needle = `</${ignoredTag}`;
-      let closing = lower.indexOf(needle, cursor);
-      while (
-        closing >= 0 &&
-        /[a-z0-9:-]/u.test(lower[closing + needle.length] ?? "")
-      ) {
-        closing = lower.indexOf(needle, closing + needle.length);
+      if (ignoredTag === "plaintext") break;
+      if (RAW_TEXT_IGNORED_HTML.has(ignoredTag)) {
+        const needle = `</${ignoredTag}`;
+        let closing = lower.indexOf(needle, cursor);
+        while (
+          closing >= 0 &&
+          /[a-z0-9:-]/u.test(lower[closing + needle.length] ?? "")
+        ) {
+          closing = lower.indexOf(needle, closing + needle.length);
+        }
+        if (closing < 0) break;
+        const end = htmlTagEnd(html, closing);
+        if (end < 0) break;
+        ignoredStack.pop();
+        cursor = end + 1;
+        continue;
       }
-      if (closing < 0) break;
-      const end = htmlTagEnd(html, closing);
-      if (end < 0) break;
-      ignoredTag = undefined;
-      cursor = end + 1;
+
+      const nestedStart = html.indexOf("<", cursor);
+      if (nestedStart < 0) break;
+      if (html.startsWith("<!--", nestedStart)) {
+        const commentEnd = html.indexOf("-->", nestedStart + 4);
+        if (commentEnd < 0) break;
+        cursor = commentEnd + 3;
+        continue;
+      }
+      const nestedEnd = htmlTagEnd(html, nestedStart);
+      if (nestedEnd < 0) break;
+      const nestedElement = html.slice(nestedStart, nestedEnd + 1);
+      const nestedIdentity =
+        /^<\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/iu.exec(nestedElement);
+      const nestedClosing = nestedIdentity?.[1] === "/";
+      const nestedName = nestedIdentity?.[2]?.toLowerCase();
+      if (nestedClosing && nestedName === ignoredTag) {
+        ignoredStack.pop();
+      } else if (
+        !nestedClosing &&
+        nestedName !== undefined &&
+        ignoredHtmlElement(nestedName)
+      ) {
+        ignoredStack.push(nestedName);
+      }
+      cursor = nestedEnd + 1;
       continue;
     }
 
@@ -666,9 +710,9 @@ function semanticHtmlEvidence(html: string): SemanticHtmlEvidence {
     if (
       !closing &&
       name !== undefined &&
-      IGNORED_HTML_CONTENT.has(name)
+      ignoredHtmlElement(name)
     ) {
-      ignoredTag = name;
+      ignoredStack.push(name);
     }
     text.push(" ");
     cursor = end + 1;
@@ -705,12 +749,17 @@ function quotedHtmlAttribute(
       continue;
     }
     const name = element.slice(nameStart, cursor).toLowerCase();
+    const target = name === attribute;
     while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
-    if (element[cursor] !== "=") continue;
+    if (element[cursor] !== "=") {
+      if (target) return undefined;
+      continue;
+    }
     cursor += 1;
     while (/[\t\n\f\r ]/u.test(element[cursor] ?? "")) cursor += 1;
     const quote = element[cursor];
     if (quote !== '"' && quote !== "'") {
+      if (target) return undefined;
       while (
         cursor < element.length &&
         !/[\t\n\f\r >]/u.test(element[cursor] ?? "")
@@ -723,7 +772,7 @@ function quotedHtmlAttribute(
     const valueEnd = element.indexOf(quote, valueStart);
     if (valueEnd < 0) return undefined;
     const value = element.slice(valueStart, valueEnd);
-    if (name === attribute) return value;
+    if (target) return value;
     cursor = valueEnd + 1;
   }
   return undefined;
