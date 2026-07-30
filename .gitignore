@@ -81,6 +81,7 @@ demo/*.mp4
 *.mp3
 *.m4a
 *.srt
+captions.en.srt
 production-capture.webm
 capture-receipt.json
 narration-receipt.json

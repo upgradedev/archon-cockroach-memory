@@ -1925,7 +1925,7 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 10);
+  assert.equal(repositoryWorkflows.length, 11);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true

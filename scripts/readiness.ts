@@ -76,6 +76,7 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "bench-uniform.txt",
   "distribution.txt",
   "submission-readiness-receipt.json",
+  "production-capture.webm",
   "capture-receipt.json",
   "narration-receipt.json",
   "video-build-receipt.json",
@@ -92,6 +93,7 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "07-managed-mcp.png",
   "08-close.png",
   "captions.en.srt",
+  "archon-memory-demo.mp4",
   "server.pid",
 ] as const;
 export const DURABLE_RECOVERY_LOCAL_BASENAMES = [
