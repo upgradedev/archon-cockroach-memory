@@ -4689,9 +4689,26 @@ function sourceChecks(): SourceCheck[] {
         /assert-video-receipt\.mjs/u.test(demoVideoWorkflow) &&
         /video-gate:/u.test(ci) &&
         /media-gate-selftest\.mjs/u.test(ci) &&
+        /Initialize runner-temp media root[\s\S]*?DEMO_VIDEO_ROOT=\$\{RUNNER_TEMP\}\/archon-demo-video-selftest[\s\S]*?GITHUB_ENV/u.test(
+          ci
+        ) &&
+        !/DEMO_VIDEO_ROOT:\s*\$\{\{\s*runner\.temp/u.test(ci) &&
         /\$\{\{\s*runner\.temp\s*\}\}\/archon-demo-video/u.test(
           demoVideoWorkflow
         ) &&
+        !/DEMO_VIDEO_(?:ROOT|RELEASE_RECEIPT):\s*\$\{\{\s*runner\.temp/u.test(
+          demoVideoWorkflow
+        ) &&
+        (
+          demoVideoWorkflow.match(
+            /echo "DEMO_VIDEO_ROOT=\$\{RUNNER_TEMP\}\/archon-demo-video" >>"\$\{GITHUB_ENV\}"/gu
+          ) ?? []
+        ).length === 4 &&
+        (
+          demoVideoWorkflow.match(
+            /echo "DEMO_VIDEO_RELEASE_RECEIPT=\$\{RUNNER_TEMP\}\/archon-demo-video\/release\/video-release-binding\.json" >>"\$\{GITHUB_ENV\}"/gu
+          ) ?? []
+        ).length === 2 &&
         /retention-days:\s*14/u.test(demoVideoWorkflow) &&
         /compression-level:\s*0/u.test(demoVideoWorkflow) &&
         /archon\.demo-video-publication/u.test(demoVideoWorkflow) &&

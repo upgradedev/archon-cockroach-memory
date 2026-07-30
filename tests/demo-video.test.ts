@@ -112,6 +112,31 @@ function quotedNarrationBlocks(markdown: string): string[] {
   );
 }
 
+test("workflow initializes runner-temp paths only after runner assignment", () => {
+  const workflow = readFileSync(DEMO_VIDEO_WORKFLOW, "utf8");
+
+  assert.doesNotMatch(
+    workflow,
+    /DEMO_VIDEO_(?:ROOT|RELEASE_RECEIPT):\s*\$\{\{\s*runner\.temp/u
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /echo "DEMO_VIDEO_ROOT=\$\{RUNNER_TEMP\}\/archon-demo-video" >>"\$\{GITHUB_ENV\}"/gu
+      ) ?? []
+    ).length,
+    4
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /echo "DEMO_VIDEO_RELEASE_RECEIPT=\$\{RUNNER_TEMP\}\/archon-demo-video\/release\/video-release-binding\.json" >>"\$\{GITHUB_ENV\}"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+});
+
 function releaseBindingFixture(): {
   now: number;
   receipt: DemoVideoReleaseBindingReceipt;

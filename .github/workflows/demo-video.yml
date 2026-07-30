@@ -34,11 +34,9 @@ jobs:
       mcp_run_id: ${{ steps.release.outputs.mcp_run_id }}
       recovery_run_id: ${{ steps.release.outputs.recovery_run_id }}
     env:
-      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
       DEMO_VIDEO_PHASE: initial
       DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
       DEMO_VIDEO_SOURCE_GATE_ATTEMPT: ${{ github.run_attempt }}
-      DEMO_VIDEO_RELEASE_RECEIPT: ${{ runner.temp }}/archon-demo-video/release/video-release-binding.json
     steps:
       - name: Require main-ref exact-SHA dispatch before any paid call
         shell: bash
@@ -51,6 +49,13 @@ jobs:
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${DISPATCH_REF}" = "refs/heads/main"
           test "${DISPATCH_SHA}" = "${EXPECTED_SHA}"
+      - name: Initialize runner-temp release root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP}"
+          echo "DEMO_VIDEO_ROOT=${RUNNER_TEMP}/archon-demo-video" >>"${GITHUB_ENV}"
+          echo "DEMO_VIDEO_RELEASE_RECEIPT=${RUNNER_TEMP}/archon-demo-video/release/video-release-binding.json" >>"${GITHUB_ENV}"
       - name: Check out the exact dispatched release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -129,9 +134,14 @@ jobs:
     environment:
       name: demo-video-production
     env:
-      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
       DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
     steps:
+      - name: Initialize runner-temp narration root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP}"
+          echo "DEMO_VIDEO_ROOT=${RUNNER_TEMP}/archon-demo-video" >>"${GITHUB_ENV}"
       - name: Check out the exact release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -228,13 +238,18 @@ jobs:
     outputs:
       artifact_run_attempt: ${{ steps.artifact_attempt.outputs.artifact_run_attempt }}
     env:
-      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
       EXPECTED_RELEASE_SHA: ${{ inputs.exact_sha }}
       DEMO_DEPLOY_RUN_ID: ${{ needs.source-gate.outputs.deploy_run_id }}
       DEMO_DAST_RUN_ID: ${{ needs.source-gate.outputs.dast_run_id }}
       DEMO_MCP_RUN_ID: ${{ needs.source-gate.outputs.mcp_run_id }}
       DEMO_RECOVERY_RUN_ID: ${{ needs.source-gate.outputs.recovery_run_id }}
     steps:
+      - name: Initialize runner-temp capture root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP}"
+          echo "DEMO_VIDEO_ROOT=${RUNNER_TEMP}/archon-demo-video" >>"${GITHUB_ENV}"
       - name: Check out the exact release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -387,11 +402,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
       DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
-      DEMO_VIDEO_RELEASE_RECEIPT: ${{ runner.temp }}/archon-demo-video/release/video-release-binding.json
       DEMO_VIDEO_SOURCE_GATE_ATTEMPT: ${{ needs.source-gate.outputs.artifact_run_attempt }}
     steps:
+      - name: Initialize runner-temp package root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP}"
+          echo "DEMO_VIDEO_ROOT=${RUNNER_TEMP}/archon-demo-video" >>"${GITHUB_ENV}"
+          echo "DEMO_VIDEO_RELEASE_RECEIPT=${RUNNER_TEMP}/archon-demo-video/release/video-release-binding.json" >>"${GITHUB_ENV}"
       - name: Check out the exact release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
