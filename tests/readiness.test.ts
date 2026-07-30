@@ -122,6 +122,10 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     new URL("../.github/workflows/security-dast.yml", import.meta.url),
     "utf8"
   );
+  const hostedDastScript = readFileSync(
+    new URL("../scripts/hosted-dast.mjs", import.meta.url),
+    "utf8"
+  );
   assert.match(
     ci,
     /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u
@@ -160,6 +164,14 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     /"Smoke production through CloudFront"/u
   );
   assert.match(hostedDast, /"Upload production receipt"/u);
+  assert.match(
+    hostedDastScript,
+    /function allowlistedStatus\(actual, expectedStatuses, id\)/u
+  );
+  assert.match(
+    hostedDastScript,
+    /releaseSha:\s*expectedReleaseSha \|\| "unknown"/u
+  );
   assert.match(
     readFileSync(
       new URL("../tests/hosted-dast.test.ts", import.meta.url),

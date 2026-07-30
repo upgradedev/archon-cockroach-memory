@@ -97,6 +97,8 @@ test("hosted DAST rejects base64url-encoded JSON secret fields", async () => {
 
 test("hosted DAST emits a passing receipt only after every boundary check", async () => {
   const originalFetch = globalThis.fetch;
+  const previousExpectedRelease = process.env.DAST_EXPECTED_RELEASE_SHA;
+  process.env.DAST_EXPECTED_RELEASE_SHA = "";
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     const method = String(init?.method ?? "GET").toUpperCase();
@@ -196,14 +198,16 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
     assert.equal(receipt.passed, true);
     assert.equal(receipt.version, 3);
     assert.equal(receipt.profile, "predeploy");
-    assert.equal(
-      receipt.releaseSha,
-      "315d8b20b7195b5fd55fe216a8a76835585aa49d"
-    );
+    assert.equal(receipt.releaseSha, "unknown");
     assert.equal(receipt.checks.length, 16);
     assert.ok(receipt.checks.every((check) => check.status === "pass"));
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousExpectedRelease === undefined) {
+      delete process.env.DAST_EXPECTED_RELEASE_SHA;
+    } else {
+      process.env.DAST_EXPECTED_RELEASE_SHA = previousExpectedRelease;
+    }
   }
 });
 

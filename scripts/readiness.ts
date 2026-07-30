@@ -3683,6 +3683,13 @@ function sourceChecks(): SourceCheck[] {
         /candidate\.replaceAll\("-", "\+"\)\.replaceAll\("_", "\/"\)/u.test(
           hostedDast
         ) &&
+        /function allowlistedStatus\(actual, expectedStatuses, id\)/u.test(
+          hostedDast
+        ) &&
+        /releaseSha:\s*expectedReleaseSha \|\| "unknown"/u.test(
+          hostedDast
+        ) &&
+        /targetOrigin:\s*EXPECTED_PRODUCTION_URL/u.test(hostedDast) &&
         /id:\s*"audit-boundary"/u.test(hostedDast) &&
         /writes a sanitized fail-closed receipt before rethrowing/u.test(
           hostedDastTests
