@@ -495,7 +495,6 @@ jobs:
     timeout-minutes: 25
     env:
       DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net
-      DAST_RECEIPT_PATH: ${{ runner.temp }}/hosted-dast.json
       DAST_SCANNER_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -503,6 +502,8 @@ jobs:
         with:
           node-version: 22.23.1
       - name: Run bounded active production probes
+        env:
+          DAST_RECEIPT_PATH: ${{ runner.temp }}/hosted-dast.json
         run: node scripts/hosted-dast.mjs
       - name: Upload sanitized hosted DAST receipt
         if: always()
