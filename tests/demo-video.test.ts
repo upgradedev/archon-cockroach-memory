@@ -625,7 +625,7 @@ test("narration prevalidates the final scene before secrets, files, or requests"
     finalScene.narration = `${finalScene.narration} drift`;
     const planPath = writeFileAtomic(
       fixture,
-      "scene-plan.json",
+      "input/scene-plan.json",
       `${JSON.stringify(plan, null, 2)}\n`,
       { encoding: "utf8" }
     );
@@ -1063,7 +1063,7 @@ test("release receipt is read through one no-follow file descriptor", () => {
     const { receipt, now } = releaseBindingFixture();
     const receiptPath = writeFileAtomic(
       fixture,
-      "video-release-binding.json",
+      "release/video-release-binding.json",
       `${JSON.stringify(receipt, null, 2)}\n`,
       { encoding: "utf8" }
     );
