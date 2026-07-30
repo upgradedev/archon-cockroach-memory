@@ -7,6 +7,7 @@ name: CI
 # (src/memory/embeddings.ts), so the vector index is exercised end-to-end with no secrets.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
