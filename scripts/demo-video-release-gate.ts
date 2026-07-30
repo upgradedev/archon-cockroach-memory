@@ -1474,6 +1474,12 @@ export function readInitialReceipt(
     now?: number;
   }
 ): DemoVideoReleaseBindingReceipt {
+  if (
+    typeof fsConstants.O_NOFOLLOW !== "number" ||
+    fsConstants.O_NOFOLLOW === 0
+  ) {
+    throw new Error("This runner cannot enforce no-follow receipt reads");
+  }
   let descriptor: number;
   try {
     descriptor = openSync(

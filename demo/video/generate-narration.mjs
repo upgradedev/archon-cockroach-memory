@@ -191,11 +191,15 @@ export async function generateNarration({
     "DEMO_VIDEO_VOICE_RIGHTS_ATTESTED",
     env
   );
+  const plan = loadScenePlan(planPath);
+  requireCanonicalVoice(plan.voice);
+  for (const scene of plan.scenes) {
+    canonicalNarrationForScene(scene);
+  }
+  const planSha256 = sha256File(planPath);
   const apiKey = requireNonEmptyEnv("ELEVENLABS_API_KEY", env);
   const root = demoVideoRoot(env);
   ensureOutputDirectory(root, "narration");
-  const plan = loadScenePlan(planPath);
-  const planSha256 = sha256File(planPath);
   const allCues = [];
   const scenes = [];
 

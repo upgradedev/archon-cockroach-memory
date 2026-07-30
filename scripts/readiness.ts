@@ -4685,6 +4685,9 @@ function sourceChecks(): SourceCheck[] {
         demoVideoWorkflow.includes('mktemp --tmpdir="${receipt_dir}"') &&
         demoVideoWorkflow.includes("base64 --decode") &&
         demoVideoWorkflow.includes('test ! -L "${receipt_temp}"') &&
+        demoVideoWorkflow.includes(
+          'mv -n -- "${receipt_temp}" "${DEMO_VIDEO_RELEASE_RECEIPT}"'
+        ) &&
         /demo-video-release-gate\.ts/u.test(demoVideoWorkflow) &&
         /capture-production\.mjs/u.test(demoVideoWorkflow) &&
         /generate-narration\.mjs/u.test(demoVideoWorkflow) &&
@@ -4800,6 +4803,9 @@ function sourceChecks(): SourceCheck[] {
           demoVideoReleaseGate
         ) &&
         demoVideoReleaseGate.includes("fsConstants.O_NOFOLLOW") &&
+        demoVideoReleaseGate.includes(
+          'throw new Error("This runner cannot enforce no-follow receipt reads")'
+        ) &&
         demoVideoReleaseGate.includes("fstatSync(descriptor, { bigint: true })") &&
         demoVideoReleaseGate.includes("process.stdout.write(receiptHandoff)") &&
         !demoVideoReleaseGate.includes("readFileSync(path") &&
@@ -4828,6 +4834,9 @@ function sourceChecks(): SourceCheck[] {
         demoVideoNarration.includes("const CANONICAL_VOICE") &&
         demoVideoNarration.includes("canonicalNarrationForScene") &&
         demoVideoNarration.includes("requireCanonicalVoice") &&
+        demoVideoTests.includes(
+          "narration prevalidates the final scene before secrets, files, or requests"
+        ) &&
         !/edge-tts/iu.test(demoVideoNarration) &&
         /libx264/u.test(demoVideoBuilder) &&
         /loudnorm/u.test(demoVideoBuilder) &&

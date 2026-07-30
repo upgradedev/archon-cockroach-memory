@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -607,6 +608,62 @@ test("timestamped narration rejects scene or voice drift before any request", as
     /voice configuration is outside the allowlist/u
   );
   assert.equal(fetchCalls, 0);
+});
+
+test("narration prevalidates the final scene before secrets, files, or requests", async () => {
+  const configuredRunnerTemp = process.env.RUNNER_TEMP;
+  assert.ok(
+    configuredRunnerTemp,
+    "RUNNER_TEMP must be supplied by the CI test runner"
+  );
+  const ciTemp = realpathSync(configuredRunnerTemp);
+  const fixture = mkdtempSync(join(ciTemp, "archon-narration-plan-unit-"));
+  try {
+    const plan = structuredClone(loadScenePlan());
+    const finalScene = plan.scenes.at(-1);
+    assert.ok(finalScene);
+    finalScene.narration = `${finalScene.narration} drift`;
+    const planPath = writeFileAtomic(
+      fixture,
+      "scene-plan.json",
+      `${JSON.stringify(plan, null, 2)}\n`,
+      { encoding: "utf8" }
+    );
+    let fetchCalls = 0;
+    let secretReads = 0;
+    const videoRoot = join(fixture, "video-root");
+    const env: NodeJS.ProcessEnv = {
+      RUNNER_TEMP: ciTemp,
+      DEMO_VIDEO_ROOT: videoRoot,
+      DEMO_VIDEO_EXPECTED_SHA: "a".repeat(40),
+      GITHUB_SHA: "a".repeat(40),
+      DEMO_VIDEO_VOICE_RIGHTS_ATTESTED: "true",
+    };
+    Object.defineProperty(env, "ELEVENLABS_API_KEY", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        secretReads += 1;
+        return "unit-test-key-not-a-real-secret";
+      },
+    });
+    await assert.rejects(
+      generateNarration({
+        env,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("fetch must not be reached");
+        },
+        planPath,
+      }),
+      /canonical allowlist/u
+    );
+    assert.equal(fetchCalls, 0);
+    assert.equal(secretReads, 0);
+    assert.equal(existsSync(videoRoot), false);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("narration rejects a GITHUB_SHA mismatch before secrets, files, or API calls", async () => {

@@ -110,7 +110,10 @@ jobs:
           test -f "${receipt_temp}"
           test ! -L "${receipt_temp}"
           chmod 0600 -- "${receipt_temp}"
-          mv -- "${receipt_temp}" "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          mv -n -- "${receipt_temp}" "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          test ! -e "${receipt_temp}"
+          test -f "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          test ! -L "${DEMO_VIDEO_RELEASE_RECEIPT}"
           trap - EXIT
           test -n "${GITHUB_TOKEN}"
           test -s "${DEMO_VIDEO_RELEASE_RECEIPT}"
