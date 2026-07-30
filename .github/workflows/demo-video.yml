@@ -74,9 +74,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          require_no_rg_match() {
+          require_no_grep_match() {
             local status
-            if rg --quiet "$@"; then
+            if grep --quiet "$@"; then
               echo "Credential material was detected in a sanitized receipt." >&2
               return 1
             else
@@ -119,10 +119,10 @@ jobs:
           test -s "${DEMO_VIDEO_RELEASE_RECEIPT}"
           encoded_token="$(printf '%s' "${GITHUB_TOKEN}" | base64 -w0)"
           for candidate in "${GITHUB_TOKEN}" "${encoded_token}"; do
-            require_no_rg_match -F -- \
+            require_no_grep_match -F -- \
               "${candidate}" "${DEMO_VIDEO_RELEASE_RECEIPT}"
           done
-          require_no_rg_match -i -e \
+          require_no_grep_match -i -E -e \
             "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
             "${DEMO_VIDEO_RELEASE_RECEIPT}"
       - name: Upload sanitized release binding
@@ -187,9 +187,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          require_no_rg_match() {
+          require_no_grep_match() {
             local status
-            if rg --quiet "$@"; then
+            if grep --quiet "$@"; then
               echo "Credential material was detected in narration output." >&2
               return 1
             else
@@ -201,7 +201,7 @@ jobs:
           test -n "${ELEVENLABS_API_KEY}"
           encoded_key="$(printf '%s' "${ELEVENLABS_API_KEY}" | base64 -w0)"
           for candidate in "${ELEVENLABS_API_KEY}" "${encoded_key}"; do
-            require_no_rg_match -F -- "${candidate}" \
+            require_no_grep_match -F -- "${candidate}" \
               "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" \
               "${DEMO_VIDEO_ROOT}/narration/captions.en.srt"
           done
@@ -209,9 +209,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          require_no_rg_match() {
+          require_no_grep_match() {
             local status
-            if rg --quiet "$@"; then
+            if grep --quiet "$@"; then
               echo "Credential material was detected in narration handoff." >&2
               return 1
             else
@@ -227,7 +227,7 @@ jobs:
              and .allAlignmentsValid == true
              and .sceneCount == 7' \
             "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" >/dev/null
-          require_no_rg_match -i -e \
+          require_no_grep_match -i -E -e \
             "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=])" \
             "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" \
             "${DEMO_VIDEO_ROOT}/narration/captions.en.srt"
@@ -592,9 +592,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          require_no_rg_match() {
+          require_no_grep_match() {
             local status
-            if rg --quiet "$@"; then
+            if grep --quiet "$@"; then
               echo "Credential material was detected in the review package." >&2
               return 1
             else
@@ -607,7 +607,7 @@ jobs:
               \( -name '*.json' -o -name '*.srt' -o -name '*.txt' \) -print0
           )
           test "${#uploadable[@]}" -ge 5
-          require_no_rg_match -i -e \
+          require_no_grep_match -i -E -e \
             "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
             "${uploadable[@]}"
       - name: Upload verified review package
@@ -647,9 +647,9 @@ jobs:
           VOICE_RIGHTS_ATTESTED: ${{ inputs.voice_rights_attested }}
         run: |
           set -euo pipefail
-          require_no_rg_match() {
+          require_no_grep_match() {
             local status
-            if rg --quiet "$@"; then
+            if grep --quiet "$@"; then
               echo "Credential material was detected in publication provenance." >&2
               return 1
             else
@@ -741,7 +741,7 @@ jobs:
                "captionsSha256": $captions_sha,
                "verificationReceiptSha256": $verification_sha
              }' "${publication}" >/dev/null
-          require_no_rg_match -i -e \
+          require_no_grep_match -i -E -e \
             "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
             "${publication}"
       - name: Upload canonical publication provenance
