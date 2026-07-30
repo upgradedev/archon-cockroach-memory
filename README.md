@@ -534,7 +534,23 @@ verification in hosted CI. Do not commit
 `node_modules`, `dist`, `.aws-sam`, Playwright output, readiness output, or
 generated video assets.
 
-## Current evidence state
+## Pinned release evidence
+
+The latest fully evidenced feature-bearing release baseline recorded before
+this documentation-only update is
+[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
+It is jointly bound to the successful
+[main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157603),
+[CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157215),
+[Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206),
+[exact-release Hosted DAST](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259),
+[standalone Managed MCP](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779),
+and [manual dual-environment recovery audit](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552).
+The exact artifact IDs and SHA-256 digests are recorded in
+[the judge-application evidence ledger](./docs/DEMO_URL.md).
+The ledger is immutable historical evidence for that exact SHA; later
+documentation-only commits must earn their own pipeline evidence and do not
+rewrite this baseline.
 
 | Evidence | State |
 |---|---|

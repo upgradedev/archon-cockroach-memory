@@ -6,6 +6,59 @@ The unrestricted production application is:
 
 **https://d2s5v0o0eg2aaw.cloudfront.net**
 
+## Pinned exact feature-release baseline — 2026-07-30
+
+The latest fully evidenced feature-bearing release baseline recorded before
+this documentation-only update is commit
+[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
+Every item below is hosted evidence for that exact SHA:
+
+| Gate | Exact hosted evidence |
+|---|---|
+| Main CI | [Run 30533157603](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157603), all nine jobs successful |
+| Code scanning | [CodeQL run 30533157215](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157215), successful with the prior receipt-flow alert fixed by analysis rather than dismissed |
+| AWS + CockroachDB release | [Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206), attempt 1, six successful jobs covering every required deployment operation |
+| Exact-release active + passive DAST | [Hosted DAST run 30535119259](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259), source-bound to Deploy run `30533467206/1` |
+| Independent CockroachDB proof | [Managed MCP run 30535180779](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779), protected read-only production audit |
+| Independent AWS protection/drift proof | [Recover AWS run 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552), manual `operation=audit`, both staging and production jobs successful |
+
+Hosted measurements from the exact main CI run:
+
+- backend unit/integration suite: 360 tests, 357 passed, 3 intentionally
+  skipped, 0 failed; 94.70% lines, 82.99% branches, 94.06% functions;
+- frontend: 42/42 unit tests and 4/4 desktop/mobile Playwright journeys;
+  90.66% statements, 86.60% branches, 97.50% functions, 93.72% lines;
+- k6: 554/554 checks, 0.00% request failures, 100.00% recall correctness,
+  and 773.67 ms p95 at 20 concurrent virtual users;
+- C-SPANN smoke: 98.6% mean recall@10 and 5.01 ms p95 over 1,500 vectors;
+- exact-release active DAST: 16/16 checks; and
+- exact-release ZAP: 13 URLs, 63 PASS, 0 FAIL, 0 WARN, with CSP alert
+  `10055` and site-isolation alert `90004` both passing.
+
+Key immutable evidence artifacts are unexpired and digest-bound by GitHub:
+
+- [production deployment receipt 8756292172](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206/artifacts/8756292172):
+  `sha256:bab56a7f036ab5ad45fad91a22ebfe538621e76233a4a7bc73cecd35c442a2c8`;
+- [exact-release DAST receipt 8756315429](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259/artifacts/8756315429):
+  `sha256:af6d93f95fd15301db2dfc013f9bbd4a3aec3e7d212ae9e9ddbacedfb3466b57`;
+- [exact-release ZAP report 8756374638](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259/artifacts/8756374638):
+  `sha256:0ebbd7f9d43e07d3dd3716afa17f5c548c25c65b61c0e0c387c80bef3ccd6173`;
+- [standalone Managed MCP receipt 8756341014](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779/artifacts/8756341014):
+  `sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`;
+- [staging protection/drift audit 8756347685](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552/artifacts/8756347685):
+  `sha256:a0420d78238c58dcd20ee987fd9241c4c33d6e11938f93cde6069143122dd342`;
+  and
+- [production protection/drift audit 8756366419](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552/artifacts/8756366419):
+  `sha256:fa3462af7ec8770273f41a09cba19f81735570eb7b3c525af4967fae03eb1c44`.
+
+These links are evidence references, not repository artifacts. No generated
+receipt, coverage output, ZAP report, build tree, or video file is stored in the
+workspace. This immutable baseline remains valid when a later documentation-only
+commit advances `main`; that later commit must pass the live pipeline gates on
+its own.
+
+## Historical exact-release milestones
+
 The first fully verified exact-SHA cutover baseline is:
 
 - commit
