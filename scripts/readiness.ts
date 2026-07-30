@@ -1813,6 +1813,9 @@ function sourceChecks(): SourceCheck[] {
   const demoVideoCapture = read(
     "web/video/capture-production.mjs"
   );
+  const demoVideoCaptureMarkerSelfTest = read(
+    "web/video/capture-marker-selftest.mjs"
+  );
   const demoVideoTests = read("tests/demo-video.test.ts");
   const finalSubmissionGate = read(
     "scripts/final-submission-gate.ts"
@@ -4838,12 +4841,33 @@ function sourceChecks(): SourceCheck[] {
         /with-timestamps/u.test(demoVideoNarration) &&
         /ELEVENLABS_API_KEY/u.test(demoVideoNarration) &&
         demoVideoNarration.includes("const CANONICAL_VOICE") &&
+        demoVideoNarration.includes(
+          "NARRATION_MAX_WORDS_PER_MINUTE = 85"
+        ) &&
         demoVideoNarration.includes("canonicalNarrationForScene") &&
         demoVideoNarration.includes("requireCanonicalVoice") &&
+        demoVideoNarration.includes("validateNarrationWordBudgets(plan)") &&
         demoVideoTests.includes(
           "narration prevalidates the final scene before secrets, files, or requests"
         ) &&
+        demoVideoTests.includes(
+          "canonical narration stays within the deterministic eighty-five-WPM budget"
+        ) &&
         !/edge-tts/iu.test(demoVideoNarration) &&
+        /async function ensureCaptureOverlay/u.test(demoVideoCapture) &&
+        /getImageData\(0, 0, 1, 1\)/u.test(demoVideoCapture) &&
+        /style\.setProperty\([\s\S]*?"background-color"[\s\S]*?"important"/u.test(
+          demoVideoCapture
+        ) &&
+        /marker failed computed-RGBA geometry verification/u.test(
+          demoVideoCapture
+        ) &&
+        /Verify video marker rendering and DOM reinjection in Chromium[\s\S]*?working-directory:\s*web[\s\S]*?node video\/capture-marker-selftest\.mjs/u.test(
+          ci
+        ) &&
+        /activateScene\(page, SCENES\[0\], CARD\)[\s\S]*?document\.getElementById\(id\)\?\.remove\(\)[\s\S]*?activateScene\(page, SCENES\[1\], CARD\)/u.test(
+          demoVideoCaptureMarkerSelfTest
+        ) &&
         /libx264/u.test(demoVideoBuilder) &&
         /loudnorm/u.test(demoVideoBuilder) &&
         /yuv420p/u.test(demoVideoBuilder) &&

@@ -490,6 +490,9 @@ jobs:
           fi
       - name: Install Chromium in the ephemeral runner
         run: npx --prefix web playwright install --with-deps chromium
+      - name: Verify video marker rendering and DOM reinjection in Chromium
+        working-directory: web
+        run: node video/capture-marker-selftest.mjs
       - name: Desktop and mobile judge journeys
         run: npm run test:e2e --prefix web
       - name: Upload browser diagnostics

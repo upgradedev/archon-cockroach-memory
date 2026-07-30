@@ -16,6 +16,7 @@ import {
   relative,
   resolve,
 } from "node:path";
+import { pathToFileURL } from "node:url";
 import { chromium } from "@playwright/test";
 
 const CANONICAL_ORIGIN = "https://d2s5v0o0eg2aaw.cloudfront.net";
@@ -33,8 +34,10 @@ const RECORDING_TAIL_SECONDS = 2;
 const MARKER_SIZE = 40;
 const MARKER_RIGHT = 24;
 const MARKER_BOTTOM = 24;
-const MARKER_SAMPLE_X = WIDTH - MARKER_RIGHT - MARKER_SIZE / 2;
-const MARKER_SAMPLE_Y = HEIGHT - MARKER_BOTTOM - MARKER_SIZE / 2;
+const MARKER_LEFT = WIDTH - MARKER_RIGHT - MARKER_SIZE;
+const MARKER_TOP = HEIGHT - MARKER_BOTTOM - MARKER_SIZE;
+const MARKER_SAMPLE_X = MARKER_LEFT + MARKER_SIZE / 2;
+const MARKER_SAMPLE_Y = MARKER_TOP + MARKER_SIZE / 2;
 const EXACT_SHA = /^[0-9a-f]{40}$/u;
 const EXACT_RUN_ID = /^[1-9][0-9]*$/u;
 const EXACT_RUNTIME_PRINCIPAL = /^archon_production_[0-9a-f]{10}$/u;
@@ -708,10 +711,18 @@ async function collectLiveProof(browser, releaseSha) {
   }
 }
 
-async function installCaptureOverlay(page) {
+export async function installCaptureOverlay(page) {
   await page.evaluate(
-    ({ markerSize, markerRight, markerBottom }) => {
+    ({ markerSize, markerLeft, markerTop, markerRight, markerBottom }) => {
       document.documentElement.style.scrollBehavior = "auto";
+      for (const id of [
+        "archon-capture-style",
+        "archon-production-overlay",
+        "archon-scene-marker",
+        "archon-scene-label",
+      ]) {
+        document.getElementById(id)?.remove();
+      }
       const style = document.createElement("style");
       style.id = "archon-capture-style";
       style.textContent = `
@@ -833,8 +844,8 @@ async function installCaptureOverlay(page) {
         #archon-scene-marker {
           position: fixed;
           z-index: 2147483646;
-          right: ${markerRight}px;
-          bottom: ${markerBottom}px;
+          left: ${markerLeft}px;
+          top: ${markerTop}px;
           width: ${markerSize}px;
           height: ${markerSize}px;
           pointer-events: none;
@@ -873,22 +884,32 @@ async function installCaptureOverlay(page) {
     },
     {
       markerSize: MARKER_SIZE,
+      markerLeft: MARKER_LEFT,
+      markerTop: MARKER_TOP,
       markerRight: MARKER_RIGHT,
       markerBottom: MARKER_BOTTOM,
     }
   );
 }
 
-function markerRgb(color) {
-  const red = Number.parseInt(color.slice(1, 3), 16);
-  const green = Number.parseInt(color.slice(3, 5), 16);
-  const blue = Number.parseInt(color.slice(5, 7), 16);
-  return `rgb(${red}, ${green}, ${blue})`;
+export async function ensureCaptureOverlay(page) {
+  const installed = await page.evaluate(() =>
+    [
+      "archon-capture-style",
+      "archon-production-overlay",
+      "archon-scene-marker",
+      "archon-scene-label",
+    ].every((id) => document.getElementById(id)?.isConnected === true)
+  );
+  if (!installed) {
+    await installCaptureOverlay(page);
+  }
 }
 
-async function activateScene(page, scene, card) {
+export async function activateScene(page, scene, card) {
+  await ensureCaptureOverlay(page);
   const observation = await page.evaluate(
-    ({ activeScene, content }) => {
+    async ({ activeScene, content }) => {
       const overlay = document.getElementById("archon-production-overlay");
       const marker = document.getElementById("archon-scene-marker");
       const markerLabel = document.getElementById("archon-scene-label");
@@ -898,7 +919,12 @@ async function activateScene(page, scene, card) {
       overlay.dataset.layout = content.layout;
       overlay.dataset.sceneId = activeScene.id;
       marker.dataset.sceneId = activeScene.id;
-      marker.style.backgroundColor = activeScene.color;
+      marker.dataset.expectedColor = activeScene.color;
+      marker.style.setProperty(
+        "background-color",
+        activeScene.color,
+        "important"
+      );
       markerLabel.textContent = activeScene.id.replaceAll("-", " ");
 
       const cardNode = document.createElement("div");
@@ -947,9 +973,48 @@ async function activateScene(page, scene, card) {
       cardNode.append(footer);
 
       overlay.append(cardNode);
+      await new Promise((resolvePaint) => {
+        const fallback = window.setTimeout(resolvePaint, 100);
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            window.clearTimeout(fallback);
+            resolvePaint();
+          });
+        });
+      });
+      const computed = getComputedStyle(marker);
+      const bounds = marker.getBoundingClientRect();
+      const sampleColor = (color) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d", {
+          alpha: true,
+          willReadFrequently: true,
+        });
+        if (!context) return null;
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        return Array.from(context.getImageData(0, 0, 1, 1).data);
+      };
       return {
         sceneId: marker.dataset.sceneId,
-        color: getComputedStyle(marker).backgroundColor,
+        declaredColor: marker.dataset.expectedColor,
+        expectedRgba: sampleColor(activeScene.color),
+        observedRgba: sampleColor(computed.backgroundColor),
+        left: bounds.left,
+        top: bounds.top,
+        sampleX: bounds.left + bounds.width / 2,
+        sampleY: bounds.top + bounds.height / 2,
+        width: bounds.width,
+        height: bounds.height,
+        opacity: Number(computed.opacity),
+        visible:
+          marker.isConnected &&
+          computed.display !== "none" &&
+          computed.visibility !== "hidden" &&
+          Number(computed.opacity) > 0,
       };
     },
     {
@@ -966,11 +1031,35 @@ async function activateScene(page, scene, card) {
       },
     }
   );
-  invariant(
+  const pixelsAgree =
+    Array.isArray(observation?.expectedRgba) &&
+    observation.expectedRgba.length === 4 &&
+    Array.isArray(observation?.observedRgba) &&
+    observation.observedRgba.length === 4 &&
+    observation.expectedRgba.every(
+      (channel, index) =>
+        Number.isInteger(channel) &&
+        channel >= 0 &&
+        channel <= 255 &&
+        observation.observedRgba[index] === channel
+    );
+  const markerObserved =
     observation?.sceneId === scene.id &&
-      observation.color === markerRgb(scene.color),
-    "A deterministic scene marker was not observed."
-  );
+    observation.declaredColor === scene.color &&
+    observation.left === MARKER_LEFT &&
+    observation.top === MARKER_TOP &&
+    observation.sampleX === MARKER_SAMPLE_X &&
+    observation.sampleY === MARKER_SAMPLE_Y &&
+    observation.width === MARKER_SIZE &&
+    observation.height === MARKER_SIZE &&
+    observation.opacity === 1 &&
+    observation.visible === true &&
+    pixelsAgree;
+  if (!markerObserved) {
+    throw new Error(
+      `Scene ${scene.id} marker failed computed-RGBA geometry verification: ${JSON.stringify(observation)}`
+    );
+  }
 }
 
 async function clearHighlights(page) {
@@ -1542,11 +1631,16 @@ function sanitizedFailureMessage(error) {
     .slice(0, 500);
 }
 
-main().catch((error) => {
-  console.error(
-    `Production capture failed closed in the hosted CI runner: ${sanitizedFailureMessage(
-      error
-    )}`
-  );
-  process.exitCode = 1;
-});
+if (
+  typeof process.argv[1] === "string" &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+) {
+  main().catch((error) => {
+    console.error(
+      `Production capture failed closed in the hosted CI runner: ${sanitizedFailureMessage(
+        error
+      )}`
+    );
+    process.exitCode = 1;
+  });
+}

@@ -10,6 +10,12 @@ export interface TimestampedNarrationResult {
   alignmentDuration: number;
 }
 
+export const NARRATION_MAX_WORDS_PER_MINUTE: 85;
+
+export function validateNarrationWordBudgets(
+  plan: DemoVideoPlan
+): true;
+
 export function validateTimestampedNarrationResponse(
   payload: unknown,
   scene: DemoVideoScene

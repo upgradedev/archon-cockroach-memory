@@ -66,8 +66,8 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> An AI agent can remember a plausible financial fact and still be wrong.
-> Archon Memory makes persistent memory disagree out loud before a CFO acts.
+> Agent memory can hold plausible but wrong financial facts. Archon Memory
+> exposes persistent disagreement before financial decisions.
 
 ### 0:12–0:27 — scope and architecture
 
@@ -78,9 +78,9 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> This is a public, synthetic, read-only AWS serverless application. CockroachDB
-> holds the relational truth, lifecycle, provenance, audit state, and native
-> vector memory in one serializable system.
+> On AWS serverless, this public synthetic demo keeps relational truth,
+> provenance, audit, and native vector memory in one serializable CockroachDB
+> system.
 
 ### 0:27–1:15 — live C-SPANN recall and grounding
 
@@ -95,14 +95,13 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> The agent idempotently stores embedded facts with provenance, lifecycle, and
-> payload-bound digests. This question is embedded by Titan and recalled through CockroachDB's native
-> C-SPANN index under the exact tenant, model, lifecycle, and company prefixes.
-> The answer reports a true employer cost of fifteen thousand three hundred
-> seventy-five euros and an off-bank wedge of six thousand seven hundred
-> seventy-five euros. Every claim links to an exact stored memory. If the model
-> wording fails citation, numeric, or claim checks, the app replaces it with a
-> deterministic rendering of the cited evidence.
+> Facts are stored idempotently with provenance, lifecycle, and payload-bound
+> digests. Titan embeds the question; CockroachDB recalls through native C-SPANN
+> under exact tenant, model, lifecycle, and company scopes. The result reports
+> employer cost of fifteen thousand three hundred seventy-five euros and an
+> off-bank wedge of six thousand seven hundred seventy-five euros. Every claim
+> links to stored memory. Failed citation, numeric, or claim checks trigger
+> deterministic evidence.
 
 ### 1:15–1:55 — contradiction and missing evidence
 
@@ -115,11 +114,11 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> Semantic recall is not a complete memory audit. This bounded exhaustive pass
-> finds a deliberate invoice conflict: eighteen thousand four hundred versus
-> eighteen thousand nine hundred euros. It recommends the higher-importance
-> evidence without rewriting either record. It also finds a reconciliation that
-> references payment PAY-118, which was never stored. Unknown stays unknown.
+> Semantic recall is not a complete audit. This bounded pass finds an invoice
+> conflict: eighteen thousand four hundred versus eighteen thousand nine hundred
+> euros. It recommends higher-importance evidence without rewriting either
+> record. It also finds payment PAY-118 referenced but never stored. Unknown
+> stays unknown.
 
 ### 1:55–2:20 — live proof ledger
 
@@ -133,11 +132,10 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> The live proof ledger identifies the exact release, database, role, region,
-> models, and catalog-backed vector index. It deterministically verifies nine persisted
-> memories, nine unique idempotency keys, and nine payload-bound content
-> digests. Separate reproducible evaluations cover larger corpora, RF-three
-> placement, and recall after one node is stopped.
+> The proof ledger binds the release, database, role, region, and vector index.
+> It verifies nine memories, nine idempotency keys, and nine content
+> digests. Evaluations cover larger corpora, RF-three placement, and recall after
+> one node stops.
 
 ### 2:20–2:40 — independent Managed MCP release proof
 
@@ -151,11 +149,9 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> The financial agent uses distributed vector indexing.
-> A separate deterministic release controller uses CockroachDB Cloud Managed MCP
-> for exactly four hosted read-only calls and accepts only the same fixed-scope nine-nine-nine result.
-> The receipt exposes no credentials, connection material, memory text, or
-> embeddings.
+> Separately, CockroachDB Cloud Managed MCP makes four hosted read-only calls and
+> accepts the fixed-scope nine-nine-nine result. Its receipt exposes no
+> credentials, connection material, memory text, or embeddings.
 
 ### 2:40–2:50 — impact and close
 
@@ -167,9 +163,8 @@ Devpost gallery; no local recapture or replacement is permitted.
 
 **Narration**
 
-> Archon Memory turns agent memory from a hidden cache into inspectable,
-> contradiction-aware financial evidence. The live demo and full source are
-> public.
+> Archon Memory makes hidden memory inspectable and contradiction-aware. The demo
+> and source are public.
 
 ## Recording checklist
 
