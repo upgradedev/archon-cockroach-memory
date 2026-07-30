@@ -164,8 +164,17 @@ jobs:
       # recall query fans out across those ranges and returns the correct top-k. Turns
       # docs/BENCHMARK.md Result 3b from asserted into tested. Offline it runs recall
       # correctness under the mock and skips the range assertions.
-      - name: Unit + integration tests (incl. multi-range fan-out)
-        run: npm test
+      - name: Unit + integration coverage gate (incl. multi-range fan-out)
+        run: npm run test:coverage
+
+      - name: Upload backend coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-coverage-${{ github.sha }}
+          path: coverage/backend/lcov.info
+          if-no-files-found: error
+          retention-days: 30
 
       # Fast benchmark smoke — proves the recall@k harness runs end-to-end and the
       # distributed vector index tracks exact NN above a floor (fails loudly if the
@@ -349,7 +358,20 @@ jobs:
             sleep 1
           done
       - name: k6 load test (p95 SLO + recall@1 under concurrency)
-        run: k6 run -e BASE_URL=http://localhost:8787 -e LOAD_N=2000 load/recall.js
+        run: >-
+          k6 run
+          --summary-export="${RUNNER_TEMP:?}/k6-summary.json"
+          -e BASE_URL=http://localhost:8787
+          -e LOAD_N=2000
+          load/recall.js
+      - name: Upload k6 load evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: k6-load-${{ github.sha }}
+          path: ${{ runner.temp }}/k6-summary.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Stop server
         if: always()
         run: kill "$(cat server.pid)" 2>/dev/null || true
@@ -379,6 +401,18 @@ jobs:
           version: 1.164.0
       - name: Install pinned CloudFormation linter
         run: python -m pip install --disable-pip-version-check cfn-lint==1.53.1
+      - name: Resolve the pinned frontend coverage lockfile
+        working-directory: web
+        run: |
+          npm install --package-lock-only --ignore-scripts --workspaces=false
+          git diff --exit-code -- package.json
+      - name: Upload the resolved frontend lockfile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: resolved-frontend-lock-${{ github.sha }}
+          path: web/package-lock.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Install locked backend and frontend dependencies
         run: |
           npm ci
@@ -387,12 +421,23 @@ jobs:
         run: |
           npm audit --audit-level=high
           npm audit --prefix web --audit-level=moderate
-      - name: Backend and frontend type/unit/build gates
+      - name: Backend and frontend type/build gates
         run: |
           npm run typecheck
           npm run typecheck --prefix web
-          npm test --prefix web
           npm run build --prefix web
+      - name: Frontend unit coverage gate
+        run: npm run test:coverage --prefix web
+      - name: Upload frontend coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: |
+            web/coverage/frontend/coverage-summary.json
+            web/coverage/frontend/lcov.info
+          if-no-files-found: error
+          retention-days: 30
       - name: Validate and build the serverless architecture
         run: |
           set -euo pipefail
