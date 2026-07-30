@@ -4678,7 +4678,7 @@ function sourceChecks(): SourceCheck[] {
           ) ?? []
         ).length === 4 &&
         !/ref:\s*main\s*$/mu.test(demoVideoWorkflow) &&
-        /Validate exact hosted release evidence and live proof[\s\S]*?encoded_token[\s\S]*?require_no_rg_match -F[\s\S]*?DEMO_VIDEO_RELEASE_RECEIPT/u.test(
+        /Validate exact hosted release evidence and live proof[\s\S]*?encoded_token[\s\S]*?require_no_grep_match -F[\s\S]*?DEMO_VIDEO_RELEASE_RECEIPT/u.test(
           demoVideoWorkflow
         ) &&
         demoVideoWorkflow.includes('receipt_base64="$(') &&
@@ -4727,7 +4727,7 @@ function sourceChecks(): SourceCheck[] {
         /Upload verified review package[\s\S]*?Create canonical publication provenance[\s\S]*?Upload canonical publication provenance[\s\S]*?Revalidate exact main after artifact publication/u.test(
           demoVideoWorkflow
         ) &&
-        /Create canonical publication provenance[\s\S]*?archon\.demo-video-publication[\s\S]*?require_no_rg_match -i -e[\s\S]*?Upload canonical publication provenance/u.test(
+        /Create canonical publication provenance[\s\S]*?archon\.demo-video-publication[\s\S]*?require_no_grep_match -i -E -e[\s\S]*?Upload canonical publication provenance/u.test(
           demoVideoWorkflow
         ) &&
         /package_artifact_digest="sha256:\$\{ARTIFACT_DIGEST\}"/u.test(
@@ -4741,10 +4741,16 @@ function sourceChecks(): SourceCheck[] {
             /\[\[ "\$\{(?:ARTIFACT_DIGEST|PROVENANCE_ARTIFACT_DIGEST)\}" =~ \^\[0-9a-f\]\{64\}\$ \]\]/gu
           ) ?? []
         ).length === 3 &&
-        !/!\s+rg\b/u.test(demoVideoWorkflow) &&
+        !/!\s+(?:grep|rg)\b/u.test(demoVideoWorkflow) &&
+        !/\brg\b/u.test(demoVideoWorkflow) &&
         (
-          demoVideoWorkflow.match(/if rg --quiet "\$@"; then/gu) ?? []
+          demoVideoWorkflow.match(/if grep --quiet "\$@"; then/gu) ?? []
         ).length === 5 &&
+        (
+          demoVideoWorkflow.match(
+            /require_no_grep_match -i -E -e/gu
+          ) ?? []
+        ).length === 4 &&
         (
           demoVideoWorkflow.match(
             /artifact_run_attempt:\s*\$\{\{\s*steps\.artifact_attempt\.outputs\.artifact_run_attempt\s*\}\}/gu
