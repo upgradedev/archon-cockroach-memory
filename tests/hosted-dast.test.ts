@@ -58,6 +58,17 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       );
     }
 
+    if (url.pathname === "/api/proof") {
+      return Response.json(
+        {
+          release: {
+            commitSha: "315d8b20b7195b5fd55fe216a8a76835585aa49d",
+          },
+        },
+        { status: 200, headers: securityHeaders }
+      );
+    }
+
     let status = 404;
     if (url.pathname === "/api/recall") {
       if (method !== "POST") status = 405;
@@ -87,9 +98,67 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       "https://d2s5v0o0eg2aaw.cloudfront.net"
     );
     assert.equal(receipt.passed, true);
-    assert.equal(receipt.checks.length, 14);
+    assert.equal(receipt.version, 2);
+    assert.equal(
+      receipt.releaseSha,
+      "315d8b20b7195b5fd55fe216a8a76835585aa49d"
+    );
+    assert.equal(receipt.checks.length, 15);
     assert.ok(receipt.checks.every((check) => check.status === "pass"));
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("hosted DAST fails closed when production is not the expected release", async () => {
+  const previous = process.env.DAST_EXPECTED_RELEASE_SHA;
+  const originalFetch = globalThis.fetch;
+  process.env.DAST_EXPECTED_RELEASE_SHA =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/") {
+      return new Response('<div id="root"></div>', {
+        status: 200,
+        headers: {
+          ...securityHeaders,
+          "content-type": "text/html; charset=utf-8",
+        },
+      });
+    }
+    if (url.pathname === "/api/health") {
+      return Response.json(
+        {
+          scope: {
+            tenantId: "public-demo",
+            company: "Helios SA",
+            access: "read-only",
+          },
+        },
+        { status: 200, headers: securityHeaders }
+      );
+    }
+    return Response.json(
+      {
+        release: {
+          commitSha: "315d8b20b7195b5fd55fe216a8a76835585aa49d",
+        },
+      },
+      { status: 200, headers: securityHeaders }
+    );
+  };
+
+  try {
+    await assert.rejects(
+      runHostedDast("https://d2s5v0o0eg2aaw.cloudfront.net"),
+      /expected a{40}, observed 315d8b20/u
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) {
+      delete process.env.DAST_EXPECTED_RELEASE_SHA;
+    } else {
+      process.env.DAST_EXPECTED_RELEASE_SHA = previous;
+    }
   }
 });

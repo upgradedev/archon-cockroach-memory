@@ -141,6 +141,52 @@ export async function runHostedDast(targetUrl) {
     observedStatus: health.status,
   });
 
+  const proof = await request(baseUrl, "/api/proof", {
+    headers: { origin: "https://untrusted.invalid" },
+  });
+  const proofBody = await proof.text();
+  invariant(
+    proof.status === 200,
+    `release-proof-boundary: expected 200, received ${proof.status}`
+  );
+  invariant(
+    proof.headers.get("content-type")?.toLowerCase().startsWith("application/json"),
+    "release-proof-boundary: proof response is not JSON"
+  );
+  invariant(
+    proof.headers.get("cache-control")?.toLowerCase().includes("no-store"),
+    "release-proof-boundary: API response is cacheable"
+  );
+  invariant(
+    !proof.headers.has("access-control-allow-origin"),
+    "release-proof-boundary: cross-origin access was enabled"
+  );
+  assertSecurityHeaders(proof, "release-proof-boundary");
+  assertNoLeak(proofBody, "release-proof-boundary");
+  const proofJson = JSON.parse(proofBody);
+  const targetReleaseSha = proofJson?.release?.commitSha;
+  invariant(
+    typeof targetReleaseSha === "string" &&
+      /^[a-f0-9]{40}$/u.test(targetReleaseSha),
+    "release-proof-boundary: canonical deployed release SHA is missing"
+  );
+  const expectedReleaseSha = process.env.DAST_EXPECTED_RELEASE_SHA;
+  if (expectedReleaseSha) {
+    invariant(
+      /^[a-f0-9]{40}$/u.test(expectedReleaseSha),
+      "DAST_EXPECTED_RELEASE_SHA must be a full lowercase commit SHA"
+    );
+    invariant(
+      targetReleaseSha === expectedReleaseSha,
+      `release-proof-boundary: expected ${expectedReleaseSha}, observed ${targetReleaseSha}`
+    );
+  }
+  checks.push({
+    id: "release-proof-boundary",
+    status: "pass",
+    observedStatus: proof.status,
+  });
+
   const jsonHeaders = { "content-type": "application/json" };
   const adversarialChecks = [
     {
@@ -260,11 +306,12 @@ export async function runHostedDast(targetUrl) {
 
   return {
     schema: "archon.hosted-dast",
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     targetOrigin: baseUrl,
-    releaseSha:
-      process.env.DAST_RELEASE_SHA ?? process.env.GITHUB_SHA ?? "unknown",
+    releaseSha: targetReleaseSha,
+    scannerSha:
+      process.env.DAST_SCANNER_SHA ?? process.env.GITHUB_SHA ?? "unknown",
     passed: checks.every((check) => check.status === "pass"),
     checks,
   };

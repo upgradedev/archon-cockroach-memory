@@ -6,10 +6,11 @@ export interface HostedDastCheck {
 
 export interface HostedDastReceipt {
   schema: "archon.hosted-dast";
-  version: 1;
+  version: 2;
   generatedAt: string;
   targetOrigin: string;
   releaseSha: string;
+  scannerSha: string;
   passed: boolean;
   checks: HostedDastCheck[];
 }

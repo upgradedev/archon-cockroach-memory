@@ -33,8 +33,8 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 82;
-export const EXPECTED_SETUP_NODE_STEPS = 15;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 94;
+export const EXPECTED_SETUP_NODE_STEPS = 17;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
@@ -47,6 +47,7 @@ export const EXPECTED_WORKFLOW_FILES = [
   "deploy-aws.yml",
   "managed-mcp-audit.yml",
   "recover-aws.yml",
+  "security-dast.yml",
   "submission-readiness.yml",
 ] as const;
 export const EXPECTED_DEPENDABOT_RELEASE_FREEZE = [
@@ -815,26 +816,99 @@ function hasExactMainPush(trigger: Map<unknown, unknown>): boolean {
 export function hasExactCiTrigger(source: string): boolean {
   const parsed = parseWorkflow(source);
   const trigger = parsed?.root.get("on");
-  if (!(trigger instanceof Map) || trigger.size !== 2) return false;
+  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
   return (
     hasExactMainPush(trigger) &&
-    trigger.get("pull_request") === null
+    trigger.get("pull_request") === null &&
+    trigger.get("workflow_dispatch") === null
   );
 }
 
 function hasExactCodeqlTrigger(source: string): boolean {
   const parsed = parseWorkflow(source);
   const trigger = parsed?.root.get("on");
-  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
+  if (!(trigger instanceof Map) || trigger.size !== 4) return false;
   const schedule = trigger.get("schedule");
   if (!Array.isArray(schedule) || schedule.length !== 1) return false;
   const entry = schedule[0];
   return (
     hasExactMainPush(trigger) &&
     trigger.get("pull_request") === null &&
+    trigger.get("workflow_dispatch") === null &&
     entry instanceof Map &&
     entry.size === 1 &&
     entry.get("cron") === "27 3 * * 1"
+  );
+}
+
+export function hasExactBenchmarkTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 2) return false;
+
+  const workflowDispatch = trigger.get("workflow_dispatch");
+  const schedule = trigger.get("schedule");
+  if (
+    !(workflowDispatch instanceof Map) ||
+    workflowDispatch.size !== 1 ||
+    !Array.isArray(schedule) ||
+    schedule.length !== 1
+  ) {
+    return false;
+  }
+  const inputs = workflowDispatch.get("inputs");
+  const scheduleEntry = schedule[0];
+  return (
+    inputs instanceof Map &&
+    inputs.size === 2 &&
+    exactWorkflowInput(inputs, "corpus_n", {
+      description: "Corpus size for the representative run",
+      default: "10000",
+    }) &&
+    exactWorkflowInput(inputs, "queries", {
+      description: "Number of probe queries",
+      default: "200",
+    }) &&
+    scheduleEntry instanceof Map &&
+    scheduleEntry.size === 1 &&
+    scheduleEntry.get("cron") === "17 3 * * 0"
+  );
+}
+
+export function hasExactHostedDastTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
+
+  const workflowRun = trigger.get("workflow_run");
+  const schedule = trigger.get("schedule");
+  if (
+    !(workflowRun instanceof Map) ||
+    workflowRun.size !== 3 ||
+    trigger.get("workflow_dispatch") !== null ||
+    !Array.isArray(schedule) ||
+    schedule.length !== 1
+  ) {
+    return false;
+  }
+
+  const workflows = workflowRun.get("workflows");
+  const branches = workflowRun.get("branches");
+  const types = workflowRun.get("types");
+  const scheduleEntry = schedule[0];
+  return (
+    Array.isArray(workflows) &&
+    workflows.length === 1 &&
+    workflows[0] === "Deploy AWS" &&
+    Array.isArray(branches) &&
+    branches.length === 1 &&
+    branches[0] === "main" &&
+    Array.isArray(types) &&
+    types.length === 1 &&
+    types[0] === "completed" &&
+    scheduleEntry instanceof Map &&
+    scheduleEntry.size === 1 &&
+    scheduleEntry.get("cron") === "43 4 * * 1"
   );
 }
 
@@ -1396,10 +1470,13 @@ export function hasUniqueCiTriggerOwnership(
     return false;
   }
   const expectedEvents = new Map<string, string[]>([
-    ["benchmark.yml", ["workflow_dispatch"]],
+    ["benchmark.yml", ["schedule", "workflow_dispatch"]],
     ["bootstrap-aws.yml", ["workflow_dispatch"]],
-    ["ci.yml", ["pull_request", "push"]],
-    ["codeql.yml", ["pull_request", "push", "schedule"]],
+    ["ci.yml", ["pull_request", "push", "workflow_dispatch"]],
+    [
+      "codeql.yml",
+      ["pull_request", "push", "schedule", "workflow_dispatch"],
+    ],
     [
       "database-release.yml",
       ["workflow_call", "workflow_dispatch"],
@@ -1408,6 +1485,10 @@ export function hasUniqueCiTriggerOwnership(
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
     [
       "recover-aws.yml",
+      ["schedule", "workflow_dispatch", "workflow_run"],
+    ],
+    [
+      "security-dast.yml",
       ["schedule", "workflow_dispatch", "workflow_run"],
     ],
     ["submission-readiness.yml", ["workflow_dispatch"]],
@@ -1430,21 +1511,31 @@ export function hasUniqueCiTriggerOwnership(
     }
   }
   const ci = workflows.find(({ name }) => name === "ci.yml");
+  const benchmark = workflows.find(
+    ({ name }) => name === "benchmark.yml"
+  );
   const codeql = workflows.find(({ name }) => name === "codeql.yml");
   const recovery = workflows.find(
     ({ name }) => name === "recover-aws.yml"
+  );
+  const hostedDast = workflows.find(
+    ({ name }) => name === "security-dast.yml"
   );
   const submission = workflows.find(
     ({ name }) => name === "submission-readiness.yml"
   );
   return (
     ci !== undefined &&
+    benchmark !== undefined &&
     codeql !== undefined &&
     recovery !== undefined &&
+    hostedDast !== undefined &&
     submission !== undefined &&
+    hasExactBenchmarkTrigger(benchmark.source) &&
     hasExactCiTrigger(ci.source) &&
     hasExactCodeqlTrigger(codeql.source) &&
     hasExactAwsRecoveryTrigger(recovery.source) &&
+    hasExactHostedDastTrigger(hostedDast.source) &&
     hasExactSubmissionReadinessTrigger(submission.source)
   );
 }
@@ -1488,6 +1579,9 @@ function sourceChecks(): SourceCheck[] {
   const dependabotConfig = read(".github/dependabot.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
   const recoveryWorkflow = read(".github/workflows/recover-aws.yml");
+  const securityDastWorkflow = read(
+    ".github/workflows/security-dast.yml"
+  );
   const submissionWorkflow = read(
     ".github/workflows/submission-readiness.yml"
   );
@@ -1587,10 +1681,18 @@ function sourceChecks(): SourceCheck[] {
   const finalSubmissionGate = read(
     "scripts/final-submission-gate.ts"
   );
+  const hostedDast = read("scripts/hosted-dast.mjs");
+  const hostedDastTests = read("tests/hosted-dast.test.ts");
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
   const packageSource = read("package.json");
+  const webPackageSource = read("web/package.json");
+  const webPackageLock = read("web/package-lock.json");
+  const backendCoverageRunner = read(
+    "scripts/run-backend-coverage.mjs"
+  );
+  const frontendTestConfig = read("web/vite.config.ts");
   const managedMcpAudit = read("scripts/cloud-mcp-audit.ts");
   const managedMcpAuditTests = read("tests/cloud-mcp-audit.test.ts");
   const managedMcpEvidenceDocs = [
@@ -1606,6 +1708,10 @@ function sourceChecks(): SourceCheck[] {
   const readinessJob =
     ci.match(
       /(?:^|\r?\n)  readiness:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const hostedDastCiJob =
+    ci.match(
+      /(?:^|\r?\n)  hosted-dast:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
   const managedMcpDeployJob =
     deploy.match(
@@ -2989,9 +3095,43 @@ function sourceChecks(): SourceCheck[] {
         /cluster-survival:/u.test(ci) &&
         /pen-test:/u.test(ci) &&
         /load:/u.test(ci) &&
+        /hosted-dast:/u.test(ci) &&
         /test:e2e/iu.test(ci),
-      "CI gates backend, real CockroachDB, node loss, security, load, frontend, SAM, and browser journeys.",
+      "CI gates backend, real CockroachDB, node loss, security, hosted DAST, load, frontend, SAM, and browser journeys.",
       "One or more release-critical CI jobs are missing."
+    ),
+    sourceCheck(
+      "tech.pipeline-coverage-evidence",
+      "Technical Implementation",
+      /"test:coverage":\s*"node scripts\/run-backend-coverage\.mjs"/u.test(
+        packageSource
+      ) &&
+        /if \(!runnerTemp\)[\s\S]*?Coverage is CI-only/u.test(
+          backendCoverageRunner
+        ) &&
+        /"archon-coverage",\s*\n?\s*"backend",\s*\n?\s*"lcov\.info"/u.test(
+          backendCoverageRunner
+        ) &&
+        /--test-coverage-lines=80/u.test(backendCoverageRunner) &&
+        /--test-coverage-branches=75/u.test(backendCoverageRunner) &&
+        /--test-coverage-functions=80/u.test(backendCoverageRunner) &&
+        /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/backend\/lcov\.info/u.test(
+          ci
+        ) &&
+        /@vitest\/coverage-v8":\s*"4\.1\.10"/u.test(webPackageSource) &&
+        /node_modules\/@vitest\/coverage-v8/u.test(webPackageLock) &&
+        /process\.env\.RUNNER_TEMP \?\? tmpdir\(\)/u.test(
+          frontendTestConfig
+        ) &&
+        /"archon-coverage",\s*\n?\s*"frontend"/u.test(frontendTestConfig) &&
+        /statements:\s*80[\s\S]*?branches:\s*75[\s\S]*?functions:\s*80[\s\S]*?lines:\s*80/u.test(
+          frontendTestConfig
+        ) &&
+        /path:\s*\|[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/coverage-summary\.json[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/lcov\.info/u.test(
+          ci
+        ),
+      "Backend and frontend coverage enforce 80/75/80 release floors and retain LCOV/summary evidence exclusively under the ephemeral CI runner.",
+      "Coverage thresholds, immutable tooling, CI-only output isolation, or uploaded evidence is incomplete."
     ),
     sourceCheck(
       "tech.managed-mcp-receipt-v2-gate",
@@ -3017,14 +3157,14 @@ function sourceChecks(): SourceCheck[] {
     sourceCheck(
       "tech.fail-closed-ci-aggregate",
       "Technical Implementation",
-      /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac\]/u.test(
+      /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u.test(
         readinessJob
       ) &&
         /^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/mu.test(readinessJob) &&
         /^    steps:\r?\n      - name: Require every prerequisite CI job to pass\s*$/mu.test(
           readinessJob
         ) &&
-        /length == 7 and all\(\.\[\];\s*\.result == "success"\)/u.test(
+        /length == 8 and all\(\.\[\];\s*\.result == "success"\)/u.test(
           readinessJob
         ),
       "The aggregate readiness check always runs and fails unless every prerequisite CI job succeeded.",
@@ -3061,8 +3201,8 @@ function sourceChecks(): SourceCheck[] {
       "Technical Implementation",
       hasExactCiTrigger(ci) &&
         hasUniqueCiTriggerOwnership(workflowEntries),
-      "The CI workflow runs once for main pushes and every pull request; only CI and the explicit CodeQL scan own those repository events.",
-      "CI triggers are duplicated repository-wide, omit main, or filter pull requests."
+      "The CI workflow runs once for main pushes and every pull request, supports an explicit manual audit retry, and retains exact trigger ownership across scheduled evidence workflows.",
+      "CI/evidence triggers are duplicated, mutable, omit main or pull requests, or lack the exact manual/scheduled audit contracts."
     ),
     sourceCheck(
       "tech.bedrock-grounding",
@@ -3274,6 +3414,56 @@ function sourceChecks(): SourceCheck[] {
         deploy.includes("reserved logical ID|unexpected behaviors"),
       "SAM defines the private S3/CloudFront/Lambda architecture and CI proves the drift-stable canonical access-log ARN, complete read-only drift discovery, non-reserved named stage, exact live CloudFront binding, throttling, metrics, and access logs before frontend mutation.",
       "The deployable AWS architecture, canonical access-log ARN, complete drift-discovery permissions, or live API stage-control proof is incomplete."
+    ),
+    sourceCheck(
+      "product.hosted-dast-release-gate",
+      "Production Readiness",
+      hasExactHostedDastTrigger(securityDastWorkflow) &&
+        hostedDastCiJob.length > 0 &&
+        /DAST_TARGET_URL:\s*https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net/u.test(
+          hostedDastCiJob
+        ) &&
+        /DAST_RECEIPT_PATH:\s*\$\{\{\s*runner\.temp\s*\}\}\/hosted-dast\.json/u.test(
+          hostedDastCiJob
+        ) &&
+        /node scripts\/hosted-dast\.mjs/u.test(hostedDastCiJob) &&
+        /zaproxy\/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874/u.test(
+          hostedDastCiJob
+        ) &&
+        /ghcr\.io\/zaproxy\/zaproxy:2\.17\.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2/u.test(
+          hostedDastCiJob
+        ) &&
+        /fail_action:\s*true/u.test(hostedDastCiJob) &&
+        /allow_issue_writing:\s*false/u.test(hostedDastCiJob) &&
+        /workflows:\s*\["Deploy AWS"\]/u.test(securityDastWorkflow) &&
+        /types:\s*\[completed\]/u.test(securityDastWorkflow) &&
+        /cron:\s*"43 4 \* \* 1"/u.test(securityDastWorkflow) &&
+        /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u.test(
+          securityDastWorkflow
+        ) &&
+        (
+          securityDastWorkflow.match(
+            /github\.event_name != 'workflow_run' \|\| github\.event\.workflow_run\.conclusion == 'success'/gu
+          ) ?? []
+        ).length === 2 &&
+        /EXPECTED_PRODUCTION_URL\s*=\s*\n?\s*"https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net"/u.test(
+          hostedDast
+        ) &&
+        /"\/api\/proof"/u.test(hostedDast) &&
+        /targetReleaseSha === expectedReleaseSha/u.test(hostedDast) &&
+        /schema:\s*"archon\.hosted-dast"[\s\S]*?version:\s*2/u.test(
+          hostedDast
+        ) &&
+        /flag:\s*"wx"/u.test(hostedDast) &&
+        /checks\.length,\s*15/u.test(hostedDastTests) &&
+        /fails closed when production is not the expected release/u.test(
+          hostedDastTests
+        ) &&
+        /refuses non-owned or non-HTTPS targets before fetching/u.test(
+          hostedDastTests
+        ),
+      "CI requires release-bound active API probes plus a SHA- and digest-pinned OWASP ZAP baseline; every successful AWS deployment receives the same exact-release scan and sanitized evidence.",
+      "The hosted DAST gate, exact deployed-release binding, immutable ZAP baseline, or adversarial regression coverage is incomplete."
     ),
     sourceCheck(
       "product.demo-concurrency-headroom",

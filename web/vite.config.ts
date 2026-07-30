@@ -1,7 +1,14 @@
 import react from "@vitejs/plugin-react";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 
 const proxyTarget = process.env.VITE_API_PROXY_TARGET;
+const coverageRoot = join(
+  process.env.RUNNER_TEMP ?? tmpdir(),
+  "archon-coverage",
+  "frontend"
+);
 
 export default defineConfig({
   plugins: [react()],
@@ -26,7 +33,7 @@ export default defineConfig({
       include: ["src/**/*.{ts,tsx}"],
       exclude: ["src/test/**", "src/**/*.d.ts"],
       reporter: ["text", "json-summary", "lcov"],
-      reportsDirectory: "coverage/frontend",
+      reportsDirectory: coverageRoot,
       thresholds: {
         statements: 80,
         branches: 75,

@@ -30,9 +30,11 @@ import {
   GENERATED_ARTIFACT_BASENAMES,
   hasExactAwsDeliveryConcurrency,
   hasExactAwsRecoveryTrigger,
+  hasExactBenchmarkTrigger,
   hasExactCiTrigger,
   hasExactCodeqlActionPins,
   hasExactDependabotReleaseFreeze,
+  hasExactHostedDastTrigger,
   hasExactHostedSmokeContracts,
   hasExactSubmissionReadinessTrigger,
   hasExactSubmissionWorkflowContract,
@@ -100,6 +102,64 @@ test("readiness: judge-facing concurrency has bounded in-flight headroom", () =>
   assert.ok(check);
   assert.equal(check.criterion, "Production Readiness");
   assert.equal(check.status, "pass", check.detail);
+});
+
+test("readiness: hosted DAST is release-bound and required by CI", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.hosted-dast-release-gate"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const hostedDast = readFileSync(
+    new URL("../.github/workflows/security-dast.yml", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    ci,
+    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u
+  );
+  assert.match(hostedDast, /workflows:\s*\["Deploy AWS"\]/u);
+  assert.match(
+    hostedDast,
+    /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u
+  );
+});
+
+test("readiness: coverage evidence is CI-only and thresholded", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "tech.pipeline-coverage-evidence"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Technical Implementation");
+  assert.equal(check.status, "pass", check.detail);
+
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const runner = readFileSync(
+    new URL("../scripts/run-backend-coverage.mjs", import.meta.url),
+    "utf8"
+  );
+  const frontend = readFileSync(
+    new URL("../web/vite.config.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(runner, /if \(!runnerTemp\)/u);
+  assert.doesNotMatch(ci, /path:\s*(?:web\/)?coverage\//u);
+  assert.match(
+    ci,
+    /\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/backend\/lcov\.info/u
+  );
+  assert.match(frontend, /process\.env\.RUNNER_TEMP \?\? tmpdir\(\)/u);
 });
 
 test("readiness: durable S3 CAS recovery is armed before mutation and closed by receipts", () => {
@@ -944,7 +1004,7 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   assert.ok(readinessJob);
   assert.match(
     readinessJob,
-    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac\]/u
+    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u
   );
   assert.match(
     readinessJob,
@@ -956,13 +1016,14 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   );
   assert.match(
     readinessJob,
-    /jq -e 'length == 7 and all\(\.\[\]; \.result == "success"\)'/u
+    /jq -e 'length == 8 and all\(\.\[\]; \.result == "success"\)'/u
   );
 });
 
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
+  assert.equal(EXPECTED_SETUP_NODE_STEPS, 17);
   assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
   assert.deepEqual(
     [...new Set(versions)],
@@ -970,7 +1031,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 82);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 94);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -1436,22 +1497,45 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   );
 });
 
-test("readiness: CI runs once for main pushes and for every pull request", () => {
+test("readiness: CI covers main, every pull request, and exact manual evidence retries", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/ci.yml", import.meta.url),
     "utf8"
   );
   assert.equal(hasExactCiTrigger(workflow), true);
+  assert.equal(
+    hasExactCiTrigger(workflow.replace("  workflow_dispatch:\n", "")),
+    false
+  );
+  assert.equal(
+    hasExactCiTrigger(
+      workflow.replace(
+        "  workflow_dispatch:",
+        "  workflow_dispatch:\n    inputs: {}"
+      )
+    ),
+    false
+  );
   const repositoryWorkflows = repositoryWorkflowSources();
   const recoveryWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "recover-aws.yml"
   );
+  const benchmarkWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "benchmark.yml"
+  );
   const submissionWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "submission-readiness.yml"
   );
+  const hostedDastWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "security-dast.yml"
+  );
   assert.ok(recoveryWorkflow);
+  assert.ok(benchmarkWorkflow);
   assert.ok(submissionWorkflow);
+  assert.ok(hostedDastWorkflow);
   assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
+  assert.equal(hasExactBenchmarkTrigger(benchmarkWorkflow.source), true);
+  assert.equal(hasExactHostedDastTrigger(hostedDastWorkflow.source), true);
   assert.equal(
     hasExactSubmissionReadinessTrigger(submissionWorkflow.source),
     true
@@ -1469,6 +1553,50 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
     ),
     false
   );
+  for (const mutation of [
+    hostedDastWorkflow.source.replace(
+      "    workflows: [\"Deploy AWS\"]",
+      "    workflows: [\"CI\"]"
+    ),
+    hostedDastWorkflow.source.replace(
+      "    branches: [main]",
+      "    branches: [release]"
+    ),
+    hostedDastWorkflow.source.replace(
+      "    types: [completed]",
+      "    types: [requested]"
+    ),
+    hostedDastWorkflow.source.replace(
+      '    - cron: "43 4 * * 1"',
+      '    - cron: "0 0 * * *"'
+    ),
+    hostedDastWorkflow.source.replace(
+      "  workflow_dispatch:",
+      "  workflow_dispatch:\n    inputs: {}"
+    ),
+  ]) {
+    assert.equal(hasExactHostedDastTrigger(mutation), false);
+  }
+  for (const mutation of [
+    benchmarkWorkflow.source.replace(
+      '    - cron: "17 3 * * 0"',
+      '    - cron: "0 0 * * *"'
+    ),
+    benchmarkWorkflow.source.replace(
+      '        default: "10000"',
+      '        default: "1000"'
+    ),
+    benchmarkWorkflow.source.replace(
+      '        default: "200"',
+      '        default: "20"'
+    ),
+    benchmarkWorkflow.source.replace(
+      "  schedule:",
+      "  push:\n  schedule:"
+    ),
+  ]) {
+    assert.equal(hasExactBenchmarkTrigger(mutation), false);
+  }
   assert.equal(
     hasExactAwsRecoveryTrigger(
       recoveryWorkflow.source.replace(
@@ -1575,7 +1703,7 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 9);
+  assert.equal(repositoryWorkflows.length, 10);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -1622,7 +1750,7 @@ test("readiness: CI runs once for main pushes and for every pull request", () =>
   for (const invalid of [
     "on:\n  push:\n  pull_request:",
     "on:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]",
-    "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:",
+    "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n  schedule:",
     "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\non:\n  workflow_dispatch:",
     "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\non :\n  workflow_dispatch:",
     "on:\n  push:\n    branches: [main]\n  pull_request:\nname: CI\n\"on\":\n  workflow_dispatch:",
