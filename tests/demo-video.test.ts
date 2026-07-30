@@ -68,6 +68,12 @@ const CAPTURE_PRODUCTION = join(
   "video",
   "capture-production.mjs"
 );
+const CAPTURE_SELFTEST = join(
+  ROOT,
+  "web",
+  "video",
+  "capture-marker-selftest.mjs"
+);
 const INSTALLER = join(
   ROOT,
   "demo",
@@ -405,8 +411,9 @@ test("canonical narration stays within the deterministic eighty-five-WPM budget"
   );
 });
 
-test("capture marker source gate requires normalized RGBA and DOM reinjection", () => {
+test("capture source gate requires normalized RGBA, DOM reinjection, and strict scene locators", () => {
   const capture = readFileSync(CAPTURE_PRODUCTION, "utf8");
+  const captureSelfTest = readFileSync(CAPTURE_SELFTEST, "utf8");
   assert.match(capture, /async function ensureCaptureOverlay/u);
   assert.match(capture, /getImageData\(0, 0, 1, 1\)/u);
   assert.match(capture, /requestAnimationFrame/u);
@@ -418,7 +425,27 @@ test("capture marker source gate requires normalized RGBA and DOM reinjection", 
   assert.match(capture, /observation\.sampleY === MARKER_SAMPLE_Y/u);
   assert.match(capture, /observation\.opacity === 1/u);
   assert.match(capture, /marker failed computed-RGBA geometry verification/u);
+  assert.match(capture, /resolveCanonicalAuditLocators/u);
+  assert.match(capture, /section\[aria-labelledby="audit-title"\]/u);
+  assert.match(capture, /\^INV-2043\\s\*\\\/\\s\*total\$/u);
+  assert.match(capture, /level:\s*3/u);
+  assert.match(capture, /The capture highlight target was not unique/u);
+  assert.match(capture, /\.filter\(\{ hasText: "€15,375" \}\)/u);
+  assert.match(capture, /\.filter\(\{ hasText: "€6,775" \}\)/u);
   assert.doesNotMatch(capture, /observation\.color === markerRgb/u);
+  assert.doesNotMatch(
+    capture,
+    /getByRole\("heading", \{ name: \/INV-2043\/u \}\)/u
+  );
+  assert.match(
+    captureSelfTest,
+    /strict audit-locator fixture did not reproduce the ambiguous heading/u
+  );
+  assert.match(captureSelfTest, /formerlyAmbiguousHeadings\.count\(\)/u);
+  assert.match(
+    captureSelfTest,
+    /resolveCanonicalAuditLocators\(page\)/u
+  );
 });
 
 test("capture receipt binds exactly eight screenshots retained in the final package", () => {

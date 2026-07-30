@@ -2,6 +2,7 @@ import { chromium } from "@playwright/test";
 import {
   activateScene,
   installCaptureOverlay,
+  resolveCanonicalAuditLocators,
 } from "./capture-production.mjs";
 
 const VIEWPORT = Object.freeze({ width: 1920, height: 1080 });
@@ -49,6 +50,42 @@ try {
     if (finalScene !== SCENES[1].id) {
       throw new Error("Capture marker self-test did not restore the expected scene");
     }
+
+    await page.setContent(`
+      <!doctype html>
+      <html>
+        <body>
+          <h2>Off-bank employment cost at INV-2043</h2>
+          <section aria-labelledby="audit-title">
+            <h2 id="audit-title">The memory audits itself.</h2>
+            <article>
+              <h3>INV-2043<span>/</span><span>total</span></h3>
+              <p>18,400</p>
+              <p>18,900</p>
+              <p>18,400</p>
+            </article>
+            <article>
+              <h3>PAY-118</h3>
+              <p>No automatic mutation</p>
+            </article>
+          </section>
+        </body>
+      </html>
+    `);
+    const formerlyAmbiguousHeadings = page.getByRole("heading", {
+      name: /INV-2043/u,
+    });
+    if ((await formerlyAmbiguousHeadings.count()) !== 2) {
+      throw new Error(
+        "The strict audit-locator fixture did not reproduce the ambiguous heading"
+      );
+    }
+    const auditLocators = await resolveCanonicalAuditLocators(page);
+    await auditLocators.conflictHeading.waitFor({ state: "visible" });
+    await auditLocators.primaryValue.waitFor({ state: "visible" });
+    await auditLocators.competingValue.waitFor({ state: "visible" });
+    await auditLocators.absenceHeading.waitFor({ state: "visible" });
+    await auditLocators.noAutomaticMutation.waitFor({ state: "visible" });
   } finally {
     await context.close();
   }
@@ -57,5 +94,5 @@ try {
 }
 
 process.stdout.write(
-  "Capture marker Chromium self-test passed computed RGBA, geometry, and DOM reinjection.\n"
+  "Capture Chromium self-test passed computed RGBA, geometry, DOM reinjection, and strict audit locators.\n"
 );
