@@ -1,15 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { deflateRawSync } from "node:zlib";
 import {
   exactPublicScope,
   exactSequentialCitationMarkers,
+  extractSingleJsonArtifact,
   expectedPreSubmitDisplayTitle,
   type GitHubWorkflowRun,
   parseWorkflowJobs,
   parseWorkflowRuns,
+  parseWorkflowArtifacts,
+  requireArtifactArchiveDigest,
+  requireExactHostedDastReceipt,
   requireFreshGeneratedAt,
   requirePostDeployAuditTiming,
+  requireSuccessfulDeployJobs,
+  requireSuccessfulHostedDastJobs,
   requireSuccessfulRecoveryAuditJobs,
+  selectExactHostedDastArtifact,
   selectSuccessfulRun,
   validSubmissionCopyMetadata,
   validDevpostPageContract,
@@ -87,6 +96,236 @@ function recoveryJobs(runId = 303, sha = SHA): Record<string, unknown> {
         "Upload production daily protection and drift audit"
       ),
     ],
+  };
+}
+
+function hostedDastJobs(runId = 302, sha = SHA): Record<string, unknown> {
+  const job = (id: number, name: string, steps: string[]) => ({
+    id,
+    run_id: runId,
+    head_sha: sha,
+    name,
+    status: "completed",
+    conclusion: "success",
+    steps: steps.map((step) => ({
+      name: step,
+      status: "completed",
+      conclusion: "success",
+    })),
+  });
+  return {
+    total_count: 3,
+    jobs: [
+      job(500, "Validate Hosted DAST source deployment", [
+        "Require successful operation-bound Deploy AWS source",
+      ]),
+      job(501, "Bounded active API and browser-boundary probes", [
+        "Run fail-closed hosted adversarial probes",
+        "Upload sanitized hosted DAST receipt",
+      ]),
+      job(502, "OWASP ZAP passive and AJAX-spider baseline", [
+        "Scan the owned public production release",
+      ]),
+    ],
+  };
+}
+
+function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
+  const job = (id: number, name: string, steps: string[]) => ({
+    id,
+    run_id: runId,
+    head_sha: sha,
+    name,
+    status: "completed",
+    conclusion: "success",
+    steps: steps.map((step) => ({
+      name: step,
+      status: "completed",
+      conclusion: "success",
+    })),
+  });
+  return {
+    total_count: 6,
+    jobs: [
+      job(600, "Validate Deploy AWS source CI", [
+        "Require successful exact-main push CI source",
+      ]),
+      job(601, "Verify CI SHA and build once", [
+        "Prove the CI SHA is still the main branch head",
+        "Prove CodeQL succeeded for the exact release SHA",
+        "Test and build the frontend",
+        "Validate and build the SAM application",
+        "Create sanitized build receipt",
+        "Upload immutable candidate",
+      ]),
+      job(602, "Deploy and smoke staging", [
+        "Deploy staging with recovery-safe SAM canary",
+        "Smoke the same-origin application and real recall path",
+        "Hosted Chromium judge journey on staging",
+        "Build and validate sanitized staging deployment receipt",
+        "Upload staging receipt",
+      ]),
+      job(603, "Promote identical candidate to production", [
+        "Deploy production with recovery-safe SAM canary",
+        "Smoke production through CloudFront",
+        "Hosted Chromium judge journey on production",
+        "Build and validate sanitized production deployment receipt",
+        "Commit the receipt-bound production recovery intent",
+        "Upload production receipt",
+      ]),
+      job(
+        604,
+        "Prove production memory through CockroachDB Managed MCP",
+        [
+          "Run bounded read-only Managed MCP proof",
+          "Upload sanitized Managed MCP receipt",
+        ]
+      ),
+      job(605, "Reusable database release evidence", []),
+    ],
+  };
+}
+
+function testCrc32(value: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function storedZip(path: string, value: unknown): Uint8Array {
+  const name = Buffer.from(path, "utf8");
+  const content = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  const crc = testCrc32(content);
+  const flags = 0x0800;
+
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(flags, 6);
+  local.writeUInt16LE(0, 8);
+  local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(content.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(name.length, 26);
+
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(flags, 8);
+  central.writeUInt16LE(0, 10);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(content.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(name.length, 28);
+
+  const localEntry = Buffer.concat([local, name, content]);
+  const centralEntry = Buffer.concat([central, name]);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(centralEntry.length, 12);
+  eocd.writeUInt32LE(localEntry.length, 16);
+  return Buffer.concat([localEntry, centralEntry, eocd]);
+}
+
+function descriptorZip(path: string, value: unknown): Uint8Array {
+  const name = Buffer.from(path, "utf8");
+  const content = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  const compressed = deflateRawSync(content);
+  const crc = testCrc32(content);
+  const flags = 0x0008;
+
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(flags, 6);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt16LE(name.length, 26);
+
+  const descriptor = Buffer.alloc(16);
+  descriptor.writeUInt32LE(0x08074b50, 0);
+  descriptor.writeUInt32LE(crc, 4);
+  descriptor.writeUInt32LE(compressed.length, 8);
+  descriptor.writeUInt32LE(content.length, 12);
+
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(flags, 8);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(compressed.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(name.length, 28);
+
+  const localEntry = Buffer.concat([
+    local,
+    name,
+    compressed,
+    descriptor,
+  ]);
+  const centralEntry = Buffer.concat([central, name]);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(centralEntry.length, 12);
+  eocd.writeUInt32LE(localEntry.length, 16);
+  return Buffer.concat([localEntry, centralEntry, eocd]);
+}
+
+function hostedDastReceipt(
+  deployRun: GitHubWorkflowRun,
+  hostedDastRun: GitHubWorkflowRun
+): Record<string, unknown> {
+  const ids = [
+    "root-security-headers",
+    "health-boundary",
+    "release-proof-boundary",
+    "audit-boundary",
+    "method-boundary-get",
+    "method-boundary-delete",
+    "content-type-boundary",
+    "malformed-json-boundary",
+    "body-size-boundary",
+    "question-size-boundary",
+    "fixed-scope-sql-injection",
+    "kind-enumeration-boundary",
+    "limit-boundary",
+    "write-route-absent",
+    "audit-scope-injection",
+    "unknown-route-boundary",
+  ];
+  const statuses = [
+    200, 200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400,
+    404, 400, 404,
+  ];
+  return {
+    schema: "archon.hosted-dast",
+    version: 3,
+    generatedAt: "2026-07-29T12:03:00.000Z",
+    profile: "exact-release",
+    targetOrigin: "https://d2s5v0o0eg2aaw.cloudfront.net",
+    releaseSha: SHA,
+    scannerSha: SHA,
+    scannerRunId: hostedDastRun.id,
+    scannerRunAttempt: hostedDastRun.run_attempt,
+    sourceDeployRunId: deployRun.id,
+    sourceDeployRunAttempt: deployRun.run_attempt,
+    passed: true,
+    checks: ids.map((id, index) => ({
+      id,
+      status: "pass",
+      observedStatus: statuses[index],
+    })),
   };
 }
 
@@ -170,6 +409,338 @@ test("final gate: a newer failed or queued run blocks an older success", () => {
   }
 });
 
+test("final gate: exact-release Hosted DAST selection is workflow-run and path bound", () => {
+  const hostedDast = workflowRun({
+    id: 150,
+    name: "Hosted DAST",
+    display_title: "Hosted DAST",
+    path: ".github/workflows/security-dast.yml",
+    event: "workflow_run",
+  });
+  assert.equal(
+    selectSuccessfulRun(
+      [hostedDast],
+      "Hosted DAST",
+      "workflow_run",
+      SHA,
+      ".github/workflows/security-dast.yml"
+    ).id,
+    hostedDast.id
+  );
+  for (const mutation of [
+    { ...hostedDast, event: "workflow_dispatch" },
+    { ...hostedDast, path: ".github/workflows/ci.yml" },
+    { ...hostedDast, head_sha: "b".repeat(40) },
+    { ...hostedDast, name: "Not Hosted DAST" },
+  ]) {
+    assert.throws(() =>
+      selectSuccessfulRun(
+        [mutation],
+        "Hosted DAST",
+        "workflow_run",
+        SHA,
+        ".github/workflows/security-dast.yml"
+      )
+    );
+  }
+});
+
+test("final gate: Hosted DAST artifact is unique, unexpired, and operation named", () => {
+  const deploy = workflowRun({
+    id: 201,
+    name: "Deploy AWS",
+    display_title: "Deploy AWS",
+    path: ".github/workflows/deploy-aws.yml",
+    run_started_at: "2026-07-29T11:45:00.000Z",
+    updated_at: "2026-07-29T12:00:00.000Z",
+  });
+  const hostedDast = workflowRun({
+    id: 302,
+    name: "Hosted DAST",
+    display_title: "Hosted DAST",
+    path: ".github/workflows/security-dast.yml",
+    event: "workflow_run",
+    run_started_at: "2026-07-29T12:01:00.000Z",
+    updated_at: "2026-07-29T12:05:00.000Z",
+  });
+  const expectedName =
+    `hosted-dast-${SHA}-${deploy.id}-${deploy.run_attempt}-${hostedDast.run_attempt}`;
+  const artifact = {
+    id: 700,
+    name: expectedName,
+    size_in_bytes: 512,
+    archive_download_url:
+      "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/700/zip",
+    digest: `sha256:${"0".repeat(64)}`,
+    expired: false,
+    created_at: "2026-07-29T12:04:00.000Z",
+    updated_at: "2026-07-29T12:04:30.000Z",
+    workflow_run: {
+      id: hostedDast.id,
+      head_sha: SHA,
+    },
+  };
+  const zapArtifact = {
+    ...artifact,
+    id: 702,
+    name: `zap-baseline-${SHA}-${hostedDast.run_attempt}`,
+    archive_download_url:
+      "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/702/zip",
+    digest: `sha256:${"1".repeat(64)}`,
+  };
+  const response = {
+    total_count: 2,
+    artifacts: [artifact, zapArtifact],
+  };
+  const parsed = parseWorkflowArtifacts(response);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0]?.id, artifact.id);
+  assert.equal(
+    selectExactHostedDastArtifact(
+      response,
+      expectedName,
+      hostedDast
+    ).name,
+    expectedName
+  );
+  assert.equal(
+    selectExactHostedDastArtifact(
+      response,
+      zapArtifact.name,
+      hostedDast
+    ).id,
+    zapArtifact.id
+  );
+
+  const mutation = (
+    changes: Record<string, unknown>
+  ): Record<string, unknown> => ({
+    total_count: 1,
+    artifacts: [{ ...artifact, ...changes }],
+  });
+  for (const invalid of [
+    mutation({ name: `hosted-dast-${SHA}-999-1` }),
+    mutation({ expired: true }),
+    mutation({
+      workflow_run: { id: 999, head_sha: SHA },
+    }),
+    mutation({
+      workflow_run: {
+        id: hostedDast.id,
+        head_sha: "b".repeat(40),
+      },
+    }),
+    mutation({ digest: "sha256:not-a-digest" }),
+    {
+      total_count: 2,
+      artifacts: [artifact],
+    },
+    {
+      total_count: 2,
+      artifacts: [
+        artifact,
+        {
+          ...artifact,
+          id: 701,
+          archive_download_url:
+            "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/701/zip",
+        },
+      ],
+    },
+  ]) {
+    assert.throws(() =>
+      selectExactHostedDastArtifact(
+        invalid,
+        expectedName,
+        hostedDast
+      )
+    );
+  }
+});
+
+test("final gate: Hosted DAST ZIP accepts one integrity-checked JSON receipt", () => {
+  const deploy = workflowRun({
+    id: 201,
+    name: "Deploy AWS",
+    updated_at: "2026-07-29T12:00:00.000Z",
+  });
+  const hostedDast = workflowRun({
+    id: 302,
+    name: "Hosted DAST",
+    path: ".github/workflows/security-dast.yml",
+    event: "workflow_run",
+    run_started_at: "2026-07-29T12:01:00.000Z",
+    updated_at: "2026-07-29T12:05:00.000Z",
+  });
+  const receipt = hostedDastReceipt(deploy, hostedDast);
+  const archive = storedZip("hosted-dast.json", receipt);
+  const compressedArchive = Buffer.from(
+    descriptorZip("hosted-dast.json", receipt)
+  );
+  assert.deepEqual(
+    extractSingleJsonArtifact(archive, "hosted-dast.json"),
+    receipt
+  );
+  assert.deepEqual(
+    extractSingleJsonArtifact(
+      compressedArchive,
+      "hosted-dast.json"
+    ),
+    receipt
+  );
+  const digest = `sha256:${createHash("sha256")
+    .update(archive)
+    .digest("hex")}`;
+  assert.doesNotThrow(() =>
+    requireArtifactArchiveDigest(archive, digest)
+  );
+  assert.throws(() =>
+    requireArtifactArchiveDigest(
+      archive,
+      `sha256:${"0".repeat(64)}`
+    )
+  );
+
+  const corrupted = Buffer.from(archive);
+  const corruptionOffset =
+    30 + Buffer.byteLength("hosted-dast.json", "utf8") + 1;
+  corrupted[corruptionOffset] =
+    (corrupted[corruptionOffset] ?? 0) ^ 0xff;
+  const inconsistentLocalHeader = Buffer.from(archive);
+  inconsistentLocalHeader.writeUInt32LE(0, 14);
+  const corruptDescriptor = Buffer.from(compressedArchive);
+  const compressedEocd = corruptDescriptor.length - 22;
+  const compressedCentral = corruptDescriptor.readUInt32LE(
+    compressedEocd + 16
+  );
+  corruptDescriptor.writeUInt32LE(0, compressedCentral - 16);
+  const prefixed = Buffer.concat([Buffer.from([0]), archive]);
+  const prefixedEocd = prefixed.length - 22;
+  const prefixedCentral =
+    prefixed.readUInt32LE(prefixedEocd + 16) + 1;
+  prefixed.writeUInt32LE(prefixedCentral, prefixedEocd + 16);
+  prefixed.writeUInt32LE(1, prefixedCentral + 42);
+  for (const invalid of [
+    corrupted,
+    inconsistentLocalHeader,
+    corruptDescriptor,
+    prefixed,
+    storedZip("other.json", receipt),
+    Buffer.concat([archive, Buffer.from([0])]),
+  ]) {
+    assert.throws(() =>
+      extractSingleJsonArtifact(invalid, "hosted-dast.json")
+    );
+  }
+});
+
+test("final gate: Hosted DAST receipt proves exact scanner, deploy, checks, and time", () => {
+  const deploy = workflowRun({
+    id: 201,
+    name: "Deploy AWS",
+    display_title: "Deploy AWS",
+    path: ".github/workflows/deploy-aws.yml",
+    run_started_at: "2026-07-29T11:45:00.000Z",
+    updated_at: "2026-07-29T12:00:00.000Z",
+  });
+  const hostedDast = workflowRun({
+    id: 302,
+    name: "Hosted DAST",
+    display_title: "Hosted DAST",
+    path: ".github/workflows/security-dast.yml",
+    event: "workflow_run",
+    run_started_at: "2026-07-29T12:01:00.000Z",
+    updated_at: "2026-07-29T12:05:00.000Z",
+  });
+  const receipt = hostedDastReceipt(deploy, hostedDast);
+  assert.doesNotThrow(() =>
+    requireExactHostedDastReceipt(
+      receipt,
+      deploy,
+      hostedDast,
+      SHA,
+      NOW
+    )
+  );
+
+  const change = (
+    mutate: (copy: Record<string, unknown>) => void
+  ): Record<string, unknown> => {
+    const copy = structuredClone(receipt);
+    mutate(copy);
+    return copy;
+  };
+  const changedStatus = change((copy) => {
+    const checks = copy.checks as Array<Record<string, unknown>>;
+    checks[0] = { ...checks[0], status: "fail" };
+  });
+  const changedObservedStatus = change((copy) => {
+    const checks = copy.checks as Array<Record<string, unknown>>;
+    checks[4] = { ...checks[4], observedStatus: 404 };
+  });
+  const malformedChecks = change((copy) => {
+    const checks = copy.checks as unknown[];
+    checks[0] = null;
+  });
+  const extraCheck = change((copy) => {
+    const checks = copy.checks as unknown[];
+    checks.push({
+      id: "unexpected",
+      status: "pass",
+      observedStatus: 200,
+    });
+  });
+  for (const invalid of [
+    change((copy) => {
+      copy.sourceDeployRunId = 999;
+    }),
+    change((copy) => {
+      copy.sourceDeployRunAttempt = 2;
+    }),
+    change((copy) => {
+      copy.scannerRunId = 999;
+    }),
+    change((copy) => {
+      copy.scannerRunAttempt = 2;
+    }),
+    change((copy) => {
+      copy.scannerSha = "b".repeat(40);
+    }),
+    change((copy) => {
+      copy.profile = "production-audit";
+    }),
+    change((copy) => {
+      copy.releaseSha = "b".repeat(40);
+    }),
+    change((copy) => {
+      copy.generatedAt = "2026-07-29T12:00:59.999Z";
+    }),
+    change((copy) => {
+      copy.generatedAt = "2026-07-29T12:07:00.001Z";
+    }),
+    change((copy) => {
+      copy.passed = false;
+    }),
+    change((copy) => {
+      copy.unexpected = true;
+    }),
+    changedStatus,
+    changedObservedStatus,
+    malformedChecks,
+    extraCheck,
+  ]) {
+    assert.throws(() =>
+      requireExactHostedDastReceipt(
+        invalid,
+        deploy,
+        hostedDast,
+        SHA,
+        NOW
+      )
+    );
+  }
+});
+
 test("final gate: recovery audit proves both exact jobs and executed evidence steps", () => {
   const baseline = recoveryJobs();
   const parsed = parseWorkflowJobs(baseline);
@@ -204,6 +775,157 @@ test("final gate: recovery audit proves both exact jobs and executed evidence st
   }
 });
 
+test("final gate: Hosted DAST proves its source gate and both release scanners", () => {
+  const baseline = hostedDastJobs();
+  assert.doesNotThrow(() =>
+    requireSuccessfulHostedDastJobs(baseline, 302, SHA)
+  );
+
+  const skippedStep = structuredClone(baseline);
+  const skippedJobs = skippedStep.jobs as Array<Record<string, unknown>>;
+  const skippedSteps = skippedJobs[0]?.steps as Array<
+    Record<string, unknown>
+  >;
+  skippedSteps[0] = {
+    ...skippedSteps[0],
+    conclusion: "skipped",
+  };
+
+  const failedJob = structuredClone(baseline);
+  const failedJobs = failedJob.jobs as Array<Record<string, unknown>>;
+  failedJobs[1] = {
+    ...failedJobs[1],
+    conclusion: "failure",
+  };
+
+  const missingJob = structuredClone(baseline);
+  missingJob.total_count = 2;
+  (missingJob.jobs as unknown[]).pop();
+
+  for (const mutation of [
+    skippedStep,
+    failedJob,
+    missingJob,
+    { ...structuredClone(baseline), total_count: 4 },
+    hostedDastJobs(999, SHA),
+    hostedDastJobs(302, "b".repeat(40)),
+  ]) {
+    assert.throws(() =>
+      requireSuccessfulHostedDastJobs(mutation, 302, SHA)
+    );
+  }
+});
+
+test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt operation", () => {
+  const baseline = deployJobs();
+  assert.doesNotThrow(() =>
+    requireSuccessfulDeployJobs(baseline, 301, SHA)
+  );
+
+  const skippedSource = structuredClone(baseline);
+  const skippedSourceJobs = skippedSource.jobs as Array<
+    Record<string, unknown>
+  >;
+  const skippedSourceSteps = skippedSourceJobs[0]?.steps as Array<
+    Record<string, unknown>
+  >;
+  skippedSourceSteps[0] = {
+    ...skippedSourceSteps[0],
+    conclusion: "skipped",
+  };
+
+  const failedProduction = structuredClone(baseline);
+  const failedProductionJobs = failedProduction.jobs as Array<
+    Record<string, unknown>
+  >;
+  failedProductionJobs[3] = {
+    ...failedProductionJobs[3],
+    conclusion: "failure",
+  };
+
+  const missingProductionSmoke = structuredClone(baseline);
+  const missingProductionJobs = missingProductionSmoke.jobs as Array<
+    Record<string, unknown>
+  >;
+  const productionSteps = missingProductionJobs[3]?.steps as Array<
+    Record<string, unknown>
+  >;
+  productionSteps.splice(1, 1);
+
+  const missingRequiredJob = structuredClone(baseline);
+  const requiredJobs = missingRequiredJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  requiredJobs.splice(3, 1);
+  missingRequiredJob.total_count = 5;
+
+  const duplicateRequiredJob = structuredClone(baseline);
+  const duplicateJobs = duplicateRequiredJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  duplicateJobs.push({
+    ...structuredClone(duplicateJobs[0]),
+    id: 606,
+  });
+  duplicateRequiredJob.total_count = 7;
+
+  const duplicateRequiredStep = structuredClone(baseline);
+  const duplicateStepJobs = duplicateRequiredStep.jobs as Array<
+    Record<string, unknown>
+  >;
+  const duplicateProductionSteps = duplicateStepJobs[3]?.steps as Array<
+    Record<string, unknown>
+  >;
+  duplicateProductionSteps.push(
+    structuredClone(duplicateProductionSteps[1]!)
+  );
+
+  const incompleteJob = structuredClone(baseline);
+  const incompleteJobs = incompleteJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  incompleteJobs[1] = {
+    ...incompleteJobs[1],
+    status: "in_progress",
+    conclusion: null,
+  };
+
+  const oversizedInventory = structuredClone(baseline);
+  const oversizedJobs = oversizedInventory.jobs as Array<
+    Record<string, unknown>
+  >;
+  for (let index = oversizedJobs.length; index < 101; index += 1) {
+    oversizedJobs.push({
+      id: 700 + index,
+      run_id: 301,
+      head_sha: SHA,
+      name: `Unrelated deploy evidence ${index}`,
+      status: "completed",
+      conclusion: "success",
+      steps: [],
+    });
+  }
+  oversizedInventory.total_count = 101;
+
+  for (const mutation of [
+    skippedSource,
+    failedProduction,
+    missingProductionSmoke,
+    missingRequiredJob,
+    duplicateRequiredJob,
+    duplicateRequiredStep,
+    incompleteJob,
+    oversizedInventory,
+    { ...structuredClone(baseline), total_count: 7 },
+    deployJobs(999, SHA),
+    deployJobs(301, "b".repeat(40)),
+  ]) {
+    assert.throws(() =>
+      requireSuccessfulDeployJobs(mutation, 301, SHA)
+    );
+  }
+});
+
 test("final gate: post-deploy audits must be ordered, completed, and fresh", () => {
   const deploy = workflowRun({
     id: 201,
@@ -217,6 +939,12 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
     run_started_at: "2026-07-29T12:01:00.000Z",
     updated_at: "2026-07-29T12:05:00.000Z",
   });
+  const hostedDast = workflowRun({
+    id: 204,
+    name: "Hosted DAST",
+    run_started_at: "2026-07-29T12:00:30.000Z",
+    updated_at: "2026-07-29T12:04:00.000Z",
+  });
   const recovery = workflowRun({
     id: 203,
     name: "Recover AWS",
@@ -224,11 +952,12 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
     updated_at: "2026-07-29T12:10:00.000Z",
   });
   assert.doesNotThrow(() =>
-    requirePostDeployAuditTiming(deploy, mcp, recovery, NOW)
+    requirePostDeployAuditTiming(deploy, hostedDast, mcp, recovery, NOW)
   );
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
+      hostedDast,
       { ...mcp, run_started_at: deploy.updated_at },
       recovery,
       NOW
@@ -237,6 +966,7 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
+      hostedDast,
       {
         ...mcp,
         updated_at: new Date(
@@ -250,6 +980,7 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
+      hostedDast,
       mcp,
       {
         ...recovery,
@@ -263,6 +994,30 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       { ...deploy, updated_at: "not-a-date" },
+      hostedDast,
+      mcp,
+      recovery,
+      NOW
+    )
+  );
+  assert.throws(() =>
+    requirePostDeployAuditTiming(
+      deploy,
+      { ...hostedDast, run_started_at: deploy.updated_at },
+      mcp,
+      recovery,
+      NOW
+    )
+  );
+  assert.throws(() =>
+    requirePostDeployAuditTiming(
+      deploy,
+      {
+        ...hostedDast,
+        updated_at: new Date(
+          NOW - 24 * 60 * 60 * 1_000 - 1
+        ).toISOString(),
+      },
       mcp,
       recovery,
       NOW

@@ -30,12 +30,33 @@ env:
   BEDROCK_NARRATOR_MODEL_ID: ${{ vars.BEDROCK_NARRATOR_MODEL_ID || 'eu.anthropic.claude-sonnet-4-6' }}
 
 jobs:
+  source-gate:
+    name: Validate Deploy AWS source CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require successful exact-main push CI source
+        shell: bash
+        env:
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_CONCLUSION" = "success"
+          test "$SOURCE_EVENT" = "push"
+          test "$SOURCE_BRANCH" = "main"
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
   build-once:
     name: Verify CI SHA and build once
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+    needs:
+      - source-gate
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

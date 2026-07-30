@@ -7,6 +7,7 @@ name: CI
 # (src/memory/embeddings.ts), so the vector index is exercised end-to-end with no secrets.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -164,8 +165,17 @@ jobs:
       # recall query fans out across those ranges and returns the correct top-k. Turns
       # docs/BENCHMARK.md Result 3b from asserted into tested. Offline it runs recall
       # correctness under the mock and skips the range assertions.
-      - name: Unit + integration tests (incl. multi-range fan-out)
-        run: npm test
+      - name: Unit + integration coverage gate (incl. multi-range fan-out)
+        run: npm run test:coverage
+
+      - name: Upload backend coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-coverage-${{ github.sha }}
+          path: ${{ runner.temp }}/archon-coverage/backend/lcov.info
+          if-no-files-found: error
+          retention-days: 30
 
       # Fast benchmark smoke — proves the recall@k harness runs end-to-end and the
       # distributed vector index tracks exact NN above a floor (fails loudly if the
@@ -349,7 +359,20 @@ jobs:
             sleep 1
           done
       - name: k6 load test (p95 SLO + recall@1 under concurrency)
-        run: k6 run -e BASE_URL=http://localhost:8787 -e LOAD_N=2000 load/recall.js
+        run: >-
+          k6 run
+          --summary-export="${RUNNER_TEMP:?}/k6-summary.json"
+          -e BASE_URL=http://localhost:8787
+          -e LOAD_N=2000
+          load/recall.js
+      - name: Upload k6 load evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: k6-load-${{ github.sha }}
+          path: ${{ runner.temp }}/k6-summary.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Stop server
         if: always()
         run: kill "$(cat server.pid)" 2>/dev/null || true
@@ -387,12 +410,23 @@ jobs:
         run: |
           npm audit --audit-level=high
           npm audit --prefix web --audit-level=moderate
-      - name: Backend and frontend type/unit/build gates
+      - name: Backend and frontend type/build gates
         run: |
           npm run typecheck
           npm run typecheck --prefix web
-          npm test --prefix web
           npm run build --prefix web
+      - name: Frontend unit coverage gate
+        run: npm run test:coverage --prefix web
+      - name: Upload frontend coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/archon-coverage/frontend/coverage-summary.json
+            ${{ runner.temp }}/archon-coverage/frontend/lcov.info
+          if-no-files-found: error
+          retention-days: 30
       - name: Validate and build the serverless architecture
         run: |
           set -euo pipefail
@@ -451,12 +485,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Stage 2g — independent hosted-surface evidence. The bounded active probes
+  # bind their receipt to the release SHA reported by production itself; ZAP
+  # independently spiders the same owned HTTPS origin and fails on findings.
+  # A second exact-release scan runs automatically after every AWS deployment.
+  hosted-dast:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net
+      DAST_SCANNER_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+      - name: Run bounded active production probes
+        env:
+          DAST_RECEIPT_PATH: ${{ runner.temp }}/hosted-dast.json
+        run: node scripts/hosted-dast.mjs
+      - name: Upload sanitized hosted DAST receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hosted-dast-ci-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hosted-dast.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: OWASP ZAP passive and AJAX-spider baseline
+        if: always()
+        uses: zaproxy/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874 # v0.15.0
+        with:
+          target: https://d2s5v0o0eg2aaw.cloudfront.net
+          rules_file_name: .zap/predeploy.tsv
+          docker_name: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+          cmd_options: "-a -j -m 2"
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-baseline-ci-${{ github.sha }}-${{ github.run_attempt }}
+
   # Stage 3 — the fail-closed READINESS GATE. It always evaluates after every
   # prerequisite reaches a terminal state and explicitly fails if any prerequisite
   # failed, was cancelled, or was skipped. Submission-only requirements remain
   # visibly pending and cannot masquerade as eligibility.
   readiness:
-    needs: [secret-scan, dep-audit, build-test, cluster-survival, pen-test, load, frontend-iac]
+    needs: [secret-scan, dep-audit, build-test, cluster-survival, pen-test, load, frontend-iac, hosted-dast]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -466,7 +540,7 @@ jobs:
           PREREQUISITE_RESULTS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          jq -e 'length == 7 and all(.[]; .result == "success")' <<<"$PREREQUISITE_RESULTS"
+          jq -e 'length == 8 and all(.[]; .result == "success")' <<<"$PREREQUISITE_RESULTS"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
