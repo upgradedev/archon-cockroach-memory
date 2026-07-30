@@ -146,6 +146,8 @@ Devpost gallery; no local recapture or replacement is permitted.
 - Show only the sanitized receipt summary; do not show GitHub chrome or logos.
 - Display the four call labels: cluster identity, table list, schema, bounded
   aggregate.
+- Make explicit that a separate deterministic release controller uses CockroachDB Cloud Managed MCP;
+  it is independent from the financial agent's vector path.
 
 **Narration**
 
