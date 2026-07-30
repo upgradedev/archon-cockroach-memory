@@ -552,7 +552,10 @@ test("timestamped narration request uses the exact ElevenLabs endpoint and model
     plan.voice,
     "unit-test-key-not-a-real-secret",
     {
-      fetchImpl: async (input: URL | RequestInfo, init?: RequestInit) => {
+      fetchImpl: async (
+        input: Parameters<typeof fetch>[0],
+        init?: RequestInit
+      ) => {
         observedUrl = String(input);
         observedInit = init;
         return Response.json({

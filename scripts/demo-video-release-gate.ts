@@ -1229,8 +1229,10 @@ async function publicProof(sha: string): Promise<CanonicalProofSummary> {
       const response = await fetchWithTimeout(
         expectedUrl,
         {
-          headers: { accept: "application/json" },
-          cache: "no-store",
+          headers: {
+            accept: "application/json",
+            "cache-control": "no-cache",
+          },
         },
         "Canonical public production proof",
         30_000
