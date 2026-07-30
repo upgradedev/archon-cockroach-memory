@@ -1,5 +1,5 @@
 name: Submission readiness
-run-name: Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s
+run-name: Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s / CI ${{ inputs.video_ci_run_id }}.${{ inputs.video_ci_run_attempt }} / ${{ inputs.video_source_sha256 }}
 
 # Manual, read-only final boundary. This workflow never receives AWS or
 # CockroachDB credentials and writes its only receipt under RUNNER_TEMP.
@@ -21,6 +21,23 @@ on:
         description: Verified integer duration from 1 through 179 seconds.
         required: true
         type: string
+      video_ci_run_id:
+        description: Successful exact-SHA demo-video workflow run ID used for the public upload.
+        required: true
+        type: string
+      video_ci_run_attempt:
+        description: Exact successful attempt number of the demo-video workflow run.
+        required: true
+        type: string
+      video_source_sha256:
+        description: SHA-256 of the CI-produced MP4 that was uploaded publicly.
+        required: true
+        type: string
+      video_uploaded_from_ci_artifact_attested:
+        description: Confirm the public video was uploaded from the bound CI artifact without content changes.
+        required: true
+        default: false
+        type: boolean
       video_public_embeddable_attested:
         description: Confirm the video was opened signed-out and embedding is allowed.
         required: true
@@ -66,6 +83,10 @@ jobs:
       SUBMISSION_PUBLIC_REPO_URL: https://github.com/upgradedev/archon-cockroach-memory
       SUBMISSION_VIDEO_URL: ${{ inputs.video_url }}
       SUBMISSION_VIDEO_DURATION_SECONDS: ${{ inputs.video_duration_seconds }}
+      SUBMISSION_VIDEO_CI_RUN_ID: ${{ inputs.video_ci_run_id }}
+      SUBMISSION_VIDEO_CI_RUN_ATTEMPT: ${{ inputs.video_ci_run_attempt }}
+      SUBMISSION_VIDEO_SOURCE_SHA256: ${{ inputs.video_source_sha256 }}
+      SUBMISSION_VIDEO_UPLOADED_FROM_CI_ARTIFACT_ATTESTED: ${{ inputs.video_uploaded_from_ci_artifact_attested }}
       SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED: ${{ inputs.video_public_embeddable_attested }}
       SUBMISSION_VIDEO_CAPTIONS_ATTESTED: ${{ inputs.video_english_captions_attested }}
       DEVPOST_SUBMISSION_URL: ${{ inputs.devpost_url }}

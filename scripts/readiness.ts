@@ -33,8 +33,8 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 94;
-export const EXPECTED_SETUP_NODE_STEPS = 17;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 112;
+export const EXPECTED_SETUP_NODE_STEPS = 22;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
@@ -44,6 +44,7 @@ export const EXPECTED_WORKFLOW_FILES = [
   "ci.yml",
   "codeql.yml",
   "database-release.yml",
+  "demo-video.yml",
   "deploy-aws.yml",
   "managed-mcp-audit.yml",
   "recover-aws.yml",
@@ -75,6 +76,22 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "bench-uniform.txt",
   "distribution.txt",
   "submission-readiness-receipt.json",
+  "capture-receipt.json",
+  "narration-receipt.json",
+  "video-build-receipt.json",
+  "video-verification-receipt.json",
+  "video-release-binding.json",
+  "toolchain-provenance.json",
+  "demo-video-publication.json",
+  "01-hook.png",
+  "02-scope-architecture.png",
+  "03-recall-grounding.png",
+  "04-audit-conflict.png",
+  "05-audit-absence.png",
+  "06-proof-ledger.png",
+  "07-managed-mcp.png",
+  "08-close.png",
+  "captions.en.srt",
   "server.pid",
 ] as const;
 export const DURABLE_RECOVERY_LOCAL_BASENAMES = [
@@ -232,7 +249,7 @@ export function generatedArtifactPaths(root = ROOT): string[] {
         /^(?:staging|production)-recovery-(?:roundtrip-)?[0-9]+-[1-9][0-9]*\.tar$/u.test(
           entry.name
         ) ||
-        /\.(?:aac|avi|flac|m4a|mkv|mov|mp3|mp4|ogg|opus|pyc|wav|webm|wmv)$/iu.test(
+        /\.(?:aac|avi|flac|m4a|mkv|mov|mp3|mp4|ogg|opus|pyc|srt|wav|webm|wmv)$/iu.test(
           entry.name
         ) ||
         /^(?:readiness|database-release-receipt|legacy-reconciliation-receipt|managed-mcp(?:-[a-z0-9-]+)?-receipt|deployment-receipt[a-z0-9-]*|[a-z0-9-]+-deployment-receipt)\.json$/iu.test(
@@ -1007,7 +1024,7 @@ export function hasExactSubmissionReadinessTrigger(
   const dispatch = trigger.get("workflow_dispatch");
   if (!(dispatch instanceof Map) || dispatch.size !== 1) return false;
   const inputs = dispatch.get("inputs");
-  if (!(inputs instanceof Map) || inputs.size !== 8) return false;
+  if (!(inputs instanceof Map) || inputs.size !== 12) return false;
 
   return (
     exactWorkflowInput(inputs, "phase", {
@@ -1027,6 +1044,35 @@ export function hasExactSubmissionReadinessTrigger(
       required: true,
       type: "string",
     }) &&
+    exactWorkflowInput(inputs, "video_ci_run_id", {
+      description:
+        "Successful exact-SHA demo-video workflow run ID used for the public upload.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "video_ci_run_attempt", {
+      description:
+        "Exact successful attempt number of the demo-video workflow run.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "video_source_sha256", {
+      description:
+        "SHA-256 of the CI-produced MP4 that was uploaded publicly.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(
+      inputs,
+      "video_uploaded_from_ci_artifact_attested",
+      {
+        description:
+          "Confirm the public video was uploaded from the bound CI artifact without content changes.",
+        required: true,
+        default: false,
+        type: "boolean",
+      }
+    ) &&
     exactWorkflowInput(inputs, "video_public_embeddable_attested", {
       description:
         "Confirm the video was opened signed-out and embedding is allowed.",
@@ -1061,6 +1107,32 @@ export function hasExactSubmissionReadinessTrigger(
       required: false,
       default: "",
       type: "string",
+    })
+  );
+}
+
+export function hasExactDemoVideoTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 1) return false;
+  const dispatch = trigger.get("workflow_dispatch");
+  if (!(dispatch instanceof Map) || dispatch.size !== 1) return false;
+  const inputs = dispatch.get("inputs");
+  if (!(inputs instanceof Map) || inputs.size !== 2) return false;
+
+  return (
+    exactWorkflowInput(inputs, "exact_sha", {
+      description:
+        "Exact current main SHA whose hosted release evidence and live application will be recorded.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "voice_rights_attested", {
+      description:
+        "Confirm the selected ElevenLabs premade voice is authorized for public competition use.",
+      required: true,
+      default: false,
+      type: "boolean",
     })
   );
 }
@@ -1114,7 +1186,7 @@ export function hasExactSubmissionWorkflowContract(source: string): boolean {
     ]) ||
     parsed.root.get("name") !== "Submission readiness" ||
     parsed.root.get("run-name") !==
-      "Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s" ||
+      "Submission readiness / ${{ inputs.phase }} / ${{ github.sha }} / ${{ inputs.video_url }} / ${{ inputs.video_duration_seconds }}s / CI ${{ inputs.video_ci_run_id }}.${{ inputs.video_ci_run_attempt }} / ${{ inputs.video_source_sha256 }}" ||
     !exactScalarMap(parsed.root.get("permissions"), {
       actions: "read",
       contents: "read",
@@ -1154,6 +1226,13 @@ export function hasExactSubmissionWorkflowContract(source: string): boolean {
       SUBMISSION_VIDEO_URL: "${{ inputs.video_url }}",
       SUBMISSION_VIDEO_DURATION_SECONDS:
         "${{ inputs.video_duration_seconds }}",
+      SUBMISSION_VIDEO_CI_RUN_ID: "${{ inputs.video_ci_run_id }}",
+      SUBMISSION_VIDEO_CI_RUN_ATTEMPT:
+        "${{ inputs.video_ci_run_attempt }}",
+      SUBMISSION_VIDEO_SOURCE_SHA256:
+        "${{ inputs.video_source_sha256 }}",
+      SUBMISSION_VIDEO_UPLOADED_FROM_CI_ARTIFACT_ATTESTED:
+        "${{ inputs.video_uploaded_from_ci_artifact_attested }}",
       SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED:
         "${{ inputs.video_public_embeddable_attested }}",
       SUBMISSION_VIDEO_CAPTIONS_ATTESTED:
@@ -1504,6 +1583,7 @@ export function hasUniqueCiTriggerOwnership(
       "database-release.yml",
       ["workflow_call", "workflow_dispatch"],
     ],
+    ["demo-video.yml", ["workflow_dispatch"]],
     ["deploy-aws.yml", ["workflow_run"]],
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
     [
@@ -1538,6 +1618,9 @@ export function hasUniqueCiTriggerOwnership(
     ({ name }) => name === "benchmark.yml"
   );
   const codeql = workflows.find(({ name }) => name === "codeql.yml");
+  const demoVideo = workflows.find(
+    ({ name }) => name === "demo-video.yml"
+  );
   const recovery = workflows.find(
     ({ name }) => name === "recover-aws.yml"
   );
@@ -1551,12 +1634,14 @@ export function hasUniqueCiTriggerOwnership(
     ci !== undefined &&
     benchmark !== undefined &&
     codeql !== undefined &&
+    demoVideo !== undefined &&
     recovery !== undefined &&
     hostedDast !== undefined &&
     submission !== undefined &&
     hasExactBenchmarkTrigger(benchmark.source) &&
     hasExactCiTrigger(ci.source) &&
     hasExactCodeqlTrigger(codeql.source) &&
+    hasExactDemoVideoTrigger(demoVideo.source) &&
     hasExactAwsRecoveryTrigger(recovery.source) &&
     hasExactHostedDastTrigger(hostedDast.source) &&
     hasExactSubmissionReadinessTrigger(submission.source)
@@ -1607,6 +1692,9 @@ function sourceChecks(): SourceCheck[] {
   );
   const submissionWorkflow = read(
     ".github/workflows/submission-readiness.yml"
+  );
+  const demoVideoWorkflow = read(
+    ".github/workflows/demo-video.yml"
   );
   const foundationWorkflow = read(
     ".github/workflows/bootstrap-aws.yml"
@@ -1701,6 +1789,29 @@ function sourceChecks(): SourceCheck[] {
   const makefile = read("Makefile");
   const devpostSubmission = read("docs/DEVPOST_SUBMISSION.md");
   const videoPlan = read("demo/VIDEO_PLAN.md");
+  const videoScenePlan = read("demo/video/scene-plan.json");
+  const demoVideoReleaseGate = read(
+    "scripts/demo-video-release-gate.ts"
+  );
+  const demoVideoLibrary = read("demo/video/lib.mjs");
+  const demoVideoNarration = read(
+    "demo/video/generate-narration.mjs"
+  );
+  const demoVideoBuilder = read("demo/video/build-video.mjs");
+  const demoVideoVerifier = read("demo/video/verify-video.mjs");
+  const demoVideoMediaSelfTest = read(
+    "demo/video/media-gate-selftest.mjs"
+  );
+  const demoVideoReceiptGate = read(
+    "demo/video/assert-video-receipt.mjs"
+  );
+  const demoVideoFfmpegInstaller = read(
+    "demo/video/install-pinned-ffmpeg-linux.sh"
+  );
+  const demoVideoCapture = read(
+    "web/video/capture-production.mjs"
+  );
+  const demoVideoTests = read("tests/demo-video.test.ts");
   const finalSubmissionGate = read(
     "scripts/final-submission-gate.ts"
   );
@@ -3217,14 +3328,14 @@ function sourceChecks(): SourceCheck[] {
     sourceCheck(
       "tech.fail-closed-ci-aggregate",
       "Technical Implementation",
-      /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u.test(
+      /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast,\s*video-gate\]/u.test(
         readinessJob
       ) &&
         /^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/mu.test(readinessJob) &&
         /^    steps:\r?\n      - name: Require every prerequisite CI job to pass\s*$/mu.test(
           readinessJob
         ) &&
-        /length == 8 and all\(\.\[\];\s*\.result == "success"\)/u.test(
+        /length == 9 and all\(\.\[\];\s*\.result == "success"\)/u.test(
           readinessJob
         ),
       "The aggregate readiness check always runs and fails unless every prerequisite CI job succeeded.",
@@ -4532,6 +4643,205 @@ function sourceChecks(): SourceCheck[] {
       "Generated-output ignore/detection gates or the Makefile cleanup are incomplete."
     ),
     sourceCheck(
+      "product.ci-only-demo-video",
+      "Production Readiness",
+      hasExactDemoVideoTrigger(demoVideoWorkflow) &&
+        /name:\s*Generate exact-release demo video/u.test(
+          demoVideoWorkflow
+        ) &&
+        /actions:\s*read/u.test(demoVideoWorkflow) &&
+        /contents:\s*read/u.test(demoVideoWorkflow) &&
+        !/id-token:\s*write|configure-aws-credentials/u.test(
+          demoVideoWorkflow
+        ) &&
+        (
+          demoVideoWorkflow.match(
+            /secrets\.ELEVENLABS_API_KEY/gu
+          ) ?? []
+        ).length === 1 &&
+        /name:\s*Generate timestamped ElevenLabs narration[\s\S]*?environment:\s*\r?\n\s+name:\s*demo-video-production/u.test(
+          demoVideoWorkflow
+        ) &&
+        !/edge-tts|ELEVEN_LABS_KEY|YOUTUBE|VIMEO/iu.test(
+          demoVideoWorkflow
+        ) &&
+        /DEMO_VIDEO_PHASE:\s*initial/u.test(demoVideoWorkflow) &&
+        /DEMO_VIDEO_PHASE:\s*terminal/u.test(demoVideoWorkflow) &&
+        /Require main-ref exact-SHA dispatch before any paid call[\s\S]*?refs\/heads\/main[\s\S]*?DISPATCH_SHA[\s\S]*?EXPECTED_SHA/u.test(
+          demoVideoWorkflow
+        ) &&
+        (
+          demoVideoWorkflow.match(
+            /ref:\s*\$\{\{\s*inputs\.exact_sha\s*\}\}/gu
+          ) ?? []
+        ).length === 4 &&
+        !/ref:\s*main\s*$/mu.test(demoVideoWorkflow) &&
+        /Validate exact hosted release evidence and live proof[\s\S]*?encoded_token[\s\S]*?require_no_rg_match -F[\s\S]*?DEMO_VIDEO_RELEASE_RECEIPT/u.test(
+          demoVideoWorkflow
+        ) &&
+        /demo-video-release-gate\.ts/u.test(demoVideoWorkflow) &&
+        /capture-production\.mjs/u.test(demoVideoWorkflow) &&
+        /generate-narration\.mjs/u.test(demoVideoWorkflow) &&
+        /install-pinned-ffmpeg-linux\.sh/u.test(
+          demoVideoWorkflow
+        ) &&
+        /verify-video\.mjs/u.test(demoVideoWorkflow) &&
+        /assert-video-receipt\.mjs/u.test(demoVideoWorkflow) &&
+        /video-gate:/u.test(ci) &&
+        /media-gate-selftest\.mjs/u.test(ci) &&
+        /\$\{\{\s*runner\.temp\s*\}\}\/archon-demo-video/u.test(
+          demoVideoWorkflow
+        ) &&
+        /retention-days:\s*14/u.test(demoVideoWorkflow) &&
+        /compression-level:\s*0/u.test(demoVideoWorkflow) &&
+        /archon\.demo-video-publication/u.test(demoVideoWorkflow) &&
+        /archon-demo-video-provenance-\$\{\{\s*inputs\.exact_sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          demoVideoWorkflow
+        ) &&
+        /Upload verified review package[\s\S]*?Create canonical publication provenance[\s\S]*?Upload canonical publication provenance[\s\S]*?Revalidate exact main after artifact publication/u.test(
+          demoVideoWorkflow
+        ) &&
+        /Create canonical publication provenance[\s\S]*?archon\.demo-video-publication[\s\S]*?require_no_rg_match -i -e[\s\S]*?Upload canonical publication provenance/u.test(
+          demoVideoWorkflow
+        ) &&
+        /package_artifact_digest="sha256:\$\{ARTIFACT_DIGEST\}"/u.test(
+          demoVideoWorkflow
+        ) &&
+        /--arg packageArtifactDigest "\$\{package_artifact_digest\}"/u.test(
+          demoVideoWorkflow
+        ) &&
+        (
+          demoVideoWorkflow.match(
+            /\[\[ "\$\{(?:ARTIFACT_DIGEST|PROVENANCE_ARTIFACT_DIGEST)\}" =~ \^\[0-9a-f\]\{64\}\$ \]\]/gu
+          ) ?? []
+        ).length === 3 &&
+        !/!\s+rg\b/u.test(demoVideoWorkflow) &&
+        (
+          demoVideoWorkflow.match(/if rg --quiet "\$@"; then/gu) ?? []
+        ).length === 5 &&
+        (
+          demoVideoWorkflow.match(
+            /artifact_run_attempt:\s*\$\{\{\s*steps\.artifact_attempt\.outputs\.artifact_run_attempt\s*\}\}/gu
+          ) ?? []
+        ).length === 3 &&
+        /demo-video-release-\$\{\{\s*inputs\.exact_sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_attempt\s*\}\}/u.test(
+          demoVideoWorkflow
+        ) &&
+        /demo-video-narration-\$\{\{\s*inputs\.exact_sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*needs\.narrate\.outputs\.artifact_run_attempt\s*\}\}/u.test(
+          demoVideoWorkflow
+        ) &&
+        /demo-video-capture-\$\{\{\s*inputs\.exact_sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*needs\.capture\.outputs\.artifact_run_attempt\s*\}\}/u.test(
+          demoVideoWorkflow
+        ) &&
+        /Validate producer artifact attempt bindings/u.test(
+          demoVideoWorkflow
+        ) &&
+        /Prove all eight hash-bound screenshots are package inputs/u.test(
+          demoVideoWorkflow
+        ) &&
+        (
+          demoVideoWorkflow.match(
+            /-mindepth 1 -maxdepth 1 -print0/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          demoVideoWorkflow.match(
+            /od -An -tx1 -j12 -N4 -- "\$\{screenshot\}"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          demoVideoWorkflow.match(
+            /od -An -tx1 -j16 -N8 -- "\$\{screenshot\}"/gu
+          ) ?? []
+        ).length === 2 &&
+        [
+          "01-hook.png",
+          "02-scope-architecture.png",
+          "03-recall-grounding.png",
+          "04-audit-conflict.png",
+          "05-audit-absence.png",
+          "06-proof-ledger.png",
+          "07-managed-mcp.png",
+          "08-close.png",
+        ].every(
+          (name) =>
+            demoVideoWorkflow.includes(
+              `runner.temp }}/archon-demo-video/capture/${name}`
+            )
+        ) &&
+        /EXPECTED_CAPTURE_SCREENSHOTS/u.test(demoVideoLibrary) &&
+        /Capture receipt must bind the eight canonical screenshots/u.test(
+          demoVideoLibrary
+        ) &&
+        /DEMO_VIDEO_SOURCE_GATE_ATTEMPT/u.test(
+          demoVideoReleaseGate
+        ) &&
+        /voiceRightsAttested:\s*true/u.test(demoVideoWorkflow) &&
+        /managed-mcp-proof-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          managedMcpWorkflow
+        ) &&
+        /managed-mcp-proof-\$\{runs\.mcp\.id\}-\$\{runs\.mcp\.run_attempt\}/u.test(
+          demoVideoReleaseGate
+        ) &&
+        /archon\.demo-video-plan/u.test(videoScenePlan) &&
+        /"targetDurationSeconds":\s*170/u.test(videoScenePlan) &&
+        [
+          "hook",
+          "scope-architecture",
+          "recall-grounding",
+          "audit",
+          "proof",
+          "managed-mcp",
+          "close",
+        ].every((scene) => videoScenePlan.includes(`"id": "${scene}"`)) &&
+        /RUNNER_TEMP/u.test(demoVideoLibrary) &&
+        /realpath|lstat|symlink/iu.test(demoVideoLibrary) &&
+        /with-timestamps/u.test(demoVideoNarration) &&
+        /ELEVENLABS_API_KEY/u.test(demoVideoNarration) &&
+        !/edge-tts/iu.test(demoVideoNarration) &&
+        /libx264/u.test(demoVideoBuilder) &&
+        /loudnorm/u.test(demoVideoBuilder) &&
+        /yuv420p/u.test(demoVideoBuilder) &&
+        /fullDecodePassed|full decode/iu.test(demoVideoVerifier) &&
+        /caption/iu.test(demoVideoVerifier) &&
+        /scene/iu.test(demoVideoVerifier) &&
+        /mis-?order|scene/iu.test(demoVideoMediaSelfTest) &&
+        /caption/iu.test(demoVideoMediaSelfTest) &&
+        /mismatch|tamper/iu.test(demoVideoMediaSelfTest) &&
+        /sha256/iu.test(demoVideoReceiptGate) &&
+        /autobuild-2026-07-19-13-12/u.test(
+          demoVideoFfmpegInstaller
+        ) &&
+        /b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61/u.test(
+          demoVideoFfmpegInstaller
+        ) &&
+        /d2s5v0o0eg2aaw\.cloudfront\.net/u.test(
+          demoVideoCapture
+        ) &&
+        /INV-2043/u.test(demoVideoCapture) &&
+        /PAY-118/u.test(demoVideoCapture) &&
+        /C-SPANN/u.test(demoVideoCapture) &&
+        /9\s*\/\s*9\s*\/\s*9/u.test(demoVideoCapture) &&
+        /function sanitizedFailureMessage\(error\)/u.test(
+          demoVideoCapture
+        ) &&
+        /Production capture failed closed in the hosted CI runner: \$\{sanitizedFailureMessage\(/u.test(
+          demoVideoCapture
+        ) &&
+        /\.slice\(0, 500\)/u.test(demoVideoCapture) &&
+        !/console\.error\(\s*error\s*\)/u.test(demoVideoCapture) &&
+        /env\.GITHUB_SHA !== sourceSha/u.test(
+          demoVideoNarration
+        ) &&
+        /rejects a GITHUB_SHA mismatch before secrets, files, or API calls/u.test(
+          demoVideoTests
+        ) &&
+        /wrong|reject|tamper|mismatch/iu.test(demoVideoTests) &&
+        /demo-video\.test\.ts/u.test(packageSource),
+      "The exact-release browser demo is generated, narrated, composed, and independently media-gated only in hosted CI with runner-temp outputs.",
+      "The CI-only exact-release video pipeline, media verifier, or negative regression coverage is incomplete."
+    ),
+    sourceCheck(
       "product.hosted-submission-boundary",
       "Production Readiness",
       hasExactSubmissionWorkflowContract(submissionWorkflow) &&
@@ -4548,6 +4858,63 @@ function sourceChecks(): SourceCheck[] {
           finalSubmissionGate
         ) &&
         /selectedRuns\.hostedDast = toSelectedRun\(hostedDastRun\)/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedRuns\.demoVideo = toSelectedRun\(demoVideoRun\)/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectBoundSuccessfulDemoVideoRun\(/u.test(
+          finalSubmissionGate
+        ) &&
+        (
+          finalSubmissionGate.match(
+            /requireSuccessfulDemoVideoJobs\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        (
+          finalSubmissionGate.match(
+            /selectExactDemoVideoArtifacts\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        /githubDemoVideoPublication\(/u.test(finalSubmissionGate) &&
+        /export async function readBoundedResponseBody\(/u.test(
+          finalSubmissionGate
+        ) &&
+        /response body exceeds its byte bound/u.test(
+          finalSubmissionGate
+        ) &&
+        !/response\.arrayBuffer\(\)/u.test(finalSubmissionGate) &&
+        /SUBMISSION_VIDEO_UPLOADED_FROM_CI_ARTIFACT_ATTESTED/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedArtifacts\.demoVideoPackage = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedArtifacts\.demoVideoProvenance = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedArtifacts\.demoVideoRelease = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedArtifacts\.demoVideoNarration = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedArtifacts\.demoVideoCapture = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /Demo-video producer, package, or provenance artifact changed while the gate was running/u.test(
+          finalSubmissionGate
+        ) &&
+        /Exact-SHA \$\{key\} run metadata changed while the gate was running/u.test(
+          finalSubmissionGate
+        ) &&
+        (
+          finalSubmissionGate.match(
+            /jobs\?filter=all&per_page=100/gu
+          ) ?? []
+        ).length === 2 &&
+        /job\.run_attempt/u.test(finalSubmissionGate) &&
+        /Demo-video producer job attempts changed while the gate was running/u.test(
           finalSubmissionGate
         ) &&
         (

@@ -10,6 +10,50 @@ public production URL and the exact release that has passed CI, CodeQL,
 production deployment, recovery audit, and the standalone Managed MCP audit.
 No generated video, frames, audio, or editing output belongs in this repository.
 
+## CI-only production contract
+
+The final review package is generated only by the manual
+`Generate exact-release demo video` GitHub Actions workflow. The workflow:
+
+- binds the dispatch to the exact current `main` SHA and revalidates the
+  successful CI, CodeQL, Deploy AWS, exact-release Hosted DAST, standalone
+  Managed MCP, and manual dual-environment recovery audit;
+- records the real public CloudFront application at 1920×1080 with Playwright;
+- proves the application and APIs before and after recording with the deployed
+  CSP enforced; only the separate recording context bypasses CSP so the owned
+  explanatory overlay and deterministic verification marker can be injected;
+- synthesizes the seven canonical narration beats with ElevenLabs
+  `/with-timestamps`, without a silent or alternate-provider fallback;
+- derives the English captions from the returned character alignment;
+- composes with a byte- and SHA-256-pinned FFmpeg toolchain;
+- measures the final MP4 rather than trusting its manifest: complete decode,
+  duration, stream count, codec/profile, resolution, frame rate, pixel format,
+  loudness, caption reconstruction, scene order, A/V agreement, and receipt
+  hashes must all pass; and
+- writes raw capture, audio, frames, captions, intermediate media, and receipts
+  only beneath the hosted runner's `$RUNNER_TEMP`. Sanitized narration and
+  capture handoffs use short-lived one-day GitHub artifacts between isolated
+  jobs. The verified review package, including all eight ordered, hash-bound
+  production screenshots, and its separate small
+  `archon.demo-video-publication` provenance artifact are retained for fourteen
+  days. The provenance binds the exact workflow run/attempt, release SHA,
+  package artifact ID/digest, measured MP4 SHA/bytes/duration, captions SHA,
+  verification-receipt SHA, and the explicit voice-rights attestation.
+
+The ElevenLabs secret is scoped only to the narration job. Capture, composition,
+verification, and artifact upload are credential-free. Public YouTube/Vimeo
+upload remains a separate human-reviewed side effect because no provider
+publication credential is stored in this repository.
+
+The canonical still set is `01-hook.png`, `02-scope-architecture.png`,
+`03-recall-grounding.png`, `04-audit-conflict.png`, `05-audit-absence.png`,
+`06-proof-ledger.png`, `07-managed-mcp.png`, and `08-close.png`. CI rejects
+missing, reordered, extra, non-PNG, non-1920×1080, byte-drifted, or
+SHA-256-drifted stills before the one-day capture handoff. The same eight files
+and their hash-binding capture receipt are retained in the fourteen-day final
+review package. These are the only stills eligible for human selection for a
+Devpost gallery; no local recapture or replacement is permitted.
+
 ## Storyboard and narration
 
 ### 0:00–0:12 — hook
@@ -158,10 +202,19 @@ No generated video, frames, audio, or editing output belongs in this repository.
 4. Dispatch `Recover AWS` with `operation=audit` and require both staging and
    production protection/drift audit uploads to pass.
 5. Dispatch and complete the standalone Managed MCP audit for that exact SHA.
-6. Record and upload the video with `Archon Memory` in the provider title.
-7. Dispatch `Submission readiness` in `pre-submit` mode with the public video
-   URL, verified integer duration, and both visibility/embed and accurate
-   English-caption attestations.
-8. Complete the Devpost form only after that gate passes.
-9. Dispatch the same workflow in `post-submit` mode with the public Devpost URL,
-   explicit final-submission attestation, and the successful pre-submit run ID.
+6. Dispatch `Generate exact-release demo video` for that exact SHA only after
+   explicitly attesting the selected ElevenLabs voice rights. Require all four
+   jobs, the verified review package, the separate publication-provenance
+   artifact, and the post-artifact terminal revalidation to pass.
+7. Review the CI-produced MP4, upload that exact source file with `Archon
+   Memory` in the public provider title, and retain the provenance-reported
+   workflow run ID, run attempt, and MP4 SHA-256. Do not edit or re-export the
+   source between CI and upload.
+8. Dispatch `Submission readiness` in `pre-submit` mode with the public video
+   URL, verified integer duration, CI video run ID/attempt, provenance-reported
+   MP4 SHA-256, explicit uploaded-from-CI-artifact attestation, and both
+   visibility/embed and accurate English-caption attestations.
+9. Complete the Devpost form only after that gate passes.
+10. Dispatch the same workflow in `post-submit` mode with the identical video
+    and CI-source bindings, public Devpost URL, explicit final-submission
+    attestation, and the successful pre-submit run ID.

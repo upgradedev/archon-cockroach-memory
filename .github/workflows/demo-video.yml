@@ -1,0 +1,757 @@
+name: Generate exact-release demo video
+run-name: Demo video / ${{ inputs.exact_sha }} / ElevenLabs
+
+on:
+  workflow_dispatch:
+    inputs:
+      exact_sha:
+        description: Exact current main SHA whose hosted release evidence and live application will be recorded.
+        required: true
+        type: string
+      voice_rights_attested:
+        description: Confirm the selected ElevenLabs premade voice is authorized for public competition use.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: demo-video-${{ inputs.exact_sha }}
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    name: Bind video to the exact protected release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact_run_attempt: ${{ steps.artifact_attempt.outputs.artifact_run_attempt }}
+      deploy_run_id: ${{ steps.release.outputs.deploy_run_id }}
+      dast_run_id: ${{ steps.release.outputs.dast_run_id }}
+      mcp_run_id: ${{ steps.release.outputs.mcp_run_id }}
+      recovery_run_id: ${{ steps.release.outputs.recovery_run_id }}
+    env:
+      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
+      DEMO_VIDEO_PHASE: initial
+      DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
+      DEMO_VIDEO_SOURCE_GATE_ATTEMPT: ${{ github.run_attempt }}
+      DEMO_VIDEO_RELEASE_RECEIPT: ${{ runner.temp }}/archon-demo-video/release/video-release-binding.json
+    steps:
+      - name: Require main-ref exact-SHA dispatch before any paid call
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.exact_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${DISPATCH_REF}" = "refs/heads/main"
+          test "${DISPATCH_SHA}" = "${EXPECTED_SHA}"
+      - name: Check out the exact dispatched release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.exact_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - name: Install source-gate dependencies
+        run: npm ci
+      - name: Validate exact hosted release evidence and live proof
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          require_no_rg_match() {
+            local status
+            if rg --quiet "$@"; then
+              echo "Credential material was detected in a sanitized receipt." >&2
+              return 1
+            else
+              status=$?
+              test "${status}" -eq 1
+            fi
+          }
+          node --import tsx scripts/demo-video-release-gate.ts
+          test -n "${GITHUB_TOKEN}"
+          test -s "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          encoded_token="$(printf '%s' "${GITHUB_TOKEN}" | base64 -w0)"
+          for candidate in "${GITHUB_TOKEN}" "${encoded_token}"; do
+            require_no_rg_match -F -- \
+              "${candidate}" "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          done
+          require_no_rg_match -i -e \
+            "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
+            "${DEMO_VIDEO_RELEASE_RECEIPT}"
+      - name: Upload sanitized release binding
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-video-release-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/release/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Expose release-binding artifact attempt
+        id: artifact_attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          echo "artifact_run_attempt=${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Remove source-gate runner material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${DEMO_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-demo-video"
+          rm -rf -- "${DEMO_VIDEO_ROOT}"
+      - name: Require a clean source checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+
+  narrate:
+    name: Generate timestamped ElevenLabs narration
+    needs: source-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact_run_attempt: ${{ steps.artifact_attempt.outputs.artifact_run_attempt }}
+    environment:
+      name: demo-video-production
+    env:
+      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
+      DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.exact_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+      - name: Generate narration and alignment-derived English captions
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          DEMO_VIDEO_VOICE_RIGHTS_ATTESTED: ${{ inputs.voice_rights_attested }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          require_no_rg_match() {
+            local status
+            if rg --quiet "$@"; then
+              echo "Credential material was detected in narration output." >&2
+              return 1
+            else
+              status=$?
+              test "${status}" -eq 1
+            fi
+          }
+          node demo/video/generate-narration.mjs
+          test -n "${ELEVENLABS_API_KEY}"
+          encoded_key="$(printf '%s' "${ELEVENLABS_API_KEY}" | base64 -w0)"
+          for candidate in "${ELEVENLABS_API_KEY}" "${encoded_key}"; do
+            require_no_rg_match -F -- "${candidate}" \
+              "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" \
+              "${DEMO_VIDEO_ROOT}/narration/captions.en.srt"
+          done
+      - name: Validate the sanitized narration package
+        shell: bash
+        run: |
+          set -euo pipefail
+          require_no_rg_match() {
+            local status
+            if rg --quiet "$@"; then
+              echo "Credential material was detected in narration handoff." >&2
+              return 1
+            else
+              status=$?
+              test "${status}" -eq 1
+            fi
+          }
+          test -s "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json"
+          test -s "${DEMO_VIDEO_ROOT}/narration/captions.en.srt"
+          jq -e \
+            '.schema == "archon.demo-video-narration"
+             and .provider == "ElevenLabs"
+             and .allAlignmentsValid == true
+             and .sceneCount == 7' \
+            "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" >/dev/null
+          require_no_rg_match -i -e \
+            "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=])" \
+            "${DEMO_VIDEO_ROOT}/narration/narration-receipt.json" \
+            "${DEMO_VIDEO_ROOT}/narration/captions.en.srt"
+      - name: Upload sanitized one-day narration handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-video-narration-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/narration/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Expose narration artifact attempt
+        id: artifact_attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          echo "artifact_run_attempt=${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Remove narration runner material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${DEMO_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-demo-video"
+          rm -rf -- "${DEMO_VIDEO_ROOT}"
+      - name: Require a clean source checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+
+  capture:
+    name: Record the real production browser journey
+    needs: source-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact_run_attempt: ${{ steps.artifact_attempt.outputs.artifact_run_attempt }}
+    env:
+      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
+      EXPECTED_RELEASE_SHA: ${{ inputs.exact_sha }}
+      DEMO_DEPLOY_RUN_ID: ${{ needs.source-gate.outputs.deploy_run_id }}
+      DEMO_DAST_RUN_ID: ${{ needs.source-gate.outputs.dast_run_id }}
+      DEMO_MCP_RUN_ID: ${{ needs.source-gate.outputs.mcp_run_id }}
+      DEMO_RECOVERY_RUN_ID: ${{ needs.source-gate.outputs.recovery_run_id }}
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.exact_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install exact browser dependencies
+        run: npm ci --prefix web
+      - name: Install hosted Chromium
+        run: npx --prefix web playwright install --with-deps chromium
+      - name: Capture the exact live application
+        working-directory: web
+        run: node video/capture-production.mjs
+      - name: Validate the sanitized capture package
+        shell: bash
+        run: |
+          set -euo pipefail
+          capture_dir="${DEMO_VIDEO_ROOT}/capture"
+          receipt="${capture_dir}/capture-receipt.json"
+          test -s "${capture_dir}/production-capture.webm"
+          jq -e \
+            --arg sha "${EXPECTED_RELEASE_SHA}" \
+            '.schema == "archon.demo-video-capture"
+             and .releaseSha == $sha
+             and .liveProofBefore == true
+             and .liveProofAfter == true
+             and .cspEnforcedBefore == true
+             and .cspEnforcedAfter == true
+             and .recordingCspBypassedForOwnedOverlay == true
+             and .sceneCount == 7
+             and .crossOriginRequests == 0
+             and .consoleErrors == 0
+             and .pageErrors == 0
+             and (.screenshots | type == "array")
+             and (.screenshots | map(.path)) == [
+               "capture/01-hook.png",
+               "capture/02-scope-architecture.png",
+               "capture/03-recall-grounding.png",
+               "capture/04-audit-conflict.png",
+               "capture/05-audit-absence.png",
+               "capture/06-proof-ledger.png",
+               "capture/07-managed-mcp.png",
+               "capture/08-close.png"
+             ]
+             and (.screenshots | all(.[];
+               keys == ["bytes","path","sha256"]
+               and (.bytes
+                 | type == "number"
+                 and . > 0
+                 and floor == .
+               )
+               and (.sha256 | test("^[0-9a-f]{64}$"))
+             ))' \
+            "${receipt}" >/dev/null
+          expected=(
+            "01-hook.png"
+            "02-scope-architecture.png"
+            "03-recall-grounding.png"
+            "04-audit-conflict.png"
+            "05-audit-absence.png"
+            "06-proof-ledger.png"
+            "07-managed-mcp.png"
+            "08-close.png"
+          )
+          expected_entries=(
+            "production-capture.webm"
+            "capture-receipt.json"
+            "${expected[@]}"
+          )
+          mapfile -d '' observed_entries < <(
+            find "${capture_dir}" -mindepth 1 -maxdepth 1 -print0
+          )
+          test "${#observed_entries[@]}" -eq "${#expected_entries[@]}"
+          for name in "${expected_entries[@]}"; do
+            entry="${capture_dir}/${name}"
+            test -f "${entry}"
+            test ! -L "${entry}"
+          done
+          for name in "${expected[@]}"; do
+            relative_path="capture/${name}"
+            screenshot="${capture_dir}/${name}"
+            test -s "${screenshot}"
+            test -f "${screenshot}"
+            test ! -L "${screenshot}"
+            expected_bytes="$(
+              jq -er --arg path "${relative_path}" \
+                '.screenshots
+                 | map(select(.path == $path))
+                 | select(length == 1)
+                 | .[0].bytes' \
+                "${receipt}"
+            )"
+            expected_sha256="$(
+              jq -er --arg path "${relative_path}" \
+                '.screenshots
+                 | map(select(.path == $path))
+                 | select(length == 1)
+                 | .[0].sha256' \
+                "${receipt}"
+            )"
+            test "$(stat -c '%s' -- "${screenshot}")" = "${expected_bytes}"
+            test "$(sha256sum -- "${screenshot}" | awk '{print $1}')" = \
+              "${expected_sha256}"
+            test "$(
+              od -An -tx1 -N8 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "89504e470d0a1a0a"
+            test "$(
+              od -An -tx1 -j12 -N4 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "49484452"
+            test "$(
+              od -An -tx1 -j16 -N8 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "0000078000000438"
+          done
+      - name: Upload sanitized one-day live-capture handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-video-capture-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/capture/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Expose live-capture artifact attempt
+        id: artifact_attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          echo "artifact_run_attempt=${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Remove capture runner material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${DEMO_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-demo-video"
+          rm -rf -- "${DEMO_VIDEO_ROOT}"
+      - name: Require a clean source checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+
+  build-verify:
+    name: Compose and independently verify the final review package
+    needs: [source-gate, narrate, capture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DEMO_VIDEO_ROOT: ${{ runner.temp }}/archon-demo-video
+      DEMO_VIDEO_EXPECTED_SHA: ${{ inputs.exact_sha }}
+      DEMO_VIDEO_RELEASE_RECEIPT: ${{ runner.temp }}/archon-demo-video/release/video-release-binding.json
+      DEMO_VIDEO_SOURCE_GATE_ATTEMPT: ${{ needs.source-gate.outputs.artifact_run_attempt }}
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.exact_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - name: Install terminal-gate dependencies
+        run: npm ci
+      - name: Validate producer artifact attempt bindings
+        shell: bash
+        env:
+          SOURCE_ARTIFACT_ATTEMPT: ${{ needs.source-gate.outputs.artifact_run_attempt }}
+          NARRATION_ARTIFACT_ATTEMPT: ${{ needs.narrate.outputs.artifact_run_attempt }}
+          CAPTURE_ARTIFACT_ATTEMPT: ${{ needs.capture.outputs.artifact_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          for attempt in \
+            "${SOURCE_ARTIFACT_ATTEMPT}" \
+            "${NARRATION_ARTIFACT_ATTEMPT}" \
+            "${CAPTURE_ARTIFACT_ATTEMPT}"; do
+            [[ "${attempt}" =~ ^[1-9][0-9]*$ ]]
+            test "${attempt}" -le "${GITHUB_RUN_ATTEMPT}"
+          done
+      - name: Download exact release binding
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: demo-video-release-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ needs.source-gate.outputs.artifact_run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/release
+      - name: Download exact narration intermediate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: demo-video-narration-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ needs.narrate.outputs.artifact_run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/narration
+      - name: Download exact live-capture intermediate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: demo-video-capture-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ needs.capture.outputs.artifact_run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/capture
+      - name: Install exact FFmpeg toolchain
+        shell: bash
+        run: bash demo/video/install-pinned-ffmpeg-linux.sh
+      - name: Compose the release-bound video and captions
+        run: node demo/video/build-video.mjs
+      - name: Measure and verify the final media contract
+        run: node demo/video/verify-video.mjs
+      - name: Fail closed on receipt or artifact disagreement
+        run: node demo/video/assert-video-receipt.mjs
+      - name: Prove all eight hash-bound screenshots are package inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${DEMO_VIDEO_ROOT}/capture/capture-receipt.json"
+          expected=(
+            "capture/01-hook.png"
+            "capture/02-scope-architecture.png"
+            "capture/03-recall-grounding.png"
+            "capture/04-audit-conflict.png"
+            "capture/05-audit-absence.png"
+            "capture/06-proof-ledger.png"
+            "capture/07-managed-mcp.png"
+            "capture/08-close.png"
+          )
+          test "${#expected[@]}" -eq 8
+          jq -e \
+            '.screenshots
+             | type == "array"
+             and map(.path) == [
+               "capture/01-hook.png",
+               "capture/02-scope-architecture.png",
+               "capture/03-recall-grounding.png",
+               "capture/04-audit-conflict.png",
+               "capture/05-audit-absence.png",
+               "capture/06-proof-ledger.png",
+               "capture/07-managed-mcp.png",
+               "capture/08-close.png"
+             ]
+             and all(.[];
+               keys == ["bytes","path","sha256"]
+               and (.bytes
+                 | type == "number"
+                 and . > 0
+                 and floor == .
+               )
+               and (.sha256 | test("^[0-9a-f]{64}$"))
+             )' \
+            "${receipt}" >/dev/null
+          expected_entries=(
+            "production-capture.webm"
+            "capture-receipt.json"
+          )
+          for relative_path in "${expected[@]}"; do
+            expected_entries+=("${relative_path#capture/}")
+          done
+          mapfile -d '' observed_entries < <(
+            find "${DEMO_VIDEO_ROOT}/capture" \
+              -mindepth 1 -maxdepth 1 -print0
+          )
+          test "${#observed_entries[@]}" -eq "${#expected_entries[@]}"
+          for name in "${expected_entries[@]}"; do
+            entry="${DEMO_VIDEO_ROOT}/capture/${name}"
+            test -f "${entry}"
+            test ! -L "${entry}"
+          done
+          for relative_path in "${expected[@]}"; do
+            screenshot="${DEMO_VIDEO_ROOT}/${relative_path}"
+            test -s "${screenshot}"
+            test -f "${screenshot}"
+            test ! -L "${screenshot}"
+            expected_bytes="$(
+              jq -er --arg path "${relative_path}" \
+                '.screenshots
+                 | map(select(.path == $path))
+                 | select(length == 1)
+                 | .[0].bytes' \
+                "${receipt}"
+            )"
+            expected_sha256="$(
+              jq -er --arg path "${relative_path}" \
+                '.screenshots
+                 | map(select(.path == $path))
+                 | select(length == 1)
+                 | .[0].sha256' \
+                "${receipt}"
+            )"
+            test "$(stat -c '%s' -- "${screenshot}")" = "${expected_bytes}"
+            test "$(sha256sum -- "${screenshot}" | awk '{print $1}')" = \
+              "${expected_sha256}"
+            test "$(
+              od -An -tx1 -N8 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "89504e470d0a1a0a"
+            test "$(
+              od -An -tx1 -j12 -N4 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "49484452"
+            test "$(
+              od -An -tx1 -j16 -N8 -- "${screenshot}" | tr -d '[:space:]'
+            )" = "0000078000000438"
+          done
+      - name: Terminally revalidate main, live proof, and hosted evidence
+        env:
+          DEMO_VIDEO_PHASE: terminal
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --import tsx scripts/demo-video-release-gate.ts
+      - name: Scan every uploadable text receipt for credential material
+        shell: bash
+        run: |
+          set -euo pipefail
+          require_no_rg_match() {
+            local status
+            if rg --quiet "$@"; then
+              echo "Credential material was detected in the review package." >&2
+              return 1
+            else
+              status=$?
+              test "${status}" -eq 1
+            fi
+          }
+          mapfile -d '' uploadable < <(
+            find "${DEMO_VIDEO_ROOT}" -type f \
+              \( -name '*.json' -o -name '*.srt' -o -name '*.txt' \) -print0
+          )
+          test "${#uploadable[@]}" -ge 5
+          require_no_rg_match -i -e \
+            "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
+            "${uploadable[@]}"
+      - name: Upload verified review package
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archon-demo-video-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/archon-demo-video/output/archon-memory-demo.mp4
+            ${{ runner.temp }}/archon-demo-video/output/captions.en.srt
+            ${{ runner.temp }}/archon-demo-video/output/video-build-receipt.json
+            ${{ runner.temp }}/archon-demo-video/output/video-verification-receipt.json
+            ${{ runner.temp }}/archon-demo-video/release/video-release-binding.json
+            ${{ runner.temp }}/archon-demo-video/capture/capture-receipt.json
+            ${{ runner.temp }}/archon-demo-video/capture/01-hook.png
+            ${{ runner.temp }}/archon-demo-video/capture/02-scope-architecture.png
+            ${{ runner.temp }}/archon-demo-video/capture/03-recall-grounding.png
+            ${{ runner.temp }}/archon-demo-video/capture/04-audit-conflict.png
+            ${{ runner.temp }}/archon-demo-video/capture/05-audit-absence.png
+            ${{ runner.temp }}/archon-demo-video/capture/06-proof-ledger.png
+            ${{ runner.temp }}/archon-demo-video/capture/07-managed-mcp.png
+            ${{ runner.temp }}/archon-demo-video/capture/08-close.png
+            ${{ runner.temp }}/archon-demo-video/narration/narration-receipt.json
+            ${{ runner.temp }}/archon-demo-video/toolchain-provenance.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Create canonical publication provenance
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+          PACKAGE_ARTIFACT_NAME: archon-demo-video-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          RELEASE_SHA: ${{ inputs.exact_sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          VOICE_RIGHTS_ATTESTED: ${{ inputs.voice_rights_attested }}
+        run: |
+          set -euo pipefail
+          require_no_rg_match() {
+            local status
+            if rg --quiet "$@"; then
+              echo "Credential material was detected in publication provenance." >&2
+              return 1
+            else
+              status=$?
+              test "${status}" -eq 1
+            fi
+          }
+          umask 077
+          test "${ARTIFACT_ID}" -gt 0
+          [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          package_artifact_digest="sha256:${ARTIFACT_DIGEST}"
+          test "${VOICE_RIGHTS_ATTESTED}" = "true"
+          verification="${DEMO_VIDEO_ROOT}/output/video-verification-receipt.json"
+          video="${DEMO_VIDEO_ROOT}/output/archon-memory-demo.mp4"
+          captions="${DEMO_VIDEO_ROOT}/output/captions.en.srt"
+          publication_dir="${DEMO_VIDEO_ROOT}/publication"
+          publication="${publication_dir}/demo-video-publication.json"
+          mkdir -p -- "${publication_dir}"
+          video_sha256="$(sha256sum -- "${video}" | awk '{print $1}')"
+          video_bytes="$(stat -c '%s' -- "${video}")"
+          captions_sha256="$(sha256sum -- "${captions}" | awk '{print $1}')"
+          verification_sha256="$(sha256sum -- "${verification}" | awk '{print $1}')"
+          duration_seconds="$(jq -er '.media.durationSeconds | select(. >= 169.88 and . <= 170.12)' "${verification}")"
+          test "$(jq -er '.bindings.video.sha256' "${verification}")" = "${video_sha256}"
+          test "$(jq -er '.bindings.video.bytes' "${verification}")" = "${video_bytes}"
+          test "$(jq -er '.captions.file.sha256' "${verification}")" = "${captions_sha256}"
+          jq -n \
+            --arg schema "archon.demo-video-publication" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --argjson workflowRunId "${WORKFLOW_RUN_ID}" \
+            --argjson workflowRunAttempt "${WORKFLOW_RUN_ATTEMPT}" \
+            --argjson packageArtifactId "${ARTIFACT_ID}" \
+            --arg packageArtifactName "${PACKAGE_ARTIFACT_NAME}" \
+            --arg packageArtifactDigest "${package_artifact_digest}" \
+            --arg mp4Sha256 "${video_sha256}" \
+            --argjson mp4Bytes "${video_bytes}" \
+            --argjson measuredDurationSeconds "${duration_seconds}" \
+            --arg captionsSha256 "${captions_sha256}" \
+            --arg verificationReceiptSha256 "${verification_sha256}" \
+            '{
+              schema: $schema,
+              version: 1,
+              releaseSha: $releaseSha,
+              workflowRunId: $workflowRunId,
+              workflowRunAttempt: $workflowRunAttempt,
+              voiceRightsAttested: true,
+              packageArtifact: {
+                id: $packageArtifactId,
+                name: $packageArtifactName,
+                digest: $packageArtifactDigest
+              },
+              media: {
+                mp4Sha256: $mp4Sha256,
+                mp4Bytes: $mp4Bytes,
+                measuredDurationSeconds: $measuredDurationSeconds,
+                captionsSha256: $captionsSha256,
+                verificationReceiptSha256: $verificationReceiptSha256
+              }
+            }' >"${publication}.tmp"
+          mv -- "${publication}.tmp" "${publication}"
+          jq -e \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson run_id "${WORKFLOW_RUN_ID}" \
+            --argjson run_attempt "${WORKFLOW_RUN_ATTEMPT}" \
+            --argjson artifact_id "${ARTIFACT_ID}" \
+            --arg artifact_name "${PACKAGE_ARTIFACT_NAME}" \
+            --arg artifact_digest "${package_artifact_digest}" \
+            --arg video_sha "${video_sha256}" \
+            --argjson video_bytes "${video_bytes}" \
+            --argjson duration "${duration_seconds}" \
+            --arg captions_sha "${captions_sha256}" \
+            --arg verification_sha "${verification_sha256}" \
+            'keys == ["media","packageArtifact","releaseSha","schema","version","voiceRightsAttested","workflowRunAttempt","workflowRunId"] and
+             .schema == "archon.demo-video-publication" and
+             .version == 1 and
+             .releaseSha == $sha and
+             .workflowRunId == $run_id and
+             .workflowRunAttempt == $run_attempt and
+             .voiceRightsAttested == true and
+             .packageArtifact == {
+               "id": $artifact_id,
+               "name": $artifact_name,
+               "digest": $artifact_digest
+             } and
+             .media == {
+               "mp4Sha256": $video_sha,
+               "mp4Bytes": $video_bytes,
+               "measuredDurationSeconds": $duration,
+               "captionsSha256": $captions_sha,
+               "verificationReceiptSha256": $verification_sha
+             }' "${publication}" >/dev/null
+          require_no_rg_match -i -e \
+            "(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|postgres(ql)?://|password[[:space:]\"']*[:=]|token[[:space:]\"']*[:=]|api[_-]?key[[:space:]\"']*[:=]|authorization[[:space:]\"']*[:=])" \
+            "${publication}"
+      - name: Upload canonical publication provenance
+        id: provenance_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archon-demo-video-provenance-${{ inputs.exact_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-demo-video/publication/demo-video-publication.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Publish artifact identity in the run summary
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ steps.provenance_artifact.outputs.artifact-id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ steps.provenance_artifact.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          test "${ARTIFACT_ID}" -gt 0
+          [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          test "${PROVENANCE_ARTIFACT_ID}" -gt 0
+          [[ "${PROVENANCE_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          package_artifact_digest="sha256:${ARTIFACT_DIGEST}"
+          provenance_artifact_digest="sha256:${PROVENANCE_ARTIFACT_DIGEST}"
+          publication="${DEMO_VIDEO_ROOT}/publication/demo-video-publication.json"
+          video_sha256="$(jq -er '.media.mp4Sha256' "${publication}")"
+          duration_seconds="$(jq -er '.media.measuredDurationSeconds' "${publication}")"
+          marker_count="$(jq -er '.sceneMarkers.count | select(. == 7)' "${DEMO_VIDEO_ROOT}/output/video-verification-receipt.json")"
+          {
+            echo "## Verified Archon Memory demo video"
+            echo
+            echo "- exact release: \`${{ inputs.exact_sha }}\`"
+            echo "- measured duration: \`${duration_seconds}s\`"
+            echo "- final-media scene markers: \`${marker_count}/7\`"
+            echo "- MP4 SHA-256: \`${video_sha256}\`"
+            echo "- artifact ID: \`${ARTIFACT_ID}\`"
+            echo "- artifact digest: \`${package_artifact_digest}\`"
+            echo "- provenance artifact ID: \`${PROVENANCE_ARTIFACT_ID}\`"
+            echo "- provenance artifact digest: \`${provenance_artifact_digest}\`"
+            echo "- public upload: deliberately not performed by this credential-free workflow"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Revalidate exact main after artifact publication
+        env:
+          DEMO_VIDEO_PHASE: terminal
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --import tsx scripts/demo-video-release-gate.ts
+      - name: Remove final runner material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${DEMO_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-demo-video"
+          toolchain_root="${RUNNER_TEMP}/archon-demo-video-toolchain-b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61"
+          test "${toolchain_root}" != "${RUNNER_TEMP}"
+          rm -rf -- "${DEMO_VIDEO_ROOT}" "${toolchain_root}"
+      - name: Require a clean source checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"

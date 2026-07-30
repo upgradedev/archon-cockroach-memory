@@ -566,7 +566,7 @@ rewrite this baseline.
 | Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
 | Fault-triggered `RECOVERING → RECOVERED` and daily/manual audit | Implemented and CI-covered; the final gate requires a fresh manual `operation=audit` receipt, but no intentional live failure drill is claimed |
 | `main` governance | [Active ruleset](https://github.com/upgradedev/archon-cockroach-memory/rules/19722191): PR only, no force-push/delete, strict `readiness` + CodeQL |
-| Submission copy, video plan, owned thumbnail, and hosted final gate | Versioned under [docs/DEVPOST_SUBMISSION.md](./docs/DEVPOST_SUBMISSION.md), [demo/VIDEO_PLAN.md](./demo/VIDEO_PLAN.md), and [Submission readiness](./.github/workflows/submission-readiness.yml) |
+| Submission copy, CI-only ElevenLabs video plan, owned thumbnail, and hosted final gate | Versioned under [docs/DEVPOST_SUBMISSION.md](./docs/DEVPOST_SUBMISSION.md), [demo/VIDEO_PLAN.md](./demo/VIDEO_PLAN.md), [Generate exact-release demo video](./.github/workflows/demo-video.yml), and [Submission readiness](./.github/workflows/submission-readiness.yml) |
 | Final public video and Devpost form | Deliberately last; a blog/post is not a required deliverable |
 
 Run `npm run readiness` for separate source-readiness and submission-eligibility

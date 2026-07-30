@@ -30,6 +30,10 @@ const WORKFLOW_REF =
   `${REPOSITORY}/.github/workflows/submission-readiness.yml@refs/heads/main`;
 const RECALL_QUESTION =
   "What was the true employer cost and the off-bank wedge?";
+const DEMO_VIDEO_WORKFLOW_PATH = ".github/workflows/demo-video.yml";
+const DEMO_VIDEO_MAXIMUM_AGE_MS = 24 * 60 * 60 * 1_000;
+const DEMO_VIDEO_MINIMUM_PACKAGE_BYTES = 5_000_000;
+const DEMO_VIDEO_MAXIMUM_PACKAGE_BYTES = 2_000_000_000;
 
 type GatePhase = "pre-submit" | "post-submit";
 type CheckStatus = "pass" | "fail";
@@ -96,6 +100,7 @@ interface GitHubWorkflowStep {
 interface GitHubWorkflowJob {
   id: number;
   run_id: number;
+  run_attempt: number;
   head_sha: string;
   name: string;
   status: string;
@@ -112,6 +117,10 @@ interface VideoReceipt {
   oembedVerified: boolean;
   publicEmbeddableAttested: true;
   englishCaptionsAttested: true;
+  ciRunId: number;
+  ciRunAttempt: number;
+  sourceMp4Sha256: string;
+  uploadedFromCiArtifactAttested: true;
 }
 
 interface ThumbnailReceipt {
@@ -120,6 +129,42 @@ interface ThumbnailReceipt {
   height: number;
   bytes: number;
   sha256: string;
+}
+
+export interface DemoVideoArtifactSet {
+  release: GitHubArtifact;
+  narration: GitHubArtifact;
+  capture: GitHubArtifact;
+  package: GitHubArtifact;
+  provenance: GitHubArtifact;
+}
+
+export interface DemoVideoJobAttempts {
+  sourceGate: number;
+  narrate: number;
+  capture: number;
+  buildVerify: number;
+}
+
+export interface DemoVideoPublicationReceipt {
+  schema: "archon.demo-video-publication";
+  version: 1;
+  releaseSha: string;
+  workflowRunId: number;
+  workflowRunAttempt: number;
+  voiceRightsAttested: true;
+  packageArtifact: {
+    id: number;
+    name: string;
+    digest: string;
+  };
+  media: {
+    mp4Sha256: string;
+    mp4Bytes: number;
+    measuredDurationSeconds: number;
+    captionsSha256: string;
+    verificationReceiptSha256: string;
+  };
 }
 
 interface SubmissionReceipt {
@@ -161,6 +206,18 @@ function asRecords(value: unknown): Array<Record<string, unknown>> {
           candidate !== undefined
       )
     : [];
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[]
+): boolean {
+  const observed = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  return (
+    observed.length === canonical.length &&
+    observed.every((key, index) => key === canonical[index])
+  );
 }
 
 function stringValue(
@@ -355,11 +412,66 @@ async function githubJson(
   );
 }
 
+export async function readBoundedResponseBody(
+  response: Response,
+  label: string,
+  maximumBytes: number
+): Promise<Uint8Array> {
+  if (
+    !Number.isSafeInteger(maximumBytes) ||
+    maximumBytes < 1 ||
+    maximumBytes > 100_000_000 ||
+    !response.body
+  ) {
+    throw new Error(`${label} response body bound is invalid`);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        throw new Error(`${label} returned a non-byte response chunk`);
+      }
+      if (value.byteLength === 0) continue;
+      if (totalBytes > maximumBytes - value.byteLength) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`${label} response body exceeds its byte bound`);
+      }
+      totalBytes += value.byteLength;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (totalBytes < 1) {
+    throw new Error(`${label} response body is empty`);
+  }
+  const output = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
 async function githubArtifactArchive(
   artifact: GitHubArtifact,
   token: string,
-  label: string
+  label: string,
+  maximumArchiveBytes = 1_000_000
 ): Promise<Uint8Array> {
+  if (
+    !Number.isSafeInteger(maximumArchiveBytes) ||
+    maximumArchiveBytes < 1 ||
+    maximumArchiveBytes > 100_000_000 ||
+    artifact.sizeInBytes > maximumArchiveBytes
+  ) {
+    throw new Error(`${label} metadata exceeds its archive size bound`);
+  }
   const response = await fetchWithTimeout(
     artifact.archiveDownloadUrl,
     {
@@ -379,14 +491,15 @@ async function githubArtifactArchive(
     (contentLength !== 0 &&
       (!Number.isSafeInteger(contentLength) ||
         contentLength < 1 ||
-        contentLength > 1_000_000))
+        contentLength > maximumArchiveBytes))
   ) {
     throw new Error(`${label} content length is invalid`);
   }
-  const archive = new Uint8Array(await response.arrayBuffer());
-  if (archive.length < 1 || archive.length > 1_000_000) {
-    throw new Error(`${label} archive size is invalid`);
-  }
+  const archive = await readBoundedResponseBody(
+    response,
+    label,
+    maximumArchiveBytes
+  );
   try {
     requireArtifactArchiveDigest(archive, artifact.digest);
   } catch {
@@ -403,6 +516,20 @@ async function githubArtifactReceipt(
   return extractSingleJsonArtifact(
     await githubArtifactArchive(artifact, token, label),
     "hosted-dast.json"
+  );
+}
+
+async function githubDemoVideoPublication(
+  artifact: GitHubArtifact,
+  token: string,
+  label: string
+): Promise<unknown> {
+  if (artifact.sizeInBytes > 1_000_000) {
+    throw new Error(`${label} metadata size exceeds the small-receipt bound`);
+  }
+  return extractSingleJsonArtifact(
+    await githubArtifactArchive(artifact, token, label),
+    "demo-video-publication.json"
   );
 }
 
@@ -436,9 +563,16 @@ function parsePhase(value: string | undefined): GatePhase | undefined {
 export function expectedPreSubmitDisplayTitle(
   sha: string,
   videoUrl: string | undefined,
-  durationSeconds: string | undefined
+  durationSeconds: string | undefined,
+  videoCiRunId: string | undefined,
+  videoCiRunAttempt: string | undefined,
+  videoSourceSha256: string | undefined
 ): string {
-  return `Submission readiness / pre-submit / ${sha} / ${videoUrl} / ${durationSeconds}s`;
+  return (
+    `Submission readiness / pre-submit / ${sha} / ${videoUrl} / ` +
+    `${durationSeconds}s / CI ${videoCiRunId}.${videoCiRunAttempt} / ` +
+    `${videoSourceSha256}`
+  );
 }
 
 export function parseWorkflowRuns(value: unknown): GitHubWorkflowRun[] {
@@ -515,6 +649,53 @@ export function selectSuccessfulRun(
   return selected;
 }
 
+export function selectBoundSuccessfulDemoVideoRun(
+  runs: GitHubWorkflowRun[],
+  sha: string,
+  runId: number,
+  runAttempt: number,
+  now = Date.now()
+): GitHubWorkflowRun {
+  if (
+    !/^[0-9a-f]{40}$/u.test(sha) ||
+    !Number.isSafeInteger(runId) ||
+    runId < 1 ||
+    !Number.isSafeInteger(runAttempt) ||
+    runAttempt < 1 ||
+    !Number.isFinite(now)
+  ) {
+    throw new Error("Requested demo-video run binding is invalid");
+  }
+  const matches = runs.filter(
+    (run) => run.id === runId && run.run_attempt === runAttempt
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      "Exactly one requested demo-video run and attempt is required"
+    );
+  }
+  const selected = selectSuccessfulRun(
+    matches,
+    "Generate exact-release demo video",
+    "workflow_dispatch",
+    sha,
+    DEMO_VIDEO_WORKFLOW_PATH
+  );
+  const startedAt = Date.parse(selected.run_started_at);
+  const completedAt = Date.parse(selected.updated_at);
+  if (
+    ![startedAt, completedAt].every(Number.isFinite) ||
+    completedAt < startedAt ||
+    completedAt > now + 5 * 60 * 1_000 ||
+    now - completedAt > DEMO_VIDEO_MAXIMUM_AGE_MS
+  ) {
+    throw new Error(
+      "Requested demo-video run must have completed within 24 hours"
+    );
+  }
+  return selected;
+}
+
 function toSelectedRun(run: GitHubWorkflowRun): SelectedRun {
   return {
     id: run.id,
@@ -527,7 +708,17 @@ function toSelectedRun(run: GitHubWorkflowRun): SelectedRun {
   };
 }
 
-export function parseWorkflowArtifacts(value: unknown): GitHubArtifact[] {
+export function parseWorkflowArtifacts(
+  value: unknown,
+  maximumSizeInBytes = 1_000_000
+): GitHubArtifact[] {
+  if (
+    !Number.isSafeInteger(maximumSizeInBytes) ||
+    maximumSizeInBytes < 1 ||
+    maximumSizeInBytes > 2_000_000_000
+  ) {
+    throw new Error("Artifact metadata size bound is invalid");
+  }
   const root = asRecord(value);
   return asRecords(root?.artifacts)
     .map((artifact) => {
@@ -552,7 +743,7 @@ export function parseWorkflowArtifacts(value: unknown): GitHubArtifact[] {
         artifact.id > 0 &&
         Number.isSafeInteger(artifact.sizeInBytes) &&
         artifact.sizeInBytes > 0 &&
-        artifact.sizeInBytes <= 1_000_000 &&
+        artifact.sizeInBytes <= maximumSizeInBytes &&
         artifact.workflowRunId > 0 &&
         /^[0-9a-f]{40}$/u.test(artifact.workflowRunHeadSha) &&
         /^sha256:[0-9a-f]{64}$/u.test(artifact.digest) &&
@@ -566,7 +757,8 @@ export function parseWorkflowArtifacts(value: unknown): GitHubArtifact[] {
 export function selectExactHostedDastArtifact(
   value: unknown,
   expectedName: string,
-  hostedDastRun: GitHubWorkflowRun
+  hostedDastRun: GitHubWorkflowRun,
+  maximumSizeInBytes = 1_000_000
 ): GitHubArtifact {
   const root = asRecord(value);
   const rawArtifacts = asRecords(root?.artifacts);
@@ -585,7 +777,10 @@ export function selectExactHostedDastArtifact(
       "Hosted DAST artifact inventory is incomplete or ambiguous"
     );
   }
-  const matches = parseWorkflowArtifacts(value).filter(
+  const matches = parseWorkflowArtifacts(
+    value,
+    maximumSizeInBytes
+  ).filter(
     (artifact) =>
       artifact.name === expectedName &&
       artifact.workflowRunId === hostedDastRun.id &&
@@ -598,6 +793,224 @@ export function selectExactHostedDastArtifact(
     );
   }
   return matches[0];
+}
+
+export function selectExactDemoVideoArtifacts(
+  value: unknown,
+  run: GitHubWorkflowRun,
+  sha: string,
+  jobAttempts: DemoVideoJobAttempts,
+  now = Date.now()
+): DemoVideoArtifactSet {
+  const attemptRecord = asRecord(jobAttempts);
+  if (
+    !/^[0-9a-f]{40}$/u.test(sha) ||
+    run.head_sha !== sha ||
+    run.path !== DEMO_VIDEO_WORKFLOW_PATH ||
+    run.event !== "workflow_dispatch" ||
+    !attemptRecord ||
+    !hasExactKeys(
+      attemptRecord,
+      ["sourceGate", "narrate", "capture", "buildVerify"]
+    ) ||
+    Object.values(attemptRecord).some(
+      (attempt) =>
+        !Number.isSafeInteger(attempt) ||
+        (attempt as number) < 1 ||
+        (attempt as number) > run.run_attempt
+    ) ||
+    jobAttempts.buildVerify !== run.run_attempt ||
+    !Number.isFinite(now)
+  ) {
+    throw new Error("Demo-video artifact selection is not exact-SHA bound");
+  }
+  const root = asRecord(value);
+  const rawArtifacts = asRecords(root?.artifacts);
+  const totalCount = numberValue(root, "total_count");
+  if (
+    !Number.isSafeInteger(totalCount) ||
+    totalCount !== rawArtifacts.length ||
+    (totalCount ?? 0) < 5 ||
+    (totalCount ?? 0) > 100
+  ) {
+    throw new Error("Demo-video artifact inventory is incomplete or truncated");
+  }
+  const namePattern = new RegExp(
+    "^(?:demo-video-(?:release|narration|capture)|" +
+      "archon-demo-video(?:-provenance)?)-" +
+      `${sha}-${run.id}-([1-9][0-9]*)$`,
+    "u"
+  );
+  const rawNames = rawArtifacts.map(
+    (artifact) => stringValue(artifact, "name") ?? ""
+  );
+  if (
+    new Set(rawNames).size !== rawNames.length ||
+    rawNames.some((name) => {
+      const match = namePattern.exec(name);
+      const attempt = match ? Number(match[1]) : 0;
+      return (
+        !match ||
+        !Number.isSafeInteger(attempt) ||
+        attempt < 1 ||
+        attempt > run.run_attempt
+      );
+    })
+  ) {
+    throw new Error(
+      "Demo-video artifact inventory contains duplicate, unexpected, or future-attempt items"
+    );
+  }
+  const packageName =
+    `archon-demo-video-${sha}-${run.id}-${run.run_attempt}`;
+  const provenanceName =
+    `archon-demo-video-provenance-${sha}-${run.id}-${run.run_attempt}`;
+  const releaseName =
+    `demo-video-release-${sha}-${run.id}-${jobAttempts.sourceGate}`;
+  const narrationName =
+    `demo-video-narration-${sha}-${run.id}-${jobAttempts.narrate}`;
+  const captureName =
+    `demo-video-capture-${sha}-${run.id}-${jobAttempts.capture}`;
+  const parsed = parseWorkflowArtifacts(
+    value,
+    DEMO_VIDEO_MAXIMUM_PACKAGE_BYTES
+  );
+  const runStartedAt = Date.parse(run.run_started_at);
+  const runCompletedAt = Date.parse(run.updated_at);
+  if (
+    parsed.length !== rawArtifacts.length ||
+    new Set(parsed.map((artifact) => artifact.id)).size !==
+      parsed.length ||
+    parsed.some((artifact) => {
+      const createdAt = Date.parse(artifact.createdAt);
+      const updatedAt = Date.parse(artifact.updatedAt);
+      const isCurrentEvidence =
+        artifact.name === packageName ||
+        artifact.name === provenanceName;
+      return (
+        artifact.workflowRunId !== run.id ||
+        artifact.workflowRunHeadSha !== sha ||
+        (isCurrentEvidence &&
+          createdAt < runStartedAt - 5 * 60 * 1_000) ||
+        updatedAt < createdAt ||
+        updatedAt > runCompletedAt + 5 * 60 * 1_000 ||
+        updatedAt > now + 5 * 60 * 1_000
+      );
+    })
+  ) {
+    throw new Error(
+      "Every demo-video artifact must have valid exact-run metadata"
+    );
+  }
+  const exact = (name: string): GitHubArtifact => {
+    const matches = parsed.filter((artifact) => artifact.name === name);
+    if (matches.length !== 1 || !matches[0]) {
+      throw new Error(`Exactly one selected-attempt ${name} is required`);
+    }
+    return matches[0];
+  };
+  const packageArtifact = exact(packageName);
+  const provenanceArtifact = exact(provenanceName);
+  const releaseArtifact = exact(releaseName);
+  const narrationArtifact = exact(narrationName);
+  const captureArtifact = exact(captureName);
+  if (
+    releaseArtifact.expired !== false ||
+    narrationArtifact.expired !== false ||
+    captureArtifact.expired !== false ||
+    packageArtifact.expired !== false ||
+    provenanceArtifact.expired !== false ||
+    packageArtifact.sizeInBytes < DEMO_VIDEO_MINIMUM_PACKAGE_BYTES ||
+    packageArtifact.sizeInBytes > DEMO_VIDEO_MAXIMUM_PACKAGE_BYTES ||
+    provenanceArtifact.sizeInBytes < 128 ||
+    provenanceArtifact.sizeInBytes > 1_000_000
+  ) {
+    throw new Error(
+      "Demo-video package or provenance artifact size is not sane"
+    );
+  }
+  return {
+    release: releaseArtifact,
+    narration: narrationArtifact,
+    capture: captureArtifact,
+    package: packageArtifact,
+    provenance: provenanceArtifact,
+  };
+}
+
+export function requireExactDemoVideoPublication(
+  value: unknown,
+  expected: {
+    run: GitHubWorkflowRun;
+    packageArtifact: GitHubArtifact;
+    sha: string;
+    sourceSha256: string;
+    durationSeconds: number;
+  }
+): DemoVideoPublicationReceipt {
+  const receipt = asRecord(value);
+  const packageArtifact = asRecord(receipt?.packageArtifact);
+  const media = asRecord(receipt?.media);
+  const expectedPackageName =
+    `archon-demo-video-${expected.sha}-${expected.run.id}-` +
+    `${expected.run.run_attempt}`;
+  if (
+    !receipt ||
+    !packageArtifact ||
+    !media ||
+    !/^[0-9a-f]{40}$/u.test(expected.sha) ||
+    !/^[0-9a-f]{64}$/u.test(expected.sourceSha256) ||
+    !Number.isSafeInteger(expected.durationSeconds) ||
+    expected.durationSeconds < 1 ||
+    expected.durationSeconds > 179 ||
+    !hasExactKeys(receipt, [
+      "schema",
+      "version",
+      "releaseSha",
+      "workflowRunId",
+      "workflowRunAttempt",
+      "voiceRightsAttested",
+      "packageArtifact",
+      "media",
+    ]) ||
+    receipt.schema !== "archon.demo-video-publication" ||
+    receipt.version !== 1 ||
+    receipt.releaseSha !== expected.sha ||
+    receipt.workflowRunId !== expected.run.id ||
+    receipt.workflowRunAttempt !== expected.run.run_attempt ||
+    receipt.voiceRightsAttested !== true ||
+    !hasExactKeys(packageArtifact, ["id", "name", "digest"]) ||
+    packageArtifact.id !== expected.packageArtifact.id ||
+    packageArtifact.name !== expectedPackageName ||
+    packageArtifact.name !== expected.packageArtifact.name ||
+    packageArtifact.digest !== expected.packageArtifact.digest ||
+    !hasExactKeys(media, [
+      "mp4Sha256",
+      "mp4Bytes",
+      "measuredDurationSeconds",
+      "captionsSha256",
+      "verificationReceiptSha256",
+    ]) ||
+    media.mp4Sha256 !== expected.sourceSha256 ||
+    !Number.isSafeInteger(media.mp4Bytes) ||
+    (media.mp4Bytes as number) < DEMO_VIDEO_MINIMUM_PACKAGE_BYTES ||
+    (media.mp4Bytes as number) > expected.packageArtifact.sizeInBytes ||
+    typeof media.measuredDurationSeconds !== "number" ||
+    !Number.isFinite(media.measuredDurationSeconds) ||
+    Math.abs(
+      (media.measuredDurationSeconds as number) -
+        expected.durationSeconds
+    ) > 0.12 ||
+    !/^[0-9a-f]{64}$/u.test(String(media.captionsSha256)) ||
+    !/^[0-9a-f]{64}$/u.test(
+      String(media.verificationReceiptSha256)
+    )
+  ) {
+    throw new Error(
+      "Demo-video publication provenance is malformed or disagrees with the requested CI source"
+    );
+  }
+  return receipt as unknown as DemoVideoPublicationReceipt;
 }
 
 function toSelectedArtifact(artifact: GitHubArtifact): SelectedArtifact {
@@ -863,14 +1276,17 @@ export function requireExactHostedDastReceipt(
 
 export function parseWorkflowJobs(value: unknown): {
   totalCount: number;
+  rawCount: number;
   jobs: GitHubWorkflowJob[];
 } {
   const root = asRecord(value);
   const totalCount = numberValue(root, "total_count") ?? -1;
-  const jobs = asRecords(root?.jobs)
+  const rawJobs = Array.isArray(root?.jobs) ? root.jobs : [];
+  const jobs = asRecords(rawJobs)
     .map((job) => ({
       id: numberValue(job, "id") ?? 0,
       run_id: numberValue(job, "run_id") ?? 0,
+      run_attempt: numberValue(job, "run_attempt") ?? 0,
       head_sha: stringValue(job, "head_sha") ?? "",
       name: stringValue(job, "name") ?? "",
       status: stringValue(job, "status") ?? "",
@@ -893,9 +1309,11 @@ export function parseWorkflowJobs(value: unknown): {
         job.id > 0 &&
         Number.isSafeInteger(job.run_id) &&
         job.run_id > 0 &&
+        Number.isSafeInteger(job.run_attempt) &&
+        job.run_attempt > 0 &&
         /^[0-9a-f]{40}$/u.test(job.head_sha)
     );
-  return { totalCount, jobs };
+  return { totalCount, rawCount: rawJobs.length, jobs };
 }
 
 export function requireSuccessfulDeployJobs(
@@ -903,7 +1321,7 @@ export function requireSuccessfulDeployJobs(
   runId: number,
   sha: string
 ): void {
-  const { totalCount, jobs } = parseWorkflowJobs(value);
+  const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const expected = [
     {
       job: "Validate Deploy AWS source CI",
@@ -950,7 +1368,8 @@ export function requireSuccessfulDeployJobs(
     },
   ] as const;
   if (
-    totalCount !== jobs.length ||
+    totalCount !== rawCount ||
+    rawCount !== jobs.length ||
     jobs.length < expected.length ||
     jobs.length > 100
   ) {
@@ -987,7 +1406,7 @@ export function requireSuccessfulRecoveryAuditJobs(
   runId: number,
   sha: string
 ): void {
-  const { totalCount, jobs } = parseWorkflowJobs(value);
+  const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const expected = [
     {
       job: "Recover unresolved staging delivery",
@@ -1000,7 +1419,11 @@ export function requireSuccessfulRecoveryAuditJobs(
       upload: "Upload production daily protection and drift audit",
     },
   ] as const;
-  if (totalCount !== expected.length || jobs.length !== expected.length) {
+  if (
+    totalCount !== rawCount ||
+    rawCount !== expected.length ||
+    jobs.length !== expected.length
+  ) {
     throw new Error("Recovery audit must contain exactly two successful jobs");
   }
   for (const contract of expected) {
@@ -1034,7 +1457,7 @@ export function requireSuccessfulHostedDastJobs(
   runId: number,
   sha: string
 ): void {
-  const { totalCount, jobs } = parseWorkflowJobs(value);
+  const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const expected = [
     {
       job: "Validate Hosted DAST source deployment",
@@ -1052,7 +1475,11 @@ export function requireSuccessfulHostedDastJobs(
       steps: ["Scan the owned public production release"],
     },
   ] as const;
-  if (totalCount !== expected.length || jobs.length !== expected.length) {
+  if (
+    totalCount !== rawCount ||
+    rawCount !== expected.length ||
+    jobs.length !== expected.length
+  ) {
     throw new Error("Hosted DAST must contain exactly three successful jobs");
   }
   for (const contract of expected) {
@@ -1079,6 +1506,120 @@ export function requireSuccessfulHostedDastJobs(
       }
     }
   }
+}
+
+export function requireSuccessfulDemoVideoJobs(
+  value: unknown,
+  runId: number,
+  sha: string,
+  workflowAttempt: number
+): DemoVideoJobAttempts {
+  const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
+  const expected = [
+    {
+      key: "sourceGate",
+      job: "Bind video to the exact protected release",
+      steps: [
+        "Require main-ref exact-SHA dispatch before any paid call",
+        "Validate exact hosted release evidence and live proof",
+        "Upload sanitized release binding",
+        "Expose release-binding artifact attempt",
+      ],
+    },
+    {
+      key: "narrate",
+      job: "Generate timestamped ElevenLabs narration",
+      steps: [
+        "Generate narration and alignment-derived English captions",
+        "Validate the sanitized narration package",
+        "Upload sanitized one-day narration handoff",
+        "Expose narration artifact attempt",
+      ],
+    },
+    {
+      key: "capture",
+      job: "Record the real production browser journey",
+      steps: [
+        "Capture the exact live application",
+        "Validate the sanitized capture package",
+        "Upload sanitized one-day live-capture handoff",
+        "Expose live-capture artifact attempt",
+      ],
+    },
+    {
+      key: "buildVerify",
+      job: "Compose and independently verify the final review package",
+      steps: [
+        "Validate producer artifact attempt bindings",
+        "Compose the release-bound video and captions",
+        "Measure and verify the final media contract",
+        "Fail closed on receipt or artifact disagreement",
+        "Prove all eight hash-bound screenshots are package inputs",
+        "Terminally revalidate main, live proof, and hosted evidence",
+        "Upload verified review package",
+        "Create canonical publication provenance",
+        "Upload canonical publication provenance",
+        "Revalidate exact main after artifact publication",
+      ],
+    },
+  ] as const;
+  const expectedNames: ReadonlySet<string> = new Set(
+    expected.map((contract) => contract.job)
+  );
+  if (
+    !Number.isSafeInteger(workflowAttempt) ||
+    workflowAttempt < 1 ||
+    totalCount !== rawCount ||
+    rawCount !== jobs.length ||
+    jobs.length < expected.length ||
+    jobs.length > 100 ||
+    jobs.some(
+      (job) =>
+        !expectedNames.has(job.name) ||
+        job.run_id !== runId ||
+        job.head_sha !== sha ||
+        job.run_attempt > workflowAttempt
+    ) ||
+    new Set(jobs.map((job) => job.id)).size !== jobs.length ||
+    new Set(
+      jobs.map((job) => `${job.name}\u0000${job.run_attempt}`)
+    ).size !== jobs.length
+  ) {
+    throw new Error(
+      "Demo-video workflow job history is incomplete, duplicated, or unexpected"
+    );
+  }
+  const selectedAttempts = {} as DemoVideoJobAttempts;
+  for (const contract of expected) {
+    const matches = jobs
+      .filter((job) => job.name === contract.job)
+      .sort((left, right) => right.run_attempt - left.run_attempt);
+    const job = matches[0];
+    if (
+      !job ||
+      job.status !== "completed" ||
+      job.conclusion !== "success"
+    ) {
+      throw new Error(`${contract.job} did not complete successfully`);
+    }
+    for (const stepName of contract.steps) {
+      const steps = job.steps.filter((step) => step.name === stepName);
+      if (
+        steps.length !== 1 ||
+        steps[0]?.status !== "completed" ||
+        steps[0]?.conclusion !== "success"
+      ) {
+        throw new Error(`${stepName} did not execute successfully`);
+      }
+    }
+    selectedAttempts[contract.key] = job.run_attempt;
+  }
+  if (selectedAttempts.buildVerify !== workflowAttempt) {
+    throw new Error(
+      "Latest successful demo-video build/verify job must be from the current workflow attempt"
+    );
+  }
+  return selectedAttempts;
 }
 
 export function requirePostDeployAuditTiming(
@@ -1380,6 +1921,9 @@ async function main(): Promise<void> {
   let thumbnail: ThumbnailReceipt | undefined;
   let devpostUrl: string | undefined;
   let readiness: ReturnType<typeof evaluate> | undefined;
+  let requestedDemoVideoRunId = 0;
+  let requestedDemoVideoRunAttempt = 0;
+  let requestedVideoSourceSha256 = "";
 
   const check = async (
     id: string,
@@ -1426,6 +1970,40 @@ async function main(): Promise<void> {
     }).trim();
     if (head !== sha) throw new Error("Checked-out HEAD differs from GITHUB_SHA");
     return `Trusted manual ${phase} gate at ${sha}`;
+  });
+
+  await check("ci-video-source-attestation", () => {
+    const runId = process.env.SUBMISSION_VIDEO_CI_RUN_ID ?? "";
+    const runAttempt =
+      process.env.SUBMISSION_VIDEO_CI_RUN_ATTEMPT ?? "";
+    const sourceSha =
+      process.env.SUBMISSION_VIDEO_SOURCE_SHA256 ?? "";
+    if (
+      !/^[1-9][0-9]*$/u.test(runId) ||
+      !/^[1-9][0-9]*$/u.test(runAttempt) ||
+      !/^[0-9a-f]{64}$/u.test(sourceSha) ||
+      process.env
+        .SUBMISSION_VIDEO_UPLOADED_FROM_CI_ARTIFACT_ATTESTED !==
+        "true"
+    ) {
+      throw new Error(
+        "Submission requires an exact demo-video run/attempt, source SHA-256, and CI-artifact upload attestation"
+      );
+    }
+    requestedDemoVideoRunId = Number(runId);
+    requestedDemoVideoRunAttempt = Number(runAttempt);
+    requestedVideoSourceSha256 = sourceSha;
+    if (
+      !Number.isSafeInteger(requestedDemoVideoRunId) ||
+      !Number.isSafeInteger(requestedDemoVideoRunAttempt)
+    ) {
+      throw new Error("Demo-video run identity exceeds the safe integer range");
+    }
+    return (
+      `Public upload is explicitly bound to demo-video run ` +
+      `${requestedDemoVideoRunId}/${requestedDemoVideoRunAttempt} and ` +
+      `source SHA-256 ${requestedVideoSourceSha256}`
+    );
   });
 
   let mainAtStart = "";
@@ -1476,6 +2054,14 @@ async function main(): Promise<void> {
   let hostedDastZapArtifact: GitHubArtifact | undefined;
   let mcpRun: GitHubWorkflowRun | undefined;
   let recoveryRun: GitHubWorkflowRun | undefined;
+  let demoVideoRun: GitHubWorkflowRun | undefined;
+  let demoVideoJobAttempts: DemoVideoJobAttempts | undefined;
+  let demoVideoReleaseArtifact: GitHubArtifact | undefined;
+  let demoVideoNarrationArtifact: GitHubArtifact | undefined;
+  let demoVideoCaptureArtifact: GitHubArtifact | undefined;
+  let demoVideoPackageArtifact: GitHubArtifact | undefined;
+  let demoVideoProvenanceArtifact: GitHubArtifact | undefined;
+  let demoVideoPublication: DemoVideoPublicationReceipt | undefined;
   await check("exact-sha-hosted-evidence", async () => {
     const [
       ciRuns,
@@ -1484,6 +2070,7 @@ async function main(): Promise<void> {
       hostedDastRuns,
       mcpRuns,
       recoveryRuns,
+      demoVideoRuns,
     ] =
       await Promise.all([
         exactShaWorkflowRuns("ci.yml", "push", "Exact-SHA CI runs"),
@@ -1507,6 +2094,11 @@ async function main(): Promise<void> {
           "recover-aws.yml",
           "workflow_dispatch",
           "Exact-SHA recovery runs"
+        ),
+        exactShaWorkflowRuns(
+          "demo-video.yml",
+          "workflow_dispatch",
+          "Exact-SHA demo-video runs"
         ),
       ]);
     const ciRun = selectSuccessfulRun(
@@ -1551,13 +2143,20 @@ async function main(): Promise<void> {
       sha,
       ".github/workflows/recover-aws.yml"
     );
+    demoVideoRun = selectBoundSuccessfulDemoVideoRun(
+      demoVideoRuns,
+      sha,
+      requestedDemoVideoRunId,
+      requestedDemoVideoRunAttempt
+    );
     selectedRuns.ci = toSelectedRun(ciRun);
     selectedRuns.codeql = toSelectedRun(codeqlRun);
     selectedRuns.deploy = toSelectedRun(deployRun);
     selectedRuns.hostedDast = toSelectedRun(hostedDastRun);
     selectedRuns.managedMcp = toSelectedRun(mcpRun);
     selectedRuns.recovery = toSelectedRun(recoveryRun);
-    return "CI, CodeQL, deploy, exact-release Hosted DAST, standalone Managed MCP, and recovery are green";
+    selectedRuns.demoVideo = toSelectedRun(demoVideoRun);
+    return "CI, CodeQL, deploy, exact-release Hosted DAST, standalone Managed MCP, recovery, and the bound demo-video run are green";
   });
 
   await check("hosted-dast-jobs", async () => {
@@ -1603,7 +2202,8 @@ async function main(): Promise<void> {
     hostedDastZapArtifact = selectExactHostedDastArtifact(
       artifacts,
       `zap-baseline-${sha}-${hostedDastRun.run_attempt}`,
-      hostedDastRun
+      hostedDastRun,
+      100_000_000
     );
     const receipt = await githubArtifactReceipt(
       hostedDastArtifact,
@@ -1619,7 +2219,8 @@ async function main(): Promise<void> {
     await githubArtifactArchive(
       hostedDastZapArtifact,
       token,
-      "Exact Hosted DAST ZAP report"
+      "Exact Hosted DAST ZAP report",
+      100_000_000
     );
     selectedArtifacts.hostedDast = toSelectedArtifact(
       hostedDastArtifact
@@ -1628,6 +2229,78 @@ async function main(): Promise<void> {
       hostedDastZapArtifact
     );
     return `Hosted DAST receipt ${hostedDastArtifact.id} and ZAP report ${hostedDastZapArtifact.id} are digest-bound to deploy ${deployRun.id}/${deployRun.run_attempt}`;
+  });
+
+  await check("ci-demo-video-provenance", async () => {
+    if (!demoVideoRun || !requestedVideoSourceSha256) {
+      throw new Error("Exact demo-video run binding is incomplete");
+    }
+    const [jobs, artifacts] = await Promise.all([
+      githubJson(
+        `/repos/${REPOSITORY}/actions/runs/${demoVideoRun.id}/jobs?filter=all&per_page=100`,
+        token,
+        "Exact demo-video jobs"
+      ),
+      githubJson(
+        `/repos/${REPOSITORY}/actions/runs/${demoVideoRun.id}/artifacts?per_page=100`,
+        token,
+        "Exact demo-video artifacts"
+      ),
+    ]);
+    demoVideoJobAttempts = requireSuccessfulDemoVideoJobs(
+      jobs,
+      demoVideoRun.id,
+      sha,
+      demoVideoRun.run_attempt
+    );
+    const selected = selectExactDemoVideoArtifacts(
+      artifacts,
+      demoVideoRun,
+      sha,
+      demoVideoJobAttempts
+    );
+    demoVideoReleaseArtifact = selected.release;
+    demoVideoNarrationArtifact = selected.narration;
+    demoVideoCaptureArtifact = selected.capture;
+    demoVideoPackageArtifact = selected.package;
+    demoVideoProvenanceArtifact = selected.provenance;
+    const durationSeconds = Number(
+      process.env.SUBMISSION_VIDEO_DURATION_SECONDS
+    );
+    demoVideoPublication = requireExactDemoVideoPublication(
+      await githubDemoVideoPublication(
+        selected.provenance,
+        token,
+        "Exact demo-video publication provenance"
+      ),
+      {
+        run: demoVideoRun,
+        packageArtifact: selected.package,
+        sha,
+        sourceSha256: requestedVideoSourceSha256,
+        durationSeconds,
+      }
+    );
+    selectedArtifacts.demoVideoPackage = toSelectedArtifact(
+      selected.package
+    );
+    selectedArtifacts.demoVideoProvenance = toSelectedArtifact(
+      selected.provenance
+    );
+    selectedArtifacts.demoVideoRelease = toSelectedArtifact(
+      selected.release
+    );
+    selectedArtifacts.demoVideoNarration = toSelectedArtifact(
+      selected.narration
+    );
+    selectedArtifacts.demoVideoCapture = toSelectedArtifact(
+      selected.capture
+    );
+    return (
+      `CI video package ${selected.package.id} (${selected.package.sizeInBytes} bytes) ` +
+      `and digest-verified provenance ${selected.provenance.id} bind source ` +
+      `${demoVideoPublication.media.mp4Sha256}`
+    );
   });
 
   await check("recovery-audit-operation", async () => {
@@ -1944,10 +2617,16 @@ async function main(): Promise<void> {
       !identity ||
       !validSubmissionVideoDuration(duration) ||
       process.env.SUBMISSION_VIDEO_PUBLIC_EMBEDDABLE_ATTESTED !== "true" ||
-      process.env.SUBMISSION_VIDEO_CAPTIONS_ATTESTED !== "true"
+      process.env.SUBMISSION_VIDEO_CAPTIONS_ATTESTED !== "true" ||
+      !demoVideoPublication ||
+      demoVideoPublication.workflowRunId !== requestedDemoVideoRunId ||
+      demoVideoPublication.workflowRunAttempt !==
+        requestedDemoVideoRunAttempt ||
+      demoVideoPublication.media.mp4Sha256 !==
+        requestedVideoSourceSha256
     ) {
       throw new Error(
-        "Canonical video, 1-179s duration, public/embed, and English-caption attestations are required"
+        "Canonical video, 1-179s duration, CI provenance, public/embed, and English-caption attestations are required"
       );
     }
     const oembedUrl = new URL(
@@ -1983,6 +2662,10 @@ async function main(): Promise<void> {
       oembedVerified: true,
       publicEmbeddableAttested: true,
       englishCaptionsAttested: true,
+      ciRunId: requestedDemoVideoRunId,
+      ciRunAttempt: requestedDemoVideoRunAttempt,
+      sourceMp4Sha256: requestedVideoSourceSha256,
+      uploadedFromCiArtifactAttested: true,
     };
     return identity.provider === "vimeo"
       ? `Vimeo oEmbed availability and ${durationSeconds}s duration passed; public/embed/captions operator-attested`
@@ -2046,7 +2729,10 @@ async function main(): Promise<void> {
         expectedPreSubmitDisplayTitle(
           sha,
           process.env.SUBMISSION_VIDEO_URL,
-          process.env.SUBMISSION_VIDEO_DURATION_SECONDS
+          process.env.SUBMISSION_VIDEO_DURATION_SECONDS,
+          process.env.SUBMISSION_VIDEO_CI_RUN_ID,
+          process.env.SUBMISSION_VIDEO_CI_RUN_ATTEMPT,
+          process.env.SUBMISSION_VIDEO_SOURCE_SHA256
         ) ||
       Date.now() - Date.parse(preSubmitRun.updated_at) > 24 * 60 * 60 * 1_000
     ) {
@@ -2126,6 +2812,7 @@ async function main(): Promise<void> {
       hostedDastRuns,
       mcpRuns,
       recoveryRuns,
+      demoVideoRuns,
     ] =
       await Promise.all([
         exactShaWorkflowRuns("ci.yml", "push", "Terminal exact-SHA CI runs"),
@@ -2153,6 +2840,11 @@ async function main(): Promise<void> {
           "recover-aws.yml",
           "workflow_dispatch",
           "Terminal exact-SHA recovery runs"
+        ),
+        exactShaWorkflowRuns(
+          "demo-video.yml",
+          "workflow_dispatch",
+          "Terminal exact-SHA demo-video runs"
         ),
       ]);
     const terminalRuns = {
@@ -2198,16 +2890,23 @@ async function main(): Promise<void> {
         sha,
         ".github/workflows/recover-aws.yml"
       ),
+      demoVideo: selectBoundSuccessfulDemoVideoRun(
+        demoVideoRuns,
+        sha,
+        requestedDemoVideoRunId,
+        requestedDemoVideoRunAttempt
+      ),
     };
     for (const [key, run] of Object.entries(terminalRuns)) {
       const initiallySelected = selectedRuns[key];
+      const terminalSelection = toSelectedRun(run);
       if (
         !initiallySelected ||
-        initiallySelected.id !== run.id ||
-        initiallySelected.attempt !== run.run_attempt
+        JSON.stringify(initiallySelected) !==
+          JSON.stringify(terminalSelection)
       ) {
         throw new Error(
-          `Latest exact-SHA ${key} run changed while the gate was running`
+          `Exact-SHA ${key} run metadata changed while the gate was running`
         );
       }
     }
@@ -2216,6 +2915,8 @@ async function main(): Promise<void> {
       terminalHostedDastJobs,
       terminalRecoveryJobs,
       terminalHostedDastArtifacts,
+      terminalDemoVideoJobs,
+      terminalDemoVideoArtifacts,
     ] =
       await Promise.all([
         githubJson(
@@ -2238,6 +2939,16 @@ async function main(): Promise<void> {
           token,
           "Terminal exact Hosted DAST artifacts"
         ),
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.demoVideo.id}/jobs?filter=all&per_page=100`,
+          token,
+          "Terminal exact demo-video jobs"
+        ),
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.demoVideo.id}/artifacts?per_page=100`,
+          token,
+          "Terminal exact demo-video artifacts"
+        ),
       ]);
     requireSuccessfulDeployJobs(
       terminalDeployJobs,
@@ -2254,6 +2965,21 @@ async function main(): Promise<void> {
       terminalRuns.recovery.id,
       sha
     );
+    const terminalDemoVideoJobAttempts = requireSuccessfulDemoVideoJobs(
+      terminalDemoVideoJobs,
+      terminalRuns.demoVideo.id,
+      sha,
+      terminalRuns.demoVideo.run_attempt
+    );
+    if (
+      !demoVideoJobAttempts ||
+      JSON.stringify(terminalDemoVideoJobAttempts) !==
+        JSON.stringify(demoVideoJobAttempts)
+    ) {
+      throw new Error(
+        "Demo-video producer job attempts changed while the gate was running"
+      );
+    }
     const terminalHostedDastArtifact = selectExactHostedDastArtifact(
       terminalHostedDastArtifacts,
       `hosted-dast-${sha}-${terminalRuns.deploy.id}-${terminalRuns.deploy.run_attempt}-${terminalRuns.hostedDast.run_attempt}`,
@@ -2262,7 +2988,8 @@ async function main(): Promise<void> {
     const terminalHostedDastZapArtifact = selectExactHostedDastArtifact(
       terminalHostedDastArtifacts,
       `zap-baseline-${sha}-${terminalRuns.hostedDast.run_attempt}`,
-      terminalRuns.hostedDast
+      terminalRuns.hostedDast,
+      100_000_000
     );
     if (
       !hostedDastArtifact ||
@@ -2290,8 +3017,81 @@ async function main(): Promise<void> {
     await githubArtifactArchive(
       terminalHostedDastZapArtifact,
       token,
-      "Terminal exact Hosted DAST ZAP report"
+      "Terminal exact Hosted DAST ZAP report",
+      100_000_000
     );
+    const terminalDemoArtifacts = selectExactDemoVideoArtifacts(
+      terminalDemoVideoArtifacts,
+      terminalRuns.demoVideo,
+      sha,
+      terminalDemoVideoJobAttempts
+    );
+    if (
+      !demoVideoReleaseArtifact ||
+      !demoVideoNarrationArtifact ||
+      !demoVideoCaptureArtifact ||
+      !demoVideoPackageArtifact ||
+      !demoVideoProvenanceArtifact ||
+      terminalDemoArtifacts.release.id !==
+        demoVideoReleaseArtifact.id ||
+      terminalDemoArtifacts.release.digest !==
+        demoVideoReleaseArtifact.digest ||
+      terminalDemoArtifacts.release.sizeInBytes !==
+        demoVideoReleaseArtifact.sizeInBytes ||
+      terminalDemoArtifacts.narration.id !==
+        demoVideoNarrationArtifact.id ||
+      terminalDemoArtifacts.narration.digest !==
+        demoVideoNarrationArtifact.digest ||
+      terminalDemoArtifacts.narration.sizeInBytes !==
+        demoVideoNarrationArtifact.sizeInBytes ||
+      terminalDemoArtifacts.capture.id !==
+        demoVideoCaptureArtifact.id ||
+      terminalDemoArtifacts.capture.digest !==
+        demoVideoCaptureArtifact.digest ||
+      terminalDemoArtifacts.capture.sizeInBytes !==
+        demoVideoCaptureArtifact.sizeInBytes ||
+      terminalDemoArtifacts.package.id !==
+        demoVideoPackageArtifact.id ||
+      terminalDemoArtifacts.package.digest !==
+        demoVideoPackageArtifact.digest ||
+      terminalDemoArtifacts.package.sizeInBytes !==
+        demoVideoPackageArtifact.sizeInBytes ||
+      terminalDemoArtifacts.provenance.id !==
+        demoVideoProvenanceArtifact.id ||
+      terminalDemoArtifacts.provenance.digest !==
+        demoVideoProvenanceArtifact.digest ||
+      terminalDemoArtifacts.provenance.sizeInBytes !==
+        demoVideoProvenanceArtifact.sizeInBytes
+    ) {
+      throw new Error(
+        "Demo-video producer, package, or provenance artifact changed while the gate was running"
+      );
+    }
+    const terminalPublication = requireExactDemoVideoPublication(
+      await githubDemoVideoPublication(
+        terminalDemoArtifacts.provenance,
+        token,
+        "Terminal demo-video publication provenance"
+      ),
+      {
+        run: terminalRuns.demoVideo,
+        packageArtifact: terminalDemoArtifacts.package,
+        sha,
+        sourceSha256: requestedVideoSourceSha256,
+        durationSeconds: Number(
+          process.env.SUBMISSION_VIDEO_DURATION_SECONDS
+        ),
+      }
+    );
+    if (
+      !demoVideoPublication ||
+      JSON.stringify(terminalPublication) !==
+        JSON.stringify(demoVideoPublication)
+    ) {
+      throw new Error(
+        "Demo-video publication provenance changed while the gate was running"
+      );
+    }
     requirePostDeployAuditTiming(
       terminalRuns.deploy,
       terminalRuns.hostedDast,
@@ -2324,7 +3124,10 @@ async function main(): Promise<void> {
           expectedPreSubmitDisplayTitle(
             sha,
             process.env.SUBMISSION_VIDEO_URL,
-            process.env.SUBMISSION_VIDEO_DURATION_SECONDS
+            process.env.SUBMISSION_VIDEO_DURATION_SECONDS,
+            process.env.SUBMISSION_VIDEO_CI_RUN_ID,
+            process.env.SUBMISSION_VIDEO_CI_RUN_ATTEMPT,
+            process.env.SUBMISSION_VIDEO_SOURCE_SHA256
           ) ||
         Date.now() - Date.parse(terminalPreSubmit.updated_at) >
           24 * 60 * 60 * 1_000

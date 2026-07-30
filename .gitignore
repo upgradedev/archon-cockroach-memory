@@ -77,6 +77,27 @@ demo/assets/audio/
 demo/assets/clips/
 demo/assets/frames/
 demo/*.mp4
+*.webm
+*.mp3
+*.m4a
+*.srt
+production-capture.webm
+capture-receipt.json
+narration-receipt.json
+video-build-receipt.json
+video-verification-receipt.json
+video-release-binding.json
+toolchain-provenance.json
+demo-video-publication.json
+archon-memory-demo.mp4
+01-hook.png
+02-scope-architecture.png
+03-recall-grounding.png
+04-audit-conflict.png
+05-audit-absence.png
+06-proof-ledger.png
+07-managed-mcp.png
+08-close.png
 
 # Python bytecode
 __pycache__/
