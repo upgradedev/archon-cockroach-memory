@@ -46,6 +46,55 @@ test("hosted DAST refuses non-owned or non-HTTPS targets before fetching", async
   );
 });
 
+test("hosted DAST rejects encoded runtime secrets in public responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const encoded = Buffer.from(
+    "postgresql://user:password@db.invalid/archon",
+    "utf8"
+  ).toString("base64");
+  globalThis.fetch = async () =>
+    new Response(`<div id="root"></div><!-- ${encoded} -->`, {
+      status: 200,
+      headers: {
+        ...securityHeaders,
+        "content-type": "text/html; charset=utf-8",
+      },
+    });
+  try {
+    await assert.rejects(
+      runHostedDast("https://d2s5v0o0eg2aaw.cloudfront.net"),
+      /encoded internal detail/u
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("hosted DAST rejects base64url-encoded JSON secret fields", async () => {
+  const originalFetch = globalThis.fetch;
+  const encoded = Buffer.from(
+    JSON.stringify({ token: "ab💩runtime-secret-value" }),
+    "utf8"
+  ).toString("base64url");
+  assert.match(encoded, /[-_]/u);
+  globalThis.fetch = async () =>
+    new Response(`<div id="root"></div><!-- ${encoded} -->`, {
+      status: 200,
+      headers: {
+        ...securityHeaders,
+        "content-type": "text/html; charset=utf-8",
+      },
+    });
+  try {
+    await assert.rejects(
+      runHostedDast("https://d2s5v0o0eg2aaw.cloudfront.net"),
+      /encoded internal detail/u
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("hosted DAST emits a passing receipt only after every boundary check", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -81,6 +130,25 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
         {
           release: {
             commitSha: "315d8b20b7195b5fd55fe216a8a76835585aa49d",
+          },
+        },
+        { status: 200, headers: securityHeaders }
+      );
+    }
+
+    if (url.pathname === "/api/audit" && url.search === "") {
+      return Response.json(
+        {
+          scope: {
+            tenantId: "public-demo",
+            company: "Helios SA",
+            access: "read-only",
+          },
+          report: { audited: 9 },
+          coverage: {
+            total: 9,
+            scanned: 9,
+            complete: true,
           },
         },
         { status: 200, headers: securityHeaders }
@@ -132,7 +200,7 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       receipt.releaseSha,
       "315d8b20b7195b5fd55fe216a8a76835585aa49d"
     );
-    assert.equal(receipt.checks.length, 15);
+    assert.equal(receipt.checks.length, 16);
     assert.ok(receipt.checks.every((check) => check.status === "pass"));
   } finally {
     globalThis.fetch = originalFetch;
@@ -219,6 +287,24 @@ test("hosted DAST exact-release refuses the legacy API Gateway fallback", async 
     if (url.pathname === "/api/proof") {
       return Response.json(
         { release: { commitSha: releaseSha } },
+        { status: 200, headers: securityHeaders }
+      );
+    }
+    if (url.pathname === "/api/audit" && url.search === "") {
+      return Response.json(
+        {
+          scope: {
+            tenantId: "public-demo",
+            company: "Helios SA",
+            access: "read-only",
+          },
+          report: { audited: 9 },
+          coverage: {
+            total: 9,
+            scanned: 9,
+            complete: true,
+          },
+        },
         { status: 200, headers: securityHeaders }
       );
     }

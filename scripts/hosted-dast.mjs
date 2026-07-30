@@ -4,7 +4,8 @@ import { pathToFileURL } from "node:url";
 const EXPECTED_PRODUCTION_URL =
   "https://d2s5v0o0eg2aaw.cloudfront.net";
 const LEAK_PATTERN =
-  /(postgres(?:ql)?:\/\/|DATABASE_URL|AWS_(?:ACCESS|SECRET)|arn:aws:|node_modules\/|at [A-Za-z0-9_$.[\]]+ \([^)]*:\d+:\d+\))/iu;
+  /(postgres(?:ql)?:\/\/|DATABASE_URL|AWS_(?:ACCESS|SECRET)|AKIA[0-9A-Z]{16}|arn:aws:|-----BEGIN [A-Z ]+PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|node_modules\/|at [A-Za-z0-9_$.[\]]+ \([^)]*:\d+:\d+\)|["']?(?:password|secret|token)["']?\s*[:=])/iu;
+const BASE64_CANDIDATE_PATTERN = /[A-Za-z0-9+/_-]{24,}={0,2}/gu;
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -27,6 +28,26 @@ function canonicalBaseUrl(value) {
 function assertNoLeak(body, id) {
   invariant(body.length <= 16_384, `${id}: response body is unexpectedly large`);
   invariant(!LEAK_PATTERN.test(body), `${id}: response exposed an internal detail`);
+  for (const candidate of body.match(BASE64_CANDIDATE_PATTERN) ?? []) {
+    if (candidate.length % 4 === 1) continue;
+    let decoded;
+    try {
+      const normalized = candidate.replaceAll("-", "+").replaceAll("_", "/");
+      const padded = normalized.padEnd(
+        normalized.length + ((4 - (normalized.length % 4)) % 4),
+        "="
+      );
+      decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(padded, "base64")
+      );
+    } catch {
+      continue;
+    }
+    invariant(
+      !LEAK_PATTERN.test(decoded),
+      `${id}: response exposed an encoded internal detail`
+    );
+  }
 }
 
 function assertSecurityHeaders(
@@ -247,6 +268,45 @@ export async function runHostedDast(targetUrl) {
     id: "release-proof-boundary",
     status: "pass",
     observedStatus: proof.status,
+  });
+
+  const audit = await request(baseUrl, "/api/audit", {
+    headers: { origin: "https://untrusted.invalid" },
+  });
+  const auditBody = await audit.text();
+  invariant(
+    audit.status === 200,
+    `audit-boundary: expected 200, received ${audit.status}`
+  );
+  invariant(
+    audit.headers.get("content-type")?.toLowerCase().startsWith("application/json"),
+    "audit-boundary: audit response is not JSON"
+  );
+  invariant(
+    audit.headers.get("cache-control")?.toLowerCase().includes("no-store"),
+    "audit-boundary: API response is cacheable"
+  );
+  invariant(
+    !audit.headers.has("access-control-allow-origin"),
+    "audit-boundary: cross-origin access was enabled"
+  );
+  assertSecurityHeaders(audit, "audit-boundary", { hardened });
+  assertNoLeak(auditBody, "audit-boundary");
+  const auditJson = JSON.parse(auditBody);
+  invariant(
+    auditJson?.scope?.tenantId === "public-demo" &&
+      auditJson?.scope?.company === "Helios SA" &&
+      auditJson?.scope?.access === "read-only" &&
+      auditJson?.report?.audited === 9 &&
+      auditJson?.coverage?.total === 9 &&
+      auditJson?.coverage?.scanned === 9 &&
+      auditJson?.coverage?.complete === true,
+    "audit-boundary: fixed complete public audit scope was not enforced"
+  );
+  checks.push({
+    id: "audit-boundary",
+    status: "pass",
+    observedStatus: audit.status,
   });
 
   const jsonHeaders = { "content-type": "application/json" };

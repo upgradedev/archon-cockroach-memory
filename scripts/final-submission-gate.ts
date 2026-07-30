@@ -355,11 +355,11 @@ async function githubJson(
   );
 }
 
-async function githubArtifactReceipt(
+async function githubArtifactArchive(
   artifact: GitHubArtifact,
   token: string,
   label: string
-): Promise<unknown> {
+): Promise<Uint8Array> {
   const response = await fetchWithTimeout(
     artifact.archiveDownloadUrl,
     {
@@ -392,7 +392,18 @@ async function githubArtifactReceipt(
   } catch {
     throw new Error(`${label} digest differs from GitHub artifact metadata`);
   }
-  return extractSingleJsonArtifact(archive, "hosted-dast.json");
+  return archive;
+}
+
+async function githubArtifactReceipt(
+  artifact: GitHubArtifact,
+  token: string,
+  label: string
+): Promise<unknown> {
+  return extractSingleJsonArtifact(
+    await githubArtifactArchive(artifact, token, label),
+    "hosted-dast.json"
+  );
 }
 
 export function requireArtifactArchiveDigest(
@@ -583,7 +594,7 @@ export function selectExactHostedDastArtifact(
   );
   if (matches.length !== 1 || !matches[0]) {
     throw new Error(
-      "Exactly one unexpired operation-bound Hosted DAST receipt artifact is required"
+      "Exactly one unexpired operation-bound Hosted DAST artifact is required"
     );
   }
   return matches[0];
@@ -809,6 +820,7 @@ export function requireExactHostedDastReceipt(
     ["root-security-headers", 200],
     ["health-boundary", 200],
     ["release-proof-boundary", 200],
+    ["audit-boundary", 200],
     ["method-boundary-get", 405],
     ["method-boundary-delete", 405],
     ["content-type-boundary", 415],
@@ -845,7 +857,7 @@ export function requireExactHostedDastReceipt(
       );
     })
   ) {
-    throw new Error("Hosted DAST receipt does not prove all 15 checks");
+    throw new Error("Hosted DAST receipt does not prove all 16 checks");
   }
 }
 
@@ -884,6 +896,90 @@ export function parseWorkflowJobs(value: unknown): {
         /^[0-9a-f]{40}$/u.test(job.head_sha)
     );
   return { totalCount, jobs };
+}
+
+export function requireSuccessfulDeployJobs(
+  value: unknown,
+  runId: number,
+  sha: string
+): void {
+  const { totalCount, jobs } = parseWorkflowJobs(value);
+  const expected = [
+    {
+      job: "Validate Deploy AWS source CI",
+      steps: ["Require successful exact-main push CI source"],
+    },
+    {
+      job: "Verify CI SHA and build once",
+      steps: [
+        "Prove the CI SHA is still the main branch head",
+        "Prove CodeQL succeeded for the exact release SHA",
+        "Test and build the frontend",
+        "Validate and build the SAM application",
+        "Create sanitized build receipt",
+        "Upload immutable candidate",
+      ],
+    },
+    {
+      job: "Deploy and smoke staging",
+      steps: [
+        "Deploy staging with recovery-safe SAM canary",
+        "Smoke the same-origin application and real recall path",
+        "Hosted Chromium judge journey on staging",
+        "Build and validate sanitized staging deployment receipt",
+        "Upload staging receipt",
+      ],
+    },
+    {
+      job: "Promote identical candidate to production",
+      steps: [
+        "Deploy production with recovery-safe SAM canary",
+        "Smoke production through CloudFront",
+        "Hosted Chromium judge journey on production",
+        "Build and validate sanitized production deployment receipt",
+        "Commit the receipt-bound production recovery intent",
+        "Upload production receipt",
+      ],
+    },
+    {
+      job: "Prove production memory through CockroachDB Managed MCP",
+      steps: [
+        "Run bounded read-only Managed MCP proof",
+        "Upload sanitized Managed MCP receipt",
+      ],
+    },
+  ] as const;
+  if (
+    totalCount !== jobs.length ||
+    jobs.length < expected.length ||
+    jobs.length > 100
+  ) {
+    throw new Error("Deploy AWS job inventory is incomplete or truncated");
+  }
+  for (const contract of expected) {
+    const matches = jobs.filter((job) => job.name === contract.job);
+    const job = matches[0];
+    if (
+      matches.length !== 1 ||
+      !job ||
+      job.run_id !== runId ||
+      job.head_sha !== sha ||
+      job.status !== "completed" ||
+      job.conclusion !== "success"
+    ) {
+      throw new Error(`${contract.job} did not complete successfully`);
+    }
+    for (const stepName of contract.steps) {
+      const steps = job.steps.filter((step) => step.name === stepName);
+      if (
+        steps.length !== 1 ||
+        steps[0]?.status !== "completed" ||
+        steps[0]?.conclusion !== "success"
+      ) {
+        throw new Error(`${stepName} did not execute successfully`);
+      }
+    }
+  }
 }
 
 export function requireSuccessfulRecoveryAuditJobs(
@@ -1377,6 +1473,7 @@ async function main(): Promise<void> {
   let deployRun: GitHubWorkflowRun | undefined;
   let hostedDastRun: GitHubWorkflowRun | undefined;
   let hostedDastArtifact: GitHubArtifact | undefined;
+  let hostedDastZapArtifact: GitHubArtifact | undefined;
   let mcpRun: GitHubWorkflowRun | undefined;
   let recoveryRun: GitHubWorkflowRun | undefined;
   await check("exact-sha-hosted-evidence", async () => {
@@ -1468,12 +1565,25 @@ async function main(): Promise<void> {
       throw new Error("Exact-SHA Hosted DAST evidence is incomplete");
     }
     const jobs = await githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/jobs?filter=latest&per_page=100`,
+      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/attempts/${hostedDastRun.run_attempt}/jobs?per_page=100`,
       token,
       "Exact Hosted DAST jobs"
     );
     requireSuccessfulHostedDastJobs(jobs, hostedDastRun.id, sha);
     return "Both exact-release active probes and ZAP baseline executed successfully";
+  });
+
+  await check("deploy-operation", async () => {
+    if (!deployRun) {
+      throw new Error("Exact-SHA Deploy AWS evidence is incomplete");
+    }
+    const jobs = await githubJson(
+      `/repos/${REPOSITORY}/actions/runs/${deployRun.id}/attempts/${deployRun.run_attempt}/jobs?per_page=100`,
+      token,
+      "Exact Deploy AWS jobs"
+    );
+    requireSuccessfulDeployJobs(jobs, deployRun.id, sha);
+    return "Exact-main source, build-once, staging, production, smoke, receipt, and Managed MCP deployment jobs passed";
   });
 
   await check("hosted-dast-receipt", async () => {
@@ -1490,6 +1600,11 @@ async function main(): Promise<void> {
       `hosted-dast-${sha}-${deployRun.id}-${deployRun.run_attempt}-${hostedDastRun.run_attempt}`,
       hostedDastRun
     );
+    hostedDastZapArtifact = selectExactHostedDastArtifact(
+      artifacts,
+      `zap-baseline-${sha}-${hostedDastRun.run_attempt}`,
+      hostedDastRun
+    );
     const receipt = await githubArtifactReceipt(
       hostedDastArtifact,
       token,
@@ -1501,10 +1616,18 @@ async function main(): Promise<void> {
       hostedDastRun,
       sha
     );
+    await githubArtifactArchive(
+      hostedDastZapArtifact,
+      token,
+      "Exact Hosted DAST ZAP report"
+    );
     selectedArtifacts.hostedDast = toSelectedArtifact(
       hostedDastArtifact
     );
-    return `Hosted DAST receipt artifact ${hostedDastArtifact.id} is bound to deploy ${deployRun.id}/${deployRun.run_attempt}`;
+    selectedArtifacts.hostedDastZap = toSelectedArtifact(
+      hostedDastZapArtifact
+    );
+    return `Hosted DAST receipt ${hostedDastArtifact.id} and ZAP report ${hostedDastZapArtifact.id} are digest-bound to deploy ${deployRun.id}/${deployRun.run_attempt}`;
   });
 
   await check("recovery-audit-operation", async () => {
@@ -1512,7 +1635,7 @@ async function main(): Promise<void> {
       throw new Error("Exact-SHA recovery evidence is incomplete");
     }
     const jobs = await githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${recoveryRun.id}/jobs?filter=latest&per_page=100`,
+      `/repos/${REPOSITORY}/actions/runs/${recoveryRun.id}/attempts/${recoveryRun.run_attempt}/jobs?per_page=100`,
       token,
       "Exact recovery audit jobs"
     );
@@ -2089,18 +2212,24 @@ async function main(): Promise<void> {
       }
     }
     const [
+      terminalDeployJobs,
       terminalHostedDastJobs,
       terminalRecoveryJobs,
       terminalHostedDastArtifacts,
     ] =
       await Promise.all([
         githubJson(
-          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/jobs?filter=latest&per_page=100`,
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.deploy.id}/attempts/${terminalRuns.deploy.run_attempt}/jobs?per_page=100`,
+          token,
+          "Terminal exact Deploy AWS jobs"
+        ),
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/attempts/${terminalRuns.hostedDast.run_attempt}/jobs?per_page=100`,
           token,
           "Terminal exact Hosted DAST jobs"
         ),
         githubJson(
-          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.recovery.id}/jobs?filter=latest&per_page=100`,
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.recovery.id}/attempts/${terminalRuns.recovery.run_attempt}/jobs?per_page=100`,
           token,
           "Terminal exact recovery audit jobs"
         ),
@@ -2110,6 +2239,11 @@ async function main(): Promise<void> {
           "Terminal exact Hosted DAST artifacts"
         ),
       ]);
+    requireSuccessfulDeployJobs(
+      terminalDeployJobs,
+      terminalRuns.deploy.id,
+      sha
+    );
     requireSuccessfulHostedDastJobs(
       terminalHostedDastJobs,
       terminalRuns.hostedDast.id,
@@ -2125,10 +2259,19 @@ async function main(): Promise<void> {
       `hosted-dast-${sha}-${terminalRuns.deploy.id}-${terminalRuns.deploy.run_attempt}-${terminalRuns.hostedDast.run_attempt}`,
       terminalRuns.hostedDast
     );
+    const terminalHostedDastZapArtifact = selectExactHostedDastArtifact(
+      terminalHostedDastArtifacts,
+      `zap-baseline-${sha}-${terminalRuns.hostedDast.run_attempt}`,
+      terminalRuns.hostedDast
+    );
     if (
       !hostedDastArtifact ||
       terminalHostedDastArtifact.id !== hostedDastArtifact.id ||
-      terminalHostedDastArtifact.digest !== hostedDastArtifact.digest
+      terminalHostedDastArtifact.digest !== hostedDastArtifact.digest ||
+      !hostedDastZapArtifact ||
+      terminalHostedDastZapArtifact.id !== hostedDastZapArtifact.id ||
+      terminalHostedDastZapArtifact.digest !==
+        hostedDastZapArtifact.digest
     ) {
       throw new Error(
         "Hosted DAST receipt artifact changed while the gate was running"
@@ -2143,6 +2286,11 @@ async function main(): Promise<void> {
       terminalRuns.deploy,
       terminalRuns.hostedDast,
       sha
+    );
+    await githubArtifactArchive(
+      terminalHostedDastZapArtifact,
+      token,
+      "Terminal exact Hosted DAST ZAP report"
     );
     requirePostDeployAuditTiming(
       terminalRuns.deploy,

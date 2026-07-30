@@ -30,10 +30,14 @@ jobs:
     name: Validate Hosted DAST source deployment
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Require successful operation-bound Deploy AWS source
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id || '' }}
@@ -48,6 +52,104 @@ jobs:
           [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          deploy_jobs="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/attempts/${SOURCE_RUN_ATTEMPT}/jobs?per_page=100"
+          )"
+          jq -e \
+            --argjson run_id "$SOURCE_RUN_ID" \
+            --arg sha "$SOURCE_SHA" \
+            '
+              def exact_job($name):
+                [.jobs[] |
+                  select(
+                    .name == $name and
+                    .run_id == $run_id and
+                    .head_sha == $sha and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ] | length == 1;
+              def exact_step($job_name; $step_name):
+                [.jobs[] | select(.name == $job_name)] as $jobs |
+                ($jobs | length == 1) and
+                ([
+                  $jobs[0].steps[]? |
+                  select(
+                    .name == $step_name and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ] | length == 1);
+              .total_count == (.jobs | length) and
+              exact_job("Validate Deploy AWS source CI") and
+              exact_step(
+                "Validate Deploy AWS source CI";
+                "Require successful exact-main push CI source"
+              ) and
+              exact_job("Verify CI SHA and build once") and
+              exact_step(
+                "Verify CI SHA and build once";
+                "Upload immutable candidate"
+              ) and
+              exact_job("Deploy and smoke staging") and
+              exact_step(
+                "Deploy and smoke staging";
+                "Deploy staging with recovery-safe SAM canary"
+              ) and
+              exact_step(
+                "Deploy and smoke staging";
+                "Smoke the same-origin application and real recall path"
+              ) and
+              exact_step(
+                "Deploy and smoke staging";
+                "Hosted Chromium judge journey on staging"
+              ) and
+              exact_step(
+                "Deploy and smoke staging";
+                "Build and validate sanitized staging deployment receipt"
+              ) and
+              exact_step(
+                "Deploy and smoke staging";
+                "Upload staging receipt"
+              ) and
+              exact_job("Promote identical candidate to production") and
+              exact_step(
+                "Promote identical candidate to production";
+                "Deploy production with recovery-safe SAM canary"
+              ) and
+              exact_step(
+                "Promote identical candidate to production";
+                "Smoke production through CloudFront"
+              ) and
+              exact_step(
+                "Promote identical candidate to production";
+                "Hosted Chromium judge journey on production"
+              ) and
+              exact_step(
+                "Promote identical candidate to production";
+                "Build and validate sanitized production deployment receipt"
+              ) and
+              exact_step(
+                "Promote identical candidate to production";
+                "Commit the receipt-bound production recovery intent"
+              ) and
+              exact_step(
+                "Promote identical candidate to production";
+                "Upload production receipt"
+              ) and
+              exact_job(
+                "Prove production memory through CockroachDB Managed MCP"
+              ) and
+              exact_step(
+                "Prove production memory through CockroachDB Managed MCP";
+                "Run bounded read-only Managed MCP proof"
+              ) and
+              exact_step(
+                "Prove production memory through CockroachDB Managed MCP";
+                "Upload sanitized Managed MCP receipt"
+              )
+            ' <<< "$deploy_jobs"
 
   boundary-probes:
     needs: source-gate

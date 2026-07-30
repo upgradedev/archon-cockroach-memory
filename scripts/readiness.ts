@@ -1751,6 +1751,14 @@ function sourceChecks(): SourceCheck[] {
     securityDastWorkflow.match(
       /(?:^|\r?\n)  zap-baseline:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
+  const deploySourceGateJob =
+    deploy.match(
+      /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const deployBuildOnceJob =
+    deploy.match(
+      /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
   const managedMcpDeployJob =
     deploy.match(
       /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
@@ -3531,6 +3539,22 @@ function sourceChecks(): SourceCheck[] {
           hostedDastSourceGateJob,
           '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
         ) &&
+        /actions:\s*read/u.test(hostedDastSourceGateJob) &&
+        /actions\/runs\/\$\{SOURCE_RUN_ID\}\/attempts\/\$\{SOURCE_RUN_ATTEMPT\}\/jobs\?per_page=100/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /exact_job\("Validate Deploy AWS source CI"\)/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /exact_job\("Promote identical candidate to production"\)/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /"Smoke production through CloudFront"/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /"Upload production receipt"/u.test(
+          hostedDastSourceGateJob
+        ) &&
         (
           securityDastWorkflow.match(/needs:\s*source-gate/gu) ?? []
         ).length === 2 &&
@@ -3649,7 +3673,17 @@ function sourceChecks(): SourceCheck[] {
           lambdaTemplate
         ) &&
         /flag:\s*"wx"/u.test(hostedDast) &&
-        /checks\.length,\s*15/u.test(hostedDastTests) &&
+        /checks\.length,\s*16/u.test(hostedDastTests) &&
+        /rejects encoded runtime secrets in public responses/u.test(
+          hostedDastTests
+        ) &&
+        /rejects base64url-encoded JSON secret fields/u.test(
+          hostedDastTests
+        ) &&
+        /candidate\.replaceAll\("-", "\+"\)\.replaceAll\("_", "\/"\)/u.test(
+          hostedDast
+        ) &&
+        /id:\s*"audit-boundary"/u.test(hostedDast) &&
         /writes a sanitized fail-closed receipt before rethrowing/u.test(
           hostedDastTests
         ) &&
@@ -3676,10 +3710,25 @@ function sourceChecks(): SourceCheck[] {
             /requireSuccessfulHostedDastJobs\(/gu
           ) ?? []
         ).length >= 3 &&
+        (
+          finalSubmissionGate.match(
+            /requireSuccessfulDeployJobs\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        /actions\/runs\/\$\{deployRun\.id\}\/attempts\/\$\{deployRun\.run_attempt\}\/jobs\?per_page=100/u.test(
+          finalSubmissionGate
+        ) &&
         /selectExactHostedDastArtifact\(/u.test(finalSubmissionGate) &&
         /githubArtifactReceipt\(/u.test(finalSubmissionGate) &&
+        /githubArtifactArchive\(/u.test(finalSubmissionGate) &&
         /requireArtifactArchiveDigest\(/u.test(finalSubmissionGate) &&
         /requireExactHostedDastReceipt\(/u.test(finalSubmissionGate) &&
+        /selectedArtifacts\.hostedDastZap = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /terminalHostedDastZapArtifact\.digest !==/u.test(
+          finalSubmissionGate
+        ) &&
         /terminalHostedDastArtifact\.digest !== hostedDastArtifact\.digest/u.test(
           finalSubmissionGate
         ),
@@ -4191,6 +4240,40 @@ function sourceChecks(): SourceCheck[] {
       "product.oidc-promotion-rollback",
       "Production Readiness",
       has("aws/bootstrap-oidc.yaml") &&
+        deploySourceGateJob.length > 0 &&
+        /name:\s*Validate Deploy AWS source CI/u.test(
+          deploySourceGateJob
+        ) &&
+        /name:\s*Require successful exact-main push CI source/u.test(
+          deploySourceGateJob
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          'test "$SOURCE_CONCLUSION" = "success"'
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          'test "$SOURCE_EVENT" = "push"'
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          'test "$SOURCE_BRANCH" = "main"'
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          '[[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          '[[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]'
+        ) &&
+        hasExactTrimmedLine(
+          deploySourceGateJob,
+          '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+        ) &&
+        deployBuildOnceJob.length > 0 &&
+        /needs:\s*\r?\n\s+- source-gate/u.test(deployBuildOnceJob) &&
+        !/^    if:/mu.test(deployBuildOnceJob) &&
         /AssumeRoleWithWebIdentity/u.test(read("aws/bootstrap-oidc.yaml")) &&
         environmentDeployOidcTrustContract &&
         /Verify candidate tree hashes/iu.test(deploy) &&
@@ -4465,8 +4548,22 @@ function sourceChecks(): SourceCheck[] {
             /requireSuccessfulHostedDastJobs\(/gu
           ) ?? []
         ).length >= 3 &&
+        (
+          finalSubmissionGate.match(
+            /requireSuccessfulDeployJobs\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        /actions\/runs\/\$\{deployRun\.id\}\/attempts\/\$\{deployRun\.run_attempt\}\/jobs\?per_page=100/u.test(
+          finalSubmissionGate
+        ) &&
         /selectExactHostedDastArtifact\(/u.test(finalSubmissionGate) &&
         /requireExactHostedDastReceipt\(/u.test(finalSubmissionGate) &&
+        /selectedArtifacts\.hostedDastZap = toSelectedArtifact/u.test(
+          finalSubmissionGate
+        ) &&
+        /terminalHostedDastZapArtifact\.digest !==/u.test(
+          finalSubmissionGate
+        ) &&
         /hosted-dast-\$\{sha\}-\$\{deployRun\.id\}-\$\{deployRun\.run_attempt\}-\$\{hostedDastRun\.run_attempt\}/u.test(
           finalSubmissionGate
         ) &&

@@ -3,7 +3,7 @@
 10049	IGNORE	(API responses are intentionally non-storable and actively verified)
 10050	IGNORE	(Versioned SPA assets intentionally use immutable CDN caching)
 10055	IGNORE	(Predeploy scans the prior release; the exact-release policy blocks this alert)
-10094	IGNORE	(Fixed public opaque identifiers and static assets are expected)
+10094	IGNORE	(Public UUID SHA and asset tokens are guarded by source scanning and decoded-secret response probes)
 10109	IGNORE	(Single-page application classification is informational)
 90004	IGNORE	(Predeploy scans the prior release; the exact-release policy blocks this alert)
 90005	IGNORE	(Sec-Fetch-Dest is a browser request header outside origin control)

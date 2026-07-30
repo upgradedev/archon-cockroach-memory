@@ -15,6 +15,7 @@ import {
   requireExactHostedDastReceipt,
   requireFreshGeneratedAt,
   requirePostDeployAuditTiming,
+  requireSuccessfulDeployJobs,
   requireSuccessfulHostedDastJobs,
   requireSuccessfulRecoveryAuditJobs,
   selectExactHostedDastArtifact,
@@ -129,6 +130,62 @@ function hostedDastJobs(runId = 302, sha = SHA): Record<string, unknown> {
   };
 }
 
+function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
+  const job = (id: number, name: string, steps: string[]) => ({
+    id,
+    run_id: runId,
+    head_sha: sha,
+    name,
+    status: "completed",
+    conclusion: "success",
+    steps: steps.map((step) => ({
+      name: step,
+      status: "completed",
+      conclusion: "success",
+    })),
+  });
+  return {
+    total_count: 6,
+    jobs: [
+      job(600, "Validate Deploy AWS source CI", [
+        "Require successful exact-main push CI source",
+      ]),
+      job(601, "Verify CI SHA and build once", [
+        "Prove the CI SHA is still the main branch head",
+        "Prove CodeQL succeeded for the exact release SHA",
+        "Test and build the frontend",
+        "Validate and build the SAM application",
+        "Create sanitized build receipt",
+        "Upload immutable candidate",
+      ]),
+      job(602, "Deploy and smoke staging", [
+        "Deploy staging with recovery-safe SAM canary",
+        "Smoke the same-origin application and real recall path",
+        "Hosted Chromium judge journey on staging",
+        "Build and validate sanitized staging deployment receipt",
+        "Upload staging receipt",
+      ]),
+      job(603, "Promote identical candidate to production", [
+        "Deploy production with recovery-safe SAM canary",
+        "Smoke production through CloudFront",
+        "Hosted Chromium judge journey on production",
+        "Build and validate sanitized production deployment receipt",
+        "Commit the receipt-bound production recovery intent",
+        "Upload production receipt",
+      ]),
+      job(
+        604,
+        "Prove production memory through CockroachDB Managed MCP",
+        [
+          "Run bounded read-only Managed MCP proof",
+          "Upload sanitized Managed MCP receipt",
+        ]
+      ),
+      job(605, "Reusable database release evidence", []),
+    ],
+  };
+}
+
 function testCrc32(value: Uint8Array): number {
   let crc = 0xffffffff;
   for (const byte of value) {
@@ -233,6 +290,7 @@ function hostedDastReceipt(
     "root-security-headers",
     "health-boundary",
     "release-proof-boundary",
+    "audit-boundary",
     "method-boundary-get",
     "method-boundary-delete",
     "content-type-boundary",
@@ -247,8 +305,8 @@ function hostedDastReceipt(
     "unknown-route-boundary",
   ];
   const statuses = [
-    200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400, 404,
-    400, 404,
+    200, 200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400,
+    404, 400, 404,
   ];
   return {
     schema: "archon.hosted-dast",
@@ -445,6 +503,14 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     ).name,
     expectedName
   );
+  assert.equal(
+    selectExactHostedDastArtifact(
+      response,
+      zapArtifact.name,
+      hostedDast
+    ).id,
+    zapArtifact.id
+  );
 
   const mutation = (
     changes: Record<string, unknown>
@@ -610,7 +676,7 @@ test("final gate: Hosted DAST receipt proves exact scanner, deploy, checks, and 
   });
   const changedObservedStatus = change((copy) => {
     const checks = copy.checks as Array<Record<string, unknown>>;
-    checks[3] = { ...checks[3], observedStatus: 404 };
+    checks[4] = { ...checks[4], observedStatus: 404 };
   });
   const malformedChecks = change((copy) => {
     const checks = copy.checks as unknown[];
@@ -746,6 +812,116 @@ test("final gate: Hosted DAST proves its source gate and both release scanners",
   ]) {
     assert.throws(() =>
       requireSuccessfulHostedDastJobs(mutation, 302, SHA)
+    );
+  }
+});
+
+test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt operation", () => {
+  const baseline = deployJobs();
+  assert.doesNotThrow(() =>
+    requireSuccessfulDeployJobs(baseline, 301, SHA)
+  );
+
+  const skippedSource = structuredClone(baseline);
+  const skippedSourceJobs = skippedSource.jobs as Array<
+    Record<string, unknown>
+  >;
+  const skippedSourceSteps = skippedSourceJobs[0]?.steps as Array<
+    Record<string, unknown>
+  >;
+  skippedSourceSteps[0] = {
+    ...skippedSourceSteps[0],
+    conclusion: "skipped",
+  };
+
+  const failedProduction = structuredClone(baseline);
+  const failedProductionJobs = failedProduction.jobs as Array<
+    Record<string, unknown>
+  >;
+  failedProductionJobs[3] = {
+    ...failedProductionJobs[3],
+    conclusion: "failure",
+  };
+
+  const missingProductionSmoke = structuredClone(baseline);
+  const missingProductionJobs = missingProductionSmoke.jobs as Array<
+    Record<string, unknown>
+  >;
+  const productionSteps = missingProductionJobs[3]?.steps as Array<
+    Record<string, unknown>
+  >;
+  productionSteps.splice(1, 1);
+
+  const missingRequiredJob = structuredClone(baseline);
+  const requiredJobs = missingRequiredJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  requiredJobs.splice(3, 1);
+  missingRequiredJob.total_count = 5;
+
+  const duplicateRequiredJob = structuredClone(baseline);
+  const duplicateJobs = duplicateRequiredJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  duplicateJobs.push({
+    ...structuredClone(duplicateJobs[0]),
+    id: 606,
+  });
+  duplicateRequiredJob.total_count = 7;
+
+  const duplicateRequiredStep = structuredClone(baseline);
+  const duplicateStepJobs = duplicateRequiredStep.jobs as Array<
+    Record<string, unknown>
+  >;
+  const duplicateProductionSteps = duplicateStepJobs[3]?.steps as Array<
+    Record<string, unknown>
+  >;
+  duplicateProductionSteps.push(
+    structuredClone(duplicateProductionSteps[1]!)
+  );
+
+  const incompleteJob = structuredClone(baseline);
+  const incompleteJobs = incompleteJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  incompleteJobs[1] = {
+    ...incompleteJobs[1],
+    status: "in_progress",
+    conclusion: null,
+  };
+
+  const oversizedInventory = structuredClone(baseline);
+  const oversizedJobs = oversizedInventory.jobs as Array<
+    Record<string, unknown>
+  >;
+  for (let index = oversizedJobs.length; index < 101; index += 1) {
+    oversizedJobs.push({
+      id: 700 + index,
+      run_id: 301,
+      head_sha: SHA,
+      name: `Unrelated deploy evidence ${index}`,
+      status: "completed",
+      conclusion: "success",
+      steps: [],
+    });
+  }
+  oversizedInventory.total_count = 101;
+
+  for (const mutation of [
+    skippedSource,
+    failedProduction,
+    missingProductionSmoke,
+    missingRequiredJob,
+    duplicateRequiredJob,
+    duplicateRequiredStep,
+    incompleteJob,
+    oversizedInventory,
+    { ...structuredClone(baseline), total_count: 7 },
+    deployJobs(999, SHA),
+    deployJobs(301, "b".repeat(40)),
+  ]) {
+    assert.throws(() =>
+      requireSuccessfulDeployJobs(mutation, 301, SHA)
     );
   }
 });

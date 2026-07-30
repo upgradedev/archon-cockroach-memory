@@ -147,6 +147,26 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     hostedDast,
     /\[\[ "\$SOURCE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u
   );
+  assert.match(
+    hostedDast,
+    /actions\/runs\/\$\{SOURCE_RUN_ID\}\/attempts\/\$\{SOURCE_RUN_ATTEMPT\}\/jobs\?per_page=100/u
+  );
+  assert.match(
+    hostedDast,
+    /exact_job\("Promote identical candidate to production"\)/u
+  );
+  assert.match(
+    hostedDast,
+    /"Smoke production through CloudFront"/u
+  );
+  assert.match(hostedDast, /"Upload production receipt"/u);
+  assert.match(
+    readFileSync(
+      new URL("../tests/hosted-dast.test.ts", import.meta.url),
+      "utf8"
+    ),
+    /rejects base64url-encoded JSON secret fields/u
+  );
   assert.equal(
     (hostedDast.match(/needs:\s*source-gate/gu) ?? []).length,
     2
@@ -230,6 +250,38 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
       false
     );
   }
+});
+
+test("readiness: Deploy AWS cannot succeed as an all-skipped no-op", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.oidc-promotion-rollback"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  assert.match(deploy, /name:\s*Validate Deploy AWS source CI/u);
+  assert.match(
+    deploy,
+    /name:\s*Require successful exact-main push CI source/u
+  );
+  assert.match(deploy, /test "\$SOURCE_CONCLUSION" = "success"/u);
+  assert.match(deploy, /test "\$SOURCE_EVENT" = "push"/u);
+  assert.match(deploy, /test "\$SOURCE_BRANCH" = "main"/u);
+  assert.match(
+    deploy,
+    /build-once:\r?\n\s+name:\s*Verify CI SHA and build once\r?\n\s+needs:\r?\n\s+- source-gate/u
+  );
+  const buildOnce =
+    deploy.match(
+      /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  assert.doesNotMatch(buildOnce, /^    if:/mu);
 });
 
 test("readiness: coverage evidence is CI-only and thresholded", () => {
