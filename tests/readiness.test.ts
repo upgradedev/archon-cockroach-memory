@@ -38,6 +38,7 @@ import {
   hasExactHostedSmokeContracts,
   hasExactSubmissionReadinessTrigger,
   hasExactSubmissionWorkflowContract,
+  hasExactZapIgnorePolicy,
   hasUniqueCiTriggerOwnership,
   inspectSubmissionThumbnail,
   isSubmissionEligible,
@@ -130,6 +131,105 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     hostedDast,
     /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u
   );
+  assert.match(
+    hostedDast,
+    /name:\s*Require successful operation-bound Deploy AWS source/u
+  );
+  assert.match(
+    hostedDast,
+    /\[\[ "\$SOURCE_RUN_ID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
+  );
+  assert.match(
+    hostedDast,
+    /\[\[ "\$SOURCE_RUN_ATTEMPT" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
+  );
+  assert.match(
+    hostedDast,
+    /\[\[ "\$SOURCE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u
+  );
+  assert.equal(
+    (hostedDast.match(/needs:\s*source-gate/gu) ?? []).length,
+    2
+  );
+  assert.match(
+    hostedDast,
+    /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.id \|\| github\.run_id\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| github\.run_attempt\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(ci, /rules_file_name:\s*\.zap\/predeploy\.tsv/u);
+  assert.match(hostedDast, /rules_file_name:\s*\.zap\/release\.tsv/u);
+  assert.match(
+    ci,
+    /name:\s*hosted-dast-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    ci,
+    /artifact_name:\s*zap-baseline-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    hostedDast,
+    /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    readFileSync(
+      new URL("../aws/template.yaml", import.meta.url),
+      "utf8"
+    ),
+    /ApiFallback:[\s\S]*?Path:\s*\/api\/\{proxy\+\}[\s\S]*?Method:\s*ANY/u
+  );
+  const predeployRules = readFileSync(
+    new URL("../.zap/predeploy.tsv", import.meta.url),
+    "utf8"
+  );
+  const releaseRules = readFileSync(
+    new URL("../.zap/release.tsv", import.meta.url),
+    "utf8"
+  );
+  assert.equal(
+    hasExactZapIgnorePolicy(predeployRules, [
+      "10015",
+      "10036",
+      "10049",
+      "10050",
+      "10055",
+      "10094",
+      "10109",
+      "90004",
+      "90005",
+    ]),
+    true
+  );
+  assert.equal(
+    hasExactZapIgnorePolicy(releaseRules, [
+      "10015",
+      "10036",
+      "10049",
+      "10050",
+      "10094",
+      "10109",
+      "90005",
+    ]),
+    true
+  );
+  for (const mutation of [
+    releaseRules.replace("10015", "*"),
+    releaseRules.replace("\tIGNORE\t", "\tWARN\t"),
+    `${releaseRules}10055\tIGNORE\t(Release policy regression)\n`,
+    releaseRules.replace("10036", "10015"),
+    releaseRules.replace(/\t\([^)]+\)/u, "\t(short)"),
+  ]) {
+    assert.equal(
+      hasExactZapIgnorePolicy(mutation, [
+        "10015",
+        "10036",
+        "10049",
+        "10050",
+        "10094",
+        "10109",
+        "90005",
+      ]),
+      false
+    );
+  }
 });
 
 test("readiness: coverage evidence is CI-only and thresholded", () => {
@@ -153,7 +253,23 @@ test("readiness: coverage evidence is CI-only and thresholded", () => {
     new URL("../web/vite.config.ts", import.meta.url),
     "utf8"
   );
+  const packageSource = readFileSync(
+    new URL("../package.json", import.meta.url),
+    "utf8"
+  );
   assert.match(runner, /if \(!runnerTemp\)/u);
+  assert.match(
+    runner,
+    /const canonicalTestCommand = packageJson\?\.scripts\?\.test/u
+  );
+  assert.match(runner, /\.\.\.testFiles/u);
+  for (const testPath of [
+    "tests/durable-recovery.test.ts",
+    "tests/recovery-watchdog.test.ts",
+    "tests/cloudformation-controls.test.ts",
+  ]) {
+    assert.equal(packageSource.split(testPath).length - 1, 1, testPath);
+  }
   assert.doesNotMatch(ci, /path:\s*(?:web\/)?coverage\//u);
   assert.match(
     ci,
@@ -3104,5 +3220,30 @@ test("readiness: CloudFront pins valid AWS managed policies for the SPA and unca
   assert.match(
     template,
     /PathPattern: \/api\/\*[\s\S]*?CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad[\s\S]*?OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac/u
+  );
+});
+
+test("readiness: CloudFront enforces CSP and cross-origin isolation without unsafe inline styles", () => {
+  const template = readFileSync(
+    new URL("../aws/template.yaml", import.meta.url),
+    "utf8"
+  );
+
+  assert.doesNotMatch(template, /style-src 'self' 'unsafe-inline'/u);
+  assert.match(
+    template,
+    /style-src 'self'; upgrade-insecure-requests/u
+  );
+  assert.match(
+    template,
+    /Header: Cross-Origin-Embedder-Policy\s+Value: "require-corp"\s+Override: true/u
+  );
+  assert.match(
+    template,
+    /Header: Cross-Origin-Opener-Policy\s+Value: "same-origin"\s+Override: true/u
+  );
+  assert.match(
+    template,
+    /Header: Cross-Origin-Resource-Policy\s+Value: "same-origin"\s+Override: true/u
   );
 });

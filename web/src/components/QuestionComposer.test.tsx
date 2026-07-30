@@ -51,7 +51,11 @@ describe("QuestionComposer", () => {
     expect(
       screen.getByRole("button", { name: /retrieving evidence/i }),
     ).toBeDisabled();
-    for (const suggestion of screen.getAllByRole("button").slice(1)) {
+    const suggestions = screen
+      .getAllByRole("button")
+      .filter((button) => button.getAttribute("type") === "button");
+    expect(suggestions).toHaveLength(4);
+    for (const suggestion of suggestions) {
       expect(suggestion).toBeDisabled();
       fireEvent.click(suggestion);
     }

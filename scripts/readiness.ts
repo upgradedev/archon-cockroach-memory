@@ -1264,6 +1264,29 @@ function includesEvery(source: string, fragments: readonly string[]): boolean {
   return fragments.every((fragment) => source.includes(fragment));
 }
 
+export function hasExactZapIgnorePolicy(
+  source: string,
+  expectedRuleIds: readonly string[]
+): boolean {
+  const lines = source
+    .replace(/\r\n/gu, "\n")
+    .trimEnd()
+    .split("\n");
+  if (lines.length !== expectedRuleIds.length) return false;
+  const observed: string[] = [];
+  for (const line of lines) {
+    const match = /^([0-9]{5})\tIGNORE\t\(([^()\r\n]{12,})\)$/u.exec(
+      line
+    );
+    if (!match) return false;
+    observed.push(match[1]!);
+  }
+  return (
+    new Set(observed).size === observed.length &&
+    observed.every((ruleId, index) => ruleId === expectedRuleIds[index])
+  );
+}
+
 export function hasExactHostedSmokeContracts(source: string): boolean {
   const blocks = [
     source.match(
@@ -1682,7 +1705,10 @@ function sourceChecks(): SourceCheck[] {
     "scripts/final-submission-gate.ts"
   );
   const hostedDast = read("scripts/hosted-dast.mjs");
+  const hostedDastTypes = read("scripts/hosted-dast.d.mts");
   const hostedDastTests = read("tests/hosted-dast.test.ts");
+  const zapPredeployRules = read(".zap/predeploy.tsv");
+  const zapReleaseRules = read(".zap/release.tsv");
   const narrator = read("src/agents/narrator.ts");
   const handler = read("src/http/handler.ts");
   const memory = read("src/memory/memory.ts");
@@ -1712,6 +1738,18 @@ function sourceChecks(): SourceCheck[] {
   const hostedDastCiJob =
     ci.match(
       /(?:^|\r?\n)  hosted-dast:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const hostedDastSourceGateJob =
+    securityDastWorkflow.match(
+      /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const hostedDastReleaseBoundaryJob =
+    securityDastWorkflow.match(
+      /(?:^|\r?\n)  boundary-probes:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const hostedDastReleaseZapJob =
+    securityDastWorkflow.match(
+      /(?:^|\r?\n)  zap-baseline:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
   const managedMcpDeployJob =
     deploy.match(
@@ -2629,9 +2667,16 @@ function sourceChecks(): SourceCheck[] {
       recoveryWatchdogTests
     ) &&
     (packageSource.match(/tests\/durable-recovery\.test\.ts/gu) ?? [])
-      .length === 2 &&
+      .length === 1 &&
     (packageSource.match(/tests\/recovery-watchdog\.test\.ts/gu) ?? [])
-      .length === 2;
+      .length === 1 &&
+    /const canonicalTestCommand = packageJson\?\.scripts\?\.test/u.test(
+      backendCoverageRunner
+    ) &&
+    /canonicalTestCommand\.match\(/u.test(
+      backendCoverageRunner
+    ) &&
+    /\.\.\.testFiles/u.test(backendCoverageRunner);
   const legacyCandidateReadPattern = "\\?".repeat(40);
   const durableRecoveryIamContract =
     (["staging", "production"] as const).every((environment) => {
@@ -2801,7 +2846,7 @@ function sourceChecks(): SourceCheck[] {
     (
       packageSource.match(/tests\/cloudformation-controls\.test\.ts/gu) ??
       []
-    ).length === 2;
+    ).length === 1;
   const greenfieldRetainedLogDeleteIamBlocks = [
     ...deliveryBootstrap.matchAll(
       /- Sid: DeleteFailed(?:Staging|Production)GreenfieldRetainedLogs[\s\S]*?(?=\r?\n              - Sid: InspectFailed(?:Staging|Production)GreenfieldRetainedLogTags)/gu
@@ -3106,9 +3151,16 @@ function sourceChecks(): SourceCheck[] {
       /"test:coverage":\s*"node scripts\/run-backend-coverage\.mjs"/u.test(
         packageSource
       ) &&
-        /if \(!runnerTemp\)[\s\S]*?Coverage is CI-only/u.test(
+        /if \(!runnerTemp\)[\s\S]*?coverage is CI-only/iu.test(
           backendCoverageRunner
         ) &&
+        /const canonicalTestCommand = packageJson\?\.scripts\?\.test/u.test(
+          backendCoverageRunner
+        ) &&
+        /new Set\(testFiles\)\.size !== testFiles\.length/u.test(
+          backendCoverageRunner
+        ) &&
+        /\.\.\.testFiles/u.test(backendCoverageRunner) &&
         /"archon-coverage",\s*\n?\s*"backend",\s*\n?\s*"lcov\.info"/u.test(
           backendCoverageRunner
         ) &&
@@ -3427,7 +3479,14 @@ function sourceChecks(): SourceCheck[] {
           hostedDastCiJob
         ) &&
         /node scripts\/hosted-dast\.mjs/u.test(hostedDastCiJob) &&
+        /name:\s*hosted-dast-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          hostedDastCiJob
+        ) &&
+        /retention-days:\s*90/u.test(hostedDastCiJob) &&
         /zaproxy\/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874/u.test(
+          hostedDastCiJob
+        ) &&
+        /rules_file_name:\s*\.zap\/predeploy\.tsv/u.test(
           hostedDastCiJob
         ) &&
         /ghcr\.io\/zaproxy\/zaproxy:2\.17\.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2/u.test(
@@ -3435,35 +3494,197 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /fail_action:\s*true/u.test(hostedDastCiJob) &&
         /allow_issue_writing:\s*false/u.test(hostedDastCiJob) &&
+        /artifact_name:\s*zap-baseline-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          hostedDastCiJob
+        ) &&
         /workflows:\s*\["Deploy AWS"\]/u.test(securityDastWorkflow) &&
         /types:\s*\[completed\]/u.test(securityDastWorkflow) &&
         /cron:\s*"43 4 \* \* 1"/u.test(securityDastWorkflow) &&
+        /DAST_REQUIRE_HARDENED_HEADERS:\s*"1"/u.test(
+          securityDastWorkflow
+        ) &&
+        /DAST_SOURCE_DEPLOY_RUN_ID:\s*\$\{\{\s*github\.event\.workflow_run\.id \|\| ''\s*\}\}/u.test(
+          securityDastWorkflow
+        ) &&
+        /DAST_SOURCE_DEPLOY_RUN_ATTEMPT:\s*\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| ''\s*\}\}/u.test(
+          securityDastWorkflow
+        ) &&
+        hostedDastSourceGateJob.length > 0 &&
+        /name:\s*Validate Hosted DAST source deployment/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /name:\s*Require successful operation-bound Deploy AWS source/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /test "\$SOURCE_CONCLUSION" = "success"/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        hasExactTrimmedLine(
+          hostedDastSourceGateJob,
+          '[[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
+        ) &&
+        hasExactTrimmedLine(
+          hostedDastSourceGateJob,
+          '[[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]'
+        ) &&
+        hasExactTrimmedLine(
+          hostedDastSourceGateJob,
+          '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+        ) &&
+        (
+          securityDastWorkflow.match(/needs:\s*source-gate/gu) ?? []
+        ).length === 2 &&
+        hostedDastReleaseBoundaryJob.length > 0 &&
+        /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /ref:\s*\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /node scripts\/hosted-dast\.mjs/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.id \|\| github\.run_id\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| github\.run_attempt\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /retention-days:\s*90/u.test(hostedDastReleaseBoundaryJob) &&
+        hostedDastReleaseZapJob.length > 0 &&
+        /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /ref:\s*\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /zaproxy\/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /name:\s*Scan the owned public production release/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /target:\s*\$\{\{\s*env\.DAST_TARGET_URL\s*\}\}/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /rules_file_name:\s*\.zap\/release\.tsv/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /ghcr\.io\/zaproxy\/zaproxy:2\.17\.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /fail_action:\s*true/u.test(hostedDastReleaseZapJob) &&
+        /allow_issue_writing:\s*false/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          hostedDastReleaseZapJob
+        ) &&
+        hasExactZapIgnorePolicy(zapPredeployRules, [
+          "10015",
+          "10036",
+          "10049",
+          "10050",
+          "10055",
+          "10094",
+          "10109",
+          "90004",
+          "90005",
+        ]) &&
+        hasExactZapIgnorePolicy(zapReleaseRules, [
+          "10015",
+          "10036",
+          "10049",
+          "10050",
+          "10094",
+          "10109",
+          "90005",
+        ]) &&
         /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u.test(
           securityDastWorkflow
         ) &&
-        (
-          securityDastWorkflow.match(
-            /github\.event_name != 'workflow_run' \|\| github\.event\.workflow_run\.conclusion == 'success'/gu
-          ) ?? []
-        ).length === 2 &&
         /EXPECTED_PRODUCTION_URL\s*=\s*\n?\s*"https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net"/u.test(
           hostedDast
         ) &&
         /"\/api\/proof"/u.test(hostedDast) &&
         /targetReleaseSha === expectedReleaseSha/u.test(hostedDast) &&
-        /schema:\s*"archon\.hosted-dast"[\s\S]*?version:\s*2/u.test(
+        /schema:\s*"archon\.hosted-dast"[\s\S]*?version:\s*3/u.test(
           hostedDast
+        ) &&
+        /version:\s*3/u.test(hostedDastTypes) &&
+        /profile:\s*"predeploy" \| "production-audit" \| "exact-release"/u.test(
+          hostedDastTypes
+        ) &&
+        /export function writeHostedDastReceipt\(/u.test(
+          hostedDastTypes
+        ) &&
+        /const profile = dastProfile\(\)/u.test(hostedDast) &&
+        /return process\.env\.DAST_EXPECTED_RELEASE_SHA[\s\S]*?\? "exact-release"[\s\S]*?: "production-audit"/u.test(
+          hostedDast
+        ) &&
+        /function failedReceipt\(\)/u.test(hostedDast) &&
+        /id:\s*"scan-completion"[\s\S]*?status:\s*"fail"/u.test(
+          hostedDast
+        ) &&
+        /const strictApiBoundary = profile !== "predeploy"/u.test(
+          hostedDast
+        ) &&
+        /status:\s*strictApiBoundary \? 405 : \[404, 405\]/u.test(
+          hostedDast
+        ) &&
+        /allowGatewayFallback:\s*!strictApiBoundary/u.test(
+          hostedDast
+        ) &&
+        /ApiFallback:[\s\S]*?Path:\s*\/api\/\{proxy\+\}[\s\S]*?Method:\s*ANY/u.test(
+          lambdaTemplate
+        ) &&
+        !/style-src 'self' 'unsafe-inline'/u.test(lambdaTemplate) &&
+        /style-src 'self'; upgrade-insecure-requests/u.test(
+          lambdaTemplate
+        ) &&
+        /Header: Cross-Origin-Embedder-Policy\s+Value: "require-corp"/u.test(
+          lambdaTemplate
+        ) &&
+        /Header: Cross-Origin-Opener-Policy\s+Value: "same-origin"/u.test(
+          lambdaTemplate
+        ) &&
+        /Header: Cross-Origin-Resource-Policy\s+Value: "same-origin"/u.test(
+          lambdaTemplate
         ) &&
         /flag:\s*"wx"/u.test(hostedDast) &&
         /checks\.length,\s*15/u.test(hostedDastTests) &&
+        /writes a sanitized fail-closed receipt before rethrowing/u.test(
+          hostedDastTests
+        ) &&
+        /exact-release profile requires isolated browser headers/u.test(
+          hostedDastTests
+        ) &&
+        /exact-release refuses the legacy API Gateway fallback/u.test(
+          hostedDastTests
+        ) &&
         /fails closed when production is not the expected release/u.test(
           hostedDastTests
         ) &&
         /refuses non-owned or non-HTTPS targets before fetching/u.test(
           hostedDastTests
+        ) &&
+        /exactShaWorkflowRuns\(\s*"security-dast\.yml",\s*"workflow_run"/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedRuns\.hostedDast = toSelectedRun\(hostedDastRun\)/u.test(
+          finalSubmissionGate
+        ) &&
+        (
+          finalSubmissionGate.match(
+            /requireSuccessfulHostedDastJobs\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        /selectExactHostedDastArtifact\(/u.test(finalSubmissionGate) &&
+        /githubArtifactReceipt\(/u.test(finalSubmissionGate) &&
+        /requireArtifactArchiveDigest\(/u.test(finalSubmissionGate) &&
+        /requireExactHostedDastReceipt\(/u.test(finalSubmissionGate) &&
+        /terminalHostedDastArtifact\.digest !== hostedDastArtifact\.digest/u.test(
+          finalSubmissionGate
         ),
-      "CI requires release-bound active API probes plus a SHA- and digest-pinned OWASP ZAP baseline; every successful AWS deployment receives the same exact-release scan and sanitized evidence.",
-      "The hosted DAST gate, exact deployed-release binding, immutable ZAP baseline, or adversarial regression coverage is incomplete."
+      "CI requires release-bound active API probes plus a SHA- and digest-pinned OWASP ZAP baseline; every successful AWS deployment receives the same exact-release scan, sanitized evidence, and final-submission revalidation.",
+      "The hosted DAST gate, exact deployed-release binding, immutable ZAP policy, final-submission revalidation, or adversarial regression coverage is incomplete."
     ),
     sourceCheck(
       "product.demo-concurrency-headroom",
@@ -4230,13 +4451,30 @@ function sourceChecks(): SourceCheck[] {
         /const WORKFLOW_REF =\s+`\$\{REPOSITORY\}\/\.github\/workflows\/submission-readiness\.yml@refs\/heads\/main`/u.test(
           finalSubmissionGate
         ) &&
-        /selectSuccessfulRun\([\s\S]*?"CI"[\s\S]*?"CodeQL"[\s\S]*?"Deploy AWS"[\s\S]*?"Cockroach Cloud Managed MCP Audit"[\s\S]*?"Recover AWS"/u.test(
+        /selectSuccessfulRun\([\s\S]*?"CI"[\s\S]*?"CodeQL"[\s\S]*?"Deploy AWS"[\s\S]*?"Hosted DAST"[\s\S]*?"Cockroach Cloud Managed MCP Audit"[\s\S]*?"Recover AWS"/u.test(
           finalSubmissionGate
         ) &&
-        /Deploy timing must be valid and both audits must start after deploy completes/u.test(
+        /Deploy timing must be valid and all independent audits must start after deploy completes/u.test(
+          finalSubmissionGate
+        ) &&
+        /selectedRuns\.hostedDast = toSelectedRun\(hostedDastRun\)/u.test(
+          finalSubmissionGate
+        ) &&
+        (
+          finalSubmissionGate.match(
+            /requireSuccessfulHostedDastJobs\(/gu
+          ) ?? []
+        ).length >= 3 &&
+        /selectExactHostedDastArtifact\(/u.test(finalSubmissionGate) &&
+        /requireExactHostedDastReceipt\(/u.test(finalSubmissionGate) &&
+        /hosted-dast-\$\{sha\}-\$\{deployRun\.id\}-\$\{deployRun\.run_attempt\}-\$\{hostedDastRun\.run_attempt\}/u.test(
+          finalSubmissionGate
+        ) &&
+        /terminalHostedDastArtifact\.digest !== hostedDastArtifact\.digest/u.test(
           finalSubmissionGate
         ) &&
         /requireSuccessfulRecoveryAuditJobs/u.test(finalSubmissionGate) &&
+        /Terminal exact Hosted DAST jobs/u.test(finalSubmissionGate) &&
         /must have completed within 24 hours/u.test(finalSubmissionGate) &&
         /release\?\.commitSha !== sha/u.test(finalSubmissionGate) &&
         /\^archon_production_\[0-9a-f\]\{10\}\$/u.test(
@@ -4271,7 +4509,7 @@ function sourceChecks(): SourceCheck[] {
         /submission-readiness-receipt\.json/u.test(
           finalSubmissionGate
         ),
-      "A manual, read-only pre/post submission gate re-proves exact-main hosted evidence, live contracts, public video, thumbnail, and final Devpost state with a sanitized runner-temp receipt.",
+      "A manual, read-only pre/post submission gate re-proves exact-main CI, deployment, exact-release DAST jobs, independent audits, live contracts, public video, thumbnail, and final Devpost state with a sanitized runner-temp receipt.",
       "The hosted final submission boundary is incomplete or can bypass its evidence contract."
     ),
     sourceCheck(

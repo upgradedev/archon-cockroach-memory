@@ -112,48 +112,93 @@ describe("ProofLedger", () => {
   });
 
   it("fails visible proof closed for every independently required invariant", () => {
-    const mutations: Array<(proof: ProofSnapshot) => void> = [
-      (proof) => {
-        proof.memory.storeVerified = false;
+    const mutations: Array<{
+      boundary: "store" | "index";
+      mutate: (proof: ProofSnapshot) => void;
+    }> = [
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.memory.storeVerified = false;
+        },
       },
-      (proof) => {
-        proof.memory.persisted = 8;
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.memory.persisted = 8;
+        },
       },
-      (proof) => {
-        proof.memory.idempotencyKeys = 8;
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.memory.idempotencyKeys = 8;
+        },
       },
-      (proof) => {
-        proof.memory.contentDigests = 8;
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.memory.contentDigests = 8;
+        },
       },
-      (proof) => {
-        proof.memory.evidence = "static claim";
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.memory.evidence = "static claim";
+        },
       },
-      (proof) => {
-        proof.database.activeMemories = 8;
+      {
+        boundary: "store",
+        mutate: (proof) => {
+          proof.database.activeMemories = 8;
+        },
       },
-      (proof) => {
-        proof.vectorIndex.enabled = false;
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.enabled = false;
+        },
       },
-      (proof) => {
-        proof.vectorIndex.name = "wrong-index";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.name = "wrong-index";
+        },
       },
-      (proof) => {
-        proof.vectorIndex.engine = "unknown";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.engine = "unknown";
+        },
       },
-      (proof) => {
-        proof.vectorIndex.dimensions = 768;
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.dimensions = 768;
+        },
       },
-      (proof) => {
-        proof.vectorIndex.metric = "l2";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.metric = "l2";
+        },
       },
-      (proof) => {
-        proof.vectorIndex.lifecycleState = "backfilling";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.lifecycleState = "backfilling";
+        },
       },
-      (proof) => {
-        proof.vectorIndex.evidence = "static claim";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.evidence = "static claim";
+        },
       },
-      (proof) => {
-        proof.vectorIndex.definitionFingerprint = "short";
+      {
+        boundary: "index",
+        mutate: (proof) => {
+          proof.vectorIndex.definitionFingerprint = "short";
+        },
       },
     ];
     const initial = verifiedProof();
@@ -161,12 +206,23 @@ describe("ProofLedger", () => {
     const { rerender } = render(ledger(initial, { isFetching: true }));
     expect(screen.getByTestId("proof-unverifiable")).toBeInTheDocument();
 
-    for (const mutate of mutations) {
+    for (const { boundary, mutate } of mutations) {
       const proof = verifiedProof();
       proof.hasEvidence = false;
       mutate(proof);
       rerender(ledger(proof));
       expect(screen.getByTestId("proof-unverifiable")).toBeInTheDocument();
+      if (boundary === "store") {
+        expect(screen.getByTestId("store-proof")).toHaveTextContent(
+          "Not verified",
+        );
+        expect(screen.getByText("Index verified")).toBeInTheDocument();
+      } else {
+        expect(screen.getByTestId("store-proof")).toHaveTextContent(
+          "Store verified",
+        );
+        expect(screen.getByText("Not verified")).toBeInTheDocument();
+      }
     }
 
     const invalid = verifiedProof();

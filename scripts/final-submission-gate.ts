@@ -4,9 +4,11 @@
 // sanitized receipt under RUNNER_TEMP and never receives AWS credentials.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync } from "node:zlib";
 import { parse } from "parse5";
 import {
   evaluate,
@@ -64,6 +66,27 @@ interface SelectedRun {
   completedAt: string;
 }
 
+export interface GitHubArtifact {
+  id: number;
+  name: string;
+  sizeInBytes: number;
+  archiveDownloadUrl: string;
+  digest: string;
+  expired: boolean;
+  createdAt: string;
+  updatedAt: string;
+  workflowRunId: number;
+  workflowRunHeadSha: string;
+}
+
+interface SelectedArtifact {
+  id: number;
+  name: string;
+  sizeInBytes: number;
+  digest: string;
+  url: string;
+}
+
 interface GitHubWorkflowStep {
   name: string;
   status: string;
@@ -109,6 +132,7 @@ interface SubmissionReceipt {
   passed: boolean;
   checks: GateCheck[];
   selectedRuns: Record<string, SelectedRun>;
+  selectedArtifacts?: Record<string, SelectedArtifact>;
   live: Record<string, boolean>;
   video?: VideoReceipt;
   thumbnail?: ThumbnailReceipt;
@@ -331,6 +355,61 @@ async function githubJson(
   );
 }
 
+async function githubArtifactReceipt(
+  artifact: GitHubArtifact,
+  token: string,
+  label: string
+): Promise<unknown> {
+  const response = await fetchWithTimeout(
+    artifact.archiveDownloadUrl,
+    {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "archon-submission-readiness",
+        "x-github-api-version": "2022-11-28",
+      },
+    },
+    label
+  );
+  const contentLength = Number(
+    response.headers.get("content-length") ?? "0"
+  );
+  if (
+    (contentLength !== 0 &&
+      (!Number.isSafeInteger(contentLength) ||
+        contentLength < 1 ||
+        contentLength > 1_000_000))
+  ) {
+    throw new Error(`${label} content length is invalid`);
+  }
+  const archive = new Uint8Array(await response.arrayBuffer());
+  if (archive.length < 1 || archive.length > 1_000_000) {
+    throw new Error(`${label} archive size is invalid`);
+  }
+  try {
+    requireArtifactArchiveDigest(archive, artifact.digest);
+  } catch {
+    throw new Error(`${label} digest differs from GitHub artifact metadata`);
+  }
+  return extractSingleJsonArtifact(archive, "hosted-dast.json");
+}
+
+export function requireArtifactArchiveDigest(
+  archive: Uint8Array,
+  expectedDigest: string
+): void {
+  const digest = `sha256:${createHash("sha256")
+    .update(archive)
+    .digest("hex")}`;
+  if (
+    !/^sha256:[0-9a-f]{64}$/u.test(expectedDigest) ||
+    digest !== expectedDigest
+  ) {
+    throw new Error("Artifact archive digest does not match");
+  }
+}
+
 function requireString(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
@@ -437,6 +516,339 @@ function toSelectedRun(run: GitHubWorkflowRun): SelectedRun {
   };
 }
 
+export function parseWorkflowArtifacts(value: unknown): GitHubArtifact[] {
+  const root = asRecord(value);
+  return asRecords(root?.artifacts)
+    .map((artifact) => {
+      const workflowRun = asRecord(artifact.workflow_run);
+      return {
+        id: numberValue(artifact, "id") ?? 0,
+        name: stringValue(artifact, "name") ?? "",
+        sizeInBytes: numberValue(artifact, "size_in_bytes") ?? -1,
+        archiveDownloadUrl:
+          stringValue(artifact, "archive_download_url") ?? "",
+        digest: stringValue(artifact, "digest") ?? "",
+        expired: booleanValue(artifact, "expired") ?? true,
+        createdAt: stringValue(artifact, "created_at") ?? "",
+        updatedAt: stringValue(artifact, "updated_at") ?? "",
+        workflowRunId: numberValue(workflowRun, "id") ?? 0,
+        workflowRunHeadSha: stringValue(workflowRun, "head_sha") ?? "",
+      };
+    })
+    .filter(
+      (artifact) =>
+        Number.isSafeInteger(artifact.id) &&
+        artifact.id > 0 &&
+        Number.isSafeInteger(artifact.sizeInBytes) &&
+        artifact.sizeInBytes > 0 &&
+        artifact.sizeInBytes <= 1_000_000 &&
+        artifact.workflowRunId > 0 &&
+        /^[0-9a-f]{40}$/u.test(artifact.workflowRunHeadSha) &&
+        /^sha256:[0-9a-f]{64}$/u.test(artifact.digest) &&
+        artifact.archiveDownloadUrl ===
+          `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${artifact.id}/zip` &&
+        !Number.isNaN(Date.parse(artifact.createdAt)) &&
+        !Number.isNaN(Date.parse(artifact.updatedAt))
+    );
+}
+
+export function selectExactHostedDastArtifact(
+  value: unknown,
+  expectedName: string,
+  hostedDastRun: GitHubWorkflowRun
+): GitHubArtifact {
+  const root = asRecord(value);
+  const rawArtifacts = asRecords(root?.artifacts);
+  const totalCount = numberValue(root, "total_count");
+  const rawMatches = rawArtifacts.filter(
+    (artifact) => stringValue(artifact, "name") === expectedName
+  );
+  if (
+    !Number.isSafeInteger(totalCount) ||
+    totalCount !== rawArtifacts.length ||
+    (totalCount ?? 0) < 1 ||
+    (totalCount ?? 0) > 100 ||
+    rawMatches.length !== 1
+  ) {
+    throw new Error(
+      "Hosted DAST artifact inventory is incomplete or ambiguous"
+    );
+  }
+  const matches = parseWorkflowArtifacts(value).filter(
+    (artifact) =>
+      artifact.name === expectedName &&
+      artifact.workflowRunId === hostedDastRun.id &&
+      artifact.workflowRunHeadSha === hostedDastRun.head_sha &&
+      artifact.expired === false
+  );
+  if (matches.length !== 1 || !matches[0]) {
+    throw new Error(
+      "Exactly one unexpired operation-bound Hosted DAST receipt artifact is required"
+    );
+  }
+  return matches[0];
+}
+
+function toSelectedArtifact(artifact: GitHubArtifact): SelectedArtifact {
+  return {
+    id: artifact.id,
+    name: artifact.name,
+    sizeInBytes: artifact.sizeInBytes,
+    digest: artifact.digest,
+    url: `https://github.com/${REPOSITORY}/actions/runs/${artifact.workflowRunId}/artifacts/${artifact.id}`,
+  };
+}
+
+function crc32(value: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function extractSingleJsonArtifact(
+  archive: Uint8Array,
+  expectedPath: string
+): unknown {
+  const input = Buffer.from(
+    archive.buffer,
+    archive.byteOffset,
+    archive.byteLength
+  );
+  if (input.length < 22 || input.length > 1_000_000) {
+    throw new Error("Hosted DAST artifact ZIP size is invalid");
+  }
+
+  const minimumOffset = Math.max(0, input.length - 22 - 65_535);
+  let eocdOffset = -1;
+  for (let offset = input.length - 22; offset >= minimumOffset; offset -= 1) {
+    if (input.readUInt32LE(offset) === 0x06054b50) {
+      eocdOffset = offset;
+      break;
+    }
+  }
+  if (eocdOffset < 0) throw new Error("Hosted DAST artifact ZIP has no EOCD");
+
+  const disk = input.readUInt16LE(eocdOffset + 4);
+  const centralDisk = input.readUInt16LE(eocdOffset + 6);
+  const entriesOnDisk = input.readUInt16LE(eocdOffset + 8);
+  const entries = input.readUInt16LE(eocdOffset + 10);
+  const centralSize = input.readUInt32LE(eocdOffset + 12);
+  const centralOffset = input.readUInt32LE(eocdOffset + 16);
+  const commentLength = input.readUInt16LE(eocdOffset + 20);
+  if (
+    disk !== 0 ||
+    centralDisk !== 0 ||
+    entriesOnDisk !== 1 ||
+    entries !== 1 ||
+    eocdOffset + 22 + commentLength !== input.length ||
+    centralOffset + centralSize !== eocdOffset ||
+    centralSize < 46 ||
+    input.readUInt32LE(centralOffset) !== 0x02014b50
+  ) {
+    throw new Error("Hosted DAST artifact ZIP structure is not canonical");
+  }
+
+  const flags = input.readUInt16LE(centralOffset + 8);
+  const compression = input.readUInt16LE(centralOffset + 10);
+  const expectedCrc = input.readUInt32LE(centralOffset + 16);
+  const compressedSize = input.readUInt32LE(centralOffset + 20);
+  const uncompressedSize = input.readUInt32LE(centralOffset + 24);
+  const nameLength = input.readUInt16LE(centralOffset + 28);
+  const extraLength = input.readUInt16LE(centralOffset + 30);
+  const entryCommentLength = input.readUInt16LE(centralOffset + 32);
+  const localOffset = input.readUInt32LE(centralOffset + 42);
+  const centralEntryEnd =
+    centralOffset + 46 + nameLength + extraLength + entryCommentLength;
+  const name = input
+    .subarray(centralOffset + 46, centralOffset + 46 + nameLength)
+    .toString("utf8");
+  if (
+    centralEntryEnd !== centralOffset + centralSize ||
+    name !== expectedPath ||
+    (flags & ~(0x0008 | 0x0800)) !== 0 ||
+    (compression !== 0 && compression !== 8) ||
+    uncompressedSize < 2 ||
+    uncompressedSize > 65_536 ||
+    localOffset !== 0 ||
+    localOffset + 30 > centralOffset ||
+    input.readUInt32LE(localOffset) !== 0x04034b50
+  ) {
+    throw new Error("Hosted DAST artifact ZIP entry is invalid");
+  }
+
+  const localFlags = input.readUInt16LE(localOffset + 6);
+  const localCompression = input.readUInt16LE(localOffset + 8);
+  const localCrc = input.readUInt32LE(localOffset + 14);
+  const localCompressedSize = input.readUInt32LE(localOffset + 18);
+  const localUncompressedSize = input.readUInt32LE(localOffset + 22);
+  const localNameLength = input.readUInt16LE(localOffset + 26);
+  const localExtraLength = input.readUInt16LE(localOffset + 28);
+  const localName = input
+    .subarray(localOffset + 30, localOffset + 30 + localNameLength)
+    .toString("utf8");
+  const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+  const dataEnd = dataStart + compressedSize;
+  const usesDataDescriptor = (flags & 0x0008) !== 0;
+  const exactTerminalStructure = usesDataDescriptor
+    ? dataEnd + 16 === centralOffset &&
+      input.readUInt32LE(dataEnd) === 0x08074b50 &&
+      input.readUInt32LE(dataEnd + 4) === expectedCrc &&
+      input.readUInt32LE(dataEnd + 8) === compressedSize &&
+      input.readUInt32LE(dataEnd + 12) === uncompressedSize &&
+      localCrc === 0 &&
+      localCompressedSize === 0 &&
+      localUncompressedSize === 0
+    : dataEnd === centralOffset &&
+      localCrc === expectedCrc &&
+      localCompressedSize === compressedSize &&
+      localUncompressedSize === uncompressedSize;
+  if (
+    localFlags !== flags ||
+    localCompression !== compression ||
+    localName !== expectedPath ||
+    dataStart > dataEnd ||
+    dataEnd > centralOffset ||
+    !exactTerminalStructure
+  ) {
+    throw new Error("Hosted DAST artifact local ZIP entry is invalid");
+  }
+
+  const compressed = input.subarray(dataStart, dataEnd);
+  const output =
+    compression === 0
+      ? Buffer.from(compressed)
+      : inflateRawSync(compressed, {
+          maxOutputLength: 65_536,
+        });
+  if (
+    output.length !== uncompressedSize ||
+    crc32(output) !== expectedCrc
+  ) {
+    throw new Error("Hosted DAST artifact ZIP integrity check failed");
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(output));
+  } catch {
+    throw new Error("Hosted DAST artifact receipt is not canonical UTF-8 JSON");
+  }
+}
+
+export function requireExactHostedDastReceipt(
+  value: unknown,
+  deployRun: GitHubWorkflowRun,
+  hostedDastRun: GitHubWorkflowRun,
+  sha: string,
+  now = Date.now()
+): void {
+  const receipt = asRecord(value);
+  const expectedKeys = [
+    "checks",
+    "generatedAt",
+    "passed",
+    "profile",
+    "releaseSha",
+    "scannerRunAttempt",
+    "scannerRunId",
+    "scannerSha",
+    "schema",
+    "sourceDeployRunAttempt",
+    "sourceDeployRunId",
+    "targetOrigin",
+    "version",
+  ];
+  const actualKeys = receipt ? Object.keys(receipt).sort() : [];
+  const generatedAt = Date.parse(stringValue(receipt, "generatedAt") ?? "");
+  const scannerRunId = numberValue(receipt, "scannerRunId");
+  const scannerRunAttempt = numberValue(receipt, "scannerRunAttempt");
+  const sourceDeployRunId = numberValue(receipt, "sourceDeployRunId");
+  const sourceDeployRunAttempt = numberValue(
+    receipt,
+    "sourceDeployRunAttempt"
+  );
+  const hostedStartedAt = Date.parse(hostedDastRun.run_started_at);
+  const hostedCompletedAt = Date.parse(hostedDastRun.updated_at);
+  if (
+    !receipt ||
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    receipt.schema !== "archon.hosted-dast" ||
+    receipt.version !== 3 ||
+    receipt.profile !== "exact-release" ||
+    receipt.targetOrigin !== DEMO_URL ||
+    receipt.releaseSha !== sha ||
+    receipt.scannerSha !== sha ||
+    receipt.passed !== true ||
+    scannerRunId !== hostedDastRun.id ||
+    scannerRunAttempt !== hostedDastRun.run_attempt ||
+    sourceDeployRunId !== deployRun.id ||
+    sourceDeployRunAttempt !== deployRun.run_attempt ||
+    !Number.isSafeInteger(scannerRunId) ||
+    !Number.isSafeInteger(scannerRunAttempt) ||
+    !Number.isSafeInteger(sourceDeployRunId) ||
+    !Number.isSafeInteger(sourceDeployRunAttempt) ||
+    ![generatedAt, hostedStartedAt, hostedCompletedAt, now].every(
+      Number.isFinite
+    ) ||
+    generatedAt < hostedStartedAt ||
+    generatedAt > hostedCompletedAt + 2 * 60 * 1_000 ||
+    hostedCompletedAt < hostedStartedAt ||
+    hostedCompletedAt > now + 5 * 60 * 1_000 ||
+    now - hostedCompletedAt > 24 * 60 * 60 * 1_000
+  ) {
+    throw new Error(
+      "Hosted DAST receipt is not bound to the exact scanner and source deployment"
+    );
+  }
+
+  const expectedChecks = [
+    ["root-security-headers", 200],
+    ["health-boundary", 200],
+    ["release-proof-boundary", 200],
+    ["method-boundary-get", 405],
+    ["method-boundary-delete", 405],
+    ["content-type-boundary", 415],
+    ["malformed-json-boundary", 400],
+    ["body-size-boundary", 413],
+    ["question-size-boundary", 400],
+    ["fixed-scope-sql-injection", 400],
+    ["kind-enumeration-boundary", 400],
+    ["limit-boundary", 400],
+    ["write-route-absent", 404],
+    ["audit-scope-injection", 400],
+    ["unknown-route-boundary", 404],
+  ] as const;
+  const rawChecks = Array.isArray(receipt.checks)
+    ? receipt.checks
+    : [];
+  const checks = asRecords(rawChecks);
+  if (
+    rawChecks.length !== checks.length ||
+    checks.length !== expectedChecks.length ||
+    checks.some((check, index) => {
+      const checkKeys = Object.keys(check).sort();
+      const observedStatus = numberValue(check, "observedStatus");
+      const expected = expectedChecks[index];
+      return (
+        !expected ||
+        checkKeys.length !== 3 ||
+        checkKeys[0] !== "id" ||
+        checkKeys[1] !== "observedStatus" ||
+        checkKeys[2] !== "status" ||
+        check.id !== expected[0] ||
+        check.status !== "pass" ||
+        observedStatus !== expected[1]
+      );
+    })
+  ) {
+    throw new Error("Hosted DAST receipt does not prove all 15 checks");
+  }
+}
+
 export function parseWorkflowJobs(value: unknown): {
   totalCount: number;
   jobs: GitHubWorkflowJob[];
@@ -521,34 +933,91 @@ export function requireSuccessfulRecoveryAuditJobs(
   }
 }
 
+export function requireSuccessfulHostedDastJobs(
+  value: unknown,
+  runId: number,
+  sha: string
+): void {
+  const { totalCount, jobs } = parseWorkflowJobs(value);
+  const expected = [
+    {
+      job: "Validate Hosted DAST source deployment",
+      steps: ["Require successful operation-bound Deploy AWS source"],
+    },
+    {
+      job: "Bounded active API and browser-boundary probes",
+      steps: [
+        "Run fail-closed hosted adversarial probes",
+        "Upload sanitized hosted DAST receipt",
+      ],
+    },
+    {
+      job: "OWASP ZAP passive and AJAX-spider baseline",
+      steps: ["Scan the owned public production release"],
+    },
+  ] as const;
+  if (totalCount !== expected.length || jobs.length !== expected.length) {
+    throw new Error("Hosted DAST must contain exactly three successful jobs");
+  }
+  for (const contract of expected) {
+    const matches = jobs.filter((job) => job.name === contract.job);
+    const job = matches[0];
+    if (
+      matches.length !== 1 ||
+      !job ||
+      job.run_id !== runId ||
+      job.head_sha !== sha ||
+      job.status !== "completed" ||
+      job.conclusion !== "success"
+    ) {
+      throw new Error(`${contract.job} did not complete successfully`);
+    }
+    for (const stepName of contract.steps) {
+      const steps = job.steps.filter((step) => step.name === stepName);
+      if (
+        steps.length !== 1 ||
+        steps[0]?.status !== "completed" ||
+        steps[0]?.conclusion !== "success"
+      ) {
+        throw new Error(`${stepName} did not execute successfully`);
+      }
+    }
+  }
+}
+
 export function requirePostDeployAuditTiming(
   deployRun: GitHubWorkflowRun,
+  hostedDastRun: GitHubWorkflowRun,
   mcpRun: GitHubWorkflowRun,
   recoveryRun: GitHubWorkflowRun,
   now = Date.now()
 ): void {
   const deployedStartedAt = Date.parse(deployRun.run_started_at);
   const deployedAt = Date.parse(deployRun.updated_at);
+  const hostedDastStartedAt = Date.parse(hostedDastRun.run_started_at);
   const mcpStartedAt = Date.parse(mcpRun.run_started_at);
   const recoveryStartedAt = Date.parse(recoveryRun.run_started_at);
   if (
     ![
       deployedStartedAt,
       deployedAt,
+      hostedDastStartedAt,
       mcpStartedAt,
       recoveryStartedAt,
       now,
     ].every(Number.isFinite) ||
     deployedAt < deployedStartedAt ||
+    hostedDastStartedAt <= deployedAt ||
     mcpStartedAt <= deployedAt ||
     recoveryStartedAt <= deployedAt
   ) {
     throw new Error(
-      "Deploy timing must be valid and both audits must start after deploy completes"
+      "Deploy timing must be valid and all independent audits must start after deploy completes"
     );
   }
   const maximumAuditAgeMs = 24 * 60 * 60 * 1_000;
   for (const [label, run] of [
+    ["Hosted DAST", hostedDastRun],
     ["Managed MCP", mcpRun],
     ["recovery", recoveryRun],
   ] as const) {
@@ -807,6 +1276,7 @@ export function validDevpostPageContract(
 async function main(): Promise<void> {
   const checks: GateCheck[] = [];
   const selectedRuns: Record<string, SelectedRun> = {};
+  const selectedArtifacts: Record<string, SelectedArtifact> = {};
   const live: Record<string, boolean> = {};
   const sha = process.env.GITHUB_SHA ?? "";
   const phase = parsePhase(process.env.SUBMISSION_PHASE);
@@ -905,10 +1375,19 @@ async function main(): Promise<void> {
   });
 
   let deployRun: GitHubWorkflowRun | undefined;
+  let hostedDastRun: GitHubWorkflowRun | undefined;
+  let hostedDastArtifact: GitHubArtifact | undefined;
   let mcpRun: GitHubWorkflowRun | undefined;
   let recoveryRun: GitHubWorkflowRun | undefined;
   await check("exact-sha-hosted-evidence", async () => {
-    const [ciRuns, codeqlRuns, deployRuns, mcpRuns, recoveryRuns] =
+    const [
+      ciRuns,
+      codeqlRuns,
+      deployRuns,
+      hostedDastRuns,
+      mcpRuns,
+      recoveryRuns,
+    ] =
       await Promise.all([
         exactShaWorkflowRuns("ci.yml", "push", "Exact-SHA CI runs"),
         exactShaWorkflowRuns("codeql.yml", "push", "Exact-SHA CodeQL runs"),
@@ -916,6 +1395,11 @@ async function main(): Promise<void> {
           "deploy-aws.yml",
           "workflow_run",
           "Exact-SHA deploy runs"
+        ),
+        exactShaWorkflowRuns(
+          "security-dast.yml",
+          "workflow_run",
+          "Exact-SHA Hosted DAST runs"
         ),
         exactShaWorkflowRuns(
           "managed-mcp-audit.yml",
@@ -949,6 +1433,13 @@ async function main(): Promise<void> {
       sha,
       ".github/workflows/deploy-aws.yml"
     );
+    hostedDastRun = selectSuccessfulRun(
+      hostedDastRuns,
+      "Hosted DAST",
+      "workflow_run",
+      sha,
+      ".github/workflows/security-dast.yml"
+    );
     mcpRun = selectSuccessfulRun(
       mcpRuns,
       "Cockroach Cloud Managed MCP Audit",
@@ -966,9 +1457,54 @@ async function main(): Promise<void> {
     selectedRuns.ci = toSelectedRun(ciRun);
     selectedRuns.codeql = toSelectedRun(codeqlRun);
     selectedRuns.deploy = toSelectedRun(deployRun);
+    selectedRuns.hostedDast = toSelectedRun(hostedDastRun);
     selectedRuns.managedMcp = toSelectedRun(mcpRun);
     selectedRuns.recovery = toSelectedRun(recoveryRun);
-    return "CI, CodeQL, deploy, standalone Managed MCP, and recovery are green";
+    return "CI, CodeQL, deploy, exact-release Hosted DAST, standalone Managed MCP, and recovery are green";
+  });
+
+  await check("hosted-dast-jobs", async () => {
+    if (!hostedDastRun) {
+      throw new Error("Exact-SHA Hosted DAST evidence is incomplete");
+    }
+    const jobs = await githubJson(
+      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/jobs?filter=latest&per_page=100`,
+      token,
+      "Exact Hosted DAST jobs"
+    );
+    requireSuccessfulHostedDastJobs(jobs, hostedDastRun.id, sha);
+    return "Both exact-release active probes and ZAP baseline executed successfully";
+  });
+
+  await check("hosted-dast-receipt", async () => {
+    if (!deployRun || !hostedDastRun) {
+      throw new Error("Exact-SHA Hosted DAST evidence is incomplete");
+    }
+    const artifacts = await githubJson(
+      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/artifacts?per_page=100`,
+      token,
+      "Exact Hosted DAST artifacts"
+    );
+    hostedDastArtifact = selectExactHostedDastArtifact(
+      artifacts,
+      `hosted-dast-${sha}-${deployRun.id}-${deployRun.run_attempt}-${hostedDastRun.run_attempt}`,
+      hostedDastRun
+    );
+    const receipt = await githubArtifactReceipt(
+      hostedDastArtifact,
+      token,
+      "Exact Hosted DAST receipt"
+    );
+    requireExactHostedDastReceipt(
+      receipt,
+      deployRun,
+      hostedDastRun,
+      sha
+    );
+    selectedArtifacts.hostedDast = toSelectedArtifact(
+      hostedDastArtifact
+    );
+    return `Hosted DAST receipt artifact ${hostedDastArtifact.id} is bound to deploy ${deployRun.id}/${deployRun.run_attempt}`;
   });
 
   await check("recovery-audit-operation", async () => {
@@ -985,11 +1521,16 @@ async function main(): Promise<void> {
   });
 
   await check("post-deploy-independent-audits", () => {
-    if (!deployRun || !mcpRun || !recoveryRun) {
+    if (!deployRun || !hostedDastRun || !mcpRun || !recoveryRun) {
       throw new Error("Exact-SHA hosted evidence is incomplete");
     }
-    requirePostDeployAuditTiming(deployRun, mcpRun, recoveryRun);
-    return "Standalone Managed MCP and operation-bound recovery audits post-date deployment and are under 24 hours old";
+    requirePostDeployAuditTiming(
+      deployRun,
+      hostedDastRun,
+      mcpRun,
+      recoveryRun
+    );
+    return "Exact-release DAST, standalone Managed MCP, and operation-bound recovery audits post-date deployment and are under 24 hours old";
   });
 
   await check("submission-copy", () => {
@@ -1455,7 +1996,14 @@ async function main(): Promise<void> {
     if (!mainAtStart || finalMain !== mainAtStart || finalMain !== sha) {
       throw new Error("Main moved while the submission gate was running");
     }
-    const [ciRuns, codeqlRuns, deployRuns, mcpRuns, recoveryRuns] =
+    const [
+      ciRuns,
+      codeqlRuns,
+      deployRuns,
+      hostedDastRuns,
+      mcpRuns,
+      recoveryRuns,
+    ] =
       await Promise.all([
         exactShaWorkflowRuns("ci.yml", "push", "Terminal exact-SHA CI runs"),
         exactShaWorkflowRuns(
@@ -1467,6 +2015,11 @@ async function main(): Promise<void> {
           "deploy-aws.yml",
           "workflow_run",
           "Terminal exact-SHA deploy runs"
+        ),
+        exactShaWorkflowRuns(
+          "security-dast.yml",
+          "workflow_run",
+          "Terminal exact-SHA Hosted DAST runs"
         ),
         exactShaWorkflowRuns(
           "managed-mcp-audit.yml",
@@ -1501,6 +2054,13 @@ async function main(): Promise<void> {
         sha,
         ".github/workflows/deploy-aws.yml"
       ),
+      hostedDast: selectSuccessfulRun(
+        hostedDastRuns,
+        "Hosted DAST",
+        "workflow_run",
+        sha,
+        ".github/workflows/security-dast.yml"
+      ),
       managedMcp: selectSuccessfulRun(
         mcpRuns,
         "Cockroach Cloud Managed MCP Audit",
@@ -1528,18 +2088,65 @@ async function main(): Promise<void> {
         );
       }
     }
-    const terminalRecoveryJobs = await githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${terminalRuns.recovery.id}/jobs?filter=latest&per_page=100`,
-      token,
-      "Terminal exact recovery audit jobs"
+    const [
+      terminalHostedDastJobs,
+      terminalRecoveryJobs,
+      terminalHostedDastArtifacts,
+    ] =
+      await Promise.all([
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/jobs?filter=latest&per_page=100`,
+          token,
+          "Terminal exact Hosted DAST jobs"
+        ),
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.recovery.id}/jobs?filter=latest&per_page=100`,
+          token,
+          "Terminal exact recovery audit jobs"
+        ),
+        githubJson(
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/artifacts?per_page=100`,
+          token,
+          "Terminal exact Hosted DAST artifacts"
+        ),
+      ]);
+    requireSuccessfulHostedDastJobs(
+      terminalHostedDastJobs,
+      terminalRuns.hostedDast.id,
+      sha
     );
     requireSuccessfulRecoveryAuditJobs(
       terminalRecoveryJobs,
       terminalRuns.recovery.id,
       sha
     );
+    const terminalHostedDastArtifact = selectExactHostedDastArtifact(
+      terminalHostedDastArtifacts,
+      `hosted-dast-${sha}-${terminalRuns.deploy.id}-${terminalRuns.deploy.run_attempt}-${terminalRuns.hostedDast.run_attempt}`,
+      terminalRuns.hostedDast
+    );
+    if (
+      !hostedDastArtifact ||
+      terminalHostedDastArtifact.id !== hostedDastArtifact.id ||
+      terminalHostedDastArtifact.digest !== hostedDastArtifact.digest
+    ) {
+      throw new Error(
+        "Hosted DAST receipt artifact changed while the gate was running"
+      );
+    }
+    requireExactHostedDastReceipt(
+      await githubArtifactReceipt(
+        terminalHostedDastArtifact,
+        token,
+        "Terminal exact Hosted DAST receipt"
+      ),
+      terminalRuns.deploy,
+      terminalRuns.hostedDast,
+      sha
+    );
     requirePostDeployAuditTiming(
       terminalRuns.deploy,
+      terminalRuns.hostedDast,
       terminalRuns.managedMcp,
       terminalRuns.recovery
     );
@@ -1593,6 +2200,9 @@ async function main(): Promise<void> {
     passed,
     checks,
     selectedRuns,
+    ...(Object.keys(selectedArtifacts).length > 0
+      ? { selectedArtifacts }
+      : {}),
     live,
     ...(video ? { video } : {}),
     ...(thumbnail ? { thumbnail } : {}),

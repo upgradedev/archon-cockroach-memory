@@ -235,11 +235,27 @@ describe("AuditLedger", () => {
 
     expect(screen.getByText(/last successful snapshot/)).toBeInTheDocument();
     expect(screen.getByText("INV-2043")).toBeInTheDocument();
-    expect(screen.getByText("18,400.5")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        new Intl.NumberFormat("en-IE", {
+          maximumFractionDigits: 2,
+        }).format(18_400.5),
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("€18,900")).toBeInTheDocument();
-    expect(screen.getByText("68 / 100 heuristic signal")).toBeInTheDocument();
-    expect(screen.getByText("100 / 100 heuristic signal")).toBeInTheDocument();
-    expect(screen.getByText("signal not reported")).toBeInTheDocument();
+    for (const expected of [
+      "68 / 100 heuristic signal",
+      "100 / 100 heuristic signal",
+      "signal not reported",
+    ]) {
+      expect(
+        screen.getByText(
+          (_, element) =>
+            element?.tagName === "P" &&
+            element.textContent?.includes(expected) === true,
+        ),
+      ).toBeInTheDocument();
+    }
     expect(screen.getByText("Human review required")).toBeInTheDocument();
     expect(screen.getAllByText("not reported").length).toBeGreaterThan(0);
     expect(screen.getByText('{"state":"pending"}')).toBeInTheDocument();

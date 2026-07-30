@@ -161,8 +161,14 @@ describe("App", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent("API reachable"),
     );
-    expect(screen.getByTestId("store-proof")).toHaveTextContent("Store verified");
-    expect(screen.getByText("No findings in this scope")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("store-proof")).toHaveTextContent(
+        "Store verified",
+      ),
+    );
+    expect(
+      await screen.findByText("No findings in this scope"),
+    ).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: /true employer cost/i }),
@@ -175,11 +181,18 @@ describe("App", () => {
     expect(apiMocks.recallMemory).toHaveBeenCalledWith(recall.question);
 
     await user.click(screen.getByRole("button", { name: "Refresh proof" }));
-    await waitFor(() => expect(apiMocks.getHealth).toHaveBeenCalledTimes(2));
-    expect(apiMocks.getAudit).toHaveBeenCalledTimes(2);
-    expect(apiMocks.getProof).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(apiMocks.getHealth).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getAudit).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getProof).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByRole("button", { name: "Run audit again" }),
+      ).toBeEnabled();
+    });
 
-    await user.click(screen.getByRole("button", { name: "Run audit again" }));
+    await user.click(
+      screen.getByRole("button", { name: "Run audit again" }),
+    );
     await waitFor(() => expect(apiMocks.getAudit).toHaveBeenCalledTimes(3));
   });
 
@@ -194,8 +207,8 @@ describe("App", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent("Proof unavailable"),
     );
-    expect(screen.getByText("Audit unavailable.")).toBeInTheDocument();
-    expect(screen.getByText("Proof unavailable.")).toBeInTheDocument();
+    expect(await screen.findByText("Audit unavailable.")).toBeInTheDocument();
+    expect(await screen.findByText("Proof unavailable.")).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: /true employer cost/i }),

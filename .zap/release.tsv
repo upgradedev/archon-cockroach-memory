@@ -1,0 +1,7 @@
+10015	IGNORE	(Cache-Control is asserted as no-store by the bounded API probes)
+10036	IGNORE	(CloudFront exposes a product token without a software version)
+10049	IGNORE	(API responses are intentionally non-storable and actively verified)
+10050	IGNORE	(Versioned SPA assets intentionally use immutable CDN caching)
+10094	IGNORE	(Fixed public opaque identifiers and static assets are expected)
+10109	IGNORE	(Single-page application classification is informational)
+90005	IGNORE	(Sec-Fetch-Dest is a browser request header outside origin control)

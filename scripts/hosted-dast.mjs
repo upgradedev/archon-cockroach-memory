@@ -29,13 +29,39 @@ function assertNoLeak(body, id) {
   invariant(!LEAK_PATTERN.test(body), `${id}: response exposed an internal detail`);
 }
 
-function assertSecurityHeaders(response, id, { html = false } = {}) {
+function assertSecurityHeaders(
+  response,
+  id,
+  { html = false, hardened = false } = {}
+) {
   const hsts = response.headers.get("strict-transport-security") ?? "";
   invariant(/max-age=(?:31536000|63072000)/u.test(hsts), `${id}: HSTS missing`);
   invariant(
     response.headers.get("x-content-type-options")?.toLowerCase() === "nosniff",
     `${id}: nosniff missing`
   );
+  if (hardened) {
+    const csp = response.headers.get("content-security-policy") ?? "";
+    invariant(
+      !csp.includes("'unsafe-inline'"),
+      `${id}: CSP permits unsafe inline styles`
+    );
+    invariant(
+      response.headers.get("cross-origin-embedder-policy")?.toLowerCase() ===
+        "require-corp",
+      `${id}: cross-origin embedder boundary missing`
+    );
+    invariant(
+      response.headers.get("cross-origin-opener-policy")?.toLowerCase() ===
+        "same-origin",
+      `${id}: cross-origin opener boundary missing`
+    );
+    invariant(
+      response.headers.get("cross-origin-resource-policy")?.toLowerCase() ===
+        "same-origin",
+      `${id}: cross-origin resource boundary missing`
+    );
+  }
   if (html) {
     const csp = response.headers.get("content-security-policy") ?? "";
     invariant(csp.includes("default-src 'self'"), `${id}: restrictive CSP missing`);
@@ -60,30 +86,40 @@ async function request(baseUrl, path, init = {}) {
   });
 }
 
-async function expectJsonError(baseUrl, check) {
+async function expectJsonError(baseUrl, check, hardened) {
   const response = await request(baseUrl, check.path, check.init);
   const body = await response.text();
-  invariant(response.status === check.status, `${check.id}: expected ${check.status}, received ${response.status}`);
+  const expectedStatuses = Array.isArray(check.status)
+    ? check.status
+    : [check.status];
+  invariant(
+    expectedStatuses.includes(response.status),
+    `${check.id}: expected ${expectedStatuses.join(" or ")}, received ${response.status}`
+  );
   invariant(
     response.headers.get("content-type")?.toLowerCase().startsWith("application/json"),
     `${check.id}: error response is not JSON`
   );
+  const gatewayCompatibility =
+    check.allowGatewayFallback === true && response.status === 404;
   invariant(
-    response.headers.get("cache-control")?.toLowerCase().includes("no-store"),
+    gatewayCompatibility ||
+      response.headers.get("cache-control")?.toLowerCase().includes("no-store"),
     `${check.id}: error response is cacheable`
   );
   invariant(
     !response.headers.has("access-control-allow-origin"),
     `${check.id}: cross-origin access was enabled`
   );
-  assertSecurityHeaders(response, check.id);
+  assertSecurityHeaders(response, check.id, { hardened });
   assertNoLeak(body, check.id);
   const parsed = JSON.parse(body);
+  const publicError =
+    typeof parsed === "object" && parsed !== null
+      ? parsed.error ?? (gatewayCompatibility ? parsed.message : undefined)
+      : undefined;
   invariant(
-    typeof parsed === "object" &&
-      parsed !== null &&
-      typeof parsed.error === "string" &&
-      parsed.error.length > 0,
+    typeof publicError === "string" && publicError.length > 0,
     `${check.id}: bounded error contract missing`
   );
   return {
@@ -95,13 +131,27 @@ async function expectJsonError(baseUrl, check) {
 
 export async function runHostedDast(targetUrl) {
   const baseUrl = canonicalBaseUrl(targetUrl);
+  const hardened = process.env.DAST_REQUIRE_HARDENED_HEADERS === "1";
+  const profile = dastProfile();
+  const strictApiBoundary = profile !== "predeploy";
+  const sourceDeployRunId = positiveInteger(
+    process.env.DAST_SOURCE_DEPLOY_RUN_ID
+  );
+  const sourceDeployRunAttempt = positiveInteger(
+    process.env.DAST_SOURCE_DEPLOY_RUN_ATTEMPT
+  );
+  const scannerRunId = positiveInteger(process.env.GITHUB_RUN_ID);
+  const scannerRunAttempt = positiveInteger(process.env.GITHUB_RUN_ATTEMPT);
   const checks = [];
 
   const root = await request(baseUrl, "/");
   const rootBody = await root.text();
   invariant(root.status === 200, `root-security-headers: expected 200, received ${root.status}`);
   invariant(rootBody.includes('<div id="root"></div>'), "root-security-headers: app root missing");
-  assertSecurityHeaders(root, "root-security-headers", { html: true });
+  assertSecurityHeaders(root, "root-security-headers", {
+    html: true,
+    hardened,
+  });
   assertNoLeak(rootBody, "root-security-headers");
   checks.push({
     id: "root-security-headers",
@@ -126,7 +176,7 @@ export async function runHostedDast(targetUrl) {
     !health.headers.has("access-control-allow-origin"),
     "health-boundary: cross-origin access was enabled"
   );
-  assertSecurityHeaders(health, "health-boundary");
+  assertSecurityHeaders(health, "health-boundary", { hardened });
   assertNoLeak(healthBody, "health-boundary");
   const healthJson = JSON.parse(healthBody);
   invariant(
@@ -161,7 +211,7 @@ export async function runHostedDast(targetUrl) {
     !proof.headers.has("access-control-allow-origin"),
     "release-proof-boundary: cross-origin access was enabled"
   );
-  assertSecurityHeaders(proof, "release-proof-boundary");
+  assertSecurityHeaders(proof, "release-proof-boundary", { hardened });
   assertNoLeak(proofBody, "release-proof-boundary");
   const proofJson = JSON.parse(proofBody);
   const targetReleaseSha = proofJson?.release?.commitSha;
@@ -180,6 +230,18 @@ export async function runHostedDast(targetUrl) {
       targetReleaseSha === expectedReleaseSha,
       `release-proof-boundary: expected ${expectedReleaseSha}, observed ${targetReleaseSha}`
     );
+    invariant(
+      scannerSha() === expectedReleaseSha,
+      "release-proof-boundary: scanner SHA is not bound to the deployed release"
+    );
+    invariant(
+      sourceDeployRunId !== null && sourceDeployRunAttempt !== null,
+      "release-proof-boundary: source deploy run identity is missing"
+    );
+    invariant(
+      scannerRunId !== null && scannerRunAttempt !== null,
+      "release-proof-boundary: scanner run identity is missing"
+    );
   }
   checks.push({
     id: "release-proof-boundary",
@@ -192,13 +254,15 @@ export async function runHostedDast(targetUrl) {
     {
       id: "method-boundary-get",
       path: "/api/recall",
-      status: 405,
+      status: strictApiBoundary ? 405 : [404, 405],
+      allowGatewayFallback: !strictApiBoundary,
       init: { method: "GET" },
     },
     {
       id: "method-boundary-delete",
       path: "/api/recall",
-      status: 405,
+      status: strictApiBoundary ? 405 : [404, 405],
+      allowGatewayFallback: !strictApiBoundary,
       init: { method: "DELETE" },
     },
     {
@@ -280,6 +344,7 @@ export async function runHostedDast(targetUrl) {
       id: "write-route-absent",
       path: "/api/remember",
       status: 404,
+      allowGatewayFallback: !strictApiBoundary,
       init: {
         method: "POST",
         headers: jsonHeaders,
@@ -296,25 +361,101 @@ export async function runHostedDast(targetUrl) {
       id: "unknown-route-boundary",
       path: "/api/not-a-route",
       status: 404,
+      allowGatewayFallback: !strictApiBoundary,
       init: { method: "GET" },
     },
   ];
 
   for (const check of adversarialChecks) {
-    checks.push(await expectJsonError(baseUrl, check));
+    checks.push(await expectJsonError(baseUrl, check, hardened));
   }
 
   return {
     schema: "archon.hosted-dast",
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
+    profile,
     targetOrigin: baseUrl,
     releaseSha: targetReleaseSha,
-    scannerSha:
-      process.env.DAST_SCANNER_SHA ?? process.env.GITHUB_SHA ?? "unknown",
+    scannerSha: scannerSha(),
+    scannerRunId,
+    scannerRunAttempt,
+    sourceDeployRunId,
+    sourceDeployRunAttempt,
     passed: checks.every((check) => check.status === "pass"),
     checks,
   };
+}
+
+function positiveInteger(value) {
+  if (!/^[1-9][0-9]*$/u.test(value ?? "")) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function dastProfile() {
+  if (process.env.DAST_REQUIRE_HARDENED_HEADERS !== "1") {
+    return "predeploy";
+  }
+  return process.env.DAST_EXPECTED_RELEASE_SHA
+    ? "exact-release"
+    : "production-audit";
+}
+
+function scannerSha() {
+  const value =
+    process.env.DAST_SCANNER_SHA ?? process.env.GITHUB_SHA ?? "";
+  return /^[a-f0-9]{40}$/u.test(value) ? value : "unknown";
+}
+
+function failedReceipt() {
+  return {
+    schema: "archon.hosted-dast",
+    version: 3,
+    generatedAt: new Date().toISOString(),
+    profile: dastProfile(),
+    targetOrigin: EXPECTED_PRODUCTION_URL,
+    releaseSha: "unknown",
+    scannerSha: scannerSha(),
+    scannerRunId: positiveInteger(process.env.GITHUB_RUN_ID),
+    scannerRunAttempt: positiveInteger(process.env.GITHUB_RUN_ATTEMPT),
+    sourceDeployRunId: positiveInteger(
+      process.env.DAST_SOURCE_DEPLOY_RUN_ID
+    ),
+    sourceDeployRunAttempt: positiveInteger(
+      process.env.DAST_SOURCE_DEPLOY_RUN_ATTEMPT
+    ),
+    passed: false,
+    checks: [
+      {
+        id: "scan-completion",
+        status: "fail",
+        observedStatus: null,
+      },
+    ],
+  };
+}
+
+export async function writeHostedDastReceipt(targetUrl, receiptPath) {
+  let receipt;
+  try {
+    receipt = await runHostedDast(targetUrl);
+  } catch (error) {
+    await writeFile(
+      receiptPath,
+      `${JSON.stringify(failedReceipt(), null, 2)}\n`,
+      {
+        encoding: "utf8",
+        flag: "wx",
+      }
+    );
+    throw error;
+  }
+  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
+  return receipt;
 }
 
 async function main() {
@@ -322,11 +463,7 @@ async function main() {
   const receiptPath = process.env.DAST_RECEIPT_PATH;
   invariant(targetUrl, "DAST_TARGET_URL is required");
   invariant(receiptPath, "DAST_RECEIPT_PATH is required");
-  const receipt = await runHostedDast(targetUrl);
-  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-  });
+  const receipt = await writeHostedDastReceipt(targetUrl, receiptPath);
   process.stdout.write(
     `hosted DAST passed ${receipt.checks.length}/${receipt.checks.length} checks\n`
   );
