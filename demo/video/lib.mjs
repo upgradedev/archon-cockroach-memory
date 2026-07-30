@@ -623,7 +623,7 @@ export function alignmentToCues(alignment, scene) {
   const alignmentDuration = Math.max(...ends);
   if (alignmentDuration > sceneDuration + 0.001) {
     fail(
-      `Scene ${scene.id} narration exceeds its ${sceneDuration}-second window`
+      `Scene ${scene.id} narration lasts ${alignmentDuration.toFixed(3)} seconds and exceeds its ${sceneDuration}-second window`
     );
   }
 

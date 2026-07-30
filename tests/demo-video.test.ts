@@ -32,8 +32,10 @@ import {
 } from "../demo/video/lib.mjs";
 import { buildFilterGraph } from "../demo/video/build-video.mjs";
 import {
+  NARRATION_MAX_WORDS_PER_MINUTE,
   fetchTimestampedNarration,
   generateNarration,
+  validateNarrationWordBudgets,
   validateTimestampedNarrationResponse,
 } from "../demo/video/generate-narration.mjs";
 import {
@@ -374,6 +376,49 @@ test("demo video plan is the canonical contiguous 170-second story", () => {
     quotedNarrationBlocks(readFileSync(VIDEO_PLAN, "utf8")),
     plan.scenes.map((scene: { narration: string }) => scene.narration)
   );
+});
+
+test("canonical narration stays within the deterministic eighty-five-WPM budget", () => {
+  const plan = loadScenePlan();
+  assert.equal(NARRATION_MAX_WORDS_PER_MINUTE, 85);
+  assert.equal(validateNarrationWordBudgets(plan), true);
+  for (const scene of plan.scenes) {
+    const durationSeconds = scene.endSeconds - scene.startSeconds;
+    const maximumWords = Math.floor(
+      (durationSeconds * NARRATION_MAX_WORDS_PER_MINUTE) / 60
+    );
+    const wordCount = scene.narration.trim().split(/\s+/u).length;
+    assert.ok(
+      wordCount <= maximumWords,
+      `${scene.id} uses ${wordCount}/${maximumWords} words`
+    );
+  }
+
+  const overBudget = structuredClone(plan);
+  overBudget.scenes.at(-1)!.narration = Array.from(
+    { length: 15 },
+    () => "word"
+  ).join(" ");
+  assert.throws(
+    () => validateNarrationWordBudgets(overBudget),
+    /deterministic 85-WPM budget allows 14/u
+  );
+});
+
+test("capture marker source gate requires normalized RGBA and DOM reinjection", () => {
+  const capture = readFileSync(CAPTURE_PRODUCTION, "utf8");
+  assert.match(capture, /async function ensureCaptureOverlay/u);
+  assert.match(capture, /getImageData\(0, 0, 1, 1\)/u);
+  assert.match(capture, /requestAnimationFrame/u);
+  assert.match(capture, /expectedRgba/u);
+  assert.match(capture, /observedRgba/u);
+  assert.match(capture, /observation\.left === MARKER_LEFT/u);
+  assert.match(capture, /observation\.top === MARKER_TOP/u);
+  assert.match(capture, /observation\.sampleX === MARKER_SAMPLE_X/u);
+  assert.match(capture, /observation\.sampleY === MARKER_SAMPLE_Y/u);
+  assert.match(capture, /observation\.opacity === 1/u);
+  assert.match(capture, /marker failed computed-RGBA geometry verification/u);
+  assert.doesNotMatch(capture, /observation\.color === markerRgb/u);
 });
 
 test("capture receipt binds exactly eight screenshots retained in the final package", () => {

@@ -31,6 +31,7 @@ const CANONICAL_VOICE = Object.freeze({
   modelId: "eleven_multilingual_v2",
   outputFormat: "mp3_44100_128",
 });
+export const NARRATION_MAX_WORDS_PER_MINUTE = 85;
 
 function canonicalNarrationForScene(scene) {
   let id;
@@ -39,37 +40,37 @@ function canonicalNarrationForScene(scene) {
     case "hook":
       id = "hook";
       narration =
-        "An AI agent can remember a plausible financial fact and still be wrong. Archon Memory makes persistent memory disagree out loud before a CFO acts.";
+        "Agent memory can hold plausible but wrong financial facts. Archon Memory exposes persistent disagreement before financial decisions.";
       break;
     case "scope-architecture":
       id = "scope-architecture";
       narration =
-        "This is a public, synthetic, read-only AWS serverless application. CockroachDB holds the relational truth, lifecycle, provenance, audit state, and native vector memory in one serializable system.";
+        "On AWS serverless, this public synthetic demo keeps relational truth, provenance, audit, and native vector memory in one serializable CockroachDB system.";
       break;
     case "recall-grounding":
       id = "recall-grounding";
       narration =
-        "The agent idempotently stores embedded facts with provenance, lifecycle, and payload-bound digests. This question is embedded by Titan and recalled through CockroachDB's native C-SPANN index under the exact tenant, model, lifecycle, and company prefixes. The answer reports a true employer cost of fifteen thousand three hundred seventy-five euros and an off-bank wedge of six thousand seven hundred seventy-five euros. Every claim links to an exact stored memory. If the model wording fails citation, numeric, or claim checks, the app replaces it with a deterministic rendering of the cited evidence.";
+        "Facts are stored idempotently with provenance, lifecycle, and payload-bound digests. Titan embeds the question; CockroachDB recalls through native C-SPANN under exact tenant, model, lifecycle, and company scopes. The result reports employer cost of fifteen thousand three hundred seventy-five euros and an off-bank wedge of six thousand seven hundred seventy-five euros. Every claim links to stored memory. Failed citation, numeric, or claim checks trigger deterministic evidence.";
       break;
     case "audit":
       id = "audit";
       narration =
-        "Semantic recall is not a complete memory audit. This bounded exhaustive pass finds a deliberate invoice conflict: eighteen thousand four hundred versus eighteen thousand nine hundred euros. It recommends the higher-importance evidence without rewriting either record. It also finds a reconciliation that references payment PAY-118, which was never stored. Unknown stays unknown.";
+        "Semantic recall is not a complete audit. This bounded pass finds an invoice conflict: eighteen thousand four hundred versus eighteen thousand nine hundred euros. It recommends higher-importance evidence without rewriting either record. It also finds payment PAY-118 referenced but never stored. Unknown stays unknown.";
       break;
     case "proof":
       id = "proof";
       narration =
-        "The live proof ledger identifies the exact release, database, role, region, models, and catalog-backed vector index. It deterministically verifies nine persisted memories, nine unique idempotency keys, and nine payload-bound content digests. Separate reproducible evaluations cover larger corpora, RF-three placement, and recall after one node is stopped.";
+        "The proof ledger binds the release, database, role, region, and vector index. It verifies nine memories, nine idempotency keys, and nine content digests. Evaluations cover larger corpora, RF-three placement, and recall after one node stops.";
       break;
     case "managed-mcp":
       id = "managed-mcp";
       narration =
-        "The financial agent uses distributed vector indexing. A separate deterministic release controller uses CockroachDB Cloud Managed MCP for exactly four hosted read-only calls and accepts only the same fixed-scope nine-nine-nine result. The receipt exposes no credentials, connection material, memory text, or embeddings.";
+        "Separately, CockroachDB Cloud Managed MCP makes four hosted read-only calls and accepts the fixed-scope nine-nine-nine result. Its receipt exposes no credentials, connection material, memory text, or embeddings.";
       break;
     case "close":
       id = "close";
       narration =
-        "Archon Memory turns agent memory from a hidden cache into inspectable, contradiction-aware financial evidence. The live demo and full source are public.";
+        "Archon Memory makes hidden memory inspectable and contradiction-aware. The demo and source are public.";
       break;
     default:
       throw new Error("Narration scene is outside the canonical allowlist");
@@ -78,6 +79,34 @@ function canonicalNarrationForScene(scene) {
     throw new Error(`Scene ${id} narration differs from the canonical allowlist`);
   }
   return Object.freeze({ id, narration });
+}
+
+export function validateNarrationWordBudgets(plan) {
+  if (!Array.isArray(plan?.scenes) || plan.scenes.length === 0) {
+    throw new Error("Narration word budgets require a non-empty scene plan");
+  }
+  for (const scene of plan.scenes) {
+    const durationSeconds = scene?.endSeconds - scene?.startSeconds;
+    if (
+      typeof scene?.id !== "string" ||
+      typeof scene?.narration !== "string" ||
+      scene.narration.trim() === "" ||
+      !Number.isFinite(durationSeconds) ||
+      durationSeconds <= 0
+    ) {
+      throw new Error("Narration word budgets received an invalid scene");
+    }
+    const wordCount = scene.narration.trim().split(/\s+/u).length;
+    const maximumWords = Math.floor(
+      (durationSeconds * NARRATION_MAX_WORDS_PER_MINUTE) / 60
+    );
+    if (wordCount > maximumWords) {
+      throw new Error(
+        `Scene ${scene.id} has ${wordCount} words; its deterministic ${NARRATION_MAX_WORDS_PER_MINUTE}-WPM budget allows ${maximumWords}`
+      );
+    }
+  }
+  return true;
 }
 
 function requireCanonicalVoice(voice) {
@@ -196,6 +225,7 @@ export async function generateNarration({
   for (const scene of plan.scenes) {
     canonicalNarrationForScene(scene);
   }
+  validateNarrationWordBudgets(plan);
   const planSha256 = sha256File(planPath);
   const apiKey = requireNonEmptyEnv("ELEVENLABS_API_KEY", env);
   const root = demoVideoRoot(env);
