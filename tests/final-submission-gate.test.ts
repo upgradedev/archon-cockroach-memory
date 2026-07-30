@@ -11,14 +11,19 @@ import {
   parseWorkflowJobs,
   parseWorkflowRuns,
   parseWorkflowArtifacts,
+  readBoundedResponseBody,
   requireArtifactArchiveDigest,
   requireExactHostedDastReceipt,
   requireFreshGeneratedAt,
   requirePostDeployAuditTiming,
+  requireExactDemoVideoPublication,
+  requireSuccessfulDemoVideoJobs,
   requireSuccessfulDeployJobs,
   requireSuccessfulHostedDastJobs,
   requireSuccessfulRecoveryAuditJobs,
   selectExactHostedDastArtifact,
+  selectBoundSuccessfulDemoVideoRun,
+  selectExactDemoVideoArtifacts,
   selectSuccessfulRun,
   validSubmissionCopyMetadata,
   validDevpostPageContract,
@@ -63,6 +68,7 @@ function recoveryJobs(runId = 303, sha = SHA): Record<string, unknown> {
   ) => ({
     id,
     run_id: runId,
+    run_attempt: 1,
     head_sha: sha,
     name,
     status: "completed",
@@ -103,6 +109,7 @@ function hostedDastJobs(runId = 302, sha = SHA): Record<string, unknown> {
   const job = (id: number, name: string, steps: string[]) => ({
     id,
     run_id: runId,
+    run_attempt: 1,
     head_sha: sha,
     name,
     status: "completed",
@@ -134,6 +141,7 @@ function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
   const job = (id: number, name: string, steps: string[]) => ({
     id,
     run_id: runId,
+    run_attempt: 1,
     head_sha: sha,
     name,
     status: "completed",
@@ -183,6 +191,118 @@ function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
       ),
       job(605, "Reusable database release evidence", []),
     ],
+  };
+}
+
+function demoVideoJobs(
+  runId = 701,
+  sha = SHA,
+  attempts = {
+    sourceGate: 1,
+    narrate: 1,
+    capture: 1,
+    buildVerify: 1,
+  }
+): Record<string, unknown> {
+  const job = (
+    id: number,
+    name: string,
+    runAttempt: number,
+    steps: string[]
+  ) => ({
+    id,
+    run_id: runId,
+    run_attempt: runAttempt,
+    head_sha: sha,
+    name,
+    status: "completed",
+    conclusion: "success",
+    steps: steps.map((step) => ({
+      name: step,
+      status: "completed",
+      conclusion: "success",
+    })),
+  });
+  return {
+    total_count: 4,
+    jobs: [
+      job(
+        710,
+        "Bind video to the exact protected release",
+        attempts.sourceGate,
+        [
+          "Require main-ref exact-SHA dispatch before any paid call",
+          "Validate exact hosted release evidence and live proof",
+          "Upload sanitized release binding",
+          "Expose release-binding artifact attempt",
+        ]
+      ),
+      job(
+        711,
+        "Generate timestamped ElevenLabs narration",
+        attempts.narrate,
+        [
+          "Generate narration and alignment-derived English captions",
+          "Validate the sanitized narration package",
+          "Upload sanitized one-day narration handoff",
+          "Expose narration artifact attempt",
+        ]
+      ),
+      job(
+        712,
+        "Record the real production browser journey",
+        attempts.capture,
+        [
+          "Capture the exact live application",
+          "Validate the sanitized capture package",
+          "Upload sanitized one-day live-capture handoff",
+          "Expose live-capture artifact attempt",
+        ]
+      ),
+      job(
+        713,
+        "Compose and independently verify the final review package",
+        attempts.buildVerify,
+        [
+          "Validate producer artifact attempt bindings",
+          "Compose the release-bound video and captions",
+          "Measure and verify the final media contract",
+          "Fail closed on receipt or artifact disagreement",
+          "Prove all eight hash-bound screenshots are package inputs",
+          "Terminally revalidate main, live proof, and hosted evidence",
+          "Upload verified review package",
+          "Create canonical publication provenance",
+          "Upload canonical publication provenance",
+          "Revalidate exact main after artifact publication",
+        ]
+      ),
+    ],
+  };
+}
+
+function workflowArtifact(
+  id: number,
+  name: string,
+  run: GitHubWorkflowRun,
+  sizeInBytes: number,
+  digestCharacter: string,
+  expired = false
+): Record<string, unknown> {
+  return {
+    id,
+    name,
+    size_in_bytes: sizeInBytes,
+    archive_download_url:
+      `https://api.github.com/repos/upgradedev/archon-cockroach-memory/` +
+      `actions/artifacts/${id}/zip`,
+    digest: `sha256:${digestCharacter.repeat(64)}`,
+    expired,
+    created_at: "2026-07-29T12:04:00.000Z",
+    updated_at: "2026-07-29T12:04:30.000Z",
+    workflow_run: {
+      id: run.id,
+      head_sha: run.head_sha,
+    },
   };
 }
 
@@ -484,6 +604,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     ...artifact,
     id: 702,
     name: `zap-baseline-${SHA}-${hostedDast.run_attempt}`,
+    size_in_bytes: 2_000_000,
     archive_download_url:
       "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/702/zip",
     digest: `sha256:${"1".repeat(64)}`,
@@ -492,7 +613,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     total_count: 2,
     artifacts: [artifact, zapArtifact],
   };
-  const parsed = parseWorkflowArtifacts(response);
+  const parsed = parseWorkflowArtifacts(response, 100_000_000);
   assert.equal(parsed.length, 2);
   assert.equal(parsed[0]?.id, artifact.id);
   assert.equal(
@@ -507,9 +628,17 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     selectExactHostedDastArtifact(
       response,
       zapArtifact.name,
-      hostedDast
+      hostedDast,
+      100_000_000
     ).id,
     zapArtifact.id
+  );
+  assert.throws(() =>
+    selectExactHostedDastArtifact(
+      response,
+      zapArtifact.name,
+      hostedDast
+    )
   );
 
   const mutation = (
@@ -745,6 +874,7 @@ test("final gate: recovery audit proves both exact jobs and executed evidence st
   const baseline = recoveryJobs();
   const parsed = parseWorkflowJobs(baseline);
   assert.equal(parsed.totalCount, 2);
+  assert.equal(parsed.rawCount, 2);
   assert.equal(parsed.jobs.length, 2);
   assert.doesNotThrow(() =>
     requireSuccessfulRecoveryAuditJobs(baseline, 303, SHA)
@@ -898,6 +1028,7 @@ test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt 
     oversizedJobs.push({
       id: 700 + index,
       run_id: 301,
+      run_attempt: 1,
       head_sha: SHA,
       name: `Unrelated deploy evidence ${index}`,
       status: "completed",
@@ -1410,20 +1541,401 @@ demo: https://example.com`,
   }
 });
 
-test("final gate: pre-submit display title binds SHA, video, and duration", () => {
-  const url = "https://youtu.be/abcdefghijk";
-  const expected =
-    `Submission readiness / pre-submit / ${SHA} / ${url} / 178s`;
+test("final gate: receipt downloads stop at the configured byte bound", async () => {
+  const exact = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3, 4]));
+        controller.close();
+      },
+    })
+  );
+  assert.deepEqual(
+    [...(await readBoundedResponseBody(exact, "fixture", 4))],
+    [1, 2, 3, 4]
+  );
+
+  const oversized = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.enqueue(new Uint8Array([4, 5]));
+        controller.close();
+      },
+    })
+  );
+  await assert.rejects(
+    readBoundedResponseBody(oversized, "fixture", 4),
+    /exceeds its byte bound/u
+  );
+});
+
+test("final gate: demo-video run, four jobs, and rerun-safe artifacts are exact", () => {
+  const run = workflowRun({
+    id: 701,
+    name: "Generate exact-release demo video",
+    display_title: "Demo video fixture",
+    path: ".github/workflows/demo-video.yml",
+    event: "workflow_dispatch",
+    run_attempt: 2,
+    run_started_at: "2026-07-29T12:00:00.000Z",
+    updated_at: "2026-07-29T12:05:00.000Z",
+  });
   assert.equal(
-    expectedPreSubmitDisplayTitle(SHA, url, "178"),
+    selectBoundSuccessfulDemoVideoRun(
+      [run],
+      SHA,
+      run.id,
+      run.run_attempt,
+      NOW
+    ).id,
+    run.id
+  );
+  const attempts = {
+    sourceGate: 1,
+    narrate: 1,
+    capture: 1,
+    buildVerify: 2,
+  };
+  const mixedAttemptJobs = demoVideoJobs(run.id, SHA, attempts);
+  const jobHistory = mixedAttemptJobs.jobs as Array<
+    Record<string, unknown>
+  >;
+  jobHistory.push({
+    ...structuredClone(jobHistory[3]!),
+    id: 714,
+    run_attempt: 1,
+    status: "completed",
+    conclusion: "failure",
+  });
+  mixedAttemptJobs.total_count = 5;
+  assert.deepEqual(
+    requireSuccessfulDemoVideoJobs(
+      mixedAttemptJobs,
+      run.id,
+      SHA,
+      run.run_attempt
+    ),
+    attempts
+  );
+
+  const packageName =
+    `archon-demo-video-${SHA}-${run.id}-${run.run_attempt}`;
+  const provenanceName =
+    `archon-demo-video-provenance-${SHA}-${run.id}-${run.run_attempt}`;
+  const priorName = `archon-demo-video-${SHA}-${run.id}-1`;
+  const releaseArtifact = {
+    ...workflowArtifact(
+      804,
+      `demo-video-release-${SHA}-${run.id}-${attempts.sourceGate}`,
+      run,
+      8_192,
+      "d"
+    ),
+    created_at: "2026-07-28T12:01:00.000Z",
+    updated_at: "2026-07-28T12:02:00.000Z",
+  };
+  const narrationArtifact = workflowArtifact(
+    805,
+    `demo-video-narration-${SHA}-${run.id}-${attempts.narrate}`,
+    run,
+    2_000_000,
+    "e"
+  );
+  const captureArtifact = workflowArtifact(
+    806,
+    `demo-video-capture-${SHA}-${run.id}-${attempts.capture}`,
+    run,
+    100_000_000,
+    "f"
+  );
+  const packageArtifact = workflowArtifact(
+    801,
+    packageName,
+    run,
+    50_000_000,
+    "a"
+  );
+  const provenanceArtifact = workflowArtifact(
+    802,
+    provenanceName,
+    run,
+    1_024,
+    "b"
+  );
+  const priorArtifact = {
+    ...workflowArtifact(
+      803,
+      priorName,
+      run,
+      45_000_000,
+      "c",
+      true
+    ),
+    created_at: "2026-07-28T12:04:00.000Z",
+    updated_at: "2026-07-28T12:04:30.000Z",
+  };
+  const inventory = {
+    total_count: 6,
+    artifacts: [
+      priorArtifact,
+      releaseArtifact,
+      narrationArtifact,
+      captureArtifact,
+      packageArtifact,
+      provenanceArtifact,
+    ],
+  };
+  const selected = selectExactDemoVideoArtifacts(
+    inventory,
+    run,
+    SHA,
+    attempts,
+    NOW
+  );
+  assert.equal(selected.release.id, 804);
+  assert.equal(selected.narration.id, 805);
+  assert.equal(selected.capture.id, 806);
+  assert.equal(selected.package.id, 801);
+  assert.equal(selected.provenance.id, 802);
+
+  assert.throws(() =>
+    selectBoundSuccessfulDemoVideoRun(
+      [run],
+      SHA,
+      run.id,
+      1,
+      NOW
+    )
+  );
+  const missingTerminal = structuredClone(
+    demoVideoJobs(run.id, SHA, attempts)
+  );
+  const build = (
+    missingTerminal.jobs as Array<Record<string, unknown>>
+  )[3]!;
+  build.steps = (build.steps as Array<Record<string, unknown>>).filter(
+    (step) =>
+      step.name !== "Revalidate exact main after artifact publication"
+  );
+  assert.throws(
+    () =>
+      requireSuccessfulDemoVideoJobs(
+        missingTerminal,
+        run.id,
+        SHA,
+        run.run_attempt
+      ),
+    /Revalidate exact main/u
+  );
+  const duplicateJobAttempt = structuredClone(
+    demoVideoJobs(run.id, SHA, attempts)
+  );
+  const duplicateJobs = duplicateJobAttempt.jobs as Array<
+    Record<string, unknown>
+  >;
+  duplicateJobs.push({
+    ...structuredClone(duplicateJobs[0]!),
+    id: 715,
+  });
+  duplicateJobAttempt.total_count = 5;
+  assert.throws(
+    () =>
+      requireSuccessfulDemoVideoJobs(
+        duplicateJobAttempt,
+        run.id,
+        SHA,
+        run.run_attempt
+      ),
+    /duplicated/u
+  );
+  const malformedJobHistory = structuredClone(
+    demoVideoJobs(run.id, SHA, attempts)
+  );
+  (malformedJobHistory.jobs as Array<unknown>).push(
+    "malformed extra job"
+  );
+  assert.throws(
+    () =>
+      requireSuccessfulDemoVideoJobs(
+        malformedJobHistory,
+        run.id,
+        SHA,
+        run.run_attempt
+      ),
+    /incomplete/u
+  );
+  assert.throws(
+    () =>
+      requireSuccessfulDemoVideoJobs(
+        demoVideoJobs(run.id, SHA),
+        run.id,
+        SHA,
+        run.run_attempt
+      ),
+    /current workflow attempt/u
+  );
+  assert.throws(
+    () =>
+      selectExactDemoVideoArtifacts(
+        {
+          total_count: 7,
+          artifacts: [
+            priorArtifact,
+            releaseArtifact,
+            narrationArtifact,
+            captureArtifact,
+            packageArtifact,
+            provenanceArtifact,
+            {
+              ...packageArtifact,
+              id: 807,
+              archive_download_url:
+                "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/807/zip",
+            },
+          ],
+        },
+        run,
+        SHA,
+        attempts,
+        NOW
+      ),
+    /duplicate/u
+  );
+});
+
+test("final gate: small publication provenance binds the large CI video without downloading it", () => {
+  const run = workflowRun({
+    id: 901,
+    name: "Generate exact-release demo video",
+    path: ".github/workflows/demo-video.yml",
+    event: "workflow_dispatch",
+    run_attempt: 3,
+  });
+  const packageName =
+    `archon-demo-video-${SHA}-${run.id}-${run.run_attempt}`;
+  const artifactRecord = workflowArtifact(
+    902,
+    packageName,
+    run,
+    60_000_000,
+    "d"
+  );
+  const parsed = parseWorkflowArtifacts(
+    { total_count: 1, artifacts: [artifactRecord] },
+    2_000_000_000
+  )[0]!;
+  const sourceSha = "e".repeat(64);
+  const receipt = {
+    schema: "archon.demo-video-publication",
+    version: 1,
+    releaseSha: SHA,
+    workflowRunId: run.id,
+    workflowRunAttempt: run.run_attempt,
+    voiceRightsAttested: true,
+    packageArtifact: {
+      id: parsed.id,
+      name: parsed.name,
+      digest: parsed.digest,
+    },
+    media: {
+      mp4Sha256: sourceSha,
+      mp4Bytes: 55_000_000,
+      measuredDurationSeconds: 170.004,
+      captionsSha256: "f".repeat(64),
+      verificationReceiptSha256: "1".repeat(64),
+    },
+  };
+  assert.deepEqual(
+    requireExactDemoVideoPublication(receipt, {
+      run,
+      packageArtifact: parsed,
+      sha: SHA,
+      sourceSha256: sourceSha,
+      durationSeconds: 170,
+    }),
+    receipt
+  );
+  for (const invalid of [
+    { ...receipt, voiceRightsAttested: false },
+    {
+      ...receipt,
+      packageArtifact: {
+        ...receipt.packageArtifact,
+        digest: `sha256:${"2".repeat(64)}`,
+      },
+    },
+    {
+      ...receipt,
+      media: {
+        ...receipt.media,
+        mp4Sha256: "3".repeat(64),
+      },
+    },
+  ]) {
+    assert.throws(() =>
+      requireExactDemoVideoPublication(invalid, {
+        run,
+        packageArtifact: parsed,
+        sha: SHA,
+        sourceSha256: sourceSha,
+        durationSeconds: 170,
+      })
+    );
+  }
+});
+
+test("final gate: pre-submit display title binds public and CI video identity", () => {
+  const url = "https://youtu.be/abcdefghijk";
+  const runId = "12345";
+  const attempt = "2";
+  const sourceSha = "f".repeat(64);
+  const expected =
+    `Submission readiness / pre-submit / ${SHA} / ${url} / 178s / ` +
+    `CI ${runId}.${attempt} / ${sourceSha}`;
+  assert.equal(
+    expectedPreSubmitDisplayTitle(
+      SHA,
+      url,
+      "178",
+      runId,
+      attempt,
+      sourceSha
+    ),
     expected
   );
   assert.notEqual(
-    expectedPreSubmitDisplayTitle(SHA, url, "177"),
+    expectedPreSubmitDisplayTitle(
+      SHA,
+      url,
+      "177",
+      runId,
+      attempt,
+      sourceSha
+    ),
     expected
   );
   assert.notEqual(
-    expectedPreSubmitDisplayTitle("b".repeat(40), url, "178"),
+    expectedPreSubmitDisplayTitle(
+      "b".repeat(40),
+      url,
+      "178",
+      runId,
+      attempt,
+      sourceSha
+    ),
+    expected
+  );
+  assert.notEqual(
+    expectedPreSubmitDisplayTitle(
+      SHA,
+      url,
+      "178",
+      runId,
+      "3",
+      sourceSha
+    ),
     expected
   );
 });

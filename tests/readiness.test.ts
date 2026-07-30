@@ -34,6 +34,7 @@ import {
   hasExactCiTrigger,
   hasExactCodeqlActionPins,
   hasExactDependabotReleaseFreeze,
+  hasExactDemoVideoTrigger,
   hasExactHostedDastTrigger,
   hasExactHostedSmokeContracts,
   hasExactSubmissionReadinessTrigger,
@@ -128,7 +129,7 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   );
   assert.match(
     ci,
-    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u
+    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast,\s*video-gate\]/u
   );
   assert.match(hostedDast, /workflows:\s*\["Deploy AWS"\]/u);
   assert.match(
@@ -1184,7 +1185,7 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   assert.ok(readinessJob);
   assert.match(
     readinessJob,
-    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast\]/u
+    /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast,\s*video-gate\]/u
   );
   assert.match(
     readinessJob,
@@ -1196,14 +1197,14 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   );
   assert.match(
     readinessJob,
-    /jq -e 'length == 8 and all\(\.\[\]; \.result == "success"\)'/u
+    /jq -e 'length == 9 and all\(\.\[\]; \.result == "success"\)'/u
   );
 });
 
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
-  assert.equal(EXPECTED_SETUP_NODE_STEPS, 17);
+  assert.equal(EXPECTED_SETUP_NODE_STEPS, 22);
   assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
   assert.deepEqual(
     [...new Set(versions)],
@@ -1211,7 +1212,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 94);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 112);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -1706,12 +1707,16 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   const submissionWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "submission-readiness.yml"
   );
+  const demoVideoWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "demo-video.yml"
+  );
   const hostedDastWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "security-dast.yml"
   );
   assert.ok(recoveryWorkflow);
   assert.ok(benchmarkWorkflow);
   assert.ok(submissionWorkflow);
+  assert.ok(demoVideoWorkflow);
   assert.ok(hostedDastWorkflow);
   assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
   assert.equal(hasExactBenchmarkTrigger(benchmarkWorkflow.source), true);
@@ -1724,6 +1729,27 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
     hasExactSubmissionWorkflowContract(submissionWorkflow.source),
     true
   );
+  assert.equal(hasExactDemoVideoTrigger(demoVideoWorkflow.source), true);
+  for (const mutation of [
+    demoVideoWorkflow.source.replace(
+      /(exact_sha:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    demoVideoWorkflow.source.replace(
+      /(voice_rights_attested:[\s\S]*?\n\s+default:) false/u,
+      "$1 true"
+    ),
+    demoVideoWorkflow.source.replace(
+      "  workflow_dispatch:",
+      "  push:"
+    ),
+    demoVideoWorkflow.source.replace(
+      "    inputs:\n      exact_sha:",
+      "    inputs:\n      bypass:\n        required: false\n        type: boolean\n      exact_sha:"
+    ),
+  ]) {
+    assert.equal(hasExactDemoVideoTrigger(mutation), false);
+  }
   assert.equal(
     hasExactAwsRecoveryTrigger(
       recoveryWorkflow.source.replace(
@@ -1802,6 +1828,22 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
     submissionWorkflow.source.replace(
       /(video_duration_seconds:[\s\S]*?\n\s+type:) string/u,
       "$1 number"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_ci_run_id:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_ci_run_attempt:[\s\S]*?\n\s+type:) string/u,
+      "$1 number"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_source_sha256:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
+    ),
+    submissionWorkflow.source.replace(
+      /(video_uploaded_from_ci_artifact_attested:[\s\S]*?\n\s+default:) false/u,
+      "$1 true"
     ),
     submissionWorkflow.source.replace(
       /(video_public_embeddable_attested:[\s\S]*?\n\s+default:) false/u,
@@ -1883,7 +1925,7 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 10);
+  assert.equal(repositoryWorkflows.length, 11);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -1961,6 +2003,7 @@ test("readiness: generated receipts and nested build directories fail closed", (
       "voice.wav",
       "narration.m4a",
       "mix.flac",
+      "captions.srt",
     ]) {
       writeFileSync(join(sandbox, basename), "generated", "utf8");
     }
@@ -2002,6 +2045,7 @@ test("readiness: generated receipts and nested build directories fail closed", (
       "voice.wav",
       "narration.m4a",
       "mix.flac",
+      "captions.srt",
     ]) {
       assert.ok(found.includes(media), media);
     }
