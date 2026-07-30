@@ -3593,8 +3593,8 @@ function sourceChecks(): SourceCheck[] {
       "Production Readiness",
       hasExactHostedDastTrigger(securityDastWorkflow) &&
         hostedDastCiJob.length > 0 &&
-        /DAST_TARGET_URL:\s*https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net/u.test(
-          hostedDastCiJob
+        hostedDastCiJob.includes(
+          "DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net"
         ) &&
         /DAST_RECEIPT_PATH:\s*\$\{\{\s*runner\.temp\s*\}\}\/hosted-dast\.json/u.test(
           hostedDastCiJob
@@ -4681,6 +4681,10 @@ function sourceChecks(): SourceCheck[] {
         /Validate exact hosted release evidence and live proof[\s\S]*?encoded_token[\s\S]*?require_no_rg_match -F[\s\S]*?DEMO_VIDEO_RELEASE_RECEIPT/u.test(
           demoVideoWorkflow
         ) &&
+        demoVideoWorkflow.includes('receipt_base64="$(') &&
+        demoVideoWorkflow.includes('mktemp --tmpdir="${receipt_dir}"') &&
+        demoVideoWorkflow.includes("base64 --decode") &&
+        demoVideoWorkflow.includes('test ! -L "${receipt_temp}"') &&
         /demo-video-release-gate\.ts/u.test(demoVideoWorkflow) &&
         /capture-production\.mjs/u.test(demoVideoWorkflow) &&
         /generate-narration\.mjs/u.test(demoVideoWorkflow) &&
@@ -4795,6 +4799,10 @@ function sourceChecks(): SourceCheck[] {
         /DEMO_VIDEO_SOURCE_GATE_ATTEMPT/u.test(
           demoVideoReleaseGate
         ) &&
+        demoVideoReleaseGate.includes("fsConstants.O_NOFOLLOW") &&
+        demoVideoReleaseGate.includes("fstatSync(descriptor, { bigint: true })") &&
+        demoVideoReleaseGate.includes("process.stdout.write(receiptHandoff)") &&
+        !demoVideoReleaseGate.includes("readFileSync(path") &&
         /voiceRightsAttested:\s*true/u.test(demoVideoWorkflow) &&
         /managed-mcp-proof-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
           managedMcpWorkflow
@@ -4817,6 +4825,9 @@ function sourceChecks(): SourceCheck[] {
         /realpath|lstat|symlink/iu.test(demoVideoLibrary) &&
         /with-timestamps/u.test(demoVideoNarration) &&
         /ELEVENLABS_API_KEY/u.test(demoVideoNarration) &&
+        demoVideoNarration.includes("const CANONICAL_VOICE") &&
+        demoVideoNarration.includes("canonicalNarrationForScene") &&
+        demoVideoNarration.includes("requireCanonicalVoice") &&
         !/edge-tts/iu.test(demoVideoNarration) &&
         /libx264/u.test(demoVideoBuilder) &&
         /loudnorm/u.test(demoVideoBuilder) &&
@@ -4834,8 +4845,8 @@ function sourceChecks(): SourceCheck[] {
         /b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61/u.test(
           demoVideoFfmpegInstaller
         ) &&
-        /d2s5v0o0eg2aaw\.cloudfront\.net/u.test(
-          demoVideoCapture
+        demoVideoCapture.includes(
+          'const CANONICAL_ORIGIN = "https://d2s5v0o0eg2aaw.cloudfront.net";'
         ) &&
         /INV-2043/u.test(demoVideoCapture) &&
         /PAY-118/u.test(demoVideoCapture) &&

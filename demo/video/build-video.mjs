@@ -5,7 +5,6 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
-import { relative, sep } from "node:path";
 import {
   DEFAULT_SCENE_PLAN,
   assertExecutableInRunnerTemp,

@@ -6,12 +6,11 @@
 import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
-  lstatSync,
-  mkdirSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  openSync,
   readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1466,45 +1465,64 @@ async function collectEvidence(
   return { runs, artifacts };
 }
 
-function readInitialReceipt(
+export function readInitialReceipt(
   path: string,
   expected: {
     sha: string;
     runId: number;
     runAttempt: number;
+    now?: number;
   }
 ): DemoVideoReleaseBindingReceipt {
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 131_072) {
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+    );
+  } catch {
     throw new Error(
-      "Initial release binding must be a small regular non-symlink file"
+      "Initial release binding could not be opened without following links"
     );
   }
-  const stat = statSync(path);
-  if (stat.size !== metadata.size || stat.size < 2) {
-    throw new Error("Initial release binding changed while being inspected");
-  }
-  let value: unknown;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    throw new Error("Initial release binding is not valid JSON");
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size < 2n || before.size > 131_072n) {
+      throw new Error("Initial release binding must be a small regular file");
+    }
+    const source = readFileSync(descriptor, "utf8");
+    const after = fstatSync(descriptor, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      BigInt(Buffer.byteLength(source, "utf8")) !== after.size
+    ) {
+      throw new Error("Initial release binding changed while being read");
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(source);
+    } catch {
+      throw new Error("Initial release binding is not valid JSON");
+    }
+    return requireStoredReleaseBinding(value, expected);
+  } finally {
+    closeSync(descriptor);
   }
-  return requireStoredReleaseBinding(value, expected);
 }
 
-function writeReceipt(
-  path: string,
+function encodeReceiptHandoff(
   receipt: DemoVideoReleaseBindingReceipt
-): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-  });
-  renameSync(temporaryPath, path);
+): string {
+  const source = `${JSON.stringify(receipt, null, 2)}\n`;
+  const bytes = Buffer.byteLength(source, "utf8");
+  if (bytes < 2 || bytes > 131_072) {
+    throw new Error("Release binding handoff is outside its byte boundary");
+  }
+  return Buffer.from(source, "utf8").toString("base64");
 }
 
 function emitOutputs(
@@ -1665,6 +1683,7 @@ async function main(): Promise<void> {
 
   // The initial receipt is hashed into the media receipts. Terminal phases
   // therefore revalidate it in place and must never rewrite even one byte.
+  let receiptHandoff = "";
   if (!initialReceipt) {
     const receipt: DemoVideoReleaseBindingReceipt = {
       schema: "archon.demo-video-release-binding",
@@ -1688,15 +1707,18 @@ async function main(): Promise<void> {
       runId: invocation.runId,
       runAttempt: invocation.sourceGateRunAttempt,
     });
-    writeReceipt(invocation.receiptPath, validatedReceipt);
+    receiptHandoff = encodeReceiptHandoff(validatedReceipt);
   }
   emitOutputs(invocation.outputPath, evidence.runs, evidence.artifacts);
-  console.log(
+  console.error(
     `Demo-video release gate ${invocation.phase} PASS: ` +
       `SHA ${invocation.sha}; deploy ${evidence.runs.deploy.id}/` +
       `${evidence.runs.deploy.run_attempt}; DAST ${evidence.runs.dast.id}; ` +
       `MCP ${evidence.runs.mcp.id}; recovery ${evidence.runs.recovery.id}`
   );
+  if (receiptHandoff !== "") {
+    process.stdout.write(receiptHandoff);
+  }
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";

@@ -26,6 +26,69 @@ const VOICE_SETTINGS = Object.freeze({
   use_speaker_boost: true,
   speed: 1,
 });
+const CANONICAL_VOICE = Object.freeze({
+  voiceId: "pNInz6obpgDQGcFmaJgB",
+  modelId: "eleven_multilingual_v2",
+  outputFormat: "mp3_44100_128",
+});
+
+function canonicalNarrationForScene(scene) {
+  let id;
+  let narration;
+  switch (scene?.id) {
+    case "hook":
+      id = "hook";
+      narration =
+        "An AI agent can remember a plausible financial fact and still be wrong. Archon Memory makes persistent memory disagree out loud before a CFO acts.";
+      break;
+    case "scope-architecture":
+      id = "scope-architecture";
+      narration =
+        "This is a public, synthetic, read-only AWS serverless application. CockroachDB holds the relational truth, lifecycle, provenance, audit state, and native vector memory in one serializable system.";
+      break;
+    case "recall-grounding":
+      id = "recall-grounding";
+      narration =
+        "The agent idempotently stores embedded facts with provenance, lifecycle, and payload-bound digests. This question is embedded by Titan and recalled through CockroachDB's native C-SPANN index under the exact tenant, model, lifecycle, and company prefixes. The answer reports a true employer cost of fifteen thousand three hundred seventy-five euros and an off-bank wedge of six thousand seven hundred seventy-five euros. Every claim links to an exact stored memory. If the model wording fails citation, numeric, or claim checks, the app replaces it with a deterministic rendering of the cited evidence.";
+      break;
+    case "audit":
+      id = "audit";
+      narration =
+        "Semantic recall is not a complete memory audit. This bounded exhaustive pass finds a deliberate invoice conflict: eighteen thousand four hundred versus eighteen thousand nine hundred euros. It recommends the higher-importance evidence without rewriting either record. It also finds a reconciliation that references payment PAY-118, which was never stored. Unknown stays unknown.";
+      break;
+    case "proof":
+      id = "proof";
+      narration =
+        "The live proof ledger identifies the exact release, database, role, region, models, and catalog-backed vector index. It deterministically verifies nine persisted memories, nine unique idempotency keys, and nine payload-bound content digests. Separate reproducible evaluations cover larger corpora, RF-three placement, and recall after one node is stopped.";
+      break;
+    case "managed-mcp":
+      id = "managed-mcp";
+      narration =
+        "The financial agent uses distributed vector indexing. A separate deterministic release controller uses CockroachDB Cloud Managed MCP for exactly four hosted read-only calls and accepts only the same fixed-scope nine-nine-nine result. The receipt exposes no credentials, connection material, memory text, or embeddings.";
+      break;
+    case "close":
+      id = "close";
+      narration =
+        "Archon Memory turns agent memory from a hidden cache into inspectable, contradiction-aware financial evidence. The live demo and full source are public.";
+      break;
+    default:
+      throw new Error("Narration scene is outside the canonical allowlist");
+  }
+  if (scene.narration !== narration) {
+    throw new Error(`Scene ${id} narration differs from the canonical allowlist`);
+  }
+  return Object.freeze({ id, narration });
+}
+
+function requireCanonicalVoice(voice) {
+  if (
+    voice?.voiceId !== CANONICAL_VOICE.voiceId ||
+    voice?.modelId !== CANONICAL_VOICE.modelId ||
+    voice?.outputFormat !== CANONICAL_VOICE.outputFormat
+  ) {
+    throw new Error("ElevenLabs voice configuration is outside the allowlist");
+  }
+}
 
 function decodeCanonicalBase64(value, sceneId) {
   if (
@@ -69,13 +132,13 @@ export async function fetchTimestampedNarration(
   if (typeof fetchImpl !== "function") {
     throw new Error("A standards-compatible fetch implementation is required");
   }
+  const canonicalScene = canonicalNarrationForScene(scene);
+  requireCanonicalVoice(voice);
   const endpoint = new URL(
-    `/v1/text-to-speech/${encodeURIComponent(
-      voice.voiceId
-    )}/with-timestamps`,
+    `/v1/text-to-speech/${CANONICAL_VOICE.voiceId}/with-timestamps`,
     ELEVENLABS_ORIGIN
   );
-  endpoint.searchParams.set("output_format", voice.outputFormat);
+  endpoint.searchParams.set("output_format", CANONICAL_VOICE.outputFormat);
   const response = await fetchImpl(endpoint, {
     method: "POST",
     redirect: "error",
@@ -86,20 +149,20 @@ export async function fetchTimestampedNarration(
       "xi-api-key": apiKey,
     },
     body: JSON.stringify({
-      text: scene.narration,
-      model_id: voice.modelId,
+      text: canonicalScene.narration,
+      model_id: CANONICAL_VOICE.modelId,
       voice_settings: VOICE_SETTINGS,
     }),
   });
   if (!response.ok) {
     throw new Error(
-      `ElevenLabs timestamped narration failed for ${scene.id} with HTTP ${response.status}`
+      `ElevenLabs timestamped narration failed for ${canonicalScene.id} with HTTP ${response.status}`
     );
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) {
     throw new Error(
-      `ElevenLabs returned a non-JSON response for ${scene.id}`
+      `ElevenLabs returned a non-JSON response for ${canonicalScene.id}`
     );
   }
   let payload;
@@ -107,7 +170,7 @@ export async function fetchTimestampedNarration(
     payload = await response.json();
   } catch (error) {
     throw new Error(
-      `ElevenLabs returned invalid JSON for ${scene.id}: ${error.message}`
+      `ElevenLabs returned invalid JSON for ${canonicalScene.id}: ${error.message}`
     );
   }
   return validateTimestampedNarrationResponse(payload, scene);

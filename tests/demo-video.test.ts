@@ -13,7 +13,6 @@ import test from "node:test";
 import {
   DEFAULT_SCENE_PLAN,
   EXPECTED_CAPTURE_SCREENSHOTS,
-  alignmentToCues,
   assertFileEvidence,
   demoVideoRoot,
   fileEvidence,
@@ -38,6 +37,7 @@ import {
 } from "../demo/video/generate-narration.mjs";
 import {
   DEMO_VIDEO_CHECK_IDS,
+  readInitialReceipt,
   requireStoredReleaseBinding,
   requireTrustedWorkflowInvocation,
   requireUnchangedSelections,
@@ -579,6 +579,36 @@ test("timestamped narration request uses the exact ElevenLabs endpoint and model
   assert.ok(result.cues.length > 0);
 });
 
+test("timestamped narration rejects scene or voice drift before any request", async () => {
+  const plan = loadScenePlan();
+  const scene = plan.scenes[0];
+  let fetchCalls = 0;
+  const fetchImpl: typeof fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not be reached");
+  };
+
+  await assert.rejects(
+    fetchTimestampedNarration(
+      { ...scene, narration: `${scene.narration} drift` },
+      plan.voice,
+      "unit-test-key-not-a-real-secret",
+      { fetchImpl }
+    ),
+    /canonical allowlist/u
+  );
+  await assert.rejects(
+    fetchTimestampedNarration(
+      scene,
+      { ...plan.voice, voiceId: "not-allowlisted" },
+      "unit-test-key-not-a-real-secret",
+      { fetchImpl }
+    ),
+    /voice configuration is outside the allowlist/u
+  );
+  assert.equal(fetchCalls, 0);
+});
+
 test("narration rejects a GITHUB_SHA mismatch before secrets, files, or API calls", async () => {
   let fetchCalls = 0;
   await assert.rejects(
@@ -962,6 +992,49 @@ test("release receipt is exact and terminal selection validation is immutable", 
       ),
     /selection changed/u
   );
+});
+
+test("release receipt is read through one no-follow file descriptor", () => {
+  const configuredRunnerTemp = process.env.RUNNER_TEMP;
+  assert.ok(
+    configuredRunnerTemp,
+    "RUNNER_TEMP must be supplied by the CI test runner"
+  );
+  const ciTemp = realpathSync(configuredRunnerTemp);
+  const fixture = mkdtempSync(join(ciTemp, "archon-release-receipt-unit-"));
+  try {
+    const { receipt, now } = releaseBindingFixture();
+    const receiptPath = writeFileAtomic(
+      fixture,
+      "video-release-binding.json",
+      `${JSON.stringify(receipt, null, 2)}\n`,
+      { encoding: "utf8" }
+    );
+    assert.deepEqual(
+      readInitialReceipt(receiptPath, {
+        sha: receipt.releaseSha,
+        runId: receipt.sourceGateRunId,
+        runAttempt: receipt.sourceGateRunAttempt,
+        now,
+      }),
+      receipt
+    );
+
+    const linkedPath = join(fixture, "linked-release-binding.json");
+    symlinkSync(receiptPath, linkedPath, "file");
+    assert.throws(
+      () =>
+        readInitialReceipt(linkedPath, {
+          sha: receipt.releaseSha,
+          runId: receipt.sourceGateRunId,
+          runAttempt: receipt.sourceGateRunAttempt,
+          now,
+        }),
+      /without following links/u
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("release run selector rejects wrong-event or wrong-SHA evidence", () => {

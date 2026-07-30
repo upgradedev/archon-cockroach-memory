@@ -84,7 +84,34 @@ jobs:
               test "${status}" -eq 1
             fi
           }
-          node --import tsx scripts/demo-video-release-gate.ts
+          receipt_dir="$(dirname -- "${DEMO_VIDEO_RELEASE_RECEIPT}")"
+          receipt_name="$(basename -- "${DEMO_VIDEO_RELEASE_RECEIPT}")"
+          mkdir -p -- "${receipt_dir}"
+          test ! -e "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          receipt_temp="$(
+            mktemp --tmpdir="${receipt_dir}" "${receipt_name}.tmp.XXXXXX"
+          )"
+          cleanup_receipt_temp() {
+            rm -f -- "${receipt_temp}"
+          }
+          trap cleanup_receipt_temp EXIT
+          receipt_base64="$(
+            node --import tsx scripts/demo-video-release-gate.ts
+          )"
+          test "${#receipt_base64}" -ge 4
+          test "${#receipt_base64}" -le 174764
+          [[ "${receipt_base64}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          printf '%s' "${receipt_base64}" |
+            base64 --decode >"${receipt_temp}"
+          test "$(base64 -w0 -- "${receipt_temp}")" = "${receipt_base64}"
+          receipt_bytes="$(stat -c '%s' -- "${receipt_temp}")"
+          test "${receipt_bytes}" -ge 2
+          test "${receipt_bytes}" -le 131072
+          test -f "${receipt_temp}"
+          test ! -L "${receipt_temp}"
+          chmod 0600 -- "${receipt_temp}"
+          mv -- "${receipt_temp}" "${DEMO_VIDEO_RELEASE_RECEIPT}"
+          trap - EXIT
           test -n "${GITHUB_TOKEN}"
           test -s "${DEMO_VIDEO_RELEASE_RECEIPT}"
           encoded_token="$(printf '%s' "${GITHUB_TOKEN}" | base64 -w0)"
