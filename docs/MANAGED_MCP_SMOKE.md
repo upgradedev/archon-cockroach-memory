@@ -69,6 +69,28 @@ actual API-key and cluster-ID values, enforce the complete top-level JSON key
 set, every fixed nested value, and the four exact proof objects, and only then
 upload a receipt.
 
+## Pinned exact protected evidence — 2026-07-30
+
+The latest fully evidenced feature-bearing release baseline recorded before
+this documentation-only update,
+[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b)
+passed the post-production Managed MCP job in
+[Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206).
+Its sanitized release receipt is
+[artifact 8756302151](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206/artifacts/8756302151),
+digest
+`sha256:4a78f5bb432115950496bbea4432e3a5fafe487f6b3a8a64103c79cf0617c506`.
+
+The independent protected
+[Managed MCP run 30535180779](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779)
+then re-proved the same exact-scope read-only v2 contract after production
+completed. Its
+[artifact 8756341014](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779/artifacts/8756341014)
+is unexpired and has digest
+`sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`.
+Both workflows require the fixed four calls, strict parser, B-tree-forced
+aggregate, and exact `9 / 9 / 9` result before uploading evidence.
+
 ## Historical live evidence — pre-hardening
 
 The exact commit

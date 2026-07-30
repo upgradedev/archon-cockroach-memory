@@ -65,6 +65,11 @@ historical live serving-path milestone is the protected database release,
 production deployment, and Managed MCP receipt from
 [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2)
 at exact commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`.
+The latest pinned feature-bearing release baseline is
+[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b)
+in [Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206);
+that run re-proved both runtime-principal C-SPANN paths before staging and
+production promotion.
 
 ## 2. CockroachDB Cloud Managed MCP
 
@@ -93,6 +98,14 @@ Implementation:
 
 Evidence status:
 
+- The pinned feature-release contract passed in
+  [Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206)
+  and was independently re-proved after deployment in
+  [Managed MCP run 30535180779](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779).
+  The standalone receipt is
+  [artifact 8756341014](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779/artifacts/8756341014),
+  digest
+  `sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`.
 - [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
   historical live read-only proof from the hardened v2 contract. The latter
   passed at exact commit `a2b69e3fad31010d14d0c3bca261421e635ca885`
@@ -279,6 +292,13 @@ objects under `${RUNNER_TEMP}`, committed both intents, and removed temporary
 runner material. Recover AWS run 30333619982 proved the trusted-source,
 environment-OIDC classifier and cleanup path. Because both intents were already
 `COMMITTED`, no restoration receipt or post-recovery control object was created.
+
+For the pinned exact feature release, [Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206)
+again committed both receipt-bound environment intents and removed runner
+material. The independent manual
+[Recover AWS audit 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552)
+then passed fresh staging and production termination-protection and drift
+checks, uploading only sanitized audit receipts with GitHub-bound digests.
 
 Infrastructure and delivery proof live in:
 
