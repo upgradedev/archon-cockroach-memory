@@ -4862,11 +4862,28 @@ function sourceChecks(): SourceCheck[] {
         /marker failed computed-RGBA geometry verification/u.test(
           demoVideoCapture
         ) &&
-        /Verify video marker rendering and DOM reinjection in Chromium[\s\S]*?working-directory:\s*web[\s\S]*?node video\/capture-marker-selftest\.mjs/u.test(
+        demoVideoCapture.includes(
+          "export async function resolveCanonicalAuditLocators(page)"
+        ) &&
+        demoVideoCapture.includes(
+          "The capture highlight target was not unique."
+        ) &&
+        demoVideoCapture.includes('.filter({ hasText: "€15,375" })') &&
+        demoVideoCapture.includes('.filter({ hasText: "€6,775" })') &&
+        !demoVideoCapture.includes(
+          'getByRole("heading", { name: /INV-2043/u })'
+        ) &&
+        /Verify video marker, strict scene locators, and DOM reinjection in Chromium[\s\S]*?working-directory:\s*web[\s\S]*?node video\/capture-marker-selftest\.mjs/u.test(
           ci
         ) &&
         /activateScene\(page, SCENES\[0\], CARD\)[\s\S]*?document\.getElementById\(id\)\?\.remove\(\)[\s\S]*?activateScene\(page, SCENES\[1\], CARD\)/u.test(
           demoVideoCaptureMarkerSelfTest
+        ) &&
+        demoVideoCaptureMarkerSelfTest.includes(
+          "The strict audit-locator fixture did not reproduce the ambiguous heading"
+        ) &&
+        demoVideoCaptureMarkerSelfTest.includes(
+          "resolveCanonicalAuditLocators(page)"
         ) &&
         /libx264/u.test(demoVideoBuilder) &&
         /loudnorm/u.test(demoVideoBuilder) &&

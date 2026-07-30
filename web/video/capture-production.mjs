@@ -1071,7 +1071,11 @@ async function clearHighlights(page) {
 }
 
 async function highlight(locator) {
-  await locator.first().evaluate((element) => {
+  invariant(
+    (await locator.count()) === 1,
+    "The capture highlight target was not unique."
+  );
+  await locator.evaluate((element) => {
     element.setAttribute("data-archon-highlight", "true");
   });
 }
@@ -1094,6 +1098,66 @@ async function keyScreenshot(page, captureDirectory, name, screenshots) {
     scale: "css",
   });
   screenshots.push({ path, name });
+}
+
+export async function resolveCanonicalAuditLocators(page) {
+  const auditSection = page.locator(
+    'section[aria-labelledby="audit-title"]'
+  );
+  const conflictHeading = auditSection.getByRole("heading", {
+    level: 3,
+    name: /^INV-2043\s*\/\s*total$/u,
+  });
+  const primaryValue = auditSection.getByText("18,400", { exact: true });
+  const competingValue = auditSection.getByText("18,900", { exact: true });
+  const absenceHeading = auditSection.getByRole("heading", {
+    level: 3,
+    name: "PAY-118",
+    exact: true,
+  });
+  const noAutomaticMutation = auditSection.getByText(
+    "No automatic mutation",
+    { exact: true }
+  );
+
+  invariant(
+    (await auditSection.count()) === 1,
+    "The canonical audit section was not unique."
+  );
+  await conflictHeading.waitFor({ state: "visible", timeout: 15_000 });
+  await absenceHeading.waitFor({ state: "visible", timeout: 15_000 });
+  await noAutomaticMutation.waitFor({
+    state: "visible",
+    timeout: 15_000,
+  });
+  invariant(
+    (await conflictHeading.count()) === 1,
+    "The canonical INV-2043/total audit heading was not unique."
+  );
+  invariant(
+    (await primaryValue.count()) === 2,
+    "The canonical conflict value and recommendation did not both render 18,400."
+  );
+  invariant(
+    (await competingValue.count()) === 1,
+    "The canonical competing audit value 18,900 was not unique."
+  );
+  invariant(
+    (await absenceHeading.count()) === 1,
+    "The canonical PAY-118 absence heading was not unique."
+  );
+  invariant(
+    (await noAutomaticMutation.count()) === 1,
+    "The canonical audit mutation boundary was not unique."
+  );
+
+  return {
+    conflictHeading,
+    primaryValue: primaryValue.first(),
+    competingValue,
+    absenceHeading,
+    noAutomaticMutation,
+  };
 }
 
 async function recordProductionJourney({
@@ -1261,13 +1325,32 @@ async function recordProductionJourney({
       throw new Error("The live recall response was not JSON.");
     }
     validateRecall(recallBody);
-    await page
-      .getByRole("heading", { name: /€15,375/u })
-      .waitFor({ state: "visible", timeout: 15_000 });
-    await page.getByText(/€6,775/u).first().waitFor({
+    const answerSection = page.locator(
+      'section[aria-labelledby="answer-title"]'
+    );
+    const answerTitle = answerSection.locator("#answer-title");
+    invariant(
+      (await answerSection.count()) === 1 &&
+        (await answerTitle.count()) === 1,
+      "The live answer brief was not unique."
+    );
+    const canonicalAnswerTitle = answerTitle
+      .filter({ hasText: "€15,375" })
+      .filter({ hasText: "€6,775" });
+    await canonicalAnswerTitle.waitFor({
       state: "visible",
       timeout: 15_000,
     });
+    invariant(
+      (await canonicalAnswerTitle.count()) === 1,
+      "The canonical live answer title was not unique."
+    );
+    const renderedAnswer = (await canonicalAnswerTitle.textContent()) ?? "";
+    invariant(
+      renderedAnswer.includes("€15,375") &&
+        renderedAnswer.includes("€6,775"),
+      "The live answer brief did not render both canonical amounts."
+    );
     await page
       .getByText("Exact returned evidence", { exact: true })
       .waitFor({ state: "visible", timeout: 15_000 });
@@ -1282,8 +1365,8 @@ async function recordProductionJourney({
       /verified|extractive/u.test((await groundingStatus.textContent()) ?? ""),
       "The UI did not render a verified or extractive grounding state."
     );
-    await page.locator("#answer-title").scrollIntoViewIfNeeded();
-    await highlight(page.locator("#answer-title"));
+    await canonicalAnswerTitle.scrollIntoViewIfNeeded();
+    await highlight(canonicalAnswerTitle);
     await waitUntilTimeline(timelineStartedAt, 51);
     await keyScreenshot(
       page,
@@ -1299,7 +1382,13 @@ async function recordProductionJourney({
       await highlight(citations.nth(1));
     }
     await waitUntilTimeline(timelineStartedAt, 68);
-    const retrievalProof = page.getByText(/native C-SPANN vector index/u).first();
+    const retrievalProof = answerSection.getByText(
+      /native C-SPANN vector index/u
+    );
+    invariant(
+      (await retrievalProof.count()) === 1,
+      "The rendered C-SPANN retrieval proof was not unique."
+    );
     await retrievalProof.scrollIntoViewIfNeeded();
     await highlight(retrievalProof);
 
@@ -1314,15 +1403,16 @@ async function recordProductionJourney({
     });
     await clearHighlights(page);
     await page.locator("#audit-title").scrollIntoViewIfNeeded();
-    const conflict = page.getByRole("heading", { name: /INV-2043/u });
+    const auditLocators = await resolveCanonicalAuditLocators(page);
+    const conflict = auditLocators.conflictHeading;
     await conflict.waitFor({ state: "visible", timeout: 15_000 });
     await conflict.scrollIntoViewIfNeeded();
     await highlight(conflict);
-    await page.getByText("18,400", { exact: true }).waitFor({
+    await auditLocators.primaryValue.waitFor({
       state: "visible",
       timeout: 15_000,
     });
-    await page.getByText("18,900", { exact: true }).waitFor({
+    await auditLocators.competingValue.waitFor({
       state: "visible",
       timeout: 15_000,
     });
@@ -1333,10 +1423,10 @@ async function recordProductionJourney({
       "04-audit-conflict.png",
       screenshots
     );
-    const absence = page.getByText("PAY-118", { exact: true });
+    const absence = auditLocators.absenceHeading;
     await absence.scrollIntoViewIfNeeded();
     await highlight(absence);
-    await page.getByText("No automatic mutation", { exact: true }).waitFor({
+    await auditLocators.noAutomaticMutation.waitFor({
       state: "visible",
       timeout: 15_000,
     });
@@ -1347,9 +1437,7 @@ async function recordProductionJourney({
       "05-audit-absence.png",
       screenshots
     );
-    await page
-      .getByText("No automatic mutation", { exact: true })
-      .scrollIntoViewIfNeeded();
+    await auditLocators.noAutomaticMutation.scrollIntoViewIfNeeded();
     await waitUntilTimeline(timelineStartedAt, 108);
 
     await beginScene("proof", {
@@ -1370,7 +1458,7 @@ async function recordProductionJourney({
     const proofLedger = page.locator("aside[aria-labelledby='proof-title']");
     await proofLedger.scrollIntoViewIfNeeded();
     await highlight(proofLedger);
-    await page.getByText("Index verified", { exact: true }).waitFor({
+    await proofLedger.getByText("Index verified", { exact: true }).waitFor({
       state: "visible",
       timeout: 15_000,
     });
