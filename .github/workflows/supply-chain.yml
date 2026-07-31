@@ -29,8 +29,11 @@ jobs:
       contents: read
     env:
       REPORT_DIR: supply-chain-reports/static
-      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
     steps:
+      - name: Bind ephemeral static-analysis paths
+        shell: bash
+        run: echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin" >>"$GITHUB_ENV"
+
       - name: Check out source without credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -222,9 +225,15 @@ jobs:
       contents: read
     env:
       REPORT_DIR: supply-chain-reports/iac
-      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
     steps:
+      - name: Bind ephemeral infrastructure-analysis paths
+        shell: bash
+        run: |
+          {
+            echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin"
+            echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy-cache"
+          } >>"$GITHUB_ENV"
+
       - name: Check out source without credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -491,10 +500,16 @@ jobs:
       contents: read
     env:
       REPORT_DIR: supply-chain-reports/sbom
-      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
-      SAM_BUILD_DIR: ${{ runner.temp }}/archon-sam-build
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
     steps:
+      - name: Bind ephemeral SBOM-analysis paths
+        shell: bash
+        run: |
+          {
+            echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin"
+            echo "SAM_BUILD_DIR=$RUNNER_TEMP/archon-sam-build"
+            echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy-cache"
+          } >>"$GITHUB_ENV"
+
       - name: Check out source without credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -813,10 +828,15 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    env:
-      EVIDENCE_ROOT: ${{ runner.temp }}/archon-supply-chain-release-inputs
-      RELEASE_ROOT: ${{ runner.temp }}/archon-supply-chain-release
     steps:
+      - name: Bind ephemeral release-evidence paths
+        shell: bash
+        run: |
+          {
+            echo "EVIDENCE_ROOT=$RUNNER_TEMP/archon-supply-chain-release-inputs"
+            echo "RELEASE_ROOT=$RUNNER_TEMP/archon-supply-chain-release"
+          } >>"$GITHUB_ENV"
+
       - name: Download exact-run static-analysis evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
