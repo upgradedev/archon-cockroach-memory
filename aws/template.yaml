@@ -108,9 +108,44 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional SNS topic ARN for operational alarm notifications.
+  CloudFrontWebAclArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
+    Description: >-
+      Optional approval-gated CloudFront WebACL ARN from aws/edge-waf.yaml.
+      Empty keeps the billable control dormant; production activation requires
+      explicit approval and a us-east-1 control-plane deployment.
+  OriginVerifyToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9_-]{43,128}$"
+    Description: >-
+      Optional CloudFront-to-origin capability. When non-empty, Lambda rejects
+      direct execute-api requests and CloudFront injects this value as a custom
+      origin header. Activate and rotate through the protected deployment
+      environment; never commit the value.
+
+Rules:
+  EdgeProtectionActivationIsCoupled:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref CloudFrontWebAclArn, ""]
+            - !Equals [!Ref OriginVerifyToken, ""]
+          - !And
+            - !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
+            - !Not [!Equals [!Ref OriginVerifyToken, ""]]
+        AssertDescription: >-
+          CloudFrontWebAclArn and OriginVerifyToken must both remain empty or
+          both be activated. A WebACL without origin verification leaves the
+          execute-api origin reachable outside the CloudFront/WAF boundary.
 
 Conditions:
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  HasCloudFrontWebAcl: !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
+  HasOriginVerifyToken: !Not [!Equals [!Ref OriginVerifyToken, ""]]
 
 Globals:
   Function:
@@ -279,7 +314,7 @@ Resources:
     DependsOn:
       - ApiVendedAccessLogGroup
     Properties:
-      Description: Public read-only judge API for Archon Memory
+      Description: Public fixed-scope judge API with read-only canonical memory and an isolated synthetic action sandbox
       # The regional SAM transform drops stage controls for a literal $default
       # stage. A named stage keeps the generated AWS::ApiGatewayV2::Stage
       # explicit in the processed template so throttling, metrics, and access
@@ -307,7 +342,7 @@ Resources:
       - ArchonFunctionLogGroup
     Properties:
       FunctionName: !Sub "${AppName}-${Environment}-api"
-      Description: Fixed-scope read-only memory recall, audit, and proof API
+      Description: Fixed-scope memory recall, audit, proof, and isolated human-gated resolution API
       CodeUri: ../
       Handler: lambda.handler
       Role: !Ref LambdaExecutionRoleArn
@@ -334,6 +369,9 @@ Resources:
           PGPOOL_MAX_LIFETIME_SECONDS: "300"
           RECALL_MAX_QUESTION_CHARS: "500"
           RECALL_MIN_SCORE: "0.15"
+          RESOLUTION_SESSION_TTL_MINUTES: "30"
+          RESOLUTION_MAX_ACTIVE_SESSIONS: "500"
+          ORIGIN_VERIFY_TOKEN: !Ref OriginVerifyToken
           NODE_OPTIONS: "--enable-source-maps"
       Events:
         Health:
@@ -360,6 +398,24 @@ Resources:
             ApiId: !Ref ArchonHttpApi
             Path: /api/proof
             Method: GET
+        ResolutionSessionCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/session
+            Method: POST
+        ResolutionSessionRead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/session
+            Method: GET
+        ResolutionDecision:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/decision
+            Method: POST
         ApiFallback:
           Type: HttpApi
           Properties:
@@ -400,6 +456,10 @@ Resources:
         Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
+        WebACLId: !If
+          - HasCloudFrontWebAcl
+          - !Ref CloudFrontWebAclArn
+          - !Ref "AWS::NoValue"
         PriceClass: PriceClass_100
         DefaultRootObject: index.html
         Origins:
@@ -413,6 +473,11 @@ Resources:
             # non-reserved API logical ID. This Ref resolves to the deployed
             # stage name and creates the required ordering edge.
             OriginPath: !Join ["", ["/", !Ref ArchonHttpApi.Stage]]
+            OriginCustomHeaders: !If
+              - HasOriginVerifyToken
+              - - HeaderName: x-archon-origin-verify
+                  HeaderValue: !Ref OriginVerifyToken
+              - !Ref "AWS::NoValue"
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only

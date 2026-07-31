@@ -1,0 +1,1134 @@
+name: Supply Chain (enforced)
+
+# Findings at the documented policy thresholds block. The canonical waiver
+# ledger is deliberately empty, so a successful run is a zero-unwaived-finding
+# assertion for these scanners and scopes, not a vulnerability-free claim.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-and-workflows:
+    name: Shell and workflow policy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/static
+      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate tool lock and install verified static analyzers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          jq -e '
+            .schemaVersion == 1 and
+            ([.tools[] | (.sha256 | test("^[0-9a-f]{64}$"))] | all) and
+            ([.actions[] | (.sha | test("^[0-9a-f]{40}$"))] | all)
+          ' .github/toolchain-lock.json >/dev/null
+
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+
+          install_locked_tool shellcheck
+          install_locked_tool actionlint
+          install_locked_tool zizmor
+          "$TOOL_BIN/shellcheck" --version
+          "$TOOL_BIN/actionlint" -version
+          "$TOOL_BIN/zizmor" --version
+
+      - name: Inventory tracked shell and workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+          git ls-files -- '*.sh' | LC_ALL=C sort > "$REPORT_DIR/shell-files.txt"
+          git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml' |
+            LC_ALL=C sort > "$REPORT_DIR/workflow-files.txt"
+          test -s "$REPORT_DIR/shell-files.txt"
+          test -s "$REPORT_DIR/workflow-files.txt"
+
+      - name: Run blocking ShellCheck policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t shell_files < "$REPORT_DIR/shell-files.txt"
+          set +e
+          "$TOOL_BIN/shellcheck" \
+            --external-sources \
+            --severity=warning \
+            --format=checkstyle \
+            "${shell_files[@]}" > "$REPORT_DIR/shellcheck.xml"
+          status=$?
+          set -e
+          jq -n \
+            --argjson exitCode "$status" \
+            --argjson files "${#shell_files[@]}" \
+            '{mode:"blocking",exitCode:$exitCode,trackedFiles:$files}' \
+            > "$REPORT_DIR/shellcheck-status.json"
+
+      - name: Run blocking actionlint with inline ShellCheck
+        continue-on-error: true
+        shell: bash
+        env:
+          PATH: ${{ runner.temp }}/archon-supply-chain/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          set -euo pipefail
+          set +e
+          actionlint -format '{{json .}}' > "$REPORT_DIR/actionlint.jsonl"
+          status=$?
+          set -e
+          jq -n \
+            --argjson exitCode "$status" \
+            '{mode:"blocking",exitCode:$exitCode}' \
+            > "$REPORT_DIR/actionlint-status.json"
+
+      - name: Run blocking zizmor regular-persona policy and SARIF
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          "$TOOL_BIN/zizmor" \
+            --offline \
+            --strict-collection \
+            --persona=regular \
+            --format=json-v1 \
+            . > "$REPORT_DIR/zizmor.json"
+          json_status=$?
+          "$TOOL_BIN/zizmor" \
+            --offline \
+            --strict-collection \
+            --persona=regular \
+            --format=sarif \
+            . > "$REPORT_DIR/zizmor.sarif"
+          sarif_status=$?
+          set -e
+          jq -n \
+            --argjson jsonExitCode "$json_status" \
+            --argjson sarifExitCode "$sarif_status" \
+            '{
+              mode:"blocking",
+              jsonExitCode:$jsonExitCode,
+              sarifExitCode:$sarifExitCode
+            }' \
+            > "$REPORT_DIR/zizmor-status.json"
+
+      - name: Enforce zero-unwaived static findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0 and
+             (.trackedFiles | type == "number" and . > 0)' \
+            "$REPORT_DIR/shellcheck-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$REPORT_DIR/actionlint-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and
+             .jsonExitCode == 0 and
+             .sarifExitCode == 0' \
+            "$REPORT_DIR/zizmor-status.json" >/dev/null
+          test -s "$REPORT_DIR/shellcheck.xml"
+          test -f "$REPORT_DIR/actionlint.jsonl"
+          jq -e '.runs | type == "array"' \
+            "$REPORT_DIR/zizmor.sarif" >/dev/null
+
+      - name: Summarize enforced semantics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Enforced supply-chain static policy"
+            echo
+            echo "- Enforcement: **blocking**"
+            echo "- Any ShellCheck, actionlint, or zizmor finding blocks."
+            echo "- The exact waiver ledger is empty; no finding is suppressed."
+            echo "- See \`docs/SUPPLY_CHAIN_SECURITY.md\` before citing this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Name static-analysis evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-static-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist static-analysis evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/static/
+          if-no-files-found: error
+          retention-days: 90
+
+  infrastructure-policy:
+    name: Infrastructure policy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/iac
+      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
+      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install verified Guard and Trivy binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+          install_locked_tool cfn_guard
+          install_locked_tool trivy
+          "$TOOL_BIN/cfn-guard" --version
+          "$TOOL_BIN/trivy" --version
+
+      - name: Install pinned CloudFormation linter
+        run: python -m pip install --disable-pip-version-check cfn-lint==1.53.1
+
+      - name: Validate the empty waiver ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Run blocking cfn-lint policy on every current template
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          lint_template() {
+            local label="$1"
+            local template="$2"
+            local report="$REPORT_DIR/cfn-lint-${label}.json"
+            local error_report="$REPORT_DIR/cfn-lint-${label}.stderr"
+            local status
+            set +e
+            cfn-lint --format json "$template" \
+              >"$report" 2>"$error_report"
+            status=$?
+            set -e
+            jq -e 'type == "array"' "$report" >/dev/null
+            echo "$status"
+          }
+          application_status="$(
+            lint_template application aws/template.yaml
+          )"
+          foundation_status="$(
+            lint_template foundation aws/bootstrap-oidc.yaml
+          )"
+          edge_waf_status="$(
+            lint_template edge-waf aws/edge-waf.yaml
+          )"
+          finops_status="$(
+            lint_template finops aws/finops.yaml
+          )"
+          jq -n \
+            --argjson applicationExitCode "$application_status" \
+            --argjson foundationExitCode "$foundation_status" \
+            --argjson edgeWafControlPlaneExitCode "$edge_waf_status" \
+            --argjson finopsControlPlaneExitCode "$finops_status" \
+            '{
+              mode:"blocking",
+              applicationExitCode:$applicationExitCode,
+              foundationExitCode:$foundationExitCode,
+              edgeWafControlPlaneExitCode:$edgeWafControlPlaneExitCode,
+              finopsControlPlaneExitCode:$finopsControlPlaneExitCode,
+              templates:[
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ]
+            }' > "$REPORT_DIR/cfn-lint-status.json"
+
+      - name: Run blocking Guard policy unit fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOL_BIN/cfn-guard" test \
+            --rules-file aws/guard/archon.guard \
+            --test-data aws/guard/tests/archon_tests.yaml \
+            --output-format junit > "$REPORT_DIR/guard-tests.junit.xml"
+          test -s "$REPORT_DIR/guard-tests.junit.xml"
+
+      - name: Run blocking Guard policy on every current template
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_template() {
+            local label="$1"
+            local template="$2"
+            local report="$REPORT_DIR/guard-${label}.txt"
+            local status
+            set +e
+            "$TOOL_BIN/cfn-guard" validate \
+              --rules aws/guard/archon.guard \
+              --data "$template" \
+              --type CFNTemplate \
+              --show-summary all > "$report" 2>&1
+            status=$?
+            set -e
+            echo "$status"
+          }
+          app_status="$(audit_template application aws/template.yaml)"
+          foundation_status="$(audit_template foundation aws/bootstrap-oidc.yaml)"
+          edge_waf_status="$(audit_template edge-waf aws/edge-waf.yaml)"
+          finops_status="$(audit_template finops aws/finops.yaml)"
+          jq -n \
+            --argjson applicationExitCode "$app_status" \
+            --argjson foundationExitCode "$foundation_status" \
+            --argjson edgeWafControlPlaneExitCode "$edge_waf_status" \
+            --argjson finopsControlPlaneExitCode "$finops_status" \
+            '{
+              mode:"blocking",
+              applicationExitCode:$applicationExitCode,
+              foundationExitCode:$foundationExitCode,
+              edgeWafControlPlaneExitCode:$edgeWafControlPlaneExitCode,
+              finopsControlPlaneExitCode:$finopsControlPlaneExitCode,
+              templates:[
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ]
+            }' \
+            > "$REPORT_DIR/guard-current-status.json"
+
+      - name: Run blocking Trivy CloudFormation and Dockerfile policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOL_BIN/trivy" config \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --misconfig-scanners cloudformation,dockerfile \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --exit-code 0 \
+            --format json \
+            --output "$REPORT_DIR/trivy-iac.json" \
+            .
+          "$TOOL_BIN/trivy" config \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --misconfig-scanners cloudformation,dockerfile \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --exit-code 0 \
+            --format sarif \
+            --output "$REPORT_DIR/trivy-iac.sarif" \
+            .
+          set +e
+          "$TOOL_BIN/trivy" config \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --misconfig-scanners cloudformation,dockerfile \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output "$REPORT_DIR/trivy-iac-policy.json" \
+            .
+          policy_status=$?
+          set -e
+          jq -n \
+            --argjson exitCode "$policy_status" \
+            '{mode:"blocking",exitCode:$exitCode}' \
+            > "$REPORT_DIR/trivy-iac-status.json"
+          "$TOOL_BIN/trivy" --version > "$REPORT_DIR/trivy-version.txt"
+
+      - name: Enforce zero-unwaived infrastructure findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          expected_templates='[
+            "aws/template.yaml",
+            "aws/bootstrap-oidc.yaml",
+            "aws/edge-waf.yaml",
+            "aws/finops.yaml"
+          ]'
+          for status_file in \
+            "$REPORT_DIR/cfn-lint-status.json" \
+            "$REPORT_DIR/guard-current-status.json"; do
+            jq -e \
+              --argjson templates "$expected_templates" '
+                .mode == "blocking" and
+                .applicationExitCode == 0 and
+                .foundationExitCode == 0 and
+                .edgeWafControlPlaneExitCode == 0 and
+                .finopsControlPlaneExitCode == 0 and
+                .templates == $templates
+              ' "$status_file" >/dev/null
+          done
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$REPORT_DIR/trivy-iac-status.json" >/dev/null
+          test -s "$REPORT_DIR/guard-tests.junit.xml"
+          test -s "$REPORT_DIR/guard-edge-waf.txt"
+          test -s "$REPORT_DIR/guard-finops.txt"
+          jq -e '.Results | type == "array"' \
+            "$REPORT_DIR/trivy-iac-policy.json" >/dev/null
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Name infrastructure evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-iac-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/iac/
+          if-no-files-found: error
+          retention-days: 90
+
+  dependency-review:
+    name: Dependency change gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency and license changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          config-file: ./.github/dependency-review-config.yml
+
+  sbom:
+    name: Canonical ZIP-content and dependency SBOM gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/sbom
+      TOOL_BIN: ${{ runner.temp }}/archon-supply-chain/bin
+      SAM_BUILD_DIR: ${{ runner.temp }}/archon-sam-build
+      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+
+      - name: Set up pinned AWS SAM CLI
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.164.0
+
+      - name: Install verified Syft and Trivy binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+          install_locked_tool syft
+          install_locked_tool trivy
+          "$TOOL_BIN/syft" version
+          "$TOOL_BIN/trivy" --version
+
+      - name: Install exact backend and frontend dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm ci --prefix web
+
+      - name: Validate the empty waiver ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Run blocking SAM validation and build canonical Lambda ZIP content
+        shell: bash
+        run: |
+          set -euo pipefail
+          sam validate \
+            --lint \
+            --template-file aws/template.yaml \
+            --region eu-west-1
+          PATH="$PWD/node_modules/.bin:$PATH" sam build \
+            --template-file aws/template.yaml \
+            --build-dir "$SAM_BUILD_DIR" \
+            --parallel
+          test -d "$SAM_BUILD_DIR/ArchonFunction"
+          if grep -q "Type: AWS::IAM::" "$SAM_BUILD_DIR/template.yaml"; then
+            echo "Application stack must not synthesize IAM resources." >&2
+            exit 1
+          fi
+          (
+            cd "$SAM_BUILD_DIR/ArchonFunction"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) > "$REPORT_DIR/lambda-zip-content.sha256"
+          test -s "$REPORT_DIR/lambda-zip-content.sha256"
+
+      - name: Generate SPDX and CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOL_BIN/syft" dir:. \
+            --exclude './.git/**' \
+            --exclude './web/**' \
+            --exclude './supply-chain-reports/**' \
+            --source-name archon-memory-backend \
+            --output "spdx-json=$REPORT_DIR/backend.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/backend.cyclonedx.json"
+          "$TOOL_BIN/syft" dir:web \
+            --exclude './dist/**' \
+            --source-name archon-memory-control-room \
+            --output "spdx-json=$REPORT_DIR/frontend.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/frontend.cyclonedx.json"
+          "$TOOL_BIN/syft" "dir:$SAM_BUILD_DIR/ArchonFunction" \
+            --source-name archon-memory-lambda-zip-content \
+            --output "spdx-json=$REPORT_DIR/lambda-content.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/lambda-content.cyclonedx.json"
+
+          for file in "$REPORT_DIR"/*.spdx.json; do
+            jq -e '.spdxVersion | startswith("SPDX-2.")' "$file" >/dev/null
+          done
+          for file in "$REPORT_DIR"/*.cyclonedx.json; do
+            jq -e '.bomFormat == "CycloneDX"' "$file" >/dev/null
+          done
+          sha256sum \
+            package-lock.json \
+            web/package-lock.json \
+            "$REPORT_DIR"/*.spdx.json \
+            "$REPORT_DIR"/*.cyclonedx.json \
+            > "$REPORT_DIR/sbom-inputs-and-documents.sha256"
+
+      - name: Enforce dependency SBOM vulnerability and license policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend_status=255
+          frontend_status=255
+          lambda_content_status=255
+          for scope in backend frontend lambda-content; do
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 0 \
+              --format json \
+              --output "$REPORT_DIR/trivy-${scope}.json" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 0 \
+              --format sarif \
+              --output "$REPORT_DIR/trivy-${scope}.sarif" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            set +e
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 1 \
+              --format json \
+              --output "$REPORT_DIR/trivy-${scope}-policy.json" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            status=$?
+            set -e
+            case "$scope" in
+              backend)
+                backend_status="$status"
+                ;;
+              frontend)
+                frontend_status="$status"
+                ;;
+              lambda-content)
+                lambda_content_status="$status"
+                ;;
+            esac
+          done
+          jq -n \
+            --argjson backendExitCode "$backend_status" \
+            --argjson frontendExitCode "$frontend_status" \
+            --argjson lambdaContentExitCode "$lambda_content_status" \
+            '{
+              mode:"blocking",
+              scanners:["vuln","license"],
+              severities:["UNKNOWN","MEDIUM","HIGH","CRITICAL"],
+              backendExitCode:$backendExitCode,
+              frontendExitCode:$frontendExitCode,
+              lambdaContentExitCode:$lambdaContentExitCode
+            }' > "$REPORT_DIR/trivy-sbom-status.json"
+          "$TOOL_BIN/trivy" --version > "$REPORT_DIR/trivy-version.txt"
+
+      - name: Enforce zero-unwaived vulnerability and license findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          jq -e '
+            .mode == "blocking" and
+            .scanners == ["vuln","license"] and
+            .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
+            .backendExitCode == 0 and
+            .frontendExitCode == 0 and
+            .lambdaContentExitCode == 0
+          ' "$REPORT_DIR/trivy-sbom-status.json" >/dev/null
+          for scope in backend frontend lambda-content; do
+            jq -e '.Results | type == "array"' \
+              "$REPORT_DIR/trivy-${scope}-policy.json" >/dev/null
+          done
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Record exact run provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg mode blocking \
+            '{
+              schemaVersion: 1,
+              sourceSha: $sourceSha,
+              runId: $runId,
+              runAttempt: $runAttempt,
+              enforcement: $mode,
+              canonicalArtifact: "SAM ArchonFunction Lambda ZIP content",
+              containerPath: "retired-non-release"
+            }' > "$REPORT_DIR/provenance.json"
+
+      - name: Name SBOM and scan evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-sbom-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  upload-sarif:
+    name: Publish trusted SARIF evidence
+    needs:
+      - shell-and-workflows
+      - infrastructure-policy
+      - sbom
+    if: >-
+      always() &&
+      needs.shell-and-workflows.result == 'success' &&
+      needs.infrastructure-policy.result == 'success' &&
+      needs.sbom.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download static-analysis evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          path: retrieved/static
+
+      - name: Download infrastructure evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          path: retrieved/iac
+
+      - name: Download SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.sbom.outputs.artifact-name }}
+          path: retrieved/sbom
+
+      - name: Upload zizmor SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/static/zizmor.sarif
+          category: zizmor/workflows
+
+      - name: Upload Trivy IaC SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/iac/trivy-iac.sarif
+          category: trivy/iac
+
+      - name: Upload Trivy backend SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/sbom/trivy-backend.sarif
+          category: trivy/backend
+
+      - name: Upload Trivy frontend SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/sbom/trivy-frontend.sarif
+          category: trivy/frontend
+
+  release-evidence:
+    name: Bind exact-SHA supply-chain release evidence
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - shell-and-workflows
+      - infrastructure-policy
+      - sbom
+      - upload-sarif
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      EVIDENCE_ROOT: ${{ runner.temp }}/archon-supply-chain-release-inputs
+      RELEASE_ROOT: ${{ runner.temp }}/archon-supply-chain-release
+    steps:
+      - name: Download exact-run static-analysis evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/static
+
+      - name: Download exact-run infrastructure evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/iac
+
+      - name: Download exact-run SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.sbom.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/sbom
+
+      - name: Create fail-closed exact-SHA release receipt
+        id: receipt
+        shell: bash
+        env:
+          STATIC_ARTIFACT: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          IAC_ARTIFACT: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          SBOM_ARTIFACT: ${{ needs.sbom.outputs.artifact-name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_EVENT_NAME" = "push"
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          test -d "$EVIDENCE_ROOT/static"
+          test -d "$EVIDENCE_ROOT/iac"
+          test -d "$EVIDENCE_ROOT/sbom"
+          test -z "$(find "$EVIDENCE_ROOT" -type l -print -quit)"
+
+          for required in \
+            static/shellcheck-status.json \
+            static/actionlint-status.json \
+            static/zizmor-status.json \
+            static/waiver-ledger.sha256 \
+            iac/cfn-lint-status.json \
+            iac/cfn-lint-finops.json \
+            iac/guard-current-status.json \
+            iac/guard-edge-waf.txt \
+            iac/guard-finops.txt \
+            iac/trivy-iac-status.json \
+            iac/trivy-iac.json \
+            sbom/provenance.json \
+            sbom/trivy-sbom-status.json \
+            sbom/trivy-lambda-content-policy.json \
+            sbom/waiver-ledger.sha256 \
+            sbom/lambda-zip-content.sha256 \
+            sbom/sbom-inputs-and-documents.sha256 \
+            sbom/backend.spdx.json \
+            sbom/frontend.spdx.json \
+            sbom/lambda-content.spdx.json; do
+            test -s "$EVIDENCE_ROOT/$required"
+          done
+
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" '
+              .schemaVersion == 1 and
+              .sourceSha == $sourceSha and
+              .runId == $runId and
+              .runAttempt == $runAttempt and
+              .enforcement == "blocking" and
+              .canonicalArtifact ==
+                "SAM ArchonFunction Lambda ZIP content" and
+              .containerPath == "retired-non-release"
+            ' "$EVIDENCE_ROOT/sbom/provenance.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$EVIDENCE_ROOT/static/shellcheck-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$EVIDENCE_ROOT/static/actionlint-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and
+             .jsonExitCode == 0 and
+             .sarifExitCode == 0' \
+            "$EVIDENCE_ROOT/static/zizmor-status.json" >/dev/null
+          expected_templates='[
+            "aws/template.yaml",
+            "aws/bootstrap-oidc.yaml",
+            "aws/edge-waf.yaml",
+            "aws/finops.yaml"
+          ]'
+          for status_file in \
+            "$EVIDENCE_ROOT/iac/cfn-lint-status.json" \
+            "$EVIDENCE_ROOT/iac/guard-current-status.json"; do
+            jq -e \
+              --argjson templates "$expected_templates" '
+                .mode == "blocking" and
+                .applicationExitCode == 0 and
+                .foundationExitCode == 0 and
+                .edgeWafControlPlaneExitCode == 0 and
+                .finopsControlPlaneExitCode == 0 and
+                .templates == $templates
+              ' "$status_file" >/dev/null
+          done
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$EVIDENCE_ROOT/iac/trivy-iac-status.json" >/dev/null
+          jq -e '
+            .mode == "blocking" and
+            .scanners == ["vuln","license"] and
+            .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
+            .backendExitCode == 0 and
+            .frontendExitCode == 0 and
+            .lambdaContentExitCode == 0
+          ' "$EVIDENCE_ROOT/sbom/trivy-sbom-status.json" >/dev/null
+          cmp \
+            "$EVIDENCE_ROOT/static/waiver-ledger.sha256" \
+            "$EVIDENCE_ROOT/sbom/waiver-ledger.sha256"
+          waiver_ledger_sha256="$(
+            awk '{print $1}' \
+              "$EVIDENCE_ROOT/static/waiver-ledger.sha256"
+          )"
+          [[ "$waiver_ledger_sha256" =~ ^[0-9a-f]{64}$ ]]
+
+          mkdir -p "$RELEASE_ROOT"
+          (
+            cd "$EVIDENCE_ROOT"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) >"$RELEASE_ROOT/evidence-manifest.sha256"
+          test -s "$RELEASE_ROOT/evidence-manifest.sha256"
+
+          install -m 0600 \
+            "$EVIDENCE_ROOT/sbom/lambda-zip-content.sha256" \
+            "$RELEASE_ROOT/lambda-zip-content.sha256"
+          install -m 0600 \
+            "$EVIDENCE_ROOT/sbom/sbom-inputs-and-documents.sha256" \
+            "$RELEASE_ROOT/sbom-inputs-and-documents.sha256"
+
+          evidence_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/evidence-manifest.sha256" |
+              awk '{print $1}'
+          )"
+          lambda_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/lambda-zip-content.sha256" |
+              awk '{print $1}'
+          )"
+          sbom_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/sbom-inputs-and-documents.sha256" |
+              awk '{print $1}'
+          )"
+          for digest in \
+            "$evidence_manifest_sha256" \
+            "$lambda_manifest_sha256" \
+            "$sbom_manifest_sha256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          done
+
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg staticArtifact "$STATIC_ARTIFACT" \
+            --arg iacArtifact "$IAC_ARTIFACT" \
+            --arg sbomArtifact "$SBOM_ARTIFACT" \
+            --arg evidenceManifestSha256 "$evidence_manifest_sha256" \
+            --arg lambdaManifestSha256 "$lambda_manifest_sha256" \
+            --arg sbomManifestSha256 "$sbom_manifest_sha256" \
+            --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
+              {
+                schema: "archon.supply-chain.release-evidence",
+                version: 1,
+                sourceSha: $sourceSha,
+                repository: $repository,
+                workflow: {
+                  name: "Supply Chain (enforced)",
+                  path: ".github/workflows/supply-chain.yml",
+                  event: "push",
+                  ref: "refs/heads/main",
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                passed: true,
+                enforcement: {
+                  mode: "blocking-zero-unwaived-findings",
+                  blocks: [
+                    "shellcheck-warning-or-higher",
+                    "actionlint-workflow-and-inline-shell",
+                    "zizmor-regular-persona",
+                    "cfn-lint-all-current-templates",
+                    "sam-validate-lint-and-build",
+                    "cloudformation-guard-current-templates",
+                    "trivy-iac-medium-or-higher",
+                    "trivy-sbom-vulnerability-and-license-policy"
+                  ],
+                  acceptedWaivers: 0,
+                  unwaivedFindings: 0,
+                  limitation:
+                    "A pass proves zero findings at configured scanner thresholds with an empty waiver ledger; it is not a vulnerability-free, penetration-test, or legal-review claim."
+                },
+                evidence: {
+                  staticArtifact: $staticArtifact,
+                  infrastructureArtifact: $iacArtifact,
+                  sbomArtifact: $sbomArtifact,
+                  cloudFormationTemplates: [
+                    "aws/template.yaml",
+                    "aws/bootstrap-oidc.yaml",
+                    "aws/edge-waf.yaml",
+                    "aws/finops.yaml"
+                  ],
+                  manifestSha256: $evidenceManifestSha256,
+                  lambdaContentManifestSha256: $lambdaManifestSha256,
+                  sbomDocumentsManifestSha256: $sbomManifestSha256,
+                  waiverLedgerSha256: $waiverLedgerSha256
+                }
+              }
+            ' >"$RELEASE_ROOT/supply-chain-release-receipt.json"
+
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
+              keys == [
+                "enforcement",
+                "evidence",
+                "passed",
+                "repository",
+                "schema",
+                "sourceSha",
+                "version",
+                "workflow"
+              ] and
+              .schema == "archon.supply-chain.release-evidence" and
+              .version == 1 and
+              .sourceSha == $sourceSha and
+              .repository == "upgradedev/archon-cockroach-memory" and
+              .workflow == {
+                "name":"Supply Chain (enforced)",
+                "path":".github/workflows/supply-chain.yml",
+                "event":"push",
+                "ref":"refs/heads/main",
+                "runId":$runId,
+                "runAttempt":$runAttempt
+              } and
+              .passed == true and
+              .enforcement.mode ==
+                "blocking-zero-unwaived-findings" and
+              .enforcement.blocks == [
+                "shellcheck-warning-or-higher",
+                "actionlint-workflow-and-inline-shell",
+                "zizmor-regular-persona",
+                "cfn-lint-all-current-templates",
+                "sam-validate-lint-and-build",
+                "cloudformation-guard-current-templates",
+                "trivy-iac-medium-or-higher",
+                "trivy-sbom-vulnerability-and-license-policy"
+              ] and
+              .enforcement.acceptedWaivers == 0 and
+              .enforcement.unwaivedFindings == 0 and
+              .evidence.cloudFormationTemplates == [
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ] and
+              (.evidence.manifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.evidence.lambdaContentManifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.evidence.sbomDocumentsManifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              .evidence.waiverLedgerSha256 ==
+                $waiverLedgerSha256
+            ' "$RELEASE_ROOT/supply-chain-release-receipt.json" >/dev/null
+
+          receipt_sha256="$(
+            sha256sum "$RELEASE_ROOT/supply-chain-release-receipt.json" |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Attest exact-SHA supply-chain release receipt
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/archon-supply-chain-release/supply-chain-release-receipt.json
+
+      - name: Persist exact-SHA release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supply-chain-release-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-supply-chain-release/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summarize exact-SHA release evidence
+        shell: bash
+        env:
+          RECEIPT_SHA256: ${{ steps.receipt.outputs.sha256 }}
+        run: |
+          {
+            echo "### Exact-SHA supply-chain release evidence"
+            echo
+            echo "| Evidence | Value |"
+            echo "|---|---|"
+            echo "| Source SHA | \`$GITHUB_SHA\` |"
+            echo "| Receipt SHA-256 | \`$RECEIPT_SHA256\` |"
+            echo "| Provenance attestation | GitHub artifact attestation |"
+            echo "| Enforcement | Blocking; zero unwaived findings at configured thresholds |"
+          } >>"$GITHUB_STEP_SUMMARY"

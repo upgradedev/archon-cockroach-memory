@@ -50,6 +50,18 @@ export function ProofLedger({
     /^[0-9a-f]{64}$/u.test(
       proof.vectorIndex.definitionFingerprint ?? ""
     );
+  const resolutionVerified =
+    proof?.resolutionLoop.enabled === true &&
+    proof.resolutionLoop.schemaTables === 5 &&
+    proof.resolutionLoop.transactionIsolation === "SERIALIZABLE" &&
+    proof.resolutionLoop.authorityBoundary ===
+      "financial-controller-human-gate" &&
+    proof.resolutionLoop.identityAssurance ===
+      "fixed-demo-role-assertion-not-authenticated" &&
+    proof.resolutionLoop.canonicalMemoryMutable === false &&
+    proof.resolutionLoop.externalSideEffects === "none" &&
+    proof.resolutionLoop.evidence ===
+      "live fixed-scope sandbox schema query";
   const releaseCommitSha = proof?.release.commitSha ?? null;
   const company = proof?.scope.company ?? PUBLIC_COMPANY;
 
@@ -127,13 +139,49 @@ export function ProofLedger({
                   {display(proof?.memory.contentDigests)}/{display(persisted)} payload-bound SHA-256 digests
                 </span>
                 <span className="block font-mono text-[10px] leading-5 text-muted">
-                  public mutation disabled
+                  canonical-memory mutation disabled
                 </span>
                 {proof?.memory.evidence && (
                   <span className="block font-mono text-[10px] leading-5 text-muted">
                     {proof.memory.evidence}
                   </span>
                 )}
+              </dd>
+            </div>
+
+            <div className="grid grid-cols-[6.5rem_1fr] gap-4 border-b border-line py-5">
+              <dt className="text-[9px] font-bold uppercase tracking-[0.17em] text-muted">
+                Action loop
+              </dt>
+              <dd className="text-right">
+                <span
+                  className={`font-mono text-xs font-bold uppercase ${
+                    resolutionVerified ? "text-mint" : "text-paper"
+                  }`}
+                  data-testid="resolution-proof"
+                >
+                  {resolutionVerified
+                    ? "Human gate verified"
+                    : "Not verified"}
+                </span>
+                <span className="mt-2 block font-mono text-[10px] leading-5 text-muted">
+                  {display(proof?.resolutionLoop.schemaTables)}/5 sandbox
+                  tables · {display(
+                    proof?.resolutionLoop.activeSandboxSessions
+                  )} active sessions
+                </span>
+                <span className="block font-mono text-[10px] leading-5 text-muted">
+                  {proof?.resolutionLoop.transactionIsolation ??
+                    "isolation unreported"}{" "}
+                  · {proof?.resolutionLoop.forgetting ??
+                    "retention unreported"}
+                </span>
+                <span className="block font-mono text-[10px] leading-5 text-muted">
+                  human approval · immutable receipt · no external side effects
+                </span>
+                <span className="block font-mono text-[10px] leading-5 text-muted">
+                  demo role assertion · identity not authenticated
+                </span>
               </dd>
             </div>
 
@@ -258,7 +306,7 @@ export function ProofLedger({
             <p className="mt-2 font-mono text-xs text-paper">{company}</p>
             <p className="mt-1 text-[10px] leading-5 text-muted">
               {proof?.scope.mode === "fixed-synthetic-demo"
-                ? "Fixed synthetic public dataset · read-only"
+                ? "Canonical dataset read-only · action sandbox isolated"
                 : proof?.scope.mode ?? "Scope mode not reported"}
             </p>
           </div>

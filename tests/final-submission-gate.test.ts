@@ -422,15 +422,20 @@ function hostedDastReceipt(
     "limit-boundary",
     "write-route-absent",
     "audit-scope-injection",
+    "resolution-session-method-boundary",
+    "resolution-session-fixed-scope-boundary",
+    "resolution-session-auth-boundary",
+    "resolution-capability-shape-boundary",
+    "resolution-decision-auth-boundary",
     "unknown-route-boundary",
   ];
   const statuses = [
     200, 200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400,
-    404, 400, 404,
+    404, 400, 405, 400, 401, 401, 401, 404,
   ];
   return {
     schema: "archon.hosted-dast",
-    version: 3,
+    version: 4,
     generatedAt: "2026-07-29T12:03:00.000Z",
     profile: "exact-release",
     targetOrigin: "https://d2s5v0o0eg2aaw.cloudfront.net",

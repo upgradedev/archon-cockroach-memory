@@ -760,6 +760,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
           PROVENANCE_ARTIFACT_ID: ${{ steps.provenance_artifact.outputs.artifact-id }}
           PROVENANCE_ARTIFACT_DIGEST: ${{ steps.provenance_artifact.outputs.artifact-digest }}
+          RELEASE_SHA: ${{ inputs.exact_sha }}
         run: |
           set -euo pipefail
           test "${ARTIFACT_ID}" -gt 0
@@ -775,7 +776,7 @@ jobs:
           {
             echo "## Verified Archon Memory demo video"
             echo
-            echo "- exact release: \`${{ inputs.exact_sha }}\`"
+            echo "- exact release: \`${RELEASE_SHA}\`"
             echo "- measured duration: \`${duration_seconds}s\`"
             echo "- final-media scene markers: \`${marker_count}/7\`"
             echo "- MP4 SHA-256: \`${video_sha256}\`"

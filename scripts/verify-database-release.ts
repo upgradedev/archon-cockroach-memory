@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,7 +36,18 @@ import {
   affirmativeSystemGrants,
   type SystemGrant,
 } from "../src/db/system-grants.js";
-import { parseDatabaseSecret } from "../src/db/secret.js";
+import {
+  assertCockroachEndpointBinding,
+  parseDatabaseSecret,
+} from "../src/db/secret.js";
+import { closePool } from "../src/db/client.js";
+import {
+  handleCreateResolutionSession,
+  handleGetResolutionSession,
+  handleResolutionDecision,
+} from "../src/http/resolution-handler.js";
+import { CockroachResolutionStore } from "../src/memory/resolution-store.js";
+import type { ResolutionSnapshot } from "../src/memory/resolution.js";
 
 const { Client } = pg;
 type PgClient = InstanceType<typeof Client>;
@@ -59,6 +70,57 @@ const ISOLATION_CANARY_KEYS = [
   "archon-demo/v1/rls-hidden-company-canary",
   "archon-demo/v1/rls-wrong-tenant-canary",
   "archon-demo/v1/rls-retracted-status-canary",
+] as const;
+
+const RESOLUTION_TABLES = [
+  "memory_demo_sessions",
+  "memory_resolution_observations",
+  "memory_resolution_proposals",
+  "memory_resolution_decisions",
+  "memory_resolution_consolidations",
+] as const;
+const RESOLUTION_TTL_CRON = "0 */4 * * *";
+const RESOLUTION_TRANSITION_OWNER =
+  "archon_resolution_transition_owner";
+
+const RUNTIME_RELATION_GRANTS = new Map<string, readonly string[]>([
+  ["agent_memory", ["SELECT"]],
+  [PUBLIC_RECALL_VIEW_NAME, ["SELECT"]],
+  [PUBLIC_KIND_RECALL_VIEW_NAME, ["SELECT"]],
+  ["memory_demo_sessions", ["SELECT"]],
+  ["memory_resolution_observations", ["SELECT"]],
+  ["memory_resolution_proposals", ["SELECT"]],
+  ["memory_resolution_decisions", ["SELECT"]],
+  ["memory_resolution_consolidations", ["SELECT"]],
+]);
+const RESOLUTION_WRITER_GRANTS = new Map<string, readonly string[]>(
+  [...RUNTIME_RELATION_GRANTS].filter(([relation]) =>
+    RESOLUTION_TABLES.includes(
+      relation as (typeof RESOLUTION_TABLES)[number]
+    )
+  )
+);
+const RESOLUTION_TRANSITION_OWNER_GRANTS = new Map<
+  string,
+  readonly string[]
+>([
+  ["memory_demo_sessions", ["INSERT", "SELECT", "UPDATE"]],
+  ["memory_resolution_observations", ["INSERT", "SELECT", "UPDATE"]],
+  ["memory_resolution_proposals", ["INSERT", "SELECT", "UPDATE"]],
+  ["memory_resolution_decisions", ["INSERT", "SELECT"]],
+  ["memory_resolution_consolidations", ["INSERT", "SELECT"]],
+]);
+const RESOLUTION_FUNCTIONS = [
+  {
+    name: "archon_resolution_create_session",
+    signature:
+      "public.archon_resolution_create_session(STRING, UUID, UUID, UUID, UUID, TIMESTAMPTZ, INT8)",
+  },
+  {
+    name: "archon_resolution_decide",
+    signature:
+      "public.archon_resolution_decide(STRING, STRING, UUID, UUID, UUID, TIMESTAMPTZ)",
+  },
 ] as const;
 
 const CANONICAL_MANIFEST = {
@@ -102,6 +164,29 @@ interface RuntimeCspannPathProof {
 interface RuntimeCspannProof {
   noKind: RuntimeCspannPathProof;
   kind: RuntimeCspannPathProof;
+}
+
+interface RuntimeResolutionProof {
+  fixedSyntheticScenario: true;
+  serializableTransactions: true;
+  databaseEnforcedTransitions: true;
+  exactTransitionFunctionExecute: true;
+  directResolutionDmlDenied: true;
+  approvePath: true;
+  rejectPath: true;
+  idempotentReplay: true;
+  conflictingFinalDecisionRejected: true;
+  receiptVerified: true;
+  receiptDatabaseDerived: true;
+  consolidationVerified: true;
+  canonicalMemoryUnchanged: true;
+  immutableDecisionTables: true;
+  deletePrivilegeAbsent: true;
+  externalSideEffects: "none";
+  sessionIsolationBoundary: "trusted-lambda-bearer-token";
+  retention: "cockroach-row-level-ttl";
+  approvedReceiptSha256: string;
+  rejectedReceiptSha256: string;
 }
 
 interface FixtureRow {
@@ -227,29 +312,67 @@ async function verifyRuntimeGrants(
     is_grantable: boolean;
   }>(`SHOW GRANTS ON TABLE * FOR ${principalSql}`);
   const applicationGrants = tableGrants.rows;
-  const grantedRelations = new Set(
-    applicationGrants.map((grant) => grant.table_name)
+  const expectedGrantKeys = new Set(
+    [...RUNTIME_RELATION_GRANTS].flatMap(([relation, privileges]) =>
+      privileges.map((privilege) => `${relation}:${privilege}`)
+    )
   );
-  const expectedRelations = new Set([
-    "agent_memory",
-    PUBLIC_RECALL_VIEW_NAME,
-    PUBLIC_KIND_RECALL_VIEW_NAME,
-  ]);
+  const actualGrantKeys = new Set(
+    applicationGrants.map(
+      (grant) => `${grant.table_name}:${grant.privilege_type}`
+    )
+  );
   if (
-    applicationGrants.length !== expectedRelations.size ||
-    grantedRelations.size !== expectedRelations.size ||
-    [...expectedRelations].some(
-      (relation) => !grantedRelations.has(relation)
-    ) ||
+    applicationGrants.length !== expectedGrantKeys.size ||
+    actualGrantKeys.size !== expectedGrantKeys.size ||
+    [...expectedGrantKeys].some((key) => !actualGrantKeys.has(key)) ||
     applicationGrants.some(
       (grant) =>
         grant.schema_name !== "public" ||
-        grant.privilege_type !== "SELECT" ||
         grant.is_grantable
     )
   ) {
     throw new ReleaseGateError(
-      "Runtime relation privilege matrix is not exact read-only memory."
+      "Runtime relation privilege matrix exceeds canonical and synthetic SELECT-only access."
+    );
+  }
+
+  const functionGrants = await client.query<{
+    schema_name: string | null;
+    object_name: string | null;
+    object_type: string;
+    grantee: string;
+    privilege_type: string;
+    is_grantable: boolean;
+  }>(
+    `SELECT schema_name, object_name, object_type, grantee,
+            privilege_type, is_grantable
+       FROM [SHOW GRANTS FOR ${principalSql}]
+      WHERE object_type = 'function'`
+  );
+  const functionNames = functionGrants.rows.map((grant) =>
+    String(grant.object_name ?? "")
+      .replace(/\(.*/u, "")
+      .split(".")
+      .at(-1)
+  );
+  const expectedFunctionNames = RESOLUTION_FUNCTIONS.map(
+    (routine) => routine.name
+  );
+  if (
+    functionGrants.rows.length !== RESOLUTION_FUNCTIONS.length ||
+    new Set(functionNames).size !== RESOLUTION_FUNCTIONS.length ||
+    expectedFunctionNames.some((name) => !functionNames.includes(name)) ||
+    functionGrants.rows.some(
+      (grant) =>
+        grant.schema_name !== "public" ||
+        ![principal, "archon_resolution_writer"].includes(grant.grantee) ||
+        grant.privilege_type !== "EXECUTE" ||
+        grant.is_grantable
+    )
+  ) {
+    throw new ReleaseGateError(
+      "Runtime function privileges exceed the exact two-routine transition API."
     );
   }
 
@@ -608,6 +731,226 @@ async function verifyRuntimeCspannPath(
   };
 }
 
+function requireResolutionSnapshot(
+  body: Record<string, unknown>,
+  label: string
+): ResolutionSnapshot {
+  const snapshot = body.snapshot;
+  if (typeof snapshot !== "object" || snapshot === null) {
+    throw new ReleaseGateError(`${label} did not return a resolution snapshot.`);
+  }
+  return snapshot as ResolutionSnapshot;
+}
+
+function verifyPendingResolutionSnapshot(snapshot: ResolutionSnapshot): void {
+  if (
+    snapshot.scenarioId !==
+      "helios-payroll-2026-06-correction-v1" ||
+    snapshot.company !== "Helios SA" ||
+    snapshot.period !== "2026-06" ||
+    snapshot.state !== "pending" ||
+    snapshot.receipt !== null ||
+    snapshot.proposal.status !== "pending" ||
+    snapshot.proposal.requiresHumanRole !== "financial-controller" ||
+    snapshot.policy.canonicalMemoryMutable !== false ||
+    snapshot.policy.mutationScope !==
+      "ephemeral-synthetic-session-only" ||
+    snapshot.policy.retention !== "row-level-ttl" ||
+    snapshot.lifecycle.externalSideEffects !== "none" ||
+    snapshot.observations.length !== 2 ||
+    snapshot.observations[0]?.label !== "prior" ||
+    snapshot.observations[0].status !== "current" ||
+    snapshot.observations[1]?.label !== "corrected" ||
+    snapshot.observations[1].status !== "candidate"
+  ) {
+    throw new ReleaseGateError(
+      "Initial resolution snapshot violated the fixed synthetic policy."
+    );
+  }
+}
+
+async function exerciseResolutionDecision(
+  store: CockroachResolutionStore,
+  decision: "approve" | "reject"
+): Promise<{
+  receiptSha256: string;
+  conflictingFinalDecisionRejected: true;
+}> {
+  const created = await handleCreateResolutionSession({}, store);
+  if (
+    created.status !== 201 ||
+    created.body.tokenType !== "Bearer" ||
+    typeof created.body.sessionToken !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(created.body.sessionToken)
+  ) {
+    throw new ReleaseGateError(
+      "Resolution session creation did not issue the bounded bearer contract."
+    );
+  }
+  const token = created.body.sessionToken;
+  verifyPendingResolutionSnapshot(
+    requireResolutionSnapshot(created.body, "Resolution session creation")
+  );
+
+  const idempotencyKey = randomUUID();
+  const decided = await handleResolutionDecision(
+    `Bearer ${token}`,
+    { decision, idempotencyKey },
+    store
+  );
+  if (decided.status !== 200 || decided.body.idempotent !== true) {
+    throw new ReleaseGateError(
+      `${decision} resolution decision did not complete.`
+    );
+  }
+  const snapshot = requireResolutionSnapshot(
+    decided.body,
+    `${decision} resolution decision`
+  );
+  const expectedState = decision === "approve" ? "approved" : "rejected";
+  const expectedStatuses =
+    decision === "approve"
+      ? [
+          ["prior", "superseded"],
+          ["corrected", "current"],
+        ]
+      : [
+          ["prior", "current"],
+          ["corrected", "rejected"],
+        ];
+  const receipt = snapshot.receipt;
+  if (
+    snapshot.state !== expectedState ||
+    snapshot.proposal.status !== expectedState ||
+    snapshot.lifecycle.externalSideEffects !== "none" ||
+    snapshot.lifecycle.consolidation !==
+      (decision === "approve"
+        ? "approved-observation-is-current"
+        : "prior-observation-remains-current") ||
+    JSON.stringify(
+      snapshot.observations.map((observation) => [
+        observation.label,
+        observation.status,
+      ])
+    ) !== JSON.stringify(expectedStatuses) ||
+    !receipt ||
+    receipt.actorRole !== "financial-controller" ||
+    receipt.policyVersion !== "resolution-policy-v1" ||
+    !/^[a-f0-9]{64}$/u.test(receipt.digest)
+  ) {
+    throw new ReleaseGateError(
+      `${decision} resolution lifecycle or receipt drifted.`
+    );
+  }
+
+  const replay = await handleResolutionDecision(
+    `Bearer ${token}`,
+    { decision, idempotencyKey },
+    store
+  );
+  const replaySnapshot = requireResolutionSnapshot(
+    replay.body,
+    `${decision} idempotent replay`
+  );
+  const replayReceipt = replaySnapshot.receipt;
+  if (
+    replay.status !== 200 ||
+    replaySnapshot.sessionId !== snapshot.sessionId ||
+    !replayReceipt ||
+    replayReceipt.digest !== receipt.digest ||
+    replayReceipt.decisionId !== receipt.decisionId
+  ) {
+    throw new ReleaseGateError(
+      `${decision} resolution replay was not exactly idempotent.`
+    );
+  }
+
+  const fetched = await handleGetResolutionSession(
+    `Bearer ${token}`,
+    store
+  );
+  const fetchedSnapshot = requireResolutionSnapshot(
+    fetched.body,
+    `${decision} resolution read-after-write`
+  );
+  if (
+    fetched.status !== 200 ||
+    fetchedSnapshot.state !== expectedState ||
+    fetchedSnapshot.receipt?.digest !== receipt.digest
+  ) {
+    throw new ReleaseGateError(
+      `${decision} resolution read-after-write proof failed.`
+    );
+  }
+
+  const conflict = await handleResolutionDecision(
+    `Bearer ${token}`,
+    {
+      decision: decision === "approve" ? "reject" : "approve",
+      idempotencyKey: randomUUID(),
+    },
+    store
+  );
+  if (conflict.status !== 409) {
+    throw new ReleaseGateError(
+      `${decision} resolution allowed a second final decision.`
+    );
+  }
+  return {
+    receiptSha256: receipt.digest,
+    conflictingFinalDecisionRejected: true,
+  };
+}
+
+async function verifyRuntimeResolutionLoop(
+  connectionString: string
+): Promise<RuntimeResolutionProof> {
+  const previousUrl = process.env.DATABASE_URL;
+  const previousSecret = process.env.DATABASE_SECRET_ID;
+  await closePool();
+  process.env.DATABASE_URL = connectionString;
+  delete process.env.DATABASE_SECRET_ID;
+  try {
+    const store = new CockroachResolutionStore();
+    const approved = await exerciseResolutionDecision(store, "approve");
+    const rejected = await exerciseResolutionDecision(store, "reject");
+    return {
+      fixedSyntheticScenario: true,
+      serializableTransactions: true,
+      databaseEnforcedTransitions: true,
+      exactTransitionFunctionExecute: true,
+      directResolutionDmlDenied: true,
+      approvePath: true,
+      rejectPath: true,
+      idempotentReplay: true,
+      conflictingFinalDecisionRejected: true,
+      receiptVerified: true,
+      receiptDatabaseDerived: true,
+      consolidationVerified: true,
+      canonicalMemoryUnchanged: true,
+      immutableDecisionTables: true,
+      deletePrivilegeAbsent: true,
+      externalSideEffects: "none",
+      sessionIsolationBoundary: "trusted-lambda-bearer-token",
+      retention: "cockroach-row-level-ttl",
+      approvedReceiptSha256: approved.receiptSha256,
+      rejectedReceiptSha256: rejected.receiptSha256,
+    };
+  } finally {
+    await closePool();
+    if (previousUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = previousUrl;
+    }
+    if (previousSecret === undefined) {
+      delete process.env.DATABASE_SECRET_ID;
+    } else {
+      process.env.DATABASE_SECRET_ID = previousSecret;
+    }
+  }
+}
+
 async function verifyRuntime(
   environment: "staging" | "production",
   connectionString: string,
@@ -620,6 +963,7 @@ async function verifyRuntime(
   distinctIdempotencyKeys: number;
   distinctContentDigests: number;
   cspannRecall: RuntimeCspannProof;
+  resolutionLoop: RuntimeResolutionProof;
 }> {
   const expectedPrincipal = decodeURIComponent(
     new URL(connectionString).username
@@ -658,6 +1002,17 @@ async function verifyRuntime(
       expectedPrincipal,
       identityRow.database_name
     );
+    const isolation = await client.query<Record<string, unknown>>(
+      "SHOW transaction_isolation"
+    );
+    const isolationValue = String(
+      Object.values(isolation.rows[0] ?? {})[0] ?? ""
+    ).toLowerCase();
+    if (isolationValue !== "serializable") {
+      throw new ReleaseGateError(
+        `${environment} runtime transactions are not serializable.`
+      );
+    }
 
     // application_name is attacker-controlled telemetry, never authorization.
     await client.query(
@@ -763,6 +1118,55 @@ async function verifyRuntime(
       "SELECT count(*) FROM documents",
       `${environment} non-memory SELECT`
     );
+    for (const table of RESOLUTION_TABLES) {
+      await expectDenied(
+        client,
+        `INSERT INTO public.${table}
+         SELECT * FROM public.${table} WHERE false`,
+        `${environment} direct ${table} INSERT`
+      );
+      await expectDenied(
+        client,
+        `UPDATE public.${table}
+            SET expires_at = expires_at
+          WHERE false`,
+        `${environment} direct ${table} UPDATE`
+      );
+      await expectDenied(
+        client,
+        `DELETE FROM public.${table} WHERE false`,
+        `${environment} direct ${table} DELETE`
+      );
+    }
+    const resolutionLoop = await verifyRuntimeResolutionLoop(
+      connectionString
+    );
+    const canonicalAfter = await client.query<{
+      visible: string;
+      canonical_visible: string;
+      idempotency_keys: string;
+      content_digests: string;
+    }>(
+      `SELECT count(*) AS visible,
+              count(*) FILTER (
+                WHERE idempotency_key = ANY($1::STRING[])
+              ) AS canonical_visible,
+              count(DISTINCT idempotency_key) AS idempotency_keys,
+              count(DISTINCT content_hash) AS content_digests
+         FROM agent_memory`,
+      [PUBLIC_FIXTURE_KEYS]
+    );
+    const after = canonicalAfter.rows[0];
+    if (
+      Number(after?.visible ?? -1) !== visible ||
+      Number(after?.canonical_visible ?? -1) !== canonicalVisible ||
+      Number(after?.idempotency_keys ?? -1) !== distinctIdempotencyKeys ||
+      Number(after?.content_digests ?? -1) !== distinctContentDigests
+    ) {
+      throw new ReleaseGateError(
+        `${environment} resolution loop mutated canonical agent_memory.`
+      );
+    }
     return {
       environment,
       principal: expectedPrincipal,
@@ -771,6 +1175,7 @@ async function verifyRuntime(
       distinctIdempotencyKeys,
       distinctContentDigests,
       cspannRecall: { noKind, kind },
+      resolutionLoop,
     };
   } finally {
     await client.end().catch(() => undefined);
@@ -807,6 +1212,8 @@ async function verifyRuntimeRoles(
   const expectedUsers = [
     ...principals,
     "archon_public_reader",
+    "archon_resolution_writer",
+    RESOLUTION_TRANSITION_OWNER,
     PUBLIC_RECALL_VIEW_OWNER,
   ];
   const users = await client.query<{
@@ -852,7 +1259,10 @@ async function verifyRuntimeRoles(
       }
       continue;
     }
-    if (user.username === "archon_public_reader") {
+    if (
+      user.username === "archon_public_reader" ||
+      user.username === "archon_resolution_writer"
+    ) {
       if (
         memberships.length !== 0 ||
         hasDangerousOption ||
@@ -860,14 +1270,31 @@ async function verifyRuntimeRoles(
         options.includes("LOGIN")
       ) {
         throw new ReleaseGateError(
-          "archon_public_reader is not a bounded base role."
+          `${user.username} is not a bounded base role.`
         );
       }
       continue;
     }
+    if (user.username === RESOLUTION_TRANSITION_OWNER) {
+      if (
+        memberships.length !== 0 ||
+        hasDangerousOption ||
+        !options.includes("NOLOGIN") ||
+        options.includes("LOGIN")
+      ) {
+        throw new ReleaseGateError(
+          "Resolution transition owner is not an isolated NOLOGIN/NOBYPASSRLS role."
+        );
+      }
+      continue;
+    }
+    const exactRuntimeMemberships = [...memberships].sort();
     if (
-      memberships.length !== 1 ||
-      memberships[0] !== "archon_public_reader" ||
+      JSON.stringify(exactRuntimeMemberships) !==
+        JSON.stringify([
+          "archon_public_reader",
+          "archon_resolution_writer",
+        ]) ||
       hasDangerousOption
     ) {
       throw new ReleaseGateError(
@@ -882,11 +1309,15 @@ async function verifyRuntimeRoles(
   }>("SELECT username, member_of FROM [SHOW USERS]");
   if (
     allUsers.rows.some((user) =>
-      stringArray(user.member_of).includes(PUBLIC_RECALL_VIEW_OWNER)
+      stringArray(user.member_of).some((membership) =>
+        [PUBLIC_RECALL_VIEW_OWNER, RESOLUTION_TRANSITION_OWNER].includes(
+          membership
+        )
+      )
     )
   ) {
     throw new ReleaseGateError(
-      "Public recall view owner unexpectedly has members."
+      "An isolated object owner unexpectedly has role members."
     );
   }
   const ownerSystemGrants = await client.query<SystemGrant>(
@@ -898,6 +1329,128 @@ async function verifyRuntimeRoles(
   if (ownerAffirmative.length !== 0) {
     throw new ReleaseGateError(
       "Public recall view owner has unexpected system privileges."
+    );
+  }
+  const resolutionSystemGrants = await client.query<SystemGrant>(
+    `SHOW SYSTEM GRANTS FOR archon_resolution_writer`
+  );
+  if (
+    affirmativeSystemGrants(resolutionSystemGrants.rows).length !== 0
+  ) {
+    throw new ReleaseGateError(
+      "Resolution writer has unexpected system privileges."
+    );
+  }
+  const transitionOwnerSystemGrants = await client.query<SystemGrant>(
+    `SHOW SYSTEM GRANTS FOR ${RESOLUTION_TRANSITION_OWNER}`
+  );
+  if (
+    affirmativeSystemGrants(transitionOwnerSystemGrants.rows).length !== 0
+  ) {
+    throw new ReleaseGateError(
+      "Resolution transition owner has unexpected system privileges."
+    );
+  }
+
+  const ownerSchemaGrants = await client.query<{
+    grantee: string;
+    privilege_type: string;
+    is_grantable: boolean;
+  }>("SHOW GRANTS ON SCHEMA public");
+  const directOwnerSchemaGrants = ownerSchemaGrants.rows.filter(
+    (grant) => grant.grantee === RESOLUTION_TRANSITION_OWNER
+  );
+  if (
+    directOwnerSchemaGrants.length !== 1 ||
+    directOwnerSchemaGrants[0]?.privilege_type !== "USAGE" ||
+    directOwnerSchemaGrants[0].is_grantable
+  ) {
+    throw new ReleaseGateError(
+      "Resolution transition owner must retain USAGE but no CREATE on public."
+    );
+  }
+
+  const ownerDefaults = await client.query<{
+    session_variables: string;
+    default_values: string;
+    database: string | null;
+    inherited_globally: boolean;
+  }>(
+    `SELECT session_variables, default_values, database, inherited_globally
+       FROM [SHOW DEFAULT SESSION VARIABLES
+             FOR ROLE ${RESOLUTION_TRANSITION_OWNER}]
+      WHERE session_variables = 'search_path'`
+  );
+  if (
+    ownerDefaults.rows.length !== 1 ||
+    ownerDefaults.rows[0]?.default_values
+      .replace(/\s+/gu, "")
+      .toLowerCase() !== "pg_catalog" ||
+    ownerDefaults.rows[0].database !== null ||
+    ownerDefaults.rows[0].inherited_globally
+  ) {
+    throw new ReleaseGateError(
+      "Resolution transition owner search_path is not pinned to pg_catalog."
+    );
+  }
+
+  const ownerRoleGrants = await client.query<{
+    role_name: string;
+    member: string;
+    is_admin: boolean;
+  }>(`SHOW GRANTS ON ROLE ${RESOLUTION_TRANSITION_OWNER}`);
+  if (ownerRoleGrants.rows.length !== 0) {
+    throw new ReleaseGateError(
+      "Resolution transition owner must have no role members."
+    );
+  }
+
+  const runtimeMemberships = await client.query<{
+    role_name: string;
+    member: string;
+    is_admin: boolean;
+  }>(
+    `SELECT role_name, member, is_admin
+       FROM [SHOW GRANTS ON ROLE
+             archon_public_reader, archon_resolution_writer]
+      WHERE member = ANY($1::STRING[])`,
+    [principals]
+  );
+  const expectedMemberships = new Set(
+    principals.flatMap((principal) => [
+      `archon_public_reader:${principal}`,
+      `archon_resolution_writer:${principal}`,
+    ])
+  );
+  const actualMemberships = new Set(
+    runtimeMemberships.rows.map(
+      (membership) => `${membership.role_name}:${membership.member}`
+    )
+  );
+  const allBaseRoleMemberships = new Set(
+    allUsers.rows.flatMap((user) =>
+      stringArray(user.member_of)
+        .filter((membership) =>
+          ["archon_public_reader", "archon_resolution_writer"].includes(
+            membership
+          )
+        )
+        .map((membership) => `${membership}:${user.username}`)
+    )
+  );
+  if (
+    runtimeMemberships.rows.length !== expectedMemberships.size ||
+    actualMemberships.size !== expectedMemberships.size ||
+    allBaseRoleMemberships.size !== expectedMemberships.size ||
+    [...expectedMemberships].some(
+      (membership) =>
+        !actualMemberships.has(membership) ||
+        !allBaseRoleMemberships.has(membership)
+    ) ||
+    runtimeMemberships.rows.some((membership) => membership.is_admin)
+  ) {
+    throw new ReleaseGateError(
+      "Runtime role memberships are not exact or include WITH ADMIN OPTION."
     );
   }
 }
@@ -1133,6 +1686,464 @@ async function verifyServingViewSecurity(
   }
 }
 
+function normalizedCatalogExpression(value: string | null): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replaceAll('"', "")
+    .replace(/:{2,3}(?:string|text)\b/gu, "")
+    .replace(/[()]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+async function verifyExactResolutionRelationGrants(
+  client: PgClient,
+  role: string,
+  expected: ReadonlyMap<string, readonly string[]>
+): Promise<number> {
+  const grants = await client.query<{
+    schema_name: string;
+    table_name: string;
+    privilege_type: string;
+    is_grantable: boolean;
+  }>(`SHOW GRANTS ON TABLE * FOR ${quoteIdentifier(role)}`);
+  const expectedKeys = new Set(
+    [...expected].flatMap(([table, privileges]) =>
+      privileges.map((privilege) => `${table}:${privilege}`)
+    )
+  );
+  const actualKeys = new Set(
+    grants.rows.map(
+      (grant) => `${grant.table_name}:${grant.privilege_type}`
+    )
+  );
+  if (
+    grants.rows.length !== expectedKeys.size ||
+    actualKeys.size !== expectedKeys.size ||
+    [...expectedKeys].some((key) => !actualKeys.has(key)) ||
+    grants.rows.some(
+      (grant) =>
+        grant.schema_name !== "public" ||
+        grant.is_grantable ||
+        !RESOLUTION_TABLES.includes(
+          grant.table_name as (typeof RESOLUTION_TABLES)[number]
+        )
+    )
+  ) {
+    throw new ReleaseGateError(`${role} relation privilege matrix drifted.`);
+  }
+  return grants.rows.length;
+}
+
+async function verifyResolutionTransitionFunctions(
+  client: PgClient
+): Promise<{
+  transitionFunctionCount: 2;
+  writerFunctionExecuteCount: 2;
+}> {
+  const routineNames = RESOLUTION_FUNCTIONS.map((routine) => routine.name);
+  const routines = await client.query<{
+    proname: string;
+    owner: string;
+    prosecdef: boolean;
+    provolatile: string;
+    lanname: string;
+    prosrc: string;
+  }>(
+    `SELECT procedures.proname,
+            roles.rolname AS owner,
+            procedures.prosecdef,
+            procedures.provolatile,
+            languages.lanname,
+            procedures.prosrc
+       FROM pg_catalog.pg_proc AS procedures
+       JOIN pg_catalog.pg_namespace AS namespaces
+         ON namespaces.oid = procedures.pronamespace
+       JOIN pg_catalog.pg_roles AS roles
+         ON roles.oid = procedures.proowner
+       JOIN pg_catalog.pg_language AS languages
+         ON languages.oid = procedures.prolang
+      WHERE namespaces.nspname = 'public'
+        AND procedures.proname = ANY($1::STRING[])`,
+    [routineNames]
+  );
+  if (
+    routines.rows.length !== RESOLUTION_FUNCTIONS.length ||
+    routines.rows.some(
+      (routine) =>
+        routine.owner !== RESOLUTION_TRANSITION_OWNER ||
+        !routine.prosecdef ||
+        routine.provolatile !== "v" ||
+        routine.lanname.toLowerCase() !== "plpgsql" ||
+        /\bexecute\b/iu.test(routine.prosrc) ||
+        !routine.prosrc.includes("public.memory_demo_sessions")
+    )
+  ) {
+    throw new ReleaseGateError(
+      "Resolution SECURITY DEFINER routine ownership or body contract drifted."
+    );
+  }
+
+  const createBody = routines.rows.find(
+    (routine) => routine.proname === "archon_resolution_create_session"
+  )?.prosrc;
+  const decideBody = routines.rows.find(
+    (routine) => routine.proname === "archon_resolution_decide"
+  )?.prosrc;
+  if (
+    !createBody ||
+    !decideBody ||
+    ![
+      "public.memory_demo_sessions",
+      "public.memory_resolution_observations",
+      "public.memory_resolution_proposals",
+      "pg_catalog.now()",
+      "p_max_active_sessions > 500",
+    ].every((fragment) => createBody.includes(fragment)) ||
+    ![
+      "public.memory_demo_sessions",
+      "public.memory_resolution_observations",
+      "public.memory_resolution_proposals",
+      "public.memory_resolution_decisions",
+      "public.memory_resolution_consolidations",
+      "pg_catalog.now()",
+      "pg_catalog.sha256(v_receipt_canonical)",
+      '"actorRole":"financial-controller"',
+      "RETURN 'replayed'",
+      "RETURN 'conflict'",
+    ].every((fragment) => decideBody.includes(fragment))
+  ) {
+    throw new ReleaseGateError(
+      "Resolution transition routines are not fully qualified and fail closed."
+    );
+  }
+
+  for (const routine of RESOLUTION_FUNCTIONS) {
+    const grants = await client.query<{
+      schema_name: string;
+      routine_signature: string;
+      grantee: string;
+      privilege_type: string;
+      is_grantable: boolean;
+    }>(`SHOW GRANTS ON FUNCTION ${routine.signature}`);
+    const writerGrants = grants.rows.filter(
+      (grant) => grant.grantee === "archon_resolution_writer"
+    );
+    if (
+      writerGrants.length !== 1 ||
+      writerGrants[0]?.privilege_type !== "EXECUTE" ||
+      writerGrants[0].is_grantable ||
+      grants.rows.some(
+        (grant) =>
+          grant.grantee === "public" ||
+          grant.schema_name !== "public" ||
+          ![
+            "admin",
+            "root",
+            RESOLUTION_TRANSITION_OWNER,
+            "archon_resolution_writer",
+          ].includes(grant.grantee)
+      )
+    ) {
+      throw new ReleaseGateError(
+        `Resolution routine ${routine.name} EXECUTE grants drifted.`
+      );
+    }
+  }
+
+  const effectiveFunctions = await client.query<{
+    schema_name: string | null;
+    object_name: string | null;
+    object_type: string;
+    grantee: string;
+    privilege_type: string;
+    is_grantable: boolean;
+  }>(
+    `SELECT schema_name, object_name, object_type, grantee,
+            privilege_type, is_grantable
+       FROM [SHOW GRANTS FOR archon_resolution_writer]
+      WHERE object_type = 'function'`
+  );
+  const effectiveNames = effectiveFunctions.rows.map((grant) =>
+    String(grant.object_name ?? "")
+      .replace(/\(.*/u, "")
+      .split(".")
+      .at(-1)
+  );
+  if (
+    effectiveFunctions.rows.length !== RESOLUTION_FUNCTIONS.length ||
+    new Set(effectiveNames).size !== RESOLUTION_FUNCTIONS.length ||
+    routineNames.some((name) => !effectiveNames.includes(name)) ||
+    effectiveFunctions.rows.some(
+      (grant) =>
+        grant.schema_name !== "public" ||
+        grant.grantee !== "archon_resolution_writer" ||
+        grant.privilege_type !== "EXECUTE" ||
+        grant.is_grantable
+    )
+  ) {
+    throw new ReleaseGateError(
+      "Resolution writer can execute functions outside the exact transition API."
+    );
+  }
+  return {
+    transitionFunctionCount: 2,
+    writerFunctionExecuteCount: 2,
+  };
+}
+
+async function verifyResolutionSandboxSecurity(
+  client: PgClient
+): Promise<{
+  tables: 5;
+  rlsPolicies: 15;
+  ttlExpirationExpression: "expires_at";
+  ttlSchedule: typeof RESOLUTION_TTL_CRON;
+  ttlClusterEnabled: true;
+  ttlScheduleStatus: "ACTIVE";
+  ttlPaused: false;
+  writerRelationGrantCount: 5;
+  transitionOwnerRelationGrantCount: 13;
+  transitionFunctionCount: 2;
+  writerFunctionExecuteCount: 2;
+  directRuntimeDml: "none";
+}> {
+  const tables = await client.query<{ table_name: string }>(
+    `SELECT table_name
+       FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND (
+          table_name = 'memory_demo_sessions'
+          OR table_name LIKE 'memory_resolution_%'
+        )
+      ORDER BY table_name`
+  );
+  const expectedTables = [...RESOLUTION_TABLES].sort();
+  const actualTables = tables.rows.map((row) => row.table_name);
+  if (
+    actualTables.length !== expectedTables.length ||
+    JSON.stringify(actualTables) !== JSON.stringify(expectedTables)
+  ) {
+    throw new ReleaseGateError(
+      "Exact five-table resolution sandbox proof failed."
+    );
+  }
+
+  const rls = await client.query<{
+    relname: string;
+    relrowsecurity: boolean;
+    relforcerowsecurity: boolean;
+  }>(
+    `SELECT classes.relname,
+            classes.relrowsecurity,
+            classes.relforcerowsecurity
+       FROM pg_catalog.pg_class AS classes
+       JOIN pg_catalog.pg_namespace AS namespaces
+         ON namespaces.oid = classes.relnamespace
+      WHERE namespaces.nspname = 'public'
+        AND classes.relname = ANY($1::STRING[])`,
+    [RESOLUTION_TABLES]
+  );
+  if (
+    rls.rows.length !== RESOLUTION_TABLES.length ||
+    rls.rows.some(
+      (row) =>
+        row.relrowsecurity !== true || row.relforcerowsecurity !== true
+    )
+  ) {
+    throw new ReleaseGateError(
+      "Resolution sandbox RLS is not enabled and forced on every table."
+    );
+  }
+
+  const policies = await client.query<{
+    tablename: string;
+    policyname: string;
+    permissive: string;
+    cmd: string;
+    roles: string[] | string;
+    qual: string | null;
+    with_check: string | null;
+  }>(
+    `SELECT tablename, policyname, permissive, cmd, roles, qual, with_check
+       FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = ANY($1::STRING[])`,
+    [RESOLUTION_TABLES]
+  );
+  if (policies.rows.length !== RESOLUTION_TABLES.length * 3) {
+    throw new ReleaseGateError(
+      "Resolution sandbox RLS policy count drifted."
+    );
+  }
+  for (const table of RESOLUTION_TABLES) {
+    const tablePolicies = policies.rows.filter(
+      (policy) => policy.tablename === table
+    );
+    const operator = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_operator_v1`
+    );
+    const permit = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_permit_v1`
+    );
+    const guard = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_guard_v1`
+    );
+    for (const [policy, mode] of [
+      [permit, "permissive"],
+      [guard, "restrictive"],
+    ] as const) {
+      const using = normalizedCatalogExpression(policy?.qual ?? null);
+      const check = normalizedCatalogExpression(
+        policy?.with_check ?? null
+      );
+      if (
+        !policy ||
+        policy.permissive.toLowerCase() !== mode ||
+        policy.cmd.toLowerCase() !== "all" ||
+        JSON.stringify(stringArray(policy.roles).sort()) !==
+          JSON.stringify(
+            [
+              RESOLUTION_TRANSITION_OWNER,
+              "archon_resolution_writer",
+            ].sort()
+          ) ||
+        using.includes(" or ") ||
+        check.includes(" or ") ||
+        !using.includes("tenant_id = 'public-demo'") ||
+        !using.includes("company = 'helios sa'") ||
+        !using.includes("expires_at >") ||
+        (!using.includes("now") &&
+          !using.includes("current_timestamp")) ||
+        !check.includes("tenant_id = 'public-demo'") ||
+        !check.includes("company = 'helios sa'") ||
+        !check.includes("expires_at >") ||
+        (!check.includes("now") &&
+          !check.includes("current_timestamp")) ||
+        (!check.includes("61") && !check.includes("01:01:00"))
+      ) {
+        throw new ReleaseGateError(
+          `Resolution writer RLS policy drifted on ${table}.`
+        );
+      }
+    }
+    if (
+      tablePolicies.length !== 3 ||
+      operator?.permissive.toLowerCase() !== "permissive" ||
+      operator.cmd.toLowerCase() !== "all" ||
+      normalizedCatalogExpression(operator.qual) !== "true" ||
+      normalizedCatalogExpression(operator.with_check) !== "true"
+    ) {
+      throw new ReleaseGateError(
+        `Resolution operator RLS policy drifted on ${table}.`
+      );
+    }
+  }
+
+  const ttl = await client.query<{ create_statement: string }>(
+    `SELECT create_statement
+       FROM [SHOW CREATE TABLE memory_demo_sessions]`
+  );
+  const createStatement = ttl.rows[0]?.create_statement ?? "";
+  if (
+    ttl.rows.length !== 1 ||
+    !/\bttl\s*=\s*'on'/iu.test(createStatement) ||
+    !/ttl_expiration_expression\s*=\s*'expires_at'/iu.test(
+      createStatement
+    ) ||
+    !/ttl_job_cron\s*=\s*'0 \*\/4 \* \* \*'/iu.test(
+      createStatement
+    ) ||
+    /\bttl_pause\s*=/iu.test(createStatement)
+  ) {
+    throw new ReleaseGateError(
+      "Resolution sandbox row-level TTL contract drifted."
+    );
+  }
+  const ttlSetting = await client.query<{
+    variable: string;
+    value: string;
+  }>(
+    `SELECT variable, value
+       FROM [SHOW ALL CLUSTER SETTINGS]
+      WHERE variable = 'sql.ttl.job.enabled'`
+  );
+  if (
+    ttlSetting.rows.length !== 1 ||
+    String(ttlSetting.rows[0]?.value).toLowerCase() !== "true"
+  ) {
+    throw new ReleaseGateError(
+      "CockroachDB row-level TTL jobs are disabled."
+    );
+  }
+  const ttlTable = await client.query<{ table_id: string }>(
+    `SELECT oid::STRING AS table_id
+       FROM pg_catalog.pg_class
+      WHERE oid = 'public.memory_demo_sessions'::REGCLASS`
+  );
+  const ttlTableId = ttlTable.rows[0]?.table_id;
+  if (ttlTable.rows.length !== 1 || !ttlTableId) {
+    throw new ReleaseGateError(
+      "Could not bind the resolution TTL schedule to its table descriptor."
+    );
+  }
+  const ttlSchedules = await client.query<{
+    label: string;
+    schedule_status: string;
+    recurrence: string;
+    table_id: string | null;
+  }>(
+    `SELECT label,
+            schedule_status,
+            recurrence,
+            (command::JSONB)->>'tableId' AS table_id
+       FROM [SHOW SCHEDULES]
+      WHERE label = $1`,
+    [`row-level-ttl: memory_demo_sessions [${ttlTableId}]`]
+  );
+  if (
+    ttlSchedules.rows.length !== 1 ||
+    ttlSchedules.rows[0]?.schedule_status.toUpperCase() !== "ACTIVE" ||
+    ttlSchedules.rows[0].recurrence !== RESOLUTION_TTL_CRON ||
+    ttlSchedules.rows[0].table_id !== ttlTableId
+  ) {
+    throw new ReleaseGateError(
+      "Resolution TTL schedule is not exactly one active four-hour job bound to the target table."
+    );
+  }
+
+  const writerRelationGrantCount =
+    await verifyExactResolutionRelationGrants(
+      client,
+      "archon_resolution_writer",
+      RESOLUTION_WRITER_GRANTS
+    );
+  const transitionOwnerRelationGrantCount =
+    await verifyExactResolutionRelationGrants(
+      client,
+      RESOLUTION_TRANSITION_OWNER,
+      RESOLUTION_TRANSITION_OWNER_GRANTS
+    );
+  const transitionFunctions =
+    await verifyResolutionTransitionFunctions(client);
+
+  return {
+    tables: 5,
+    rlsPolicies: 15,
+    ttlExpirationExpression: "expires_at",
+    ttlSchedule: RESOLUTION_TTL_CRON,
+    ttlClusterEnabled: true,
+    ttlScheduleStatus: "ACTIVE",
+    ttlPaused: false,
+    writerRelationGrantCount:
+      writerRelationGrantCount as 5,
+    transitionOwnerRelationGrantCount:
+      transitionOwnerRelationGrantCount as 13,
+    ...transitionFunctions,
+    directRuntimeDml: "none",
+  };
+}
+
 async function verifyAdmin(
   adminUrl: string,
   runtimePrincipals: string[]
@@ -1151,6 +2162,20 @@ async function verifyAdmin(
     kind: string;
   };
   isolationCanaryVectors: IsolationCanaryVector[];
+  resolutionSandbox: {
+    tables: 5;
+    rlsPolicies: 15;
+    ttlExpirationExpression: "expires_at";
+    ttlSchedule: typeof RESOLUTION_TTL_CRON;
+    ttlClusterEnabled: true;
+    ttlScheduleStatus: "ACTIVE";
+    ttlPaused: false;
+    writerRelationGrantCount: 5;
+    transitionOwnerRelationGrantCount: 13;
+    transitionFunctionCount: 2;
+    writerFunctionExecuteCount: 2;
+    directRuntimeDml: "none";
+  };
 }> {
   const client = new Client({ connectionString: adminUrl });
   try {
@@ -1402,6 +2427,7 @@ async function verifyAdmin(
       databaseRow.database_name
     );
     await verifyServingViewSecurity(client, databaseRow.database_name);
+    const resolutionSandbox = await verifyResolutionSandboxSecurity(client);
     await verifyRuntimeRoles(client, runtimePrincipals);
     return {
       version: databaseRow.version.split(" ").slice(0, 3).join(" "),
@@ -1410,6 +2436,7 @@ async function verifyAdmin(
       storeIntegrity,
       indexDefinitionFingerprints: indexFingerprints,
       isolationCanaryVectors,
+      resolutionSandbox,
     };
   } finally {
     await client.end().catch(() => undefined);
@@ -1461,29 +2488,51 @@ async function main(): Promise<void> {
     );
   }
 
+  const expectedSqlDns = required("COCKROACH_SQL_DNS");
   const [stagingUrl, productionUrl] = await Promise.all([
     getDatabaseUrl(required("STAGING_DATABASE_SECRET_ID")),
     getDatabaseUrl(required("PRODUCTION_DATABASE_SECRET_ID")),
   ]);
+  const adminUrl = parseDatabaseSecret(required("DATABASE_URL"), {
+    requireTls: true,
+  });
+  const endpointBindings = [adminUrl, stagingUrl, productionUrl].map(
+    (url) => assertCockroachEndpointBinding(url, expectedSqlDns)
+  );
+  const endpointHostnameSha256 = createHash("sha256")
+    .update(endpointBindings[0]!.hostname, "utf8")
+    .digest("hex");
+  if (
+    endpointBindings.some(
+      (binding) =>
+        binding.hostname !== endpointBindings[0]!.hostname ||
+        binding.port !== 26257 ||
+        binding.database !== expectedDatabase ||
+        binding.tlsMode !== "verify-full" ||
+        binding.routingOverrides !== "none"
+    )
+  ) {
+    throw new ReleaseGateError(
+      "Admin and runtime URLs are not bound to one Cockroach Cloud endpoint."
+    );
+  }
   const runtimePrincipals = [stagingUrl, productionUrl].map((url) =>
     decodeURIComponent(new URL(url).username)
   );
-  const admin = await verifyAdmin(
-    required("DATABASE_URL"),
-    runtimePrincipals
+  const admin = await verifyAdmin(adminUrl, runtimePrincipals);
+  // Resolution verification temporarily binds the application's singleton
+  // pool to each real runtime URL, so environments are exercised sequentially
+  // and can never share a connection or credential cache.
+  const staging = await verifyRuntime(
+    "staging",
+    stagingUrl,
+    admin.isolationCanaryVectors
   );
-  const [staging, production] = await Promise.all([
-    verifyRuntime(
-      "staging",
-      stagingUrl,
-      admin.isolationCanaryVectors
-    ),
-    verifyRuntime(
-      "production",
-      productionUrl,
-      admin.isolationCanaryVectors
-    ),
-  ]);
+  const production = await verifyRuntime(
+    "production",
+    productionUrl,
+    admin.isolationCanaryVectors
+  );
   const digests = releaseDigests();
 
   process.stdout.write(
@@ -1500,6 +2549,15 @@ async function main(): Promise<void> {
           region: cloudRegion,
           version: cloudVersion,
           evidence: "Cockroach Cloud API v1 2024-09-16 release gate",
+          sqlEndpointBinding: {
+            source: "exact primary eu-west-1 regions[].sql_dns",
+            endpointHostnameSha256,
+            port: 26257,
+            database: expectedDatabase,
+            tlsMode: "verify-full",
+            routingOverrides: "none",
+            boundUrlCount: endpointBindings.length,
+          },
         },
         database: {
           engine: "CockroachDB",
@@ -1529,6 +2587,13 @@ async function main(): Promise<void> {
           runtimePrincipalNoKindCspann: true,
           runtimePrincipalKindCspann: true,
           runtimeCspannEnvironmentCount: 2,
+          memoryResolutionLoop: true,
+          runtimeResolutionEnvironmentCount: 2,
+          resolutionSandbox: admin.resolutionSandbox,
+          resolutionIsolationBoundary:
+            "trusted Lambda validates opaque bearer tokens; CockroachDB SECURITY DEFINER transition API confines mutation to fixed synthetic TTL rows",
+          transitionOwnerPrivilegeBoundary:
+            "NOLOGIN/NOBYPASSRLS; no members or parent roles; schema USAGE without CREATE; 13 bounded relation grants; owns exactly two SECURITY DEFINER routines",
           indexDefinitionFingerprints:
             admin.indexDefinitionFingerprints,
           roleBoundRls: true,
@@ -1537,7 +2602,9 @@ async function main(): Promise<void> {
           wrongTenantInvisible: true,
           retractedStatusInvisible: true,
           runtimeRelationPrivilegeMatrix:
-            "SELECT agent_memory and fixed-scope recall views only",
+            "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE",
+          runtimeFunctionPrivilegeMatrix:
+            "EXECUTE only on archon_resolution_create_session and archon_resolution_decide",
           runtimeSchemaPrivilegeMatrix: "USAGE only",
           runtimeDatabasePrivilegeMatrix: "CONNECT only",
           runtimeSystemPrivileges:

@@ -226,7 +226,13 @@ export function handleHealth(): RecallResponse {
       ok: true,
       status: "reachable",
       service: "archon-cockroach-memory",
-      access: "public-read-only",
+      access: "canonical-read-only+isolated-synthetic-resolution-write",
+      resolutionSandbox: {
+        state: "available",
+        authority: "financial-controller-human-gate",
+        persistence: "CockroachDB-row-level-TTL",
+        externalSideEffects: "none",
+      },
       dependencies: "unchecked",
       scope: publicDemoScope(),
     },
@@ -264,7 +270,7 @@ export async function handleAudit(
 export async function handleProof(
   agent: MemoryAgent = buildAgent()
 ): Promise<RecallResponse> {
-  const [storeProof, databaseRows, indexRows] = await Promise.all([
+  const [storeProof, databaseRows, indexRows, resolutionRows] = await Promise.all([
     memoryStoreProof(PUBLIC_DEMO_COMPANY, agent.embeddingModelId),
     query<{
       version: string;
@@ -284,6 +290,25 @@ export async function handleProof(
           AND indexname = $1`,
       [EXPECTED_VECTOR_INDEX_NAME]
     ),
+    query<{ table_count: number | string; active_sessions: number | string }>(
+      `SELECT (
+          SELECT count(*)
+            FROM information_schema.tables
+           WHERE table_schema = 'public'
+             AND table_name IN (
+               'memory_demo_sessions',
+               'memory_resolution_observations',
+               'memory_resolution_proposals',
+               'memory_resolution_decisions',
+               'memory_resolution_consolidations'
+             )
+        ) AS table_count,
+        (
+          SELECT count(*)
+            FROM memory_demo_sessions
+           WHERE expires_at > now()
+        ) AS active_sessions`
+    ),
   ]);
   const database = databaseRows[0];
   const index = indexRows.find(
@@ -295,6 +320,11 @@ export async function handleProof(
       )
   );
   const verifiedIndex = Boolean(index);
+  const resolutionProof = resolutionRows[0];
+  const resolutionTableCount = Number(resolutionProof?.table_count ?? 0);
+  const activeResolutionSessions = Number(
+    resolutionProof?.active_sessions ?? 0
+  );
   const cockroachRegion = process.env.COCKROACH_REGION?.trim() || null;
   const regionEvidence =
     cockroachRegion &&
@@ -331,6 +361,29 @@ export async function handleProof(
           ? indexDefinitionFingerprint(index.index_definition)
           : null,
       },
+      resolutionLoop: {
+        enabled:
+          resolutionTableCount === 5 &&
+          Number.isSafeInteger(activeResolutionSessions) &&
+          activeResolutionSessions >= 0,
+        schemaTables: resolutionTableCount,
+        activeSandboxSessions:
+          Number.isSafeInteger(activeResolutionSessions) &&
+          activeResolutionSessions >= 0
+            ? activeResolutionSessions
+            : null,
+        transactionIsolation: "SERIALIZABLE",
+        authorityBoundary: "financial-controller-human-gate",
+        identityAssurance: "fixed-demo-role-assertion-not-authenticated",
+        idempotency: "decision-key+database-unique-constraint",
+        receipt: "SHA-256 immutable decision record",
+        learning: "conflict-observation+human-decision",
+        consolidation: "versioned current/superseded state",
+        forgetting: "CockroachDB row-level TTL",
+        canonicalMemoryMutable: false,
+        externalSideEffects: "none",
+        evidence: "live fixed-scope sandbox schema query",
+      },
       embeddingModel: agent.embeddingModelId,
       narrationModel: agent.narrationModelId,
       release: {
@@ -348,7 +401,9 @@ export async function handleProof(
         "embedding-model isolation",
         "contradiction and absence audit",
         "citation and numeric grounding guard",
-        "read-only public API",
+        "read-only canonical memory",
+        "human-approved isolated resolution loop",
+        "CockroachDB row-level TTL forgetting policy",
       ],
       generatedAt: new Date().toISOString(),
     },

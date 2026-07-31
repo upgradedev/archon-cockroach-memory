@@ -1,10 +1,11 @@
-// Read-only, hosted boundary for the final Devpost handoff. This script is
+// Hosted boundary for the final Devpost handoff. It is read-only against
+// canonical memory and exercises one TTL-scoped synthetic resolution action. It is
 // intentionally network-aware and must run only from the manually dispatched
 // Submission readiness workflow on the exact current main commit. It writes one
 // sanitized receipt under RUNNER_TEMP and never receives AWS credentials.
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1201,7 +1202,7 @@ export function requireExactHostedDastReceipt(
     actualKeys.length !== expectedKeys.length ||
     actualKeys.some((key, index) => key !== expectedKeys[index]) ||
     receipt.schema !== "archon.hosted-dast" ||
-    receipt.version !== 3 ||
+    receipt.version !== 4 ||
     receipt.profile !== "exact-release" ||
     receipt.targetOrigin !== DEMO_URL ||
     receipt.releaseSha !== sha ||
@@ -1245,6 +1246,11 @@ export function requireExactHostedDastReceipt(
     ["limit-boundary", 400],
     ["write-route-absent", 404],
     ["audit-scope-injection", 400],
+    ["resolution-session-method-boundary", 405],
+    ["resolution-session-fixed-scope-boundary", 400],
+    ["resolution-session-auth-boundary", 401],
+    ["resolution-capability-shape-boundary", 401],
+    ["resolution-decision-auth-boundary", 401],
     ["unknown-route-boundary", 404],
   ] as const;
   const rawChecks = Array.isArray(receipt.checks)
@@ -1270,7 +1276,7 @@ export function requireExactHostedDastReceipt(
       );
     })
   ) {
-    throw new Error("Hosted DAST receipt does not prove all 16 checks");
+    throw new Error("Hosted DAST receipt does not prove all 21 checks");
   }
 }
 
@@ -2396,17 +2402,24 @@ async function main(): Promise<void> {
       { headers: { accept: "application/json" } },
       "Live health"
     );
+    const resolutionSandbox = asRecord(health.resolutionSandbox);
     if (
       health.ok !== true ||
       health.status !== "reachable" ||
       health.service !== "archon-cockroach-memory" ||
-      health.access !== "public-read-only" ||
+      health.access !==
+        "canonical-read-only+isolated-synthetic-resolution-write" ||
+      resolutionSandbox?.state !== "available" ||
+      resolutionSandbox?.authority !==
+        "financial-controller-human-gate" ||
+      resolutionSandbox?.persistence !== "CockroachDB-row-level-TTL" ||
+      resolutionSandbox?.externalSideEffects !== "none" ||
       !exactPublicScope(health.scope)
     ) {
       throw new Error("Live health contract is not exact");
     }
     live.health = true;
-    return "Fixed synthetic public-read-only health contract passed";
+    return "Canonical read-only scope and isolated synthetic resolution contract passed";
   });
 
   await check("live-proof", async () => {
@@ -2418,8 +2431,13 @@ async function main(): Promise<void> {
     const database = asRecord(proof.database);
     const memory = asRecord(proof.memory);
     const vector = asRecord(proof.vectorIndex);
+    const resolution = asRecord(proof.resolutionLoop);
     const release = asRecord(proof.release);
     requireFreshGeneratedAt(proof, "Live proof");
+    const activeResolutionSessions = numberValue(
+      resolution,
+      "activeSandboxSessions"
+    );
     const prefixes = Array.isArray(vector?.prefixes)
       ? vector.prefixes
       : [];
@@ -2454,6 +2472,26 @@ async function main(): Promise<void> {
       !/^[0-9a-f]{64}$/u.test(
         stringValue(vector, "definitionFingerprint") ?? ""
       ) ||
+      resolution?.enabled !== true ||
+      numberValue(resolution, "schemaTables") !== 5 ||
+      activeResolutionSessions === undefined ||
+      !Number.isSafeInteger(activeResolutionSessions) ||
+      activeResolutionSessions < 0 ||
+      resolution?.transactionIsolation !== "SERIALIZABLE" ||
+      resolution?.authorityBoundary !==
+        "financial-controller-human-gate" ||
+      resolution?.identityAssurance !==
+        "fixed-demo-role-assertion-not-authenticated" ||
+      resolution?.idempotency !==
+        "decision-key+database-unique-constraint" ||
+      resolution?.receipt !== "SHA-256 immutable decision record" ||
+      resolution?.learning !== "conflict-observation+human-decision" ||
+      resolution?.consolidation !==
+        "versioned current/superseded state" ||
+      resolution?.forgetting !== "CockroachDB row-level TTL" ||
+      resolution?.canonicalMemoryMutable !== false ||
+      resolution?.externalSideEffects !== "none" ||
+      resolution?.evidence !== "live fixed-scope sandbox schema query" ||
       proof.embeddingModel !== "amazon.titan-embed-text-v2:0" ||
       proof.narrationModel !== "eu.anthropic.claude-sonnet-4-6" ||
       release?.commitSha !== sha ||
@@ -2465,7 +2503,127 @@ async function main(): Promise<void> {
       );
     }
     live.proof = true;
-    return "Exact live release SHA, CockroachDB, C-SPANN, eu-west-1, models, and 9/9/9 passed";
+    return "Exact live release SHA, CockroachDB, C-SPANN, resolution loop, eu-west-1, models, and 9/9/9 passed";
+  });
+
+  await check("live-resolution-loop", async () => {
+    const created = await fetchLiveJson(
+      "/api/resolution/session",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+      "Create isolated resolution session"
+    );
+    const token = stringValue(created, "sessionToken") ?? "";
+    const initial = asRecord(created.snapshot);
+    const initialProposal = asRecord(initial?.proposal);
+    const initialPolicy = asRecord(initial?.policy);
+    const initialLifecycle = asRecord(initial?.lifecycle);
+    const initialObservations = asRecords(initial?.observations);
+    const prior = initialObservations.find(
+      (observation) => observation.label === "prior"
+    );
+    const corrected = initialObservations.find(
+      (observation) => observation.label === "corrected"
+    );
+    if (
+      created.tokenType !== "Bearer" ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
+      initial?.scenarioId !==
+        "helios-payroll-2026-06-correction-v1" ||
+      initial?.company !== "Helios SA" ||
+      initial?.period !== "2026-06" ||
+      initial?.state !== "pending" ||
+      initial?.receipt !== null ||
+      initialObservations.length !== 2 ||
+      prior?.sourceRef !== "payroll-register-2026-06-v1" ||
+      prior?.sourceClass !== "payroll-register" ||
+      numberValue(prior, "authorityRank") !== 60 ||
+      numberValue(prior, "employerCostCents") !== 12_440_000 ||
+      prior?.status !== "current" ||
+      corrected?.sourceRef !==
+        "signed-payroll-register-2026-06-v2" ||
+      corrected?.sourceClass !== "signed-payroll-register" ||
+      numberValue(corrected, "authorityRank") !== 100 ||
+      numberValue(corrected, "employerCostCents") !== 12_890_000 ||
+      corrected?.status !== "candidate" ||
+      initialProposal?.action !== "resolve-conflicting-memory" ||
+      initialProposal?.status !== "pending" ||
+      initialProposal?.requiresHumanRole !== "financial-controller" ||
+      initialProposal?.proposedObservationId !== corrected?.id ||
+      initialProposal?.supersedesObservationId !== prior?.id ||
+      initialPolicy?.version !== "resolution-policy-v1" ||
+      initialPolicy?.authorityBoundary !== "human-approval-required" ||
+      initialPolicy?.retention !== "row-level-ttl" ||
+      initialPolicy?.canonicalMemoryMutable !== false ||
+      initialLifecycle?.externalSideEffects !== "none"
+    ) {
+      throw new Error(
+        "Initial resolution session violated the fixed synthetic authority contract"
+      );
+    }
+
+    const idempotencyKey = randomUUID();
+    const decide = () =>
+      fetchLiveJson(
+        "/api/resolution/decision",
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            decision: "approve",
+            idempotencyKey,
+          }),
+        },
+        "Approve isolated resolution"
+      );
+    const approved = await decide();
+    const replayed = await decide();
+    const approvedSnapshot = asRecord(approved.snapshot);
+    const replayedSnapshot = asRecord(replayed.snapshot);
+    const approvedReceipt = asRecord(approvedSnapshot?.receipt);
+    const replayedReceipt = asRecord(replayedSnapshot?.receipt);
+    const approvedObservations = asRecords(
+      approvedSnapshot?.observations
+    );
+    const approvedPrior = approvedObservations.find(
+      (observation) => observation.label === "prior"
+    );
+    const approvedCorrected = approvedObservations.find(
+      (observation) => observation.label === "corrected"
+    );
+    if (
+      approvedSnapshot?.sessionId !== initial?.sessionId ||
+      replayedSnapshot?.sessionId !== initial?.sessionId ||
+      approvedSnapshot?.state !== "approved" ||
+      replayedSnapshot?.state !== "approved" ||
+      approvedPrior?.status !== "superseded" ||
+      approvedCorrected?.status !== "current" ||
+      approvedReceipt?.algorithm !== "sha256" ||
+      approvedReceipt?.actorRole !== "financial-controller" ||
+      approvedReceipt?.policyVersion !== "resolution-policy-v1" ||
+      !/^[a-f0-9]{64}$/u.test(
+        stringValue(approvedReceipt, "digest") ?? ""
+      ) ||
+      approvedReceipt?.decisionId !== replayedReceipt?.decisionId ||
+      approvedReceipt?.digest !== replayedReceipt?.digest ||
+      approvedReceipt?.decidedAt !== replayedReceipt?.decidedAt
+    ) {
+      throw new Error(
+        "Resolution approval or idempotent replay proof failed"
+      );
+    }
+    live.resolution = true;
+    return "Human-gated synthetic approval, consolidation, receipt, and exact idempotent replay passed";
   });
 
   await check("live-recall", async () => {

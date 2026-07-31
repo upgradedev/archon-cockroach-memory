@@ -1,0 +1,5 @@
+# Deliberately empty: every regular-persona finding blocks before any
+# narrowly-scoped exception can be considered.
+# Never disable a rule globally. Approved exceptions belong in
+# security/waivers.yml and must also be scoped here to an exact file/line.
+rules: {}

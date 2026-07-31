@@ -1,12 +1,15 @@
 # Tool inventory and proof
 
-Archon Memory uses **2 of the 4 required CockroachDB tools**:
+Archon Memory meaningfully integrates **two CockroachDB tools**:
 
 1. Distributed Vector Indexing
 2. CockroachDB Cloud Managed MCP
 
-ccloud automation and the self-hosted application MCP server are useful
-additional surfaces, but are not counted toward the required two.
+Together they form one causal tool chain: the Financial Memory Agent uses
+Distributed Vector Indexing as its memory data plane, and the Memory Integrity
+Agent uses Cloud Managed MCP as an independent control plane that must pass
+before staging or production promotion. ccloud automation and the self-hosted
+application MCP server are useful additional surfaces, but are not counted.
 
 ## 1. Distributed Vector Indexing
 
@@ -77,8 +80,14 @@ Implementation:
 
 - `scripts/cloud-mcp-audit.ts` connects to CockroachDB Cloud's hosted Managed MCP
   endpoint with a service-account API key.
-- It calls exactly `get_cluster`, `list_tables`, `get_table_schema`, and
+- It always calls exactly `get_cluster`, `list_tables`, `get_table_schema`, and
   `select_query`, in that order.
+- If and only if the hosted server advertises `explain_query`, the agent inserts
+  that read-only call immediately before `select_query` and requires a
+  `vector search` plan on
+  `idx_agent_memory_company_scope_embedding`. An advertised but incompatible or
+  incorrect capability fails closed. If it is not advertised, the receipt says
+  `not-advertised`; it never claims the call occurred.
 - Its fixed SQL equality-constrains
   `public-demo / Helios SA / active / amazon.titan-embed-text-v2:0`, forces
   `idx_agent_memory_active_scope`, applies an inner `LIMIT 10` sentinel, and
@@ -89,12 +98,20 @@ Implementation:
   `9 / 9 / 9`.
 - It verifies cluster identity, table discovery, `agent_memory` schema, and a
   fixed-scope select.
-- Receipt schema v2 prints the exact scope, bound, aggregate, called-tool list,
-  and four proofs, with no API key, cluster identifier, host, user, password,
-  connection string, memory content, or embedding.
+- Receipt schema v3 binds the exact 40-character release SHA and SHA-256 of the
+  exact database-release C-SPANN receipt. It prints the exact scope, bounds,
+  aggregate, called-tool list, optional EXPLAIN status/plan fingerprint, and
+  fixed proof descriptions, with no API key, cluster identifier, host, user,
+  password, connection string, memory content, embedding, or raw query plan.
+- `.github/workflows/deploy-aws.yml` downloads and validates the exact
+  database-release receipt before invoking Managed MCP. Both staging and
+  production explicitly depend on this job, so the second CockroachDB tool is a
+  causal promotion gate rather than a post-deployment report.
 - `.github/workflows/managed-mcp-audit.yml` runs only in the protected
-  `production-audit` environment, exact-gates every v2 field, checks that secret
-  values are absent, and uploads the sanitized receipt.
+  `production-audit` environment, resolves the successful exact-SHA deployment,
+  downloads its database C-SPANN receipt, exact-gates every v3 field, checks
+  that secret values are absent, records the receipt digest, and uploads only
+  the sanitized receipt.
 
 Evidence status:
 
@@ -107,13 +124,18 @@ Evidence status:
   digest
   `sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`.
 - [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
-  historical live read-only proof from the hardened v2 contract. The latter
+  historical live read-only proof from the hardened v2 contract. That historical
+  contract
   passed at exact commit `a2b69e3fad31010d14d0c3bca261421e635ca885`
   in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177);
   its fixed scope, bounds, strict parser, `9 / 9 / 9` aggregate, and sanitized
   artifact were all protected-workflow verified. The same contract passed for
   later historical protected release commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`
   in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
+
+These are immutable historical v2 receipts. Receipt v3 is deliberately not
+claimed as live until a protected exact-SHA CI, deploy, and standalone audit
+have all passed after this source change.
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
 application MCP server below.
@@ -151,8 +173,10 @@ authenticated ccloud receipt is produced.
 
 - Amazon S3: encrypted, versioned private React/Tailwind origin.
 - Amazon CloudFront: OAC, same-origin delivery, security headers, HTTP/2+3.
-- Amazon API Gateway HTTP API: fixed read-only routes and throttling.
-- AWS Lambda Node.js 22: bounded recall/audit/proof adapter.
+- Amazon API Gateway HTTP API: fixed canonical-read routes, isolated synthetic
+  resolution routes, and throttling.
+- AWS Lambda Node.js 22: bounded recall/audit/proof adapter plus the
+  human-gated, idempotent resolution controller.
 - AWS Secrets Manager: least-privilege CockroachDB URL.
 - AWS X-Ray and CloudWatch: traces, logs, alarms, dashboard.
 - AWS CodeDeploy via SAM: 10%/5-minute canary continuously exercises live proof

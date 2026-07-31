@@ -3,8 +3,35 @@ const RELEASE_EVIDENCE = "server-configured Lambda environment";
 const EXACT_COMMIT_SHA = /^[0-9a-f]{40}$/u;
 const EXACT_RUNTIME_PRINCIPAL =
   /^archon_(?:staging|production)_[0-9a-f]{10}$/u;
+const EXACT_UUID_V4 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0";
 const NARRATION_MODEL = "eu.anthropic.claude-sonnet-4-6";
+const RESOLUTION_RATIONALE =
+  "Prefer the newer signed payroll register, but preserve both sources and require a financial controller decision.";
+const RESOLUTION_STATE_CONTRACT = {
+  pending: {
+    priorStatus: "current",
+    correctedStatus: "candidate",
+    learning: "two-source-conflict-observed",
+    consolidation: "awaiting-human-decision",
+    forgetting: "session-scoped-ttl-pending",
+  },
+  approved: {
+    priorStatus: "superseded",
+    correctedStatus: "current",
+    learning: "human-approved-correction",
+    consolidation: "approved-observation-is-current",
+    forgetting: "session-scoped-ttl-after-decision",
+  },
+  rejected: {
+    priorStatus: "current",
+    correctedStatus: "rejected",
+    learning: "human-rejected-correction",
+    consolidation: "prior-observation-remains-current",
+    forgetting: "session-scoped-ttl-after-decision",
+  },
+} as const;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -133,6 +160,22 @@ export interface ProofSnapshot {
     recallAt10Percent: number | null;
     p95Ms: number | null;
   };
+  resolutionLoop: {
+    enabled: boolean;
+    schemaTables: number | null;
+    activeSandboxSessions: number | null;
+    transactionIsolation: string | null;
+    authorityBoundary: string | null;
+    identityAssurance: string | null;
+    idempotency: string | null;
+    receipt: string | null;
+    learning: string | null;
+    consolidation: string | null;
+    forgetting: string | null;
+    canonicalMemoryMutable: boolean | null;
+    externalSideEffects: string | null;
+    evidence: string | null;
+  };
   embeddingModel: string | null;
   narrationModel: string | null;
   scope: {
@@ -154,6 +197,75 @@ export interface ProofSnapshot {
   memoryCount: number | null;
   generatedAt: string | null;
   hasEvidence: boolean;
+}
+
+export type ResolutionDecision = "approve" | "reject";
+export type ResolutionState = "pending" | "approved" | "rejected";
+
+export interface ResolutionObservation {
+  id: string;
+  label: "prior" | "corrected";
+  sourceRef: string;
+  sourceClass: "payroll-register" | "signed-payroll-register";
+  observedAt: string;
+  authorityRank: number;
+  employerCostCents: number;
+  employerCostDisplay: string;
+  status: "candidate" | "current" | "superseded" | "rejected";
+}
+
+export interface ResolutionSnapshot {
+  sessionId: string;
+  scenarioId: "helios-payroll-2026-06-correction-v1";
+  company: "Helios SA";
+  period: "2026-06";
+  state: ResolutionState;
+  expiresAt: string;
+  observations: ResolutionObservation[];
+  proposal: {
+    id: string;
+    action: "resolve-conflicting-memory";
+    status: ResolutionState;
+    proposedObservationId: string;
+    supersedesObservationId: string;
+    rationale: string;
+    requiresHumanRole: "financial-controller";
+  };
+  receipt: {
+    algorithm: "sha256";
+    digest: string;
+    decisionId: string;
+    decidedAt: string;
+    actorRole: "financial-controller";
+    policyVersion: "resolution-policy-v1";
+  } | null;
+  lifecycle: {
+    learning:
+      | "two-source-conflict-observed"
+      | "human-approved-correction"
+      | "human-rejected-correction";
+    consolidation:
+      | "awaiting-human-decision"
+      | "approved-observation-is-current"
+      | "prior-observation-remains-current";
+    forgetting:
+      | "session-scoped-ttl-pending"
+      | "session-scoped-ttl-after-decision";
+    externalSideEffects: "none";
+  };
+  policy: {
+    version: "resolution-policy-v1";
+    conflictRule: "newer-higher-authority-evidence-is-proposed";
+    authorityBoundary: "human-approval-required";
+    mutationScope: "ephemeral-synthetic-session-only";
+    retention: "row-level-ttl";
+    canonicalMemoryMutable: false;
+  };
+}
+
+export interface ResolutionSession {
+  token: string;
+  snapshot: ResolutionSnapshot;
 }
 
 function asRecord(value: unknown): JsonRecord | null {
@@ -662,6 +774,7 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
   const memory = nested(body, "memory");
   const release = nested(body, "release");
   const benchmark = nested(body, "benchmark");
+  const resolution = nested(body, "resolutionLoop");
   const databaseActiveMemories = asNumber(database?.activeMemories);
   const persisted = asNumber(memory?.persisted);
   const idempotencyKeys = asNumber(memory?.idempotencyKeys);
@@ -725,6 +838,36 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
       recallAt10Percent: normalizePercent(vector?.recallAt10 ?? benchmark?.recallAt10),
       p95Ms: asNumber(vector?.p95Ms, benchmark?.p95Ms),
     },
+    resolutionLoop: {
+      enabled:
+        asBoolean(resolution?.enabled) === true &&
+        asNumber(resolution?.schemaTables) === 5 &&
+        resolution?.transactionIsolation === "SERIALIZABLE" &&
+        resolution?.authorityBoundary ===
+          "financial-controller-human-gate" &&
+        resolution?.identityAssurance ===
+          "fixed-demo-role-assertion-not-authenticated" &&
+        resolution?.canonicalMemoryMutable === false &&
+        resolution?.externalSideEffects === "none" &&
+        resolution?.evidence === "live fixed-scope sandbox schema query",
+      schemaTables: asNumber(resolution?.schemaTables),
+      activeSandboxSessions: asNumber(
+        resolution?.activeSandboxSessions
+      ),
+      transactionIsolation: asString(resolution?.transactionIsolation),
+      authorityBoundary: asString(resolution?.authorityBoundary),
+      identityAssurance: asString(resolution?.identityAssurance),
+      idempotency: asString(resolution?.idempotency),
+      receipt: asString(resolution?.receipt),
+      learning: asString(resolution?.learning),
+      consolidation: asString(resolution?.consolidation),
+      forgetting: asString(resolution?.forgetting),
+      canonicalMemoryMutable: asBoolean(
+        resolution?.canonicalMemoryMutable
+      ),
+      externalSideEffects: asString(resolution?.externalSideEffects),
+      evidence: asString(resolution?.evidence),
+    },
     embeddingModel: asString(body.embeddingModel, nested(body, "bedrock")?.embeddingModel),
     narrationModel: asString(body.narrationModel, nested(body, "bedrock")?.narrationModel),
     scope: {
@@ -772,6 +915,17 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
     ) &&
     snapshot.vectorIndex.dimensions === 1024 &&
     snapshot.vectorIndex.metric === "cosine" &&
+    snapshot.resolutionLoop.enabled === true &&
+    snapshot.resolutionLoop.schemaTables === 5 &&
+    snapshot.resolutionLoop.transactionIsolation === "SERIALIZABLE" &&
+    snapshot.resolutionLoop.authorityBoundary ===
+      "financial-controller-human-gate" &&
+    snapshot.resolutionLoop.identityAssurance ===
+      "fixed-demo-role-assertion-not-authenticated" &&
+    snapshot.resolutionLoop.canonicalMemoryMutable === false &&
+    snapshot.resolutionLoop.externalSideEffects === "none" &&
+    snapshot.resolutionLoop.evidence ===
+      "live fixed-scope sandbox schema query" &&
     snapshot.embeddingModel === EMBEDDING_MODEL &&
     snapshot.narrationModel === NARRATION_MODEL &&
     snapshot.scope.company === PUBLIC_COMPANY &&
@@ -790,6 +944,319 @@ export async function getProof(signal?: AbortSignal): Promise<ProofSnapshot> {
     isFreshGeneratedAt(snapshot.generatedAt)
   );
   return snapshot;
+}
+
+function normalizeResolutionObservation(
+  value: unknown
+): ResolutionObservation | null {
+  const item = asRecord(value);
+  if (!item) return null;
+  const id = asString(item.id);
+  const label = asString(item.label);
+  const sourceRef = asString(item.sourceRef);
+  const sourceClass = asString(item.sourceClass);
+  const observedAt = asString(item.observedAt);
+  const authorityRank = asNumber(item.authorityRank);
+  const employerCostCents = asNumber(item.employerCostCents);
+  const employerCostDisplay = asString(item.employerCostDisplay);
+  const status = asString(item.status);
+  if (
+    !id ||
+    !EXACT_UUID_V4.test(id) ||
+    (label !== "prior" && label !== "corrected") ||
+    !sourceRef ||
+    (sourceClass !== "payroll-register" &&
+      sourceClass !== "signed-payroll-register") ||
+    !observedAt ||
+    !Number.isFinite(Date.parse(observedAt)) ||
+    authorityRank === null ||
+    !Number.isInteger(authorityRank) ||
+    employerCostCents === null ||
+    !Number.isSafeInteger(employerCostCents) ||
+    !employerCostDisplay ||
+    !["candidate", "current", "superseded", "rejected"].includes(
+      status ?? ""
+    )
+  ) {
+    return null;
+  }
+  const isPrior =
+    label === "prior" &&
+    sourceRef === "payroll-register-2026-06-v1" &&
+    sourceClass === "payroll-register" &&
+    observedAt === "2026-07-01T08:00:00.000Z" &&
+    authorityRank === 60 &&
+    employerCostCents === 12_440_000 &&
+    employerCostDisplay === "€124,400.00";
+  const isCorrected =
+    label === "corrected" &&
+    sourceRef === "signed-payroll-register-2026-06-v2" &&
+    sourceClass === "signed-payroll-register" &&
+    observedAt === "2026-07-08T10:30:00.000Z" &&
+    authorityRank === 100 &&
+    employerCostCents === 12_890_000 &&
+    employerCostDisplay === "€128,900.00";
+  if (!isPrior && !isCorrected) return null;
+  return {
+    id,
+    label,
+    sourceRef,
+    sourceClass,
+    observedAt,
+    authorityRank,
+    employerCostCents,
+    employerCostDisplay,
+    status: status as ResolutionObservation["status"],
+  };
+}
+
+function normalizeResolutionSnapshot(value: unknown): ResolutionSnapshot {
+  const item = asRecord(value);
+  const sessionId = asString(item?.sessionId);
+  const state = asString(item?.state);
+  const expiresAt = asString(item?.expiresAt);
+  const observations = asArray(item?.observations)
+    .map(normalizeResolutionObservation)
+    .filter(
+      (observation): observation is ResolutionObservation =>
+        observation !== null
+    );
+  const proposal = asRecord(item?.proposal);
+  const lifecycle = asRecord(item?.lifecycle);
+  const policy = asRecord(item?.policy);
+  const receipt = asRecord(item?.receipt);
+  const observationIds = new Set(
+    observations.map((observation) => observation.id)
+  );
+  const proposalId = asString(proposal?.id);
+  const proposedObservationId = asString(
+    proposal?.proposedObservationId
+  );
+  const supersedesObservationId = asString(
+    proposal?.supersedesObservationId
+  );
+  const states = new Set(["pending", "approved", "rejected"]);
+  const stateContract =
+    state === "pending" || state === "approved" || state === "rejected"
+      ? RESOLUTION_STATE_CONTRACT[state]
+      : null;
+  if (
+    !sessionId ||
+    !EXACT_UUID_V4.test(sessionId) ||
+    item?.scenarioId !== "helios-payroll-2026-06-correction-v1" ||
+    item?.company !== PUBLIC_COMPANY ||
+    item?.period !== "2026-06" ||
+    !state ||
+    !states.has(state) ||
+    !stateContract ||
+    !expiresAt ||
+    !Number.isFinite(Date.parse(expiresAt)) ||
+    observations.length !== 2 ||
+    observations[0]?.label !== "prior" ||
+    observations[1]?.label !== "corrected" ||
+    new Set(observations.map((observation) => observation.label)).size !== 2 ||
+    observationIds.size !== 2 ||
+    !proposalId ||
+    !EXACT_UUID_V4.test(proposalId) ||
+    proposal?.action !== "resolve-conflicting-memory" ||
+    proposal?.status !== state ||
+    !proposedObservationId ||
+    !EXACT_UUID_V4.test(proposedObservationId) ||
+    !supersedesObservationId ||
+    !EXACT_UUID_V4.test(supersedesObservationId) ||
+    !observationIds.has(proposedObservationId) ||
+    !observationIds.has(supersedesObservationId) ||
+    proposedObservationId === supersedesObservationId ||
+    proposal?.rationale !== RESOLUTION_RATIONALE ||
+    proposal?.requiresHumanRole !== "financial-controller" ||
+    lifecycle?.externalSideEffects !== "none" ||
+    lifecycle?.learning !== stateContract.learning ||
+    lifecycle?.consolidation !== stateContract.consolidation ||
+    lifecycle?.forgetting !== stateContract.forgetting ||
+    policy?.version !== "resolution-policy-v1" ||
+    policy?.conflictRule !==
+      "newer-higher-authority-evidence-is-proposed" ||
+    policy?.authorityBoundary !== "human-approval-required" ||
+    policy?.mutationScope !== "ephemeral-synthetic-session-only" ||
+    policy?.retention !== "row-level-ttl" ||
+    policy?.canonicalMemoryMutable !== false
+  ) {
+    throw new PublicApiError(
+      "/api/resolution",
+      "Resolution response violated the fixed evidence and authority contract."
+    );
+  }
+  const corrected = observations.find(
+    (observation) => observation.label === "corrected"
+  );
+  const prior = observations.find(
+    (observation) => observation.label === "prior"
+  );
+  if (
+    prior?.status !== stateContract.priorStatus ||
+    corrected?.status !== stateContract.correctedStatus ||
+    proposedObservationId !== corrected?.id ||
+    supersedesObservationId !== prior?.id
+  ) {
+    throw new PublicApiError(
+      "/api/resolution",
+      "Resolution graph did not match the exact state-dependent evidence contract."
+    );
+  }
+
+  let normalizedReceipt: ResolutionSnapshot["receipt"] = null;
+  if (state === "pending") {
+    if (receipt !== null) {
+      throw new PublicApiError(
+        "/api/resolution",
+        "A pending resolution unexpectedly contained a decision receipt."
+      );
+    }
+  } else {
+    const digest = asString(receipt?.digest);
+    const decisionId = asString(receipt?.decisionId);
+    const decidedAt = asString(receipt?.decidedAt);
+    if (
+      receipt?.algorithm !== "sha256" ||
+      !digest ||
+      !/^[a-f0-9]{64}$/u.test(digest) ||
+      !decisionId ||
+      !EXACT_UUID_V4.test(decisionId) ||
+      !decidedAt ||
+      !Number.isFinite(Date.parse(decidedAt)) ||
+      receipt?.actorRole !== "financial-controller" ||
+      receipt?.policyVersion !== "resolution-policy-v1"
+    ) {
+      throw new PublicApiError(
+        "/api/resolution",
+        "A finalized resolution did not contain a verifiable decision receipt."
+      );
+    }
+    normalizedReceipt = {
+      algorithm: "sha256",
+      digest,
+      decisionId,
+      decidedAt,
+      actorRole: "financial-controller",
+      policyVersion: "resolution-policy-v1",
+    };
+  }
+
+  return {
+    sessionId,
+    scenarioId: "helios-payroll-2026-06-correction-v1",
+    company: "Helios SA",
+    period: "2026-06",
+    state: state as ResolutionState,
+    expiresAt,
+    observations,
+    proposal: {
+      id: proposalId,
+      action: "resolve-conflicting-memory",
+      status: state as ResolutionState,
+      proposedObservationId,
+      supersedesObservationId,
+      rationale: RESOLUTION_RATIONALE,
+      requiresHumanRole: "financial-controller",
+    },
+    receipt: normalizedReceipt,
+    lifecycle: {
+      learning: stateContract.learning,
+      consolidation: stateContract.consolidation,
+      forgetting: stateContract.forgetting,
+      externalSideEffects: "none",
+    },
+    policy: {
+      version: "resolution-policy-v1",
+      conflictRule: "newer-higher-authority-evidence-is-proposed",
+      authorityBoundary: "human-approval-required",
+      mutationScope: "ephemeral-synthetic-session-only",
+      retention: "row-level-ttl",
+      canonicalMemoryMutable: false,
+    },
+  };
+}
+
+export async function createResolutionSession(
+  signal?: AbortSignal
+): Promise<ResolutionSession> {
+  const body = unwrap(
+    await requestJson(
+      "/api/resolution/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+      signal
+    )
+  );
+  const token = asString(body.sessionToken);
+  if (
+    !token ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
+    body.tokenType !== "Bearer"
+  ) {
+    throw new PublicApiError(
+      "/api/resolution/session",
+      "The service did not issue a valid isolated session capability."
+    );
+  }
+  return {
+    token,
+    snapshot: normalizeResolutionSnapshot(body.snapshot),
+  };
+}
+
+export async function getResolutionSession(
+  token: string,
+  signal?: AbortSignal
+): Promise<ResolutionSnapshot> {
+  const body = unwrap(
+    await requestJson(
+      "/api/resolution/session",
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}` },
+      },
+      signal
+    )
+  );
+  return normalizeResolutionSnapshot(body.snapshot);
+}
+
+export async function decideResolution(
+  token: string,
+  decision: ResolutionDecision,
+  idempotencyKey: string,
+  signal?: AbortSignal
+): Promise<ResolutionSnapshot> {
+  if (
+    !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      idempotencyKey
+    )
+  ) {
+    throw new PublicApiError(
+      "/api/resolution/decision",
+      "Resolution capability or idempotency key is invalid."
+    );
+  }
+  const body = unwrap(
+    await requestJson(
+      "/api/resolution/decision",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ decision, idempotencyKey }),
+      },
+      signal
+    )
+  );
+  return normalizeResolutionSnapshot(body.snapshot);
 }
 
 export function formatApiError(error: unknown): string {

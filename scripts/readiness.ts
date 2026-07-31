@@ -33,8 +33,8 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 112;
-export const EXPECTED_SETUP_NODE_STEPS = 22;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 152;
+export const EXPECTED_SETUP_NODE_STEPS = 27;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
@@ -42,14 +42,18 @@ export const EXPECTED_WORKFLOW_FILES = [
   "benchmark.yml",
   "bootstrap-aws.yml",
   "ci.yml",
+  "cockroach-restore-drill.yml",
   "codeql.yml",
   "database-release.yml",
   "demo-video.yml",
   "deploy-aws.yml",
   "managed-mcp-audit.yml",
+  "memory-evaluation.yml",
   "recover-aws.yml",
   "security-dast.yml",
   "submission-readiness.yml",
+  "supply-chain.yml",
+  "well-architected-audit.yml",
 ] as const;
 export const EXPECTED_DEPENDABOT_RELEASE_FREEZE = [
   ["docker", "/aws"],
@@ -76,6 +80,18 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "bench-uniform.txt",
   "distribution.txt",
   "submission-readiness-receipt.json",
+  "supply-chain-release-receipt.json",
+  "well-architected-repository-receipt.json",
+  "well-architected-live-receipt.json",
+  "evidence-manifest.sha256",
+  "lambda-zip-content.sha256",
+  "sbom-inputs-and-documents.sha256",
+  "memory-evaluation-receipt.json",
+  "policy-results.json",
+  "scale-manifest.json",
+  "vector-results.json",
+  "vector-benchmark.log",
+  "candidate-evidence-binding.json",
   "production-capture.webm",
   "capture-receipt.json",
   "narration-receipt.json",
@@ -519,6 +535,73 @@ export function allWorkflowActionsPinned(
         /^[a-f0-9]{40}$/u.test(ref.slice(separator + 1))
       );
     })
+  );
+}
+
+export function allWorkflowActionCommitsInventoryLocked(
+  sources: string[],
+  lockSource: string
+): boolean {
+  const parsed = sources.map(parseWorkflow);
+  if (parsed.some((workflow) => workflow === undefined)) return false;
+  const workflowShas = new Set<string>();
+  for (const workflow of parsed) {
+    for (const ref of workflow?.uses.map(({ ref }) => ref) ?? []) {
+      if (typeof ref !== "string" || ref.startsWith("./")) continue;
+      const match = /@([a-f0-9]{40})$/u.exec(ref);
+      if (!match) continue;
+      workflowShas.add(match[1]);
+    }
+  }
+
+  let lock: unknown;
+  try {
+    lock = JSON.parse(lockSource) as unknown;
+  } catch {
+    return false;
+  }
+  if (!lock || typeof lock !== "object" || Array.isArray(lock)) return false;
+  const actions = (lock as Record<string, unknown>).actions;
+  if (!actions || typeof actions !== "object" || Array.isArray(actions)) {
+    return false;
+  }
+  const lockedShas = new Set<string>();
+  for (const entry of Object.values(actions)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return false;
+    }
+    const sha = (entry as Record<string, unknown>).sha;
+    if (typeof sha !== "string" || !/^[a-f0-9]{40}$/u.test(sha)) {
+      return false;
+    }
+    lockedShas.add(sha);
+  }
+  return (
+    workflowShas.size === lockedShas.size &&
+    [...workflowShas].every((sha) => lockedShas.has(sha))
+  );
+}
+
+export function allCheckoutStepsDisableCredentialPersistence(
+  sources: string[]
+): boolean {
+  const parsed = sources.map(parseWorkflow);
+  if (parsed.some((workflow) => workflow === undefined)) return false;
+  const checkouts = parsed.flatMap(
+    (workflow) =>
+      workflow?.uses.filter(
+        ({ ref }) =>
+          typeof ref === "string" &&
+          actionIdentifier(ref) === "actions/checkout"
+      ) ?? []
+  );
+  return (
+    checkouts.length > 0 &&
+    checkouts.every(
+      ({ inputs }) =>
+        inputs instanceof Map &&
+        inputs.get("persist-credentials") === false
+    )
   );
 }
 
@@ -1391,7 +1474,13 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     ".ok == true",
     '.status == "reachable"',
     '.service == "archon-cockroach-memory"',
-    '.access == "public-read-only"',
+    ".access ==",
+    '"canonical-read-only+isolated-synthetic-resolution-write"',
+    ".resolutionSandbox ==",
+    '"state":"available"',
+    '"authority":"financial-controller-human-gate"',
+    '"persistence":"CockroachDB-row-level-TTL"',
+    '"externalSideEffects":"none"',
     '.dependencies == "unchecked"',
     ".scope |",
     ...scope,
@@ -1426,6 +1515,28 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     '.vectorIndex.lifecycleState == "active"',
     '.vectorIndex.evidence == "live pg_catalog.pg_indexes definition"',
     'test("^[a-f0-9]{64}$")',
+    ".resolutionLoop.enabled == true",
+    ".resolutionLoop.schemaTables == 5",
+    ".resolutionLoop.activeSandboxSessions |",
+    'type == "number" and floor == . and . >= 0',
+    '.resolutionLoop.transactionIsolation == "SERIALIZABLE"',
+    ".resolutionLoop.authorityBoundary ==",
+    '"financial-controller-human-gate"',
+    ".resolutionLoop.identityAssurance ==",
+    '"fixed-demo-role-assertion-not-authenticated"',
+    ".resolutionLoop.idempotency ==",
+    '"decision-key+database-unique-constraint"',
+    ".resolutionLoop.receipt ==",
+    '"SHA-256 immutable decision record"',
+    ".resolutionLoop.learning ==",
+    '"conflict-observation+human-decision"',
+    ".resolutionLoop.consolidation ==",
+    '"versioned current/superseded state"',
+    '.resolutionLoop.forgetting == "CockroachDB row-level TTL"',
+    ".resolutionLoop.canonicalMemoryMutable == false",
+    '.resolutionLoop.externalSideEffects == "none"',
+    ".resolutionLoop.evidence ==",
+    '"live fixed-scope sandbox schema query"',
     '.embeddingModel == "amazon.titan-embed-text-v2:0"',
     '.narrationModel == "eu.anthropic.claude-sonnet-4-6"',
     ".release.commitSha == $releaseCommitSha",
@@ -1577,6 +1688,7 @@ export function hasUniqueCiTriggerOwnership(
     ["benchmark.yml", ["schedule", "workflow_dispatch"]],
     ["bootstrap-aws.yml", ["workflow_dispatch"]],
     ["ci.yml", ["pull_request", "push", "workflow_dispatch"]],
+    ["cockroach-restore-drill.yml", ["workflow_dispatch"]],
     [
       "codeql.yml",
       ["pull_request", "push", "schedule", "workflow_dispatch"],
@@ -1589,6 +1701,10 @@ export function hasUniqueCiTriggerOwnership(
     ["deploy-aws.yml", ["workflow_run"]],
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
     [
+      "memory-evaluation.yml",
+      ["pull_request", "push", "schedule", "workflow_dispatch"],
+    ],
+    [
       "recover-aws.yml",
       ["schedule", "workflow_dispatch", "workflow_run"],
     ],
@@ -1597,6 +1713,14 @@ export function hasUniqueCiTriggerOwnership(
       ["schedule", "workflow_dispatch", "workflow_run"],
     ],
     ["submission-readiness.yml", ["workflow_dispatch"]],
+    [
+      "supply-chain.yml",
+      ["pull_request", "push", "schedule", "workflow_dispatch"],
+    ],
+    [
+      "well-architected-audit.yml",
+      ["pull_request", "push", "schedule", "workflow_dispatch"],
+    ],
   ]);
   for (const workflow of workflows) {
     const parsed = parseWorkflow(workflow.source);
@@ -1688,6 +1812,26 @@ function sourceChecks(): SourceCheck[] {
   const codeqlWorkflow = read(".github/workflows/codeql.yml");
   const dependabotConfig = read(".github/dependabot.yml");
   const deploy = read(".github/workflows/deploy-aws.yml");
+  const supplyChainWorkflow = read(
+    ".github/workflows/supply-chain.yml"
+  );
+  const supplyChainWaivers = read("security/waivers.yml");
+  const memoryEvaluationWorkflow = read(
+    ".github/workflows/memory-evaluation.yml"
+  );
+  const memoryEvaluationScript = read(
+    "scripts/evaluate-memory-architecture.ts"
+  );
+  const wellArchitectedWorkflow = read(
+    ".github/workflows/well-architected-audit.yml"
+  );
+  const wellArchitectedContractAudit = read(
+    ".github/scripts/well-architected-contract-audit.mjs"
+  );
+  const supplyChainToolLock = read(".github/toolchain-lock.json");
+  const wellArchitectedContract = read(
+    "docs/operations/well-architected-contract.json"
+  );
   const recoveryWorkflow = read(".github/workflows/recover-aws.yml");
   const securityDastWorkflow = read(
     ".github/workflows/security-dast.yml"
@@ -1879,10 +2023,38 @@ function sourceChecks(): SourceCheck[] {
     deploy.match(
       /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
+  const supplyChainReleaseJob =
+    supplyChainWorkflow.match(
+      /(?:^|\r?\n)  release-evidence:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const memoryEvaluationJob =
+    memoryEvaluationWorkflow.match(
+      /(?:^|\r?\n)  longitudinal-memory:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const wellArchitectedRepositoryJob =
+    wellArchitectedWorkflow.match(
+      /(?:^|\r?\n)  repository-contract:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const wellArchitectedLiveJob =
+    wellArchitectedWorkflow.match(
+      /(?:^|\r?\n)  live-read-only:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const deployStagingJob =
+    deploy.match(
+      /(?:^|\r?\n)  deploy-staging:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const deployProductionJob =
+    deploy.match(
+      /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
   const databaseRelease = read("scripts/verify-database-release.ts");
   const databaseReleaseWorkflow = read(
     ".github/workflows/database-release.yml"
   );
+  const databaseEndpointVerifier = read(
+    "scripts/verify-database-endpoint.ts"
+  );
+  const databaseSecretContract = read("src/db/secret.ts");
   const demoReconciliation = read(
     "src/memory/demo-reconciliation.ts"
   );
@@ -1892,6 +2064,14 @@ function sourceChecks(): SourceCheck[] {
   const scopedServingQueryVerifier =
     databaseRelease.match(
       /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
+    )?.[0] ?? "";
+  const runtimeResolutionVerifier =
+    databaseRelease.match(
+      /async function exerciseResolutionDecision[\s\S]*?(?=\r?\nasync function verifyRuntime\()/u
+    )?.[0] ?? "";
+  const resolutionSandboxVerifier =
+    databaseRelease.match(
+      /async function verifyResolutionSandboxSecurity[\s\S]*?(?=\r?\nasync function verifyAdmin)/u
     )?.[0] ?? "";
   const canaryDeploymentPreference =
     lambdaTemplate.match(
@@ -2258,8 +2438,8 @@ function sourceChecks(): SourceCheck[] {
     "trap - EXIT",
   ];
   const managedMcpGateFragments = [
-    'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
-    ".schemaVersion == 2",
+    'keys == ["aggregate","bound","calledTools","checkedAt","cspannLinkage","database","endpoint","mode","ok","proofs","redactions","release","schemaVersion","scope","toolsAdvertised"]',
+    ".schemaVersion == 3",
     '"tenantId":"public-demo"',
     '"company":"Helios SA"',
     '"status":"active"',
@@ -2270,17 +2450,23 @@ function sourceChecks(): SourceCheck[] {
     '"persisted":9',
     '"idempotencyKeys":9',
     '"contentDigests":9',
-    '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    ".proofs == [",
-    '"detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
-    '"detail":"`agent_memory` is present in the configured application database."',
-    '"detail":"Live schema exposes VECTOR(1024) and a native vector index."',
-    '"detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
-    "length == 4",
-    'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
+    '"commitSha":$release',
+    '"cspannReceiptSha256":$cspann',
+    '"idx_agent_memory_company_scope_embedding"',
+    '"status":"not-advertised"',
+    '.cspannLinkage.explainQuery.status == "verified"',
+    '["get_cluster","list_tables","get_table_schema","select_query"]',
+    '["get_cluster","list_tables","get_table_schema","explain_query","select_query"]',
+    '"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
+    '"`agent_memory` is present in the configured application database."',
+    '"Live schema exposes VECTOR(1024) and a native vector index."',
+    '"Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index."',
+    '"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
+    "map(.name) == $called",
+    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings","raw query plan"]',
     'grep -Fq -- "$CCLOUD_API_KEY"',
     'grep -Fq -- "$COCKROACH_CLUSTER_ID"',
+    'sha256sum managed-mcp-',
   ];
   const managedMcpGateBlocks = [
     managedMcpWorkflow,
@@ -2298,7 +2484,7 @@ function sourceChecks(): SourceCheck[] {
         'grep -Fq -- "$COCKROACH_CLUSTER_ID"'
       );
       const exactJqGate = block.indexOf(
-        'jq -e --arg database "$COCKROACH_DATABASE"'
+        '--arg database "$COCKROACH_DATABASE"'
       );
       return (
         receipt >= 0 &&
@@ -3189,7 +3375,7 @@ function sourceChecks(): SourceCheck[] {
     sourceCheck(
       "memory.managed-mcp",
       "Agentic Memory Design",
-      /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*2/iu.test(
+      /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*3/iu.test(
         managedMcpAudit
       ) &&
         /tenantId:\s*"public-demo"/u.test(managedMcpAudit) &&
@@ -3203,6 +3389,14 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /LIMIT 10[\s\S]*LIMIT 1/u.test(managedMcpAudit) &&
         /parseManagedMcpAggregateResult/u.test(managedMcpAudit) &&
+        /parseManagedMcpCspannExplainResult/u.test(managedMcpAudit) &&
+        /runMemoryIntegrityAgent/u.test(managedMcpAudit) &&
+        /MANAGED_MCP_RELEASE_SHA/u.test(managedMcpAudit) &&
+        /MANAGED_MCP_CSPANN_RECEIPT_SHA256/u.test(managedMcpAudit) &&
+        /idx_agent_memory_company_scope_embedding/u.test(
+          managedMcpAudit
+        ) &&
+        /"verified"\s*\|\s*"not-advertised"/u.test(managedMcpAudit) &&
         /assertExactKeys/u.test(managedMcpAudit) &&
         /Number\.isSafeInteger/u.test(managedMcpAudit) &&
         /structuredContent/u.test(managedMcpAudit) &&
@@ -3214,9 +3408,8 @@ function sourceChecks(): SourceCheck[] {
         /rejects malformed and ambiguous envelopes/u.test(
           managedMcpAuditTests
         ) &&
-        contains(
-          "docs/MANAGED_MCP_SMOKE.md",
-          /receipt schema v2/iu
+        /receipt v3 binds exact release, C-SPANN evidence/u.test(
+          managedMcpAuditTests
         ) &&
         managedMcpEvidenceDocs.every(
           (document) =>
@@ -3226,8 +3419,8 @@ function sourceChecks(): SourceCheck[] {
             ) &&
             !staleManagedMcpEvidence.test(document)
         ),
-      "Managed MCP v2 proves the exact fixed scope with an index-forced ten-row sentinel, strict typed aggregate parsing, and sanitized pure-test coverage.",
-      "Managed MCP v2 fixed scope, bounds, strict parser, import guard, tests, or evidence disclosure is incomplete."
+      "Managed MCP v3 proves the exact fixed scope, binds the exact release C-SPANN receipt, and capability-safely verifies explain_query when advertised.",
+      "Managed MCP v3 release linkage, capability-safe EXPLAIN, bounds, parser, tests, or evidence disclosure is incomplete."
     ),
     sourceCheck(
       "memory.legacy-reconciliation",
@@ -3310,7 +3503,7 @@ function sourceChecks(): SourceCheck[] {
       "Coverage thresholds, immutable tooling, CI-only output isolation, or uploaded evidence is incomplete."
     ),
     sourceCheck(
-      "tech.managed-mcp-receipt-v2-gate",
+      "tech.managed-mcp-receipt-v3-gate",
       "Technical Implementation",
       managedMcpGateBlocks.every(
         (block) =>
@@ -3321,14 +3514,27 @@ function sourceChecks(): SourceCheck[] {
       ) &&
         managedMcpLeakChecksPrecedeJq &&
         managedMcpSecretsAreStepScoped &&
+        /needs:\s*\r?\n      - database-release/u.test(
+          managedMcpDeployJob
+        ) &&
+        /- managed-mcp-production-audit/u.test(deployStagingJob) &&
+        /- managed-mcp-production-audit/u.test(
+          deployProductionJob
+        ) &&
+        /database-release-\$\{\{\s*github\.event\.workflow_run\.head_sha\s*\}\}/u.test(
+          managedMcpDeployJob
+        ) &&
+        /receipt_sha256:\s*\$\{\{\s*steps\.receipt\.outputs\.receipt_sha256\s*\}\}/u.test(
+          managedMcpDeployJob
+        ) &&
         /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u.test(
           managedMcpWorkflow
         ) &&
         /- name: Upload the sanitized proof receipt[\s\S]*?retention-days: 90/u.test(
           managedMcpWorkflow
         ),
-      "Both protected Managed MCP paths step-scope their secret, disable install scripts/persisted checkout credentials, enforce the exact sanitized v2 proof contract, and retain standalone release evidence for 90 days.",
-      "A Managed MCP workflow does not fail closed on the exact sanitized v2 receipt contract."
+      "Both protected Managed MCP paths bind exact-SHA C-SPANN evidence, capability-safely verify optional EXPLAIN, and causally gate staging and production promotion.",
+      "A Managed MCP workflow does not fail closed on the exact sanitized v3 receipt or does not causally gate promotion."
     ),
     sourceCheck(
       "tech.fail-closed-ci-aggregate",
@@ -3350,7 +3556,12 @@ function sourceChecks(): SourceCheck[] {
       "tech.immutable-supply-chain",
       "Technical Implementation",
       allWorkflowActionsPinned(workflows) &&
+        allWorkflowActionCommitsInventoryLocked(
+          workflows,
+          supplyChainToolLock
+        ) &&
         allSetupNodeStepsPinned(workflows) &&
+        allCheckoutStepsDisableCredentialPersistence(workflows) &&
         allComposeImagesPinned(composeSources) &&
         allCockroachImagesPinned(cockroachImageSources) &&
         allDockerfileBasesPinned(dockerfiles) &&
@@ -3360,17 +3571,360 @@ function sourceChecks(): SourceCheck[] {
       "A mutable Action/image/runtime reference remains."
     ),
     sourceCheck(
+      "tech.pipeline-owned-supply-chain-evidence",
+      "Technical Implementation",
+      /name:\s*Supply Chain \(enforced\)/u.test(
+        supplyChainWorkflow
+      ) &&
+        /install_locked_tool shellcheck/u.test(supplyChainWorkflow) &&
+        /install_locked_tool actionlint/u.test(supplyChainWorkflow) &&
+        /install_locked_tool zizmor/u.test(supplyChainWorkflow) &&
+        /install_locked_tool cfn_guard/u.test(supplyChainWorkflow) &&
+        /install_locked_tool trivy/u.test(supplyChainWorkflow) &&
+        /install_locked_tool syft/u.test(supplyChainWorkflow) &&
+        /actions\/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294/u.test(
+          supplyChainWorkflow
+        ) &&
+        /--scanners vuln,license/u.test(supplyChainWorkflow) &&
+        /for scope in backend frontend lambda-content/u.test(
+          supplyChainWorkflow
+        ) &&
+        /lambdaContentExitCode/u.test(supplyChainWorkflow) &&
+        /cfn-lint==1\.53\.1/u.test(supplyChainWorkflow) &&
+        /cfn-lint --format json "\$template"/u.test(
+          supplyChainWorkflow
+        ) &&
+        /sam validate\s*\\\s*\r?\n\s*--lint/u.test(
+          supplyChainWorkflow
+        ) &&
+        /spdx-json/u.test(supplyChainWorkflow) &&
+        /cyclonedx-json/u.test(supplyChainWorkflow) &&
+        /audit_template edge-waf aws\/edge-waf\.yaml/u.test(
+          supplyChainWorkflow
+        ) &&
+        /audit_template finops aws\/finops\.yaml/u.test(
+          supplyChainWorkflow
+        ) &&
+        /lint_template finops aws\/finops\.yaml/u.test(
+          supplyChainWorkflow
+        ) &&
+        /name:\s*Enforce zero-unwaived static findings/u.test(
+          supplyChainWorkflow
+        ) &&
+        /name:\s*Enforce zero-unwaived infrastructure findings/u.test(
+          supplyChainWorkflow
+        ) &&
+        /name:\s*Enforce zero-unwaived vulnerability and license findings/u.test(
+          supplyChainWorkflow
+        ) &&
+        (supplyChainWorkflow.match(/--exit-code 1/gu) ?? []).length >=
+          2 &&
+        /"schema_version":\s*1/u.test(supplyChainWaivers) &&
+        /"waivers":\s*\[\]/u.test(supplyChainWaivers) &&
+        !/audit-first/u.test(supplyChainWorkflow) &&
+        supplyChainReleaseJob.length > 0 &&
+        /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u.test(
+          supplyChainReleaseJob
+        ) &&
+        /schema: "archon\.supply-chain\.release-evidence"/u.test(
+          supplyChainReleaseJob
+        ) &&
+        /sourceSha: \$sourceSha/u.test(supplyChainReleaseJob) &&
+        /enforcement:\s*\{[\s\S]*mode:\s*"blocking-zero-unwaived-findings"/u.test(
+          supplyChainReleaseJob
+        ) &&
+        /acceptedWaivers:\s*0/u.test(supplyChainReleaseJob) &&
+        /unwaivedFindings:\s*0/u.test(supplyChainReleaseJob) &&
+        /"aws\/finops\.yaml"/u.test(supplyChainReleaseJob) &&
+        /actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u.test(
+          supplyChainReleaseJob
+        ) &&
+        /supply-chain-release-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          supplyChainReleaseJob
+        ) &&
+        /"attest":\s*\{[\s\S]*"version":\s*"v4\.2\.1"[\s\S]*"sha":\s*"508db95dd578ae2727ebd6217d5ba78e4fbda05d"/u.test(
+          supplyChainToolLock
+        ) &&
+        /name:\s*Require successful exact-SHA Supply Chain evidence/u.test(
+          deploySourceGateJob
+        ) &&
+        /actions\/workflows\/supply-chain\.yml\/runs\?branch=main&event=push/u.test(
+          deploySourceGateJob
+        ) &&
+        /select\([\s\S]*\.head_sha == \$sha[\s\S]*\.path == "\.github\/workflows\/supply-chain\.yml"/u.test(
+          deploySourceGateJob
+        ) &&
+        /supply_chain_run_id:\s*\$\{\{\s*steps\.supply_chain\.outputs\.run_id\s*\}\}/u.test(
+          deploySourceGateJob
+        ) &&
+        /name:\s*Verify exact-SHA Supply Chain receipt and attestation/u.test(
+          deployBuildOnceJob
+        ) &&
+        /run-id:\s*\$\{\{\s*needs\.source-gate\.outputs\.supply_chain_run_id\s*\}\}/u.test(
+          deployBuildOnceJob
+        ) &&
+        /gh attestation verify "\$receipt"/u.test(deployBuildOnceJob) &&
+        /blocking-zero-unwaived-findings/u.test(deployBuildOnceJob) &&
+        /waiverLedgerSha256/u.test(deployBuildOnceJob) &&
+        /name:\s*Create exact-SHA candidate evidence binding/u.test(
+          deployBuildOnceJob
+        ) &&
+        /schema:\s*"archon\.aws-candidate\.evidence-binding"/u.test(
+          deployBuildOnceJob
+        ) &&
+        /name:\s*Attest immutable candidate tree and evidence binding/u.test(
+          deployBuildOnceJob
+        ) &&
+        /actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u.test(
+          deployBuildOnceJob
+        ) &&
+        /subject-path:\s*candidate-evidence-binding\.json/u.test(
+          deployBuildOnceJob
+        ) &&
+        /supply-chain-release-receipt\.json/u.test(
+          deployBuildOnceJob
+        ) &&
+        /name:\s*Verify candidate, Supply Chain, and memory-evaluation provenance/u.test(
+          deployStagingJob
+        ) &&
+        /name:\s*Verify candidate, Supply Chain, and memory-evaluation provenance/u.test(
+          deployProductionJob
+        ) &&
+        /gh attestation verify candidate-evidence-binding\.json/u.test(
+          deployStagingJob
+        ) &&
+        /gh attestation verify supply-chain-release-receipt\.json/u.test(
+          deployStagingJob
+        ) &&
+        /gh attestation verify candidate-evidence-binding\.json/u.test(
+          deployProductionJob
+        ) &&
+        /gh attestation verify supply-chain-release-receipt\.json/u.test(
+          deployProductionJob
+        ) &&
+        /blocking-zero-unwaived-findings/u.test(deployStagingJob) &&
+        /blocking-zero-unwaived-findings/u.test(
+          deployProductionJob
+        ),
+      "Hosted CI blocks unwaived ShellCheck, actionlint, zizmor, cfn-lint, SAM, Guard, Trivy IaC/vulnerability/license, and dependency-policy findings; the exact-SHA receipt covers the dormant edge WAF and FinOps templates and is provenance-bound to the promoted candidate.",
+      "A blocking supply-chain policy, exact-SHA receipt binding, dormant control-plane scan, provenance attestation, or promotion verification is incomplete."
+    ),
+    sourceCheck(
+      "tech.exact-sha-memory-evaluation-gate",
+      "Technical Implementation",
+      /name:\s*Memory architecture evaluation/u.test(
+        memoryEvaluationWorkflow
+      ) &&
+        memoryEvaluationJob.length > 0 &&
+        /name:\s*Longitudinal, scale, and C-SPANN evidence/u.test(
+          memoryEvaluationJob
+        ) &&
+        /EVALUATION_DIR=%s/u.test(memoryEvaluationJob) &&
+        /\$RUNNER_TEMP\/memory-evaluation/u.test(
+          memoryEvaluationJob
+        ) &&
+        /Evaluate B0-B4, lifecycle ablations, and 100k-event rehearsal/u.test(
+          memoryEvaluationJob
+        ) &&
+        /Compare C-SPANN recall with exact cosine ground truth/u.test(
+          memoryEvaluationJob
+        ) &&
+        /Object\.values\(receipt\.gates\)\.some\(\(value\) => value !== true\)/u.test(
+          memoryEvaluationJob
+        ) &&
+        /memory-evaluation-\$\{\{\s*env\.SOURCE_SHA\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          memoryEvaluationJob
+        ) &&
+        /B0_SESSION_ONLY/u.test(memoryEvaluationScript) &&
+        /B1_LEXICAL/u.test(memoryEvaluationScript) &&
+        /B2_VECTOR_ONLY/u.test(memoryEvaluationScript) &&
+        /B3_VECTOR_SCOPE_TIME/u.test(memoryEvaluationScript) &&
+        /B4_FULL_LIFECYCLE/u.test(memoryEvaluationScript) &&
+        /A_NO_TEMPORAL/u.test(memoryEvaluationScript) &&
+        /A_NO_CONTRADICTION/u.test(memoryEvaluationScript) &&
+        /A_NO_HUMAN_GATE/u.test(memoryEvaluationScript) &&
+        /real-customer-production-corpus/u.test(
+          memoryEvaluationScript
+        ) &&
+        /human-evaluation-results/u.test(memoryEvaluationScript) &&
+        /name:\s*Require successful exact-SHA Memory architecture evaluation/u.test(
+          deploySourceGateJob
+        ) &&
+        /actions\/workflows\/memory-evaluation\.yml\/runs\?branch=main&event=push/u.test(
+          deploySourceGateJob
+        ) &&
+        /\.name == "Memory architecture evaluation"/u.test(
+          deploySourceGateJob
+        ) &&
+        /\.name ==\s*\r?\n\s+"Longitudinal, scale, and C-SPANN evidence"/u.test(
+          deploySourceGateJob
+        ) &&
+        /gh run download "\$run_id"/u.test(deploySourceGateJob) &&
+        /memory-evaluation-receipt\.json/u.test(
+          deploySourceGateJob
+        ) &&
+        /actual_receipt_digest/u.test(deploySourceGateJob) &&
+        /receipt_base64=/u.test(deploySourceGateJob) &&
+        /name:\s*Bind exact-SHA Memory architecture evaluation receipt/u.test(
+          deployBuildOnceJob
+        ) &&
+        /memory_evaluation_receipt_base64/u.test(
+          deployBuildOnceJob
+        ) &&
+        /memory-evaluation-receipt\.json/u.test(
+          deployBuildOnceJob
+        ) &&
+        /memoryEvaluation:\s*\{/u.test(deployBuildOnceJob) &&
+        /memoryEvaluationReceiptSha256/u.test(
+          deployBuildOnceJob
+        ) &&
+        /memory-evaluation-receipt\.json/u.test(
+          deployStagingJob
+        ) &&
+        /memory-evaluation-receipt\.json/u.test(
+          deployProductionJob
+        ) &&
+        /candidate-evidence-binding\.json/u.test(
+          deployStagingJob
+        ) &&
+        /candidate-evidence-binding\.json/u.test(
+          deployProductionJob
+        ),
+      "The release waits for the exact main-SHA longitudinal/scale/C-SPANN job, verifies its sealed receipt and artifacts, and binds the evaluation digest into the attested candidate promoted unchanged.",
+      "The exact-SHA memory-evaluation run, job context, sealed receipt, or candidate evidence binding is incomplete."
+    ),
+    sourceCheck(
+      "product.well-architected-evidence-contract",
+      "Production Readiness",
+      /name:\s*AWS Well-Architected Evidence Audit/u.test(
+        wellArchitectedWorkflow
+      ) &&
+        wellArchitectedRepositoryJob.length > 0 &&
+        /name:\s*Validate repository evidence contract/u.test(
+          wellArchitectedRepositoryJob
+        ) &&
+        !/id-token:\s*write/u.test(wellArchitectedRepositoryJob) &&
+        !/configure-aws-credentials/u.test(
+          wellArchitectedRepositoryJob
+        ) &&
+        /archon\.aws-well-architected\.repository-audit/u.test(
+          wellArchitectedRepositoryJob
+        ) &&
+        /if-no-files-found:\s*error/u.test(
+          wellArchitectedRepositoryJob
+        ) &&
+        wellArchitectedLiveJob.length > 0 &&
+        /github\.event_name == 'workflow_dispatch' &&\s*\r?\n\s*inputs\.mode == 'live-read-only'/u.test(
+          wellArchitectedLiveJob
+        ) &&
+        /environment:\s*\r?\n\s+name:\s*production-audit/u.test(
+          wellArchitectedLiveJob
+        ) &&
+        /LIVE_ACTIVATION_APPROVED/u.test(wellArchitectedLiveJob) &&
+        /test "\$AWS_REGION" = "eu-west-1"/u.test(
+          wellArchitectedLiveJob
+        ) &&
+        /test "\$FORBIDDEN_REGION" = "us-west-2"/u.test(
+          wellArchitectedLiveJob
+        ) &&
+        /resourcegroupstaggingapi get-resources/u.test(
+          wellArchitectedLiveJob
+        ) &&
+        /forbidden_count" -eq 0/u.test(wellArchitectedLiveJob) &&
+        /RUNNER_TEMP is required; this audit is CI-only/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /edge-waf-control-plane-boundary/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /AWS::WAFv2::WebACL/u.test(wellArchitectedContractAudit) &&
+        /finops-control-plane-boundary/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /AWS::Budgets::Budget/u.test(wellArchitectedContractAudit) &&
+        /AWS::CE::AnomalyMonitor/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /AWS::CE::AnomalySubscription/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /explicit-live-activation-required/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /not an application workload region/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        (
+          wellArchitectedWorkflow.match(
+            /- "aws\/finops\.yaml"/gu
+          ) ?? []
+        ).length === 2 &&
+        !/cloudformation deploy[\s\S]*?--template-file aws\/(?:edge-waf|finops)\.yaml/u.test(
+          deploy
+        ) &&
+        /"primaryRegion":\s*"eu-west-1"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"explicitlyForbiddenRegions":\s*\[\s*"us-west-2"\s*\]/u.test(
+          wellArchitectedContract
+        ) &&
+        /"defaultMode":\s*"repository"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"liveAuditMode":\s*"live-read-only"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"awsMutationPermitted":\s*false/u.test(
+          wellArchitectedContract
+        ) &&
+        /"provisioningPermitted":\s*false/u.test(
+          wellArchitectedContract
+        ) &&
+        /"status":\s*"pending-human-assignment"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"status":\s*"pending-human-decision"/u.test(
+          wellArchitectedContract
+        ),
+      "The default Well-Architected audit is credential-free and repository-only; optional live eu-west-1 inventory is explicit, read-only, owner/objective gated, and proves no tagged workload in us-west-2 while CloudFront WAF and FinOps billing controls remain approval-gated and dormant.",
+      "The Well-Architected evidence contract, honest human-decision gates, region boundary, or non-mutating activation model is incomplete."
+    ),
+    sourceCheck(
       "tech.release-dependency-governance",
       "Technical Implementation",
       hasExactCodeqlActionPins(codeqlWorkflow) &&
+        /queries:\s*security-and-quality/u.test(codeqlWorkflow) &&
+        /output:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u.test(
+          codeqlWorkflow
+        ) &&
+        /upload:\s*always/u.test(codeqlWorkflow) &&
+        /name:\s*Enforce the CodeQL high-severity policy/u.test(
+          codeqlWorkflow
+        ) &&
+        /properties\["security-severity"\]/u.test(codeqlWorkflow) &&
+        /securitySeverity >= 7 \|\| rawLevel === "error"/u.test(
+          codeqlWorkflow
+        ) &&
+        /blockingFindings\.length > 0/u.test(codeqlWorkflow) &&
+        /policy:\s*"codeql-high-critical-or-error"/u.test(
+          codeqlWorkflow
+        ) &&
+        /acceptedWaivers:\s*0/u.test(codeqlWorkflow) &&
+        /"waivers":\s*\[\]/u.test(supplyChainWaivers) &&
+        /name:\s*Prove CodeQL succeeded for the exact release SHA/u.test(
+          deployBuildOnceJob
+        ) &&
+        /actions\/workflows\/codeql\.yml\/runs\?branch=main&event=push/u.test(
+          deployBuildOnceJob
+        ) &&
         hasExactDependabotReleaseFreeze(dependabotConfig) &&
         has("docs/DEPENDENCY_RELEASE_POLICY.md") &&
         contains(
           "docs/DEPENDENCY_RELEASE_POLICY.md",
           /security updates remain enabled/iu
         ),
-      "Release dependencies are frozen without suppressing security updates, and all CodeQL phases share one verified immutable release.",
-      "The release freeze, security-update path, or atomic CodeQL pin is incomplete."
+      "Release dependencies remain governable, all CodeQL phases share one immutable version, in-threshold security findings block with zero waivers, and Deploy AWS requires that exact-SHA CodeQL success.",
+      "The dependency policy, atomic CodeQL pin, blocking finding policy, empty waiver boundary, or exact-SHA deploy gate is incomplete."
     ),
     sourceCheck(
       "tech.exact-ci-trigger",
@@ -3398,6 +3952,19 @@ function sourceChecks(): SourceCheck[] {
       "Technical Implementation",
       /export\s+function\s+buildRecallQuery/iu.test(memory) &&
         /buildRecallQuery/iu.test(databaseRelease) &&
+        /assertCockroachEndpointBinding/iu.test(databaseRelease) &&
+        /assertCockroachEndpointBinding/iu.test(databaseEndpointVerifier) &&
+        /ROUTING_OVERRIDE_PARAMETERS/iu.test(databaseSecretContract) &&
+        /hostaddr/iu.test(databaseSecretContract) &&
+        /options/iu.test(databaseSecretContract) &&
+        /COCKROACH_SQL_DNS/iu.test(databaseReleaseWorkflow) &&
+        /regions\[\]/iu.test(databaseReleaseWorkflow) &&
+        /sql_dns/iu.test(databaseReleaseWorkflow) &&
+        databaseReleaseWorkflow.indexOf("db:endpoint:verify") <
+          databaseReleaseWorkflow.indexOf("npm run db:schema") &&
+        /\.cockroachCloud\.sqlEndpointBinding\.boundUrlCount\s*==\s*3/u.test(
+          databaseReleaseWorkflow
+        ) &&
         /verifyRuntimeCspannPath/iu.test(databaseRelease) &&
         /EXPLAIN\s+\$\{statement\.text\}/u.test(databaseRelease) &&
         /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/iu.test(
@@ -3478,8 +4045,126 @@ function sourceChecks(): SourceCheck[] {
         /servingViewOwnerPrivilegeBoundary\s*==\s*\n?\s*"direct non-inheritable BYPASSRLS role option; SELECT agent_memory only; no system privileges"/u.test(
           databaseReleaseWorkflow
         ),
-      "CI executes the exact application query as both runtime principals and rejects three-axis canaries through both fixed-scope C-SPANN views.",
-      "The database release does not enforce exact runtime-principal C-SPANN planning, execution, and serving-view isolation."
+      "CI binds admin/staging/production URLs to the authenticated primary eu-west-1 Cockroach Cloud sql_dns before mutation, then executes the exact application query as both runtime principals and rejects three-axis canaries through both fixed-scope C-SPANN views.",
+      "The database release does not enforce endpoint-to-cluster identity plus exact runtime-principal C-SPANN planning, execution, and serving-view isolation."
+    ),
+    sourceCheck(
+      "tech.runtime-resolution-release-gate",
+      "Technical Implementation",
+      runtimeResolutionVerifier.length > 0 &&
+        resolutionSandboxVerifier.length > 0 &&
+        /CockroachResolutionStore/u.test(runtimeResolutionVerifier) &&
+        /handleCreateResolutionSession/u.test(runtimeResolutionVerifier) &&
+        /handleResolutionDecision/u.test(runtimeResolutionVerifier) &&
+        /handleGetResolutionSession/u.test(runtimeResolutionVerifier) &&
+        /decision:\s*"approve"\s*\|\s*"reject"/u.test(
+          runtimeResolutionVerifier
+        ) &&
+        /conflict\.status\s*!==\s*409/u.test(runtimeResolutionVerifier) &&
+        /replayReceipt\.digest\s*!==\s*receipt\.digest/u.test(
+          runtimeResolutionVerifier
+        ) &&
+        /canonicalMemoryUnchanged:\s*true/u.test(
+          runtimeResolutionVerifier
+        ) &&
+        /SHOW SYSTEM GRANTS FOR archon_resolution_writer/u.test(
+          databaseRelease
+        ) &&
+        /verifyExactResolutionRelationGrants/u.test(databaseRelease) &&
+        /verifyResolutionTransitionFunctions/u.test(databaseRelease) &&
+        /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u.test(
+          databaseRelease
+        ) &&
+        /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'function'/u.test(
+          databaseRelease
+        ) &&
+        /sql\.ttl\.job\.enabled/u.test(resolutionSandboxVerifier) &&
+        /SHOW SCHEDULES/u.test(resolutionSandboxVerifier) &&
+        /tables:\s*5/u.test(resolutionSandboxVerifier) &&
+        /rlsPolicies:\s*15/u.test(resolutionSandboxVerifier) &&
+        /ttlScheduleStatus:\s*"ACTIVE"/u.test(
+          resolutionSandboxVerifier
+        ) &&
+        /\.proofs\.memoryResolutionLoop\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.runtimeResolutionEnvironmentCount\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.tables\s*==\s*5/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.rlsPolicies\s*==\s*15/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.ttlSchedule\s*==\s*\n?\s*"0 \*\/4 \* \* \*"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.ttlClusterEnabled\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.ttlScheduleStatus\s*==\s*"ACTIVE"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.ttlPaused\s*==\s*false/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.writerRelationGrantCount\s*==\s*5/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.transitionOwnerRelationGrantCount\s*==\s*13/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.transitionFunctionCount\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.writerFunctionExecuteCount\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.resolutionSandbox\.directRuntimeDml\s*==\s*"none"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.databaseEnforcedTransitions\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.exactTransitionFunctionExecute\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.directResolutionDmlDenied\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.approvePath\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.rejectPath\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.idempotentReplay\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.conflictingFinalDecisionRejected\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.receiptVerified\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.receiptDatabaseDerived\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.consolidationVerified\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.canonicalMemoryUnchanged\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.deletePrivilegeAbsent\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.resolutionLoop\.approvedReceiptSha256\s*!=\s*\n?\s*\.resolutionLoop\.rejectedReceiptSha256/u.test(
+          databaseReleaseWorkflow
+        ),
+      "The database release proves the five-table TTL/RLS sandbox, a two-routine DB-enforced transition API with zero runtime DML, and approve/reject/idempotency/conflict/receipt/consolidation behavior through both runtime principals while canonical memory remains unchanged.",
+      "The database release does not prove the bounded CockroachDB resolution action loop and its isolation, retention, or immutable receipt controls."
     ),
     sourceCheck(
       "impact.working-slice",
@@ -3745,10 +4430,10 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /"\/api\/proof"/u.test(hostedDast) &&
         /targetReleaseSha === expectedReleaseSha/u.test(hostedDast) &&
-        /schema:\s*"archon\.hosted-dast"[\s\S]*?version:\s*3/u.test(
+        /schema:\s*"archon\.hosted-dast"[\s\S]*?version:\s*4/u.test(
           hostedDast
         ) &&
-        /version:\s*3/u.test(hostedDastTypes) &&
+        /version:\s*4/u.test(hostedDastTypes) &&
         /profile:\s*"predeploy" \| "production-audit" \| "exact-release"/u.test(
           hostedDastTypes
         ) &&
@@ -3789,7 +4474,21 @@ function sourceChecks(): SourceCheck[] {
           lambdaTemplate
         ) &&
         /flag:\s*"wx"/u.test(hostedDast) &&
-        /checks\.length,\s*16/u.test(hostedDastTests) &&
+        /checks\.length,\s*21/u.test(hostedDastTests) &&
+        /!strictApiBoundary \|\|[\s\S]*?healthJson\?\.access ===\s*\n?\s*"canonical-read-only\+isolated-synthetic-resolution-write"/u.test(
+          hostedDast
+        ) &&
+        /healthJson\?\.resolutionSandbox\?\.authority ===\s*\n?\s*"financial-controller-human-gate"/u.test(
+          hostedDast
+        ) &&
+        /id:\s*"resolution-session-method-boundary"/u.test(hostedDast) &&
+        /id:\s*"resolution-session-fixed-scope-boundary"/u.test(hostedDast) &&
+        /id:\s*"resolution-session-auth-boundary"/u.test(hostedDast) &&
+        /id:\s*"resolution-capability-shape-boundary"/u.test(hostedDast) &&
+        /id:\s*"resolution-decision-auth-boundary"/u.test(hostedDast) &&
+        /Hosted DAST receipt does not prove all 21 checks/u.test(
+          finalSubmissionGate
+        ) &&
         /rejects encoded runtime secrets in public responses/u.test(
           hostedDastTests
         ) &&

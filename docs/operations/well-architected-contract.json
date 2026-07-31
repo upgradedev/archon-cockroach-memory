@@ -1,0 +1,229 @@
+{
+  "schema": "archon.aws-well-architected.contract",
+  "version": 1,
+  "workload": {
+    "id": "archon-cockroach-memory",
+    "repository": "upgradedev/archon-cockroach-memory",
+    "environments": [
+      "staging",
+      "production"
+    ],
+    "evidenceExecutionBoundary": "github-actions-only"
+  },
+  "regionPolicy": {
+    "primaryRegion": "eu-west-1",
+    "regionalWorkloadAllowlist": [
+      "eu-west-1"
+    ],
+    "explicitlyForbiddenRegions": [
+      "us-west-2"
+    ],
+    "globalFrontDoor": "cloudfront",
+    "additionalRegionalWorkloadRequiresExplicitHumanApproval": true,
+    "additionalRegionalWorkloadRequiresCostApproval": true,
+    "additionalRegionalWorkloadRequiresTestedRtoRpoPlan": true
+  },
+  "activation": {
+    "defaultMode": "repository",
+    "liveAuditMode": "live-read-only",
+    "liveAuditEnvironment": "production-audit",
+    "liveAuditRequiresExplicitApproval": true,
+    "awsMutationPermitted": false,
+    "provisioningPermitted": false
+  },
+  "owners": {
+    "workload": {
+      "value": null,
+      "status": "pending-human-assignment",
+      "requiredForLiveActivation": true
+    },
+    "operations": {
+      "value": null,
+      "status": "pending-human-assignment",
+      "requiredForLiveActivation": true
+    },
+    "security": {
+      "value": null,
+      "status": "pending-human-assignment",
+      "requiredForLiveActivation": true
+    },
+    "finops": {
+      "value": null,
+      "status": "pending-human-assignment",
+      "requiredForLiveActivation": true
+    },
+    "sustainability": {
+      "value": null,
+      "status": "pending-human-assignment",
+      "requiredForLiveActivation": true
+    }
+  },
+  "objectives": {
+    "availabilityPercent": {
+      "value": null,
+      "unit": "percent",
+      "status": "pending-human-decision",
+      "requiredForLiveActivation": true
+    },
+    "apiP95LatencyMs": {
+      "value": null,
+      "unit": "milliseconds",
+      "status": "pending-human-decision",
+      "requiredForLiveActivation": true
+    },
+    "requestErrorRatePercent": {
+      "value": null,
+      "unit": "percent",
+      "status": "pending-human-decision",
+      "requiredForLiveActivation": true
+    },
+    "rtoMinutes": {
+      "value": null,
+      "unit": "minutes",
+      "status": "pending-human-decision",
+      "requiredForLiveActivation": true
+    },
+    "rpoMinutes": {
+      "value": null,
+      "unit": "minutes",
+      "status": "pending-human-decision",
+      "requiredForLiveActivation": true
+    }
+  },
+  "controls": [
+    {
+      "id": "WA-01",
+      "name": "Ownership, objectives, and evidence contract",
+      "scope": "repository",
+      "state": "repository-implemented",
+      "requiresExternalApproval": false,
+      "activatedByThisContract": true
+    },
+    {
+      "id": "WA-02",
+      "name": "Human alarm delivery and incident loop",
+      "scope": "account-and-human",
+      "state": "approval-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-03",
+      "name": "Account security baseline",
+      "scope": "account-or-organization",
+      "state": "approval-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-04",
+      "name": "Edge protection, access logging, and origin restriction",
+      "scope": "application-and-account",
+      "state": "repository-prepared-activation-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-05",
+      "name": "CockroachDB credential rotation",
+      "scope": "application-aws-and-cockroachdb",
+      "state": "approval-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-06",
+      "name": "Fault-injected deployment recovery",
+      "scope": "application-and-account",
+      "state": "approval-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-07",
+      "name": "Regional disaster recovery",
+      "scope": "application-account-and-cockroachdb",
+      "state": "blocked-on-region-rto-rpo-and-cost-approval",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-08",
+      "name": "Quota and hosted performance evidence",
+      "scope": "repository-and-account",
+      "state": "approval-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-09",
+      "name": "FinOps controls and unit economics",
+      "scope": "repository-and-billing-account",
+      "state": "repository-prepared-activation-required",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    },
+    {
+      "id": "WA-10",
+      "name": "Measured sustainability improvement",
+      "scope": "repository-and-account-telemetry",
+      "state": "pending-baseline-and-human-target",
+      "requiresExternalApproval": true,
+      "activatedByThisContract": false
+    }
+  ],
+  "approvalGates": [
+    {
+      "id": "live-read-only-audit",
+      "required": true,
+      "mutationAllowed": false,
+      "conditions": [
+        "workflow_dispatch approval attestation",
+        "production-audit environment approval",
+        "all required owners assigned",
+        "all required objectives approved",
+        "exact main-branch source",
+        "existing least-privilege audit role"
+      ]
+    },
+    {
+      "id": "billable-or-account-wide-control-activation",
+      "required": true,
+      "mutationAllowed": false,
+      "conditions": [
+        "separate explicit human approval",
+        "documented cost impact",
+        "documented rollback",
+        "dedicated mutating workflow outside this audit contract"
+      ]
+    },
+    {
+      "id": "additional-region",
+      "required": true,
+      "mutationAllowed": false,
+      "conditions": [
+        "region is not us-west-2",
+        "explicit architecture approval",
+        "explicit cost approval",
+        "approved RTO and RPO",
+        "pipeline-only disaster-recovery drill"
+      ]
+    }
+  ],
+  "requiredDocuments": [
+    "docs/operations/SLO_AND_OWNERSHIP.md",
+    "docs/operations/WELL_ARCHITECTED_EVIDENCE.md",
+    "docs/operations/INCIDENT_PROCESS.md",
+    "docs/finops/COST_MODEL.md",
+    "docs/sustainability/BASELINE_AND_TARGETS.md",
+    "docs/runbooks/README.md",
+    "docs/runbooks/alarm-response.md",
+    "docs/runbooks/rollback-recovery.md",
+    "docs/runbooks/regional-outage.md",
+    "docs/runbooks/credential-compromise.md",
+    "docs/runbooks/database-restore.md",
+    "docs/runbooks/cost-anomaly.md",
+    "docs/runbooks/waf-abuse-response.md",
+    "aws/finops.yaml"
+  ]
+}

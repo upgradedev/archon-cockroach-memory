@@ -9,13 +9,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   allCockroachImagesPinned,
+  allCheckoutStepsDisableCredentialPersistence,
   allComposeImagesPinned,
   allDockerfileBasesPinned,
   allSetupNodeStepsPinned,
+  allWorkflowActionCommitsInventoryLocked,
   allWorkflowActionsPinned,
   evaluate,
   EXPECTED_COCKROACH_IMAGE_REFS,
@@ -1204,7 +1206,7 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
-  assert.equal(EXPECTED_SETUP_NODE_STEPS, 22);
+  assert.equal(EXPECTED_SETUP_NODE_STEPS, 27);
   assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
   assert.deepEqual(
     [...new Set(versions)],
@@ -1212,7 +1214,34 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 112);
+  const actionLock = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      ".github",
+      "toolchain-lock.json"
+    ),
+    "utf8"
+  );
+  assert.equal(
+    allWorkflowActionCommitsInventoryLocked(workflows, actionLock),
+    true
+  );
+  assert.equal(
+    allWorkflowActionCommitsInventoryLocked(
+      workflows,
+      actionLock.replace(
+        "db07bd9765aac508ef18982e52ab937fe633a065",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    allCheckoutStepsDisableCredentialPersistence(workflows),
+    true
+  );
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 152);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -1571,6 +1600,24 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   );
 
   assert.equal(hasExactCodeqlActionPins(codeql), true);
+  assert.match(codeql, /queries:\s*security-and-quality/u);
+  assert.match(
+    codeql,
+    /output:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u
+  );
+  assert.match(codeql, /upload:\s*always/u);
+  assert.match(
+    codeql,
+    /name: Enforce the CodeQL high-severity policy/u
+  );
+  assert.match(codeql, /properties\["security-severity"\]/u);
+  assert.match(
+    codeql,
+    /securitySeverity >= 7 \|\| rawLevel === "error"/u
+  );
+  assert.match(codeql, /blockingFindings\.length > 0/u);
+  assert.match(codeql, /policy: "codeql-high-critical-or-error"/u);
+  assert.match(codeql, /acceptedWaivers: 0/u);
   assert.equal(
     (
       codeql.match(
@@ -1925,7 +1972,7 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 11);
+  assert.equal(repositoryWorkflows.length, 14);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -2111,7 +2158,7 @@ test("readiness: required tool story is Vector + hardened Managed MCP", () => {
   );
   assert.equal(
     report.checks.find(
-      (check) => check.id === "tech.managed-mcp-receipt-v2-gate"
+      (check) => check.id === "tech.managed-mcp-receipt-v3-gate"
     )?.status,
     "pass"
   );
@@ -2135,13 +2182,13 @@ test("readiness: required tool story is Vector + hardened Managed MCP", () => {
   );
 });
 
-test("readiness: Managed MCP source and both protected workflows pin receipt v2 exactly", () => {
+test("readiness: Managed MCP source and both protected workflows pin causal receipt v3 exactly", () => {
   const audit = readFileSync(
     new URL("../scripts/cloud-mcp-audit.ts", import.meta.url),
     "utf8"
   );
   for (const pattern of [
-    /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*2/u,
+    /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*3/u,
     /tenantId:\s*"public-demo"/u,
     /company:\s*"Helios SA"/u,
     /status:\s*"active"/u,
@@ -2149,6 +2196,11 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     /FORCE_INDEX=idx_agent_memory_active_scope/u,
     /LIMIT 10[\s\S]*LIMIT 1/u,
     /parseManagedMcpAggregateResult/u,
+    /parseManagedMcpCspannExplainResult/u,
+    /runMemoryIntegrityAgent/u,
+    /MANAGED_MCP_RELEASE_SHA/u,
+    /MANAGED_MCP_CSPANN_RECEIPT_SHA256/u,
+    /idx_agent_memory_company_scope_embedding/u,
     /assertExactKeys/u,
     /Number\.isSafeInteger/u,
     /invokedDirectly/u,
@@ -2170,8 +2222,8 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
   assert.ok(deployJob);
 
   const exactGateFragments = [
-    'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
-    ".schemaVersion == 2",
+    'keys == ["aggregate","bound","calledTools","checkedAt","cspannLinkage","database","endpoint","mode","ok","proofs","redactions","release","schemaVersion","scope","toolsAdvertised"]',
+    ".schemaVersion == 3",
     '"tenantId":"public-demo"',
     '"company":"Helios SA"',
     '"status":"active"',
@@ -2182,17 +2234,23 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     '"persisted":9',
     '"idempotencyKeys":9',
     '"contentDigests":9',
-    '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    ".proofs == [",
-    '"detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
-    '"detail":"`agent_memory` is present in the configured application database."',
-    '"detail":"Live schema exposes VECTOR(1024) and a native vector index."',
-    '"detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
-    "length == 4",
-    'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
+    '"commitSha":$release',
+    '"cspannReceiptSha256":$cspann',
+    '"idx_agent_memory_company_scope_embedding"',
+    '"status":"not-advertised"',
+    '.cspannLinkage.explainQuery.status == "verified"',
+    '["get_cluster","list_tables","get_table_schema","select_query"]',
+    '["get_cluster","list_tables","get_table_schema","explain_query","select_query"]',
+    '"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
+    '"`agent_memory` is present in the configured application database."',
+    '"Live schema exposes VECTOR(1024) and a native vector index."',
+    '"Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index."',
+    '"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
+    "map(.name) == $called",
+    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings","raw query plan"]',
     'grep -Fq -- "$CCLOUD_API_KEY"',
     'grep -Fq -- "$COCKROACH_CLUSTER_ID"',
+    "sha256sum managed-mcp-",
   ];
   for (const workflow of [standalone, deployJob]) {
     for (const fragment of exactGateFragments) {
@@ -2206,7 +2264,7 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
       'grep -Fq -- "$COCKROACH_CLUSTER_ID"'
     );
     const exactJqGate = workflow.indexOf(
-      'jq -e --arg database "$COCKROACH_DATABASE"'
+      '--arg database "$COCKROACH_DATABASE"'
     );
     assert.ok(receipt >= 0);
     assert.ok(receipt < apiKeyCheck);
@@ -2234,6 +2292,28 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     standalone,
     /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error[\s\S]*?retention-days: 90/u
   );
+  assert.match(
+    deployJob,
+    /needs:\s*\r?\n      - database-release/u
+  );
+  assert.match(
+    deployJob,
+    /database-release-\$\{\{\s*github\.event\.workflow_run\.head_sha\s*\}\}/u
+  );
+  assert.match(
+    deployJob,
+    /receipt_sha256:\s*\$\{\{\s*steps\.receipt\.outputs\.receipt_sha256\s*\}\}/u
+  );
+  const stagingJob = deploy.match(
+    /(?:^|\r?\n)  deploy-staging:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const productionJob = deploy.match(
+    /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(stagingJob);
+  assert.ok(productionJob);
+  assert.match(stagingJob, /- managed-mcp-production-audit/u);
+  assert.match(productionJob, /- managed-mcp-production-audit/u);
   for (const evidencePath of [
     "../README.md",
     "../docs/TOOLS.md",
@@ -2293,6 +2373,17 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(workflow, /\.proofs\.canonicalActiveMemories == 9/u);
   assert.match(workflow, /\.proofs\.distinctIdempotencyKeys == 9/u);
   assert.match(workflow, /\.proofs\.distinctContentDigests == 9/u);
+  assert.match(workflow, /COCKROACH_SQL_DNS/u);
+  assert.match(workflow, /regions\[\]/u);
+  assert.match(workflow, /sql_dns/u);
+  assert.ok(
+    workflow.indexOf("db:endpoint:verify") <
+      workflow.indexOf("npm run db:schema"),
+  );
+  assert.match(
+    workflow,
+    /\.cockroachCloud\.sqlEndpointBinding\.boundUrlCount == 3/u,
+  );
   assert.match(
     workflow,
     /\.proofs\.runtimePrincipalCspannPlanAndExecute == true/u
@@ -2334,6 +2425,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     "utf8"
   );
   assert.match(verifier, /schemaVersion: 5/u);
+  assert.match(verifier, /assertCockroachEndpointBinding/u);
   assert.match(verifier, /scopedServingQueriesRejectCanaries: true/u);
   const scopedVerifier = verifier.match(
     /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
@@ -2369,6 +2461,84 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(scopedVerifier, /SET vector_search_beam_size = 600/u);
   assert.match(verifier, /class ReleaseGateError extends Error/u);
   assert.match(verifier, /error instanceof ReleaseGateError/u);
+  assert.equal(
+    evaluate().checks.find(
+      (check) => check.id === "tech.runtime-resolution-release-gate"
+    )?.status,
+    "pass"
+  );
+  assert.match(workflow, /\.proofs\.memoryResolutionLoop == true/u);
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeResolutionEnvironmentCount == 2/u
+  );
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.tables == 5/u);
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.rlsPolicies == 15/u);
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlSchedule ==\s*\n?\s*"0 \*\/4 \* \* \*"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlClusterEnabled == true/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlScheduleStatus == "ACTIVE"/u
+  );
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.ttlPaused == false/u);
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.writerRelationGrantCount == 5/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.transitionOwnerRelationGrantCount == 13/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.transitionFunctionCount == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.writerFunctionExecuteCount == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.directRuntimeDml == "none"/u
+  );
+  for (const resolutionProof of [
+    ".resolutionLoop.databaseEnforcedTransitions == true",
+    ".resolutionLoop.exactTransitionFunctionExecute == true",
+    ".resolutionLoop.directResolutionDmlDenied == true",
+    ".resolutionLoop.approvePath == true",
+    ".resolutionLoop.rejectPath == true",
+    ".resolutionLoop.idempotentReplay == true",
+    ".resolutionLoop.conflictingFinalDecisionRejected == true",
+    ".resolutionLoop.receiptVerified == true",
+    ".resolutionLoop.receiptDatabaseDerived == true",
+    ".resolutionLoop.consolidationVerified == true",
+    ".resolutionLoop.canonicalMemoryUnchanged == true",
+    ".resolutionLoop.immutableDecisionTables == true",
+    ".resolutionLoop.deletePrivilegeAbsent == true",
+  ]) {
+    assert.ok(workflow.includes(resolutionProof), resolutionProof);
+  }
+  assert.match(
+    verifier,
+    /SHOW SYSTEM GRANTS FOR archon_resolution_writer/u
+  );
+  assert.match(
+    verifier,
+    /verifyExactResolutionRelationGrants\(\s*client,\s*"archon_resolution_writer",\s*RESOLUTION_WRITER_GRANTS/u
+  );
+  assert.match(verifier, /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u);
+  assert.match(
+    verifier,
+    /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'function'/u
+  );
+  assert.match(verifier, /sql\.ttl\.job\.enabled/u);
+  assert.match(verifier, /SHOW SCHEDULES/u);
 });
 
 test("readiness: both AWS release gates accept only fully grounded safe-answer states", () => {
@@ -2399,6 +2569,27 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
       ".memory.contentDigests == 9",
       ".memory.storeVerified == true",
       '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
+      ".resolutionLoop.enabled == true",
+      ".resolutionLoop.schemaTables == 5",
+      ".resolutionLoop.activeSandboxSessions |",
+      '.resolutionLoop.transactionIsolation == "SERIALIZABLE"',
+      '.resolutionLoop.authorityBoundary ==',
+      '"financial-controller-human-gate"',
+      '.resolutionLoop.identityAssurance ==',
+      '"fixed-demo-role-assertion-not-authenticated"',
+      '.resolutionLoop.idempotency ==',
+      '"decision-key+database-unique-constraint"',
+      '.resolutionLoop.receipt ==',
+      '"SHA-256 immutable decision record"',
+      '.resolutionLoop.learning ==',
+      '"conflict-observation+human-decision"',
+      '.resolutionLoop.consolidation ==',
+      '"versioned current/superseded state"',
+      '.resolutionLoop.forgetting == "CockroachDB row-level TTL"',
+      ".resolutionLoop.canonicalMemoryMutable == false",
+      '.resolutionLoop.externalSideEffects == "none"',
+      '.resolutionLoop.evidence ==',
+      '"live fixed-scope sandbox schema query"',
       "(.citations | length) >= 2",
       "(.citations | length) <= 5",
       ".recalled == (.citations | length)",
@@ -2564,6 +2755,323 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
   assert.match(
     workflow,
     /name: Prove the candidate is still the main branch head/u
+  );
+});
+
+test("readiness: exact-SHA supply-chain evidence and candidate provenance gate promotion", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "tech.pipeline-owned-supply-chain-evidence"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Technical Implementation");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const supplyChain = readFileSync(
+    new URL("../.github/workflows/supply-chain.yml", import.meta.url),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const waivers = readFileSync(
+    new URL("../security/waivers.yml", import.meta.url),
+    "utf8"
+  );
+  const sourceGate = deploy.match(
+    /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const buildOnce = deploy.match(
+    /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const databaseRelease = deploy.match(
+    /(?:^|\r?\n)  database-release:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const managedMcp = deploy.match(
+    /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const staging = deploy.match(
+    /(?:^|\r?\n)  deploy-staging:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const production = deploy.match(
+    /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  for (const job of [
+    sourceGate,
+    buildOnce,
+    databaseRelease,
+    managedMcp,
+    staging,
+    production,
+  ]) {
+    assert.ok(job);
+  }
+
+  assert.match(
+    sourceGate!,
+    /name: Require successful exact-SHA Supply Chain evidence/u
+  );
+  assert.match(
+    sourceGate!,
+    /actions\/workflows\/supply-chain\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    sourceGate!,
+    /\.head_sha == \$sha[\s\S]*?\.head_branch == "main"[\s\S]*?\.event == "push"[\s\S]*?\.path == "\.github\/workflows\/supply-chain\.yml"/u
+  );
+  assert.match(
+    buildOnce!,
+    /run-id:\s*\$\{\{\s*needs\.source-gate\.outputs\.supply_chain_run_id\s*\}\}/u
+  );
+  assert.match(
+    buildOnce!,
+    /gh attestation verify "\$receipt"\s+\\\r?\n\s+--repo "\$GITHUB_REPOSITORY"/u
+  );
+  assert.match(
+    buildOnce!,
+    /blocking-zero-unwaived-findings/u
+  );
+  assert.match(buildOnce!, /waiverLedgerSha256/u);
+  assert.match(
+    buildOnce!,
+    /name: Create exact-SHA candidate evidence binding[\s\S]*?schema: "archon\.aws-candidate\.evidence-binding"[\s\S]*?name: Attest immutable candidate tree and evidence binding[\s\S]*?subject-path: candidate-evidence-binding\.json/u
+  );
+  assert.match(
+    databaseRelease!,
+    /needs:\r?\n\s+- build-once/u
+  );
+  assert.match(managedMcp!, /needs:\r?\n\s+- database-release/u);
+  assert.match(staging!, /- managed-mcp-production-audit/u);
+  assert.match(production!, /- deploy-staging/u);
+  assert.equal(
+    (
+      deploy.match(
+        /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /gh attestation verify candidate-evidence-binding\.json/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /gh attestation verify supply-chain-release-receipt\.json/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    supplyChain,
+    /name: Bind exact-SHA supply-chain release evidence/u
+  );
+  assert.match(supplyChain, /^name: Supply Chain \(enforced\)$/mu);
+  assert.doesNotMatch(supplyChain, /audit-first/u);
+  assert.match(
+    supplyChain,
+    /schema: "archon\.supply-chain\.release-evidence"/u
+  );
+  assert.match(
+    supplyChain,
+    /mode: "blocking-zero-unwaived-findings"/u
+  );
+  assert.match(supplyChain, /acceptedWaivers: 0/u);
+  assert.match(supplyChain, /unwaivedFindings: 0/u);
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived static findings/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived infrastructure findings/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived vulnerability and license findings/u
+  );
+  assert.match(supplyChain, /cfn-lint==1\.53\.1/u);
+  assert.match(supplyChain, /sam validate[\s\S]*?--lint/u);
+  assert.match(
+    supplyChain,
+    /for scope in backend frontend lambda-content/u
+  );
+  assert.match(supplyChain, /lambdaContentExitCode/u);
+  assert.equal((supplyChain.match(/--exit-code 1/gu) ?? []).length >= 2, true);
+  assert.match(
+    supplyChain,
+    /name: Attest exact-SHA supply-chain release receipt[\s\S]*?actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u
+  );
+  assert.match(
+    supplyChain,
+    /name: supply-chain-release-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    supplyChain,
+    /audit_template edge-waf aws\/edge-waf\.yaml/u
+  );
+  assert.match(
+    supplyChain,
+    /audit_template finops aws\/finops\.yaml/u
+  );
+  assert.match(
+    supplyChain,
+    /lint_template finops aws\/finops\.yaml/u
+  );
+  assert.match(supplyChain, /iac\/guard-finops\.txt/u);
+  assert.match(
+    supplyChain,
+    /"aws\/finops\.yaml"/u
+  );
+  assert.deepEqual(JSON.parse(waivers), {
+    schema_version: 1,
+    policy: "docs/SUPPLY_CHAIN_SECURITY.md",
+    waivers: [],
+  });
+});
+
+test("readiness: exact-SHA memory evaluation is a required candidate-bound check context", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "tech.exact-sha-memory-evaluation-gate"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Technical Implementation");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const evaluation = readFileSync(
+    new URL("../.github/workflows/memory-evaluation.yml", import.meta.url),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const sourceGate = deploy.match(
+    /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const buildOnce = deploy.match(
+    /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(sourceGate);
+  assert.ok(buildOnce);
+  assert.match(evaluation, /^name: Memory architecture evaluation$/mu);
+  assert.match(
+    evaluation,
+    /^    name: Longitudinal, scale, and C-SPANN evidence$/mu
+  );
+  assert.match(
+    evaluation,
+    /memory-evaluation-\$\{\{\s*env\.SOURCE_SHA\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    sourceGate!,
+    /actions\/workflows\/memory-evaluation\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    sourceGate!,
+    /\.name ==\s*\r?\n\s+"Longitudinal, scale, and C-SPANN evidence"/u
+  );
+  assert.match(
+    sourceGate!,
+    /gh run download "\$run_id"[\s\S]*?memory-evaluation-receipt\.json/u
+  );
+  assert.match(sourceGate!, /actual_receipt_digest/u);
+  assert.match(sourceGate!, /receipt_base64=/u);
+  assert.match(
+    buildOnce!,
+    /name: Bind exact-SHA Memory architecture evaluation receipt/u
+  );
+  assert.match(
+    buildOnce!,
+    /candidate-evidence-binding\.json[\s\S]*?memoryEvaluation:\s*\{[\s\S]*?memoryEvaluationReceiptSha256/u
+  );
+  assert.equal(
+    (deploy.match(/memory-evaluation-receipt\.json/gu) ?? []).length >= 8,
+    true
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
+      ) ?? []
+    ).length,
+    2
+  );
+});
+
+test("readiness: Well-Architected audit is repository-first and live-read-only approval gated", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.well-architected-evidence-contract"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Production Readiness");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const workflow = readFileSync(
+    new URL(
+      "../.github/workflows/well-architected-audit.yml",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const repositoryJob = workflow.match(
+    /(?:^|\r?\n)  repository-contract:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const liveJob = workflow.match(
+    /(?:^|\r?\n)  live-read-only:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(repositoryJob);
+  assert.ok(liveJob);
+  assert.doesNotMatch(repositoryJob!, /id-token:\s*write/u);
+  assert.doesNotMatch(repositoryJob!, /configure-aws-credentials/u);
+  assert.match(
+    liveJob!,
+    /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.mode == 'live-read-only'/u
+  );
+  assert.match(liveJob!, /environment:\r?\n\s+name: production-audit/u);
+  assert.match(liveJob!, /test "\$AWS_REGION" = "eu-west-1"/u);
+  assert.match(liveJob!, /test "\$FORBIDDEN_REGION" = "us-west-2"/u);
+  assert.match(audit, /edge-waf-control-plane-boundary/u);
+  assert.match(audit, /finops-control-plane-boundary/u);
+  assert.match(audit, /AWS::Budgets::Budget/u);
+  assert.match(audit, /AWS::CE::AnomalyMonitor/u);
+  assert.match(audit, /AWS::CE::AnomalySubscription/u);
+  assert.match(audit, /explicit-live-activation-required/u);
+  assert.match(audit, /not an application workload region/u);
+  assert.equal(
+    (workflow.match(/- "aws\/edge-waf\.yaml"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/- "aws\/finops\.yaml"/gu) ?? []).length,
+    2
+  );
+  assert.doesNotMatch(
+    deploy,
+    /cloudformation deploy[\s\S]*?--template-file aws\/edge-waf\.yaml/u
+  );
+  assert.doesNotMatch(
+    deploy,
+    /cloudformation deploy[\s\S]*?--template-file aws\/finops\.yaml/u
   );
 });
 
@@ -2753,6 +3261,15 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     '.database.database == "archon"',
     '.vectorIndex.engine == "native CockroachDB C-SPANN"',
     '.vectorIndex.prefixes == ["tenant_id","embed_model","status","company"]',
+    ".resolutionLoop.enabled == true",
+    ".resolutionLoop.schemaTables == 5",
+    '.resolutionLoop.transactionIsolation == "SERIALIZABLE"',
+    '.resolutionLoop.authorityBoundary ==',
+    '"financial-controller-human-gate"',
+    '.resolutionLoop.identityAssurance ==',
+    '"fixed-demo-role-assertion-not-authenticated"',
+    '.resolutionLoop.canonicalMemoryMutable == false',
+    '.resolutionLoop.externalSideEffects == "none"',
     '.embeddingModel == "amazon.titan-embed-text-v2:0"',
     '.narrationModel == "eu.anthropic.claude-sonnet-4-6"',
     'keys == ["access","company","dataClassification","mode","source","tenantId"]',

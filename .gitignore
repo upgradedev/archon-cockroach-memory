@@ -71,6 +71,19 @@ server.pid
 # Readiness gate — generated report (produced by `npm run readiness` / CI)
 readiness.json
 submission-readiness-receipt.json
+supply-chain-release-receipt.json
+well-architected-repository-receipt.json
+well-architected-live-receipt.json
+evidence-manifest.sha256
+lambda-zip-content.sha256
+sbom-inputs-and-documents.sha256
+memory-evaluation-receipt.json
+policy-results.json
+scale-manifest.json
+vector-results.json
+vector-benchmark.log
+candidate-evidence-binding.json
+supply-chain-reports/
 
 # Demo video build — keep only source fixtures and authoring inputs.
 demo/assets/audio/

@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Approval-gated CloudFront WAF control plane for Archon Memory. Deploy only in
+  us-east-1 because AWS manages CloudFront-scope WAF resources there; this is
+  not an application workload region.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: archon-memory
+    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
+  Environment:
+    Type: String
+    AllowedValues:
+      - staging
+      - production
+  ApiAggregateRateLimit:
+    Type: Number
+    Default: 1000
+    MinValue: 100
+    MaxValue: 10000
+    Description: Maximum requests per source IP in the five-minute WAF window for /api/*.
+  ResolutionCreateRateLimit:
+    Type: Number
+    Default: 100
+    MinValue: 10
+    MaxValue: 1000
+    Description: Maximum resolution-session creates per source IP in the five-minute WAF window.
+
+Rules:
+  CloudFrontWafControlPlaneRegion:
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::Region", us-east-1]
+        AssertDescription: CloudFront-scope WAF must be deployed in us-east-1.
+
+Resources:
+  ArchonCloudFrontWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${AppName}-${Environment}-cloudfront"
+      Description: Managed threat filters and bounded abuse controls for the public Archon demo.
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AppName}-${Environment}-web-acl"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AmazonIpReputation
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: amazon-ip-reputation
+            SampledRequestsEnabled: true
+        - Name: KnownBadInputs
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: known-bad-inputs
+            SampledRequestsEnabled: true
+        - Name: CommonApplicationThreats
+          Priority: 30
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: common-application-threats
+            SampledRequestsEnabled: true
+        - Name: ApiAggregateRate
+          Priority: 40
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              EvaluationWindowSec: 300
+              Limit: !Ref ApiAggregateRateLimit
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /api/
+                  TextTransformations:
+                    - Priority: 0
+                      Type: NONE
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: api-aggregate-rate
+            SampledRequestsEnabled: true
+        - Name: ResolutionCreateRate
+          Priority: 50
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              EvaluationWindowSec: 300
+              Limit: !Ref ResolutionCreateRateLimit
+              ScopeDownStatement:
+                AndStatement:
+                  Statements:
+                    - ByteMatchStatement:
+                        FieldToMatch:
+                          UriPath: {}
+                        PositionalConstraint: EXACTLY
+                        SearchString: /api/resolution/session
+                        TextTransformations:
+                          - Priority: 0
+                            Type: NONE
+                    - ByteMatchStatement:
+                        FieldToMatch:
+                          Method: {}
+                        PositionalConstraint: EXACTLY
+                        SearchString: POST
+                        TextTransformations:
+                          - Priority: 0
+                            Type: NONE
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: resolution-create-rate
+            SampledRequestsEnabled: true
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: ApprovalBoundary
+          Value: explicit-live-activation-required
+
+Outputs:
+  WebAclArn:
+    Description: Pass this ARN to the regional application stack only after approved activation and drills.
+    Value: !GetAtt ArchonCloudFrontWebAcl.Arn
+  WebAclId:
+    Value: !GetAtt ArchonCloudFrontWebAcl.Id
+  ControlPlaneRegion:
+    Value: !Ref "AWS::Region"

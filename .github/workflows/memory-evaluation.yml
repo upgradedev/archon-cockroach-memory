@@ -1,0 +1,183 @@
+name: Memory architecture evaluation
+
+# Pipeline-owned evidence for longitudinal behavior, B0-B4 baselines, lifecycle
+# ablations, a generated 100k-event rehearsal, and real C-SPANN recall versus exact
+# ground truth. No corpus or build artifact is written to a developer workstation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_records:
+        description: "Synthetic lifecycle events (100k minimum, divisible by 5)"
+        default: "100000"
+        required: true
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "43 4 * * 0"
+
+concurrency:
+  group: memory-evaluation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ github.sha }}
+  DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
+
+jobs:
+  longitudinal-memory:
+    name: Longitudinal, scale, and C-SPANN evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out the exact evaluated revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Prove checkout is exact-SHA bound
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git status --porcelain | wc -l)" -eq 0
+
+      - name: Establish runner-owned evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'EVALUATION_DIR=%s\n' \
+            "$RUNNER_TEMP/memory-evaluation" >> "$GITHUB_ENV"
+
+      - name: Set up pinned Node runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install lockfile dependencies
+        run: npm ci
+
+      - name: Evaluate B0-B4, lifecycle ablations, and 100k-event rehearsal
+        env:
+          SCALE_RECORDS: ${{ inputs.scale_records || '100000' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-memory-architecture.ts policy \
+            --fixture evals/longitudinal-cases.json \
+            --output "$EVALUATION_DIR" \
+            --source-sha "$SOURCE_SHA" \
+            --scale-records "$SCALE_RECORDS"
+          test -f "$EVALUATION_DIR/policy-results.json"
+          test -f "$EVALUATION_DIR/scale-manifest.json"
+          test ! -e "$EVALUATION_DIR/representative-scale-corpus.jsonl"
+
+      - name: Start ephemeral CockroachDB for real C-SPANN comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name memory-eval-crdb -p 26257:26257 \
+            cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 \
+            start-single-node --insecure
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec memory-eval-crdb cockroach sql --insecure \
+              -e "SELECT 1" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          docker exec memory-eval-crdb cockroach sql --insecure \
+            -e "CREATE DATABASE IF NOT EXISTS archon_memory"
+
+      - name: Apply schema with native distributed vector index
+        run: npm run db:schema
+
+      - name: Compare C-SPANN recall with exact cosine ground truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          BENCH_N=2000 \
+          BENCH_QUERIES=75 \
+          BENCH_K=10 \
+          BENCH_BATCH=500 \
+          BENCH_BEAMS=100,300 \
+          BENCH_RECALL_FLOOR=0.80 \
+          BENCH_SETTLE_MS=3000 \
+            npm run --silent benchmark |
+            tee "$EVALUATION_DIR/vector-benchmark.log"
+
+      - name: Finalize SHA-bound evaluation receipt
+        env:
+          VECTOR_RECALL_FLOOR: "0.80"
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-memory-architecture.ts finalize \
+            --output "$EVALUATION_DIR" \
+            --source-sha "$SOURCE_SHA" \
+            --vector-log "$EVALUATION_DIR/vector-benchmark.log"
+          node - "$EVALUATION_DIR/memory-evaluation-receipt.json" "$SOURCE_SHA" <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const [receiptPath, expectedSha] = process.argv.slice(2);
+          const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+          if (receipt.source.sha !== expectedSha) {
+            throw new Error("evaluation receipt SHA mismatch");
+          }
+          if (Object.values(receipt.gates).some((value) => value !== true)) {
+            throw new Error("evaluation receipt contains a failed gate");
+          }
+          if (!/^[a-f0-9]{64}$/.test(receipt.receipt.digest)) {
+            throw new Error("evaluation receipt digest is invalid");
+          }
+          for (const artifact of receipt.artifacts) {
+            if (path.basename(artifact.file) !== artifact.file) {
+              throw new Error("evaluation receipt artifact path is not a basename");
+            }
+            const bytes = fs.readFileSync(path.join(path.dirname(receiptPath), artifact.file));
+            const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+            if (digest !== artifact.sha256) {
+              throw new Error(`evaluation artifact digest mismatch: ${artifact.file}`);
+            }
+          }
+          const canonicalize = (value) => {
+            if (Array.isArray(value)) return value.map(canonicalize);
+            if (value && typeof value === "object") {
+              return Object.fromEntries(
+                Object.keys(value).sort().map((key) => [key, canonicalize(value[key])])
+              );
+            }
+            return value;
+          };
+          const { receipt: seal, ...body } = receipt;
+          const bodyDigest = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(canonicalize(body)), "utf8")
+            .digest("hex");
+          if (bodyDigest !== seal.digest) {
+            throw new Error("evaluation receipt body digest mismatch");
+          }
+          NODE
+
+      - name: Stop ephemeral CockroachDB
+        if: always()
+        run: docker rm -f memory-eval-crdb >/dev/null 2>&1 || true
+
+      - name: Upload exact-SHA evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: memory-evaluation-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-evaluation
+          if-no-files-found: error
+          retention-days: 30

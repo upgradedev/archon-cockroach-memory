@@ -33,7 +33,16 @@ jobs:
   source-gate:
     name: Validate Deploy AWS source CI
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 55
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      memory_evaluation_receipt_base64: ${{ steps.memory_evaluation.outputs.receipt_base64 }}
+      memory_evaluation_run_id: ${{ steps.memory_evaluation.outputs.run_id }}
+      memory_evaluation_run_attempt: ${{ steps.memory_evaluation.outputs.run_attempt }}
+      supply_chain_run_id: ${{ steps.supply_chain.outputs.run_id }}
+      supply_chain_run_attempt: ${{ steps.supply_chain.outputs.run_attempt }}
     steps:
       - name: Require successful exact-main push CI source
         shell: bash
@@ -53,6 +62,229 @@ jobs:
           [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
+      - name: Require successful exact-SHA Supply Chain evidence
+        id: supply_chain
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for attempt in {1..180}; do
+            run="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/supply-chain.yml/runs?branch=main&event=push&per_page=20" |
+                jq -cer --arg sha "$EXPECTED_SHA" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .head_sha == $sha and
+                      .head_branch == "main" and
+                      .event == "push" and
+                      .path == ".github/workflows/supply-chain.yml"
+                    )
+                  ] |
+                  sort_by(.run_number, .run_attempt) |
+                  last // {}
+                '
+            )"
+            state="$(
+              jq -r '
+                if .id == null then "missing"
+                elif .conclusion != null then .conclusion
+                else .status
+                end
+              ' <<<"$run"
+            )"
+            case "$state" in
+              success)
+                run_id="$(jq -er '.id' <<<"$run")"
+                run_attempt="$(jq -er '.run_attempt' <<<"$run")"
+                [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+                [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+                echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
+                echo "run_attempt=$run_attempt" >>"$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required|startup_failure|stale|neutral|skipped)
+                echo "Supply Chain did not pass for release SHA $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+              missing|queued|in_progress|pending|requested|waiting)
+                sleep 15
+                ;;
+              *)
+                echo "Unexpected Supply Chain state for $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "Supply Chain did not complete for release SHA $EXPECTED_SHA." >&2
+          exit 1
+
+      - name: Require successful exact-SHA Memory architecture evaluation
+        id: memory_evaluation
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for attempt in {1..160}; do
+            run="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/memory-evaluation.yml/runs?branch=main&event=push&per_page=20" |
+                jq -cer --arg sha "$EXPECTED_SHA" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .head_sha == $sha and
+                      .head_branch == "main" and
+                      .event == "push" and
+                      .name == "Memory architecture evaluation" and
+                      .path == ".github/workflows/memory-evaluation.yml"
+                    )
+                  ] |
+                  sort_by(.run_number, .run_attempt) |
+                  last // {}
+                '
+            )"
+            state="$(
+              jq -r '
+                if .id == null then "missing"
+                elif .conclusion != null then .conclusion
+                else .status
+                end
+              ' <<<"$run"
+            )"
+            case "$state" in
+              success)
+                run_id="$(jq -er '.id' <<<"$run")"
+                run_attempt="$(jq -er '.run_attempt' <<<"$run")"
+                [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+                [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+                jobs="$(
+                  gh api \
+                    "repos/$GITHUB_REPOSITORY/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100"
+                )"
+                jq -e \
+                  --arg sha "$EXPECTED_SHA" \
+                  --argjson runId "$run_id" \
+                  --argjson runAttempt "$run_attempt" '
+                    [
+                      .jobs[] |
+                      select(
+                        .name ==
+                          "Longitudinal, scale, and C-SPANN evidence"
+                      )
+                    ] as $matches |
+                    ($matches | length) == 1 and
+                    $matches[0].run_id == $runId and
+                    $matches[0].run_attempt == $runAttempt and
+                    $matches[0].head_sha == $sha and
+                    $matches[0].status == "completed" and
+                    $matches[0].conclusion == "success"
+                  ' <<<"$jobs" >/dev/null
+
+                evaluation_dir="${RUNNER_TEMP:?}/memory-evaluation-${run_id}-${run_attempt}"
+                artifact_name="memory-evaluation-${EXPECTED_SHA}-${run_id}-${run_attempt}"
+                mkdir -p "$evaluation_dir"
+                gh run download "$run_id" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --name "$artifact_name" \
+                  --dir "$evaluation_dir"
+                receipt="$evaluation_dir/memory-evaluation-receipt.json"
+                test -f "$receipt"
+                test ! -L "$receipt"
+                jq -e \
+                  --arg sha "$EXPECTED_SHA" \
+                  --arg runId "$run_id" \
+                  --arg runAttempt "$run_attempt" '
+                    .schemaVersion == "1.0.0" and
+                    .source == {
+                      "repository":"upgradedev/archon-cockroach-memory",
+                      "sha":$sha,
+                      "workflow":"Memory architecture evaluation",
+                      "runId":$runId,
+                      "runAttempt":$runAttempt,
+                      "eventName":"push"
+                    } and
+                    (.generatedAt |
+                      type == "string" and
+                      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")) and
+                    [.artifacts[].file] == [
+                      "policy-results.json",
+                      "scale-manifest.json",
+                      "vector-results.json",
+                      "vector-benchmark.log"
+                    ] and
+                    .gates == {
+                      "policy":true,
+                      "representativeScale":true,
+                      "cspannVersusExact":true,
+                      "exactShaBound":true
+                    } and
+                    .claims.supported == [
+                      "deterministic-longitudinal-policy-evaluation",
+                      "B0-through-B4-fair-fixture-comparison",
+                      "lifecycle-ablation-study",
+                      "representative-100k-plus-event-rehearsal",
+                      "unauthorized-actions-zero-in-B4-and-scale-rehearsal",
+                      "real-cockroachdb-cspann-recall-versus-exact-ground-truth"
+                    ] and
+                    .claims.notSupportedByThisReceipt == [
+                      "real-customer-production-corpus",
+                      "human-evaluation-results",
+                      "production-business-impact",
+                      "hosted-load-or-SLA-results",
+                      "exact-scan-latency-comparison"
+                    ] and
+                    .receipt.algorithm == "sha256" and
+                    (.receipt.digest | test("^[a-f0-9]{64}$"))
+                  ' "$receipt" >/dev/null
+                while IFS=$'\t' read -r file expected_digest; do
+                  [[ "$file" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+                  [[ "$expected_digest" =~ ^[a-f0-9]{64}$ ]]
+                  test -f "$evaluation_dir/$file"
+                  test ! -L "$evaluation_dir/$file"
+                  actual_digest="$(
+                    sha256sum "$evaluation_dir/$file" | awk '{print $1}'
+                  )"
+                  test "$actual_digest" = "$expected_digest"
+                done < <(
+                  jq -r '.artifacts[] | [.file,.sha256] | @tsv' "$receipt"
+                )
+                expected_receipt_digest="$(jq -er '.receipt.digest' "$receipt")"
+                canonical_body="$(jq -cS 'del(.receipt)' "$receipt")"
+                actual_receipt_digest="$(
+                  printf '%s' "$canonical_body" | sha256sum | awk '{print $1}'
+                )"
+                test "$actual_receipt_digest" = "$expected_receipt_digest"
+                receipt_base64="$(base64 -w0 "$receipt")"
+                [[ "$receipt_base64" =~ ^[A-Za-z0-9+/=]+$ ]]
+                echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
+                echo "run_attempt=$run_attempt" >>"$GITHUB_OUTPUT"
+                echo "receipt_base64=$receipt_base64" >>"$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required|startup_failure|stale|neutral|skipped)
+                echo "Memory architecture evaluation did not pass for $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+              missing|queued|in_progress|pending|requested|waiting)
+                sleep 15
+                ;;
+              *)
+                echo "Unexpected Memory architecture evaluation state for $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "Memory architecture evaluation did not complete for $EXPECTED_SHA." >&2
+          exit 1
+
   build-once:
     name: Verify CI SHA and build once
     needs:
@@ -61,13 +293,16 @@ jobs:
     timeout-minutes: 25
     permissions:
       actions: read
+      attestations: write
       contents: read
+      id-token: write
     steps:
       - name: Check out the exact successful CI commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Prove the CI SHA is still the main branch head
         shell: bash
@@ -79,6 +314,148 @@ jobs:
           MAIN_SHA="$(git rev-parse origin/main)"
           test "$EXPECTED_SHA" = "$MAIN_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Download the exact-SHA Supply Chain release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: supply-chain-release-${{ github.event.workflow_run.head_sha }}-${{ needs.source-gate.outputs.supply_chain_run_id }}-${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+          path: ${{ runner.temp }}/supply-chain-release
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.source-gate.outputs.supply_chain_run_id }}
+
+      - name: Verify exact-SHA Supply Chain receipt and attestation
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/supply-chain-release/supply-chain-release-receipt.json"
+          evidence_manifest="${RUNNER_TEMP:?}/supply-chain-release/evidence-manifest.sha256"
+          lambda_manifest="${RUNNER_TEMP:?}/supply-chain-release/lambda-zip-content.sha256"
+          sbom_manifest="${RUNNER_TEMP:?}/supply-chain-release/sbom-inputs-and-documents.sha256"
+          for file in \
+            "$receipt" \
+            "$evidence_manifest" \
+            "$lambda_manifest" \
+            "$sbom_manifest"; do
+            test -f "$file"
+            test ! -L "$file"
+            test -s "$file"
+          done
+          evidence_manifest_sha256="$(
+            sha256sum "$evidence_manifest" | awk '{print $1}'
+          )"
+          lambda_manifest_sha256="$(
+            sha256sum "$lambda_manifest" | awk '{print $1}'
+          )"
+          sbom_manifest_sha256="$(
+            sha256sum "$sbom_manifest" | awk '{print $1}'
+          )"
+          waiver_ledger_sha256="$(
+            sha256sum security/waivers.yml | awk '{print $1}'
+          )"
+          jq -e \
+            --arg sourceSha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_RUN_ID" \
+            --arg runAttempt "$EXPECTED_RUN_ATTEMPT" \
+            --arg evidenceManifestSha256 "$evidence_manifest_sha256" \
+            --arg lambdaManifestSha256 "$lambda_manifest_sha256" \
+            --arg sbomManifestSha256 "$sbom_manifest_sha256" \
+            --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
+              keys == [
+                "enforcement",
+                "evidence",
+                "passed",
+                "repository",
+                "schema",
+                "sourceSha",
+                "version",
+                "workflow"
+              ] and
+              .schema == "archon.supply-chain.release-evidence" and
+              .version == 1 and
+              .sourceSha == $sourceSha and
+              .repository == "upgradedev/archon-cockroach-memory" and
+              .workflow == {
+                "name":"Supply Chain (enforced)",
+                "path":".github/workflows/supply-chain.yml",
+                "event":"push",
+                "ref":"refs/heads/main",
+                "runId":$runId,
+                "runAttempt":$runAttempt
+              } and
+              .passed == true and
+              .enforcement.mode ==
+                "blocking-zero-unwaived-findings" and
+              .enforcement.blocks == [
+                "shellcheck-warning-or-higher",
+                "actionlint-workflow-and-inline-shell",
+                "zizmor-regular-persona",
+                "cfn-lint-all-current-templates",
+                "sam-validate-lint-and-build",
+                "cloudformation-guard-current-templates",
+                "trivy-iac-medium-or-higher",
+                "trivy-sbom-vulnerability-and-license-policy"
+              ] and
+              .enforcement.acceptedWaivers == 0 and
+              .enforcement.unwaivedFindings == 0 and
+              .evidence.cloudFormationTemplates == [
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ] and
+              .evidence.manifestSha256 == $evidenceManifestSha256 and
+              .evidence.lambdaContentManifestSha256 ==
+                $lambdaManifestSha256 and
+              .evidence.sbomDocumentsManifestSha256 ==
+                $sbomManifestSha256 and
+              .evidence.waiverLedgerSha256 == $waiverLedgerSha256
+            ' "$receipt" >/dev/null
+          gh attestation verify "$receipt" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null
+          install -m 0600 "$receipt" supply-chain-release-receipt.json
+
+      - name: Bind exact-SHA Memory architecture evaluation receipt
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
+          RECEIPT_BASE64: ${{ needs.source-gate.outputs.memory_evaluation_receipt_base64 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RECEIPT_BASE64" =~ ^[A-Za-z0-9+/=]+$ ]]
+          printf '%s' "$RECEIPT_BASE64" |
+            base64 --decode > memory-evaluation-receipt.json
+          test -s memory-evaluation-receipt.json
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_RUN_ID" \
+            --arg runAttempt "$EXPECTED_RUN_ATTEMPT" '
+              .schemaVersion == "1.0.0" and
+              .source.sha == $sha and
+              .source.repository ==
+                "upgradedev/archon-cockroach-memory" and
+              .source.workflow == "Memory architecture evaluation" and
+              .source.eventName == "push" and
+              .source.runId == $runId and
+              .source.runAttempt == $runAttempt and
+              .gates == {
+                "policy":true,
+                "representativeScale":true,
+                "cspannVersusExact":true,
+                "exactShaBound":true
+              } and
+              (.receipt.digest | test("^[a-f0-9]{64}$"))
+            ' memory-evaluation-receipt.json >/dev/null
 
       - name: Prove CodeQL succeeded for the exact release SHA
         shell: bash
@@ -182,6 +559,82 @@ jobs:
              .provenance.buildOncePromoteSameArtifact == true' \
             deployment-receipt.json
 
+      - name: Create exact-SHA candidate evidence binding
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
+          MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
+          SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
+          SUPPLY_CHAIN_RUN_ATTEMPT: ${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+        run: |
+          set -euo pipefail
+          deployment_receipt_sha256="$(
+            sha256sum deployment-receipt.json | awk '{print $1}'
+          )"
+          supply_chain_receipt_sha256="$(
+            sha256sum supply-chain-release-receipt.json | awk '{print $1}'
+          )"
+          memory_evaluation_receipt_sha256="$(
+            sha256sum memory-evaluation-receipt.json | awk '{print $1}'
+          )"
+          for digest in \
+            "$deployment_receipt_sha256" \
+            "$supply_chain_receipt_sha256" \
+            "$memory_evaluation_receipt_sha256"; do
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          done
+          jq -n \
+            --arg commitSha "$COMMIT_SHA" \
+            --arg deployRunId "$GITHUB_RUN_ID" \
+            --arg deployRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg deploymentReceiptSha256 "$deployment_receipt_sha256" \
+            --arg supplyChainRunId "$SUPPLY_CHAIN_RUN_ID" \
+            --arg supplyChainRunAttempt "$SUPPLY_CHAIN_RUN_ATTEMPT" \
+            --arg supplyChainReceiptSha256 "$supply_chain_receipt_sha256" \
+            --arg memoryEvaluationRunId "$MEMORY_EVALUATION_RUN_ID" \
+            --arg memoryEvaluationRunAttempt "$MEMORY_EVALUATION_RUN_ATTEMPT" \
+            --arg memoryEvaluationReceiptSha256 "$memory_evaluation_receipt_sha256" '
+              {
+                schema: "archon.aws-candidate.evidence-binding",
+                version: 1,
+                commitSha: $commitSha,
+                deploy: {
+                  runId: $deployRunId,
+                  runAttempt: $deployRunAttempt
+                },
+                candidate: {
+                  deploymentReceiptSha256: $deploymentReceiptSha256
+                },
+                supplyChain: {
+                  runId: $supplyChainRunId,
+                  runAttempt: $supplyChainRunAttempt,
+                  receiptSha256: $supplyChainReceiptSha256
+                },
+                memoryEvaluation: {
+                  runId: $memoryEvaluationRunId,
+                  runAttempt: $memoryEvaluationRunAttempt,
+                  receiptSha256: $memoryEvaluationReceiptSha256
+                }
+              }
+            ' > candidate-evidence-binding.json
+          jq -e --arg sha "$COMMIT_SHA" '
+            .schema == "archon.aws-candidate.evidence-binding" and
+            .version == 1 and
+            .commitSha == $sha and
+            (.candidate.deploymentReceiptSha256 |
+              test("^[a-f0-9]{64}$")) and
+            (.supplyChain.receiptSha256 |
+              test("^[a-f0-9]{64}$")) and
+            (.memoryEvaluation.receiptSha256 |
+              test("^[a-f0-9]{64}$"))
+          ' candidate-evidence-binding.json >/dev/null
+
+      - name: Attest immutable candidate tree and evidence binding
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: candidate-evidence-binding.json
+
       - name: Upload immutable candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -190,6 +643,9 @@ jobs:
             .aws-sam/build/
             web/dist/
             deployment-receipt.json
+            candidate-evidence-binding.json
+            memory-evaluation-receipt.json
+            supply-chain-release-receipt.json
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
@@ -209,14 +665,17 @@ jobs:
   deploy-staging:
     name: Deploy and smoke staging
     needs:
+      - source-gate
       - build-once
       - database-release
+      - managed-mcp-production-audit
     runs-on: ubuntu-latest
     environment:
       name: staging
       url: ${{ steps.stack.outputs.application_url }}
     permissions:
       actions: read
+      attestations: read
       contents: read
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
@@ -235,6 +694,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -247,6 +707,106 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Verify candidate, Supply Chain, and memory-evaluation provenance
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
+          EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
+          EXPECTED_SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
+          EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT: ${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jq -e --arg sha "$EXPECTED_SHA" '
+            .schemaVersion == 1 and
+            .commitSha == $sha and
+            .provenance.buildOncePromoteSameArtifact == true
+          ' deployment-receipt.json >/dev/null
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_MEMORY_EVALUATION_RUN_ID" \
+            --arg runAttempt "$EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT" '
+              .schemaVersion == "1.0.0" and
+              .source.sha == $sha and
+              .source.runId == $runId and
+              .source.runAttempt == $runAttempt and
+              .gates == {
+                "policy":true,
+                "representativeScale":true,
+                "cspannVersusExact":true,
+                "exactShaBound":true
+              }
+            ' memory-evaluation-receipt.json >/dev/null
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_SUPPLY_CHAIN_RUN_ID" \
+            --arg runAttempt "$EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT" '
+              .schema == "archon.supply-chain.release-evidence" and
+              .version == 1 and
+              .sourceSha == $sha and
+              .passed == true and
+              .workflow.name == "Supply Chain (enforced)" and
+              .workflow.runId == $runId and
+              .workflow.runAttempt == $runAttempt and
+              .enforcement.mode ==
+                "blocking-zero-unwaived-findings" and
+              .enforcement.acceptedWaivers == 0 and
+              .enforcement.unwaivedFindings == 0 and
+              .evidence.cloudFormationTemplates == [
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ] and
+              (.evidence.waiverLedgerSha256 |
+                test("^[a-f0-9]{64}$"))
+            ' supply-chain-release-receipt.json >/dev/null
+          deployment_receipt_sha256="$(
+            sha256sum deployment-receipt.json | awk '{print $1}'
+          )"
+          supply_chain_receipt_sha256="$(
+            sha256sum supply-chain-release-receipt.json | awk '{print $1}'
+          )"
+          memory_evaluation_receipt_sha256="$(
+            sha256sum memory-evaluation-receipt.json | awk '{print $1}'
+          )"
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg deployRunId "$GITHUB_RUN_ID" \
+            --arg deployRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg deploymentReceiptSha256 "$deployment_receipt_sha256" \
+            --arg supplyChainRunId "$EXPECTED_SUPPLY_CHAIN_RUN_ID" \
+            --arg supplyChainRunAttempt "$EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT" \
+            --arg supplyChainReceiptSha256 "$supply_chain_receipt_sha256" \
+            --arg memoryEvaluationRunId "$EXPECTED_MEMORY_EVALUATION_RUN_ID" \
+            --arg memoryEvaluationRunAttempt "$EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT" \
+            --arg memoryEvaluationReceiptSha256 "$memory_evaluation_receipt_sha256" '
+              .schema == "archon.aws-candidate.evidence-binding" and
+              .version == 1 and
+              .commitSha == $sha and
+              .deploy == {
+                "runId":$deployRunId,
+                "runAttempt":$deployRunAttempt
+              } and
+              .candidate.deploymentReceiptSha256 ==
+                $deploymentReceiptSha256 and
+              .supplyChain == {
+                "runId":$supplyChainRunId,
+                "runAttempt":$supplyChainRunAttempt,
+                "receiptSha256":$supplyChainReceiptSha256
+              } and
+              .memoryEvaluation == {
+                "runId":$memoryEvaluationRunId,
+                "runAttempt":$memoryEvaluationRunAttempt,
+                "receiptSha256":$memoryEvaluationReceiptSha256
+              }
+            ' candidate-evidence-binding.json >/dev/null
+          gh attestation verify candidate-evidence-binding.json \
+            --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify supply-chain-release-receipt.json \
+            --repo "$GITHUB_REPOSITORY" >/dev/null
 
       - name: Verify candidate tree hashes and eu-west-1 boundary
         run: |
@@ -1818,7 +2378,14 @@ jobs:
             '.ok == true and
              .status == "reachable" and
              .service == "archon-cockroach-memory" and
-             .access == "public-read-only" and
+             .access ==
+               "canonical-read-only+isolated-synthetic-resolution-write" and
+             .resolutionSandbox == {
+               "state":"available",
+               "authority":"financial-controller-human-gate",
+               "persistence":"CockroachDB-row-level-TTL",
+               "externalSideEffects":"none"
+             } and
              .dependencies == "unchecked" and
              (.scope |
                keys == ["access","company","dataClassification","mode","source","tenantId"] and
@@ -1864,6 +2431,28 @@ jobs:
              .vectorIndex.lifecycleState == "active" and
              .vectorIndex.evidence == "live pg_catalog.pg_indexes definition" and
              (.vectorIndex.definitionFingerprint | test("^[a-f0-9]{64}$")) and
+             .resolutionLoop.enabled == true and
+             .resolutionLoop.schemaTables == 5 and
+             (.resolutionLoop.activeSandboxSessions |
+               type == "number" and floor == . and . >= 0) and
+             .resolutionLoop.transactionIsolation == "SERIALIZABLE" and
+             .resolutionLoop.authorityBoundary ==
+               "financial-controller-human-gate" and
+             .resolutionLoop.identityAssurance ==
+               "fixed-demo-role-assertion-not-authenticated" and
+             .resolutionLoop.idempotency ==
+               "decision-key+database-unique-constraint" and
+             .resolutionLoop.receipt ==
+               "SHA-256 immutable decision record" and
+             .resolutionLoop.learning ==
+               "conflict-observation+human-decision" and
+             .resolutionLoop.consolidation ==
+               "versioned current/superseded state" and
+             .resolutionLoop.forgetting == "CockroachDB row-level TTL" and
+             .resolutionLoop.canonicalMemoryMutable == false and
+             .resolutionLoop.externalSideEffects == "none" and
+             .resolutionLoop.evidence ==
+               "live fixed-scope sandbox schema query" and
              .embeddingModel == "amazon.titan-embed-text-v2:0" and
              .narrationModel == "eu.anthropic.claude-sonnet-4-6" and
              .release.commitSha == $releaseCommitSha and
@@ -2642,14 +3231,17 @@ jobs:
   deploy-production:
     name: Promote identical candidate to production
     needs:
+      - source-gate
       - build-once
       - deploy-staging
+      - managed-mcp-production-audit
     runs-on: ubuntu-latest
     environment:
       name: production
       url: ${{ steps.stack.outputs.application_url }}
     permissions:
       actions: read
+      attestations: read
       contents: read
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
@@ -2668,6 +3260,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Prove the candidate is still the main branch head
         shell: bash
@@ -2690,6 +3283,106 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Verify candidate, Supply Chain, and memory-evaluation provenance
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
+          EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
+          EXPECTED_SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
+          EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT: ${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jq -e --arg sha "$EXPECTED_SHA" '
+            .schemaVersion == 1 and
+            .commitSha == $sha and
+            .provenance.buildOncePromoteSameArtifact == true
+          ' deployment-receipt.json >/dev/null
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_MEMORY_EVALUATION_RUN_ID" \
+            --arg runAttempt "$EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT" '
+              .schemaVersion == "1.0.0" and
+              .source.sha == $sha and
+              .source.runId == $runId and
+              .source.runAttempt == $runAttempt and
+              .gates == {
+                "policy":true,
+                "representativeScale":true,
+                "cspannVersusExact":true,
+                "exactShaBound":true
+              }
+            ' memory-evaluation-receipt.json >/dev/null
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg runId "$EXPECTED_SUPPLY_CHAIN_RUN_ID" \
+            --arg runAttempt "$EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT" '
+              .schema == "archon.supply-chain.release-evidence" and
+              .version == 1 and
+              .sourceSha == $sha and
+              .passed == true and
+              .workflow.name == "Supply Chain (enforced)" and
+              .workflow.runId == $runId and
+              .workflow.runAttempt == $runAttempt and
+              .enforcement.mode ==
+                "blocking-zero-unwaived-findings" and
+              .enforcement.acceptedWaivers == 0 and
+              .enforcement.unwaivedFindings == 0 and
+              .evidence.cloudFormationTemplates == [
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ] and
+              (.evidence.waiverLedgerSha256 |
+                test("^[a-f0-9]{64}$"))
+            ' supply-chain-release-receipt.json >/dev/null
+          deployment_receipt_sha256="$(
+            sha256sum deployment-receipt.json | awk '{print $1}'
+          )"
+          supply_chain_receipt_sha256="$(
+            sha256sum supply-chain-release-receipt.json | awk '{print $1}'
+          )"
+          memory_evaluation_receipt_sha256="$(
+            sha256sum memory-evaluation-receipt.json | awk '{print $1}'
+          )"
+          jq -e \
+            --arg sha "$EXPECTED_SHA" \
+            --arg deployRunId "$GITHUB_RUN_ID" \
+            --arg deployRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg deploymentReceiptSha256 "$deployment_receipt_sha256" \
+            --arg supplyChainRunId "$EXPECTED_SUPPLY_CHAIN_RUN_ID" \
+            --arg supplyChainRunAttempt "$EXPECTED_SUPPLY_CHAIN_RUN_ATTEMPT" \
+            --arg supplyChainReceiptSha256 "$supply_chain_receipt_sha256" \
+            --arg memoryEvaluationRunId "$EXPECTED_MEMORY_EVALUATION_RUN_ID" \
+            --arg memoryEvaluationRunAttempt "$EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT" \
+            --arg memoryEvaluationReceiptSha256 "$memory_evaluation_receipt_sha256" '
+              .schema == "archon.aws-candidate.evidence-binding" and
+              .version == 1 and
+              .commitSha == $sha and
+              .deploy == {
+                "runId":$deployRunId,
+                "runAttempt":$deployRunAttempt
+              } and
+              .candidate.deploymentReceiptSha256 ==
+                $deploymentReceiptSha256 and
+              .supplyChain == {
+                "runId":$supplyChainRunId,
+                "runAttempt":$supplyChainRunAttempt,
+                "receiptSha256":$supplyChainReceiptSha256
+              } and
+              .memoryEvaluation == {
+                "runId":$memoryEvaluationRunId,
+                "runAttempt":$memoryEvaluationRunAttempt,
+                "receiptSha256":$memoryEvaluationReceiptSha256
+              }
+            ' candidate-evidence-binding.json >/dev/null
+          gh attestation verify candidate-evidence-binding.json \
+            --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify supply-chain-release-receipt.json \
+            --repo "$GITHUB_REPOSITORY" >/dev/null
 
       - name: Verify candidate tree hashes and eu-west-1 boundary
         run: |
@@ -4258,7 +4951,14 @@ jobs:
             '.ok == true and
              .status == "reachable" and
              .service == "archon-cockroach-memory" and
-             .access == "public-read-only" and
+             .access ==
+               "canonical-read-only+isolated-synthetic-resolution-write" and
+             .resolutionSandbox == {
+               "state":"available",
+               "authority":"financial-controller-human-gate",
+               "persistence":"CockroachDB-row-level-TTL",
+               "externalSideEffects":"none"
+             } and
              .dependencies == "unchecked" and
              (.scope |
                keys == ["access","company","dataClassification","mode","source","tenantId"] and
@@ -4304,6 +5004,28 @@ jobs:
              .vectorIndex.lifecycleState == "active" and
              .vectorIndex.evidence == "live pg_catalog.pg_indexes definition" and
              (.vectorIndex.definitionFingerprint | test("^[a-f0-9]{64}$")) and
+             .resolutionLoop.enabled == true and
+             .resolutionLoop.schemaTables == 5 and
+             (.resolutionLoop.activeSandboxSessions |
+               type == "number" and floor == . and . >= 0) and
+             .resolutionLoop.transactionIsolation == "SERIALIZABLE" and
+             .resolutionLoop.authorityBoundary ==
+               "financial-controller-human-gate" and
+             .resolutionLoop.identityAssurance ==
+               "fixed-demo-role-assertion-not-authenticated" and
+             .resolutionLoop.idempotency ==
+               "decision-key+database-unique-constraint" and
+             .resolutionLoop.receipt ==
+               "SHA-256 immutable decision record" and
+             .resolutionLoop.learning ==
+               "conflict-observation+human-decision" and
+             .resolutionLoop.consolidation ==
+               "versioned current/superseded state" and
+             .resolutionLoop.forgetting == "CockroachDB row-level TTL" and
+             .resolutionLoop.canonicalMemoryMutable == false and
+             .resolutionLoop.externalSideEffects == "none" and
+             .resolutionLoop.evidence ==
+               "live fixed-scope sandbox schema query" and
              .embeddingModel == "amazon.titan-embed-text-v2:0" and
              .narrationModel == "eu.anthropic.claude-sonnet-4-6" and
              .release.commitSha == $releaseCommitSha and
@@ -5082,13 +5804,18 @@ jobs:
   managed-mcp-production-audit:
     name: Prove production memory through CockroachDB Managed MCP
     needs:
-      - deploy-production
+      - database-release
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: production-audit
     permissions:
+      actions: read
       contents: read
+    outputs:
+      receipt_sha256: ${{ steps.receipt.outputs.receipt_sha256 }}
+      checked_at: ${{ steps.receipt.outputs.checked_at }}
+      explain_status: ${{ steps.receipt.outputs.explain_status }}
     env:
       COCKROACH_DATABASE: ${{ vars.COCKROACH_DATABASE || 'archon' }}
     steps:
@@ -5098,6 +5825,36 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Download the exact database C-SPANN release receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: database-release-${{ github.event.workflow_run.head_sha }}
+          path: ${{ runner.temp }}/managed-mcp-cspann-release
+      - name: Bind the exact release C-SPANN receipt digest
+        id: cspann
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/managed-mcp-cspann-release/database-release-receipt.json"
+          test -f "$receipt"
+          test ! -L "$receipt"
+          jq -e --arg release "$RELEASE_SHA" '
+            .schemaVersion == 5 and
+            .ok == true and
+            .targetSha == $release and
+            .proofs.runtimePrincipalCspannPlanAndExecute == true and
+            .proofs.runtimePrincipalNoKindCspann == true and
+            .proofs.runtimePrincipalKindCspann == true and
+            (.proofs.indexDefinitionFingerprints.company |
+              test("^[a-f0-9]{64}$")) and
+            (.proofs.indexDefinitionFingerprints.kind |
+              test("^[a-f0-9]{64}$"))
+          ' "$receipt" >/dev/null
+          receipt_sha256="$(sha256sum "$receipt" | awk '{print $1}')"
+          [[ "$receipt_sha256" =~ ^[a-f0-9]{64}$ ]]
+          echo "sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -5106,13 +5863,18 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
       - name: Run bounded read-only Managed MCP proof
+        id: receipt
         env:
           CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
           COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
+          MANAGED_MCP_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANAGED_MCP_CSPANN_RECEIPT_SHA256: ${{ steps.cspann.outputs.sha256 }}
         run: |
           set -euo pipefail
           test -n "$CCLOUD_API_KEY"
           test -n "$COCKROACH_CLUSTER_ID"
+          [[ "$MANAGED_MCP_RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$MANAGED_MCP_CSPANN_RECEIPT_SHA256" =~ ^[a-f0-9]{64}$ ]]
           npm run --silent mcp:cloud:audit > managed-mcp-production-receipt.json
           if grep -Fq -- "$CCLOUD_API_KEY" managed-mcp-production-receipt.json; then
             echo "Managed MCP receipt leaked the API key." >&2
@@ -5122,10 +5884,13 @@ jobs:
             echo "Managed MCP receipt leaked the cluster identifier." >&2
             exit 1
           fi
-          jq -e --arg database "$COCKROACH_DATABASE" \
+          jq -e \
+            --arg database "$COCKROACH_DATABASE" \
+            --arg release "$MANAGED_MCP_RELEASE_SHA" \
+            --arg cspann "$MANAGED_MCP_CSPANN_RECEIPT_SHA256" \
             'type == "object" and
-             keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"] and
-             .schemaVersion == 2 and
+             keys == ["aggregate","bound","calledTools","checkedAt","cspannLinkage","database","endpoint","mode","ok","proofs","redactions","release","schemaVersion","scope","toolsAdvertised"] and
+             .schemaVersion == 3 and
              .ok == true and
              (.checkedAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")) and
              .endpoint == "https://cockroachlabs.cloud/mcp" and
@@ -5147,42 +5912,75 @@ jobs:
                "idempotencyKeys":9,
                "contentDigests":9
              } and
-             .calledTools == ["get_cluster","list_tables","get_table_schema","select_query"] and
+             .release == {
+               "commitSha":$release,
+               "cspannReceiptSha256":$cspann
+             } and
+             .cspannLinkage.index ==
+               "idx_agent_memory_company_scope_embedding" and
+             (
+               (.cspannLinkage.explainQuery == {
+                  "status":"not-advertised",
+                  "planSha256":null
+                } and
+                .calledTools ==
+                  ["get_cluster","list_tables","get_table_schema","select_query"]) or
+               (.cspannLinkage.explainQuery.status == "verified" and
+                (.cspannLinkage.explainQuery.planSha256 |
+                  test("^[a-f0-9]{64}$")) and
+                .calledTools ==
+                  ["get_cluster","list_tables","get_table_schema","explain_query","select_query"])
+             ) and
              (.toolsAdvertised | type == "number" and floor == . and . >= 4) and
-             .proofs == [
-               {
-                 "name":"get_cluster",
-                 "ok":true,
-                 "detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."
-               },
-               {
-                 "name":"list_tables",
-                 "ok":true,
-                 "detail":"`agent_memory` is present in the configured application database."
-               },
-               {
-                 "name":"get_table_schema",
-                 "ok":true,
-                 "detail":"Live schema exposes VECTOR(1024) and a native vector index."
-               },
-               {
-                 "name":"select_query",
-                 "ok":true,
-                 "detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."
-               }
-             ] and
-             (.proofs |
+             (if .cspannLinkage.explainQuery.status == "verified"
+              then .toolsAdvertised >= 5
+              else true
+              end) and
+             (.calledTools as $called | .proofs |
                type == "array" and
-               length == 4 and
-               map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"] and
+               map(.name) == $called and
                all(.[];
                  keys == ["detail","name","ok"] and
-                 .ok == true and
+                  .ok == true and
                  (.detail | type == "string" and length > 0)
                )
              ) and
-             .redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]' \
-            managed-mcp-production-receipt.json
+             ([.proofs[] | select(.name == "get_cluster") | .detail] ==
+               ["Live cluster metadata returned through CockroachDB Cloud Managed MCP."]) and
+             ([.proofs[] | select(.name == "list_tables") | .detail] ==
+               ["`agent_memory` is present in the configured application database."]) and
+             ([.proofs[] | select(.name == "get_table_schema") | .detail] ==
+               ["Live schema exposes VECTOR(1024) and a native vector index."]) and
+             ([.proofs[] | select(.name == "select_query") | .detail] ==
+               ["The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."]) and
+             (
+               (.cspannLinkage.explainQuery.status == "not-advertised" and
+                ([.proofs[] | select(.name == "explain_query")] | length) == 0) or
+               (.cspannLinkage.explainQuery.status == "verified" and
+                [.proofs[] | select(.name == "explain_query") | .detail] ==
+                  ["Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index."])
+             ) and
+             .redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings","raw query plan"]' \
+             managed-mcp-production-receipt.json
+          receipt_sha256="$(
+            sha256sum managed-mcp-production-receipt.json | awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[a-f0-9]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
+          echo "checked_at=$(jq -er '.checkedAt' managed-mcp-production-receipt.json)" \
+            >>"$GITHUB_OUTPUT"
+          echo "explain_status=$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-production-receipt.json)" \
+            >>"$GITHUB_OUTPUT"
+          {
+            echo "### CockroachDB tool-chain release gate"
+            echo
+            echo "| Evidence | Value |"
+            echo "|---|---|"
+            echo "| Release SHA | \`$MANAGED_MCP_RELEASE_SHA\` |"
+            echo "| Database C-SPANN receipt | \`$MANAGED_MCP_CSPANN_RECEIPT_SHA256\` |"
+            echo "| Managed MCP receipt | \`$receipt_sha256\` |"
+            echo "| Optional explain_query | \`$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-production-receipt.json)\` |"
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Upload sanitized Managed MCP receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

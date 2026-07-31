@@ -6,7 +6,7 @@ export interface HostedDastCheck {
 
 export interface HostedDastReceipt {
   schema: "archon.hosted-dast";
-  version: 3;
+  version: 4;
   generatedAt: string;
   profile: "predeploy" | "production-audit" | "exact-release";
   targetOrigin: string;

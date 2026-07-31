@@ -31,6 +31,39 @@ if (!/^archon_migration(?:_ci)?$/u.test(databaseName)) {
 }
 
 const unitVector = `[1,${new Array(1023).fill("0").join(",")}]`;
+const expectedRuntimeRelationGrants = new Set([
+  "agent_memory:SELECT",
+  `${PUBLIC_RECALL_VIEW_NAME}:SELECT`,
+  `${PUBLIC_KIND_RECALL_VIEW_NAME}:SELECT`,
+  "memory_demo_sessions:SELECT",
+  "memory_resolution_observations:SELECT",
+  "memory_resolution_proposals:SELECT",
+  "memory_resolution_decisions:SELECT",
+  "memory_resolution_consolidations:SELECT",
+]);
+const expectedRuntimeFunctions = new Set([
+  "archon_resolution_create_session",
+  "archon_resolution_decide",
+]);
+
+async function expectInsufficientPrivilege(
+  operation: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "42501"
+    ) {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Runtime direct DML unexpectedly succeeded.");
+}
 
 async function setupLegacy(): Promise<void> {
   const client = new Client({ connectionString: databaseUrl });
@@ -205,9 +238,90 @@ async function verifyFinalState(): Promise<void> {
     await client.query(
       "GRANT archon_public_reader TO archon_migration_ci"
     );
+    await client.query(
+      "GRANT archon_resolution_writer TO archon_migration_ci"
+    );
+    const runtimeGrants = await client.query<{
+      table_name: string;
+      privilege_type: string;
+      is_grantable: boolean;
+    }>(
+      `SHOW GRANTS ON TABLE *
+         FOR archon_migration_ci`
+    );
+    const grantKeys = new Set(
+      runtimeGrants.rows.map(
+        (grant) => `${grant.table_name}:${grant.privilege_type}`
+      )
+    );
+    if (
+      runtimeGrants.rows.length !== expectedRuntimeRelationGrants.size ||
+      grantKeys.size !== expectedRuntimeRelationGrants.size ||
+      runtimeGrants.rows.some((grant) => grant.is_grantable) ||
+      [...expectedRuntimeRelationGrants].some(
+        (grant) => !grantKeys.has(grant)
+      ) ||
+      [...grantKeys].some((grant) => !grant.endsWith(":SELECT"))
+    ) {
+      throw new Error(
+        "Migrated runtime relation grants are not exact SELECT-only access."
+      );
+    }
+    const runtimeFunctionGrants = await client.query<{
+      schema_name: string | null;
+      object_name: string | null;
+      object_type: string;
+      privilege_type: string;
+      is_grantable: boolean;
+    }>(
+      `SELECT schema_name, object_name, object_type,
+              privilege_type, is_grantable
+         FROM [SHOW GRANTS FOR archon_migration_ci]
+        WHERE object_type = 'function'`
+    );
+    const functionNames = new Set(
+      runtimeFunctionGrants.rows.map((grant) =>
+        String(grant.object_name ?? "")
+          .replace(/\(.*/u, "")
+          .split(".")
+          .at(-1)
+      )
+    );
+    if (
+      runtimeFunctionGrants.rows.length !== expectedRuntimeFunctions.size ||
+      functionNames.size !== expectedRuntimeFunctions.size ||
+      [...expectedRuntimeFunctions].some(
+        (name) => !functionNames.has(name)
+      ) ||
+      runtimeFunctionGrants.rows.some(
+        (grant) =>
+          grant.schema_name !== "public" ||
+          grant.privilege_type !== "EXECUTE" ||
+          grant.is_grantable
+      )
+    ) {
+      throw new Error(
+        "Migrated runtime function grants exceed the exact transition API."
+      );
+    }
     await client.query("SET ROLE archon_migration_ci");
     await client.query(
       "SET application_name = 'archon.attacker-selected-scope'"
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "UPDATE public.memory_demo_sessions SET state = state WHERE false"
+      )
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "INSERT INTO public.memory_resolution_decisions DEFAULT VALUES"
+      )
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "DELETE FROM public.memory_resolution_consolidations WHERE false"
+      )
     );
     const visible = await client.query<{
       total: string;
@@ -307,6 +421,11 @@ async function main(): Promise<void> {
       exactKindCspannDefinition: true,
       roleBoundThreeAxisRls: true,
       runtimePrincipalCspannPlanAndExecute: true,
+      exactFiveTableResolutionSandbox: true,
+      resolutionWriterMembership: true,
+      exactTransitionFunctionExecute: true,
+      directResolutionDmlDenied: true,
+      canonicalMemoryRemainsReadOnly: true,
     })}\n`
   );
 }

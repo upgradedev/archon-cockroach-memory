@@ -65,6 +65,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove trusted recovery source identity
         run: |
@@ -572,6 +573,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove trusted recovery source identity
         run: |
