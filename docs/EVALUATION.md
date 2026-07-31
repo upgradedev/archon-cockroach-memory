@@ -87,7 +87,7 @@ The policy report contains per-case predictions as well as aggregate values:
 
 Evidence metrics use exact fixture identifiers. An answer is correct only when both
 the evidence identifier and abstention state match. Action equality is canonical
-JSON equality over type, target, parameters, and idempotency key. Accuracy and
+JSON equality over type, target, parameters, and idempotency identifier. Accuracy and
 evidence precision/recall are macro-averaged per case; contradiction and abstention
 precision/recall are calculated from aggregate classification counts.
 

@@ -48,7 +48,7 @@ interface ExpectedAction {
   type: string;
   target: string;
   parameters: Record<string, string>;
-  idempotencyKey: string;
+  idempotencyId: string;
 }
 
 interface ActionProposal {
@@ -58,7 +58,7 @@ interface ActionProposal {
   proposedEvidenceId: string;
   supersedesEvidenceId: string;
   requiredRole: string;
-  idempotencyKey: string;
+  idempotencyId: string;
   decisionAttempts: number;
   decision: {
     outcome: DecisionOutcome;
@@ -179,7 +179,7 @@ interface ScaleEvent {
   kind: "original" | "proposal" | "decision" | "decision-retry" | "query";
   priorEvidenceId: string;
   proposedEvidenceId: string;
-  idempotencyKey: string;
+  idempotencyId: string;
   outcome: "approved" | "rejected" | "pending";
   actorRole: "financial-controller" | "none";
   expectedEvidenceId: string | null;
@@ -558,7 +558,7 @@ function exactAction(action: ActionProposal): ExpectedAction {
     type: action.type,
     target: action.target,
     parameters: action.parameters,
-    idempotencyKey: action.idempotencyKey,
+    idempotencyId: action.idempotencyId,
   };
 }
 
@@ -1080,7 +1080,7 @@ function scaleEventsForEntity(entityIndex: number): ScaleEvent[] {
   const entityId = `entity-${String(entityIndex).padStart(6, "0")}`;
   const priorEvidenceId = `${entityId}:prior`;
   const proposedEvidenceId = `${entityId}:corrected`;
-  const idempotencyKey = sha256Text(
+  const idempotencyId = sha256Text(
     `${SCALE_GENERATOR_VERSION}:${entityId}`
   ).slice(0, 32);
   const outcome =
@@ -1101,7 +1101,7 @@ function scaleEventsForEntity(entityIndex: number): ScaleEvent[] {
     entityId,
     priorEvidenceId,
     proposedEvidenceId,
-    idempotencyKey,
+    idempotencyId,
     outcome,
     actorRole,
     expectedEvidenceId,
@@ -1182,7 +1182,7 @@ async function evaluateScaleCorpus(path: string): Promise<{
     currentEvidenceId: string | null;
     expectedEvidenceId: string | null;
     expectedAbstain: boolean;
-    idempotencyKey: string;
+    idempotencyId: string;
     decided: boolean;
   }
   const states = new Map<string, EntityState>();
@@ -1215,7 +1215,7 @@ async function evaluateScaleCorpus(path: string): Promise<{
         currentEvidenceId: event.priorEvidenceId,
         expectedEvidenceId: event.expectedEvidenceId,
         expectedAbstain: event.expectedAbstain,
-        idempotencyKey: event.idempotencyKey,
+        idempotencyId: event.idempotencyId,
         decided: false,
       };
       states.set(event.entityId, state);
@@ -1229,7 +1229,7 @@ async function evaluateScaleCorpus(path: string): Promise<{
       state.priorEvidenceId !== event.priorEvidenceId ||
       state.proposedEvidenceId !== event.proposedEvidenceId ||
       state.outcome !== event.outcome ||
-      state.idempotencyKey !== event.idempotencyKey
+      state.idempotencyId !== event.idempotencyId
     ) {
       invalidTransitions++;
     }
