@@ -164,6 +164,7 @@ export function MemoryResolutionLoop() {
                           : "text-mint"
                       }`}
                       role="status"
+                      aria-label={stateLabel(snapshot)}
                     >
                       {stateLabel(snapshot)}
                     </p>

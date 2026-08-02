@@ -1415,7 +1415,7 @@ async function verifyRuntimeRoles(
       .replace(/\s+/gu, "")
       .toLowerCase() !== "pg_catalog" ||
     ownerDefaults.rows[0].database !== null ||
-    ownerDefaults.rows[0].inherited_globally
+    !ownerDefaults.rows[0].inherited_globally
   ) {
     throw new ReleaseGateError(
       "Resolution transition owner search_path is not pinned to pg_catalog."

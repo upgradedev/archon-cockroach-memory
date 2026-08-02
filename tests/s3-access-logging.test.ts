@@ -133,6 +133,13 @@ test("S3 logging IaC retains and hardens the non-recursive archive", () => {
   assert.doesNotMatch(archive, /NewerNoncurrentVersions:/u);
   assert.doesNotMatch(archive, /LoggingConfiguration:/u);
   assert.doesNotMatch(archive, /aws:kms|ObjectLock|AccessControl|TargetGrants/u);
+
+  const cloudFrontAccessLogs = resourceBlock("CloudFrontAccessLogBucket");
+  assert.match(
+    cloudFrontAccessLogs,
+    /OwnershipControls:[\s\S]*?ObjectOwnership: BucketOwnerPreferred/u,
+  );
+  assert.doesNotMatch(cloudFrontAccessLogs, /\n\s+AccessControl:/u);
 });
 
 test("candidate and recovery objects have a bounded evidence lifecycle", () => {
@@ -540,6 +547,15 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
     assert.match(
       role,
       /Sid: AuditS3AccessLogArchive[\s\S]*?Action:\s+- s3:GetBucketLocation\s+- s3:GetBucketLogging\s+- s3:GetBucketOwnershipControls\s+- s3:GetBucketPolicy\s+- s3:GetBucketPublicAccessBlock\s+- s3:GetBucketVersioning\s+- s3:GetEncryptionConfiguration\s+- s3:GetLifecycleConfiguration\s+Resource: !GetAtt S3AccessLogArchive\.Arn/u
+    );
+    assert.match(
+      role,
+      new RegExp(
+        `Sid: Manage${title}CloudFrontLoggingAcl[\\s\\S]*?` +
+          "Action:\\s+- s3:GetBucketAcl\\s+- s3:PutBucketAcl\\s+" +
+          "Resource: !GetAtt CloudFrontAccessLogBucket\\.Arn",
+        "u",
+      ),
     );
     assert.doesNotMatch(
       role,

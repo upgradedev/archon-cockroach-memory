@@ -413,9 +413,8 @@ Resources:
     Properties:
       BucketName: !Sub "${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}"
       # CloudFront standard logging (legacy) still requires bucket ACLs.
-      # BucketOwnerPreferred retains owner control without weakening either
-      # public-access blocking or the dedicated-bucket boundary.
-      AccessControl: Private
+      # BucketOwnerPreferred enables the service-managed canonical grant; the
+      # deployment roles hold only GetBucketAcl/PutBucketAcl on this bucket.
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - BucketKeyEnabled: true

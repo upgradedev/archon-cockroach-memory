@@ -260,7 +260,12 @@ jobs:
           raw_status=$?
           set -e
 
-          jq --slurp '.' "$REPORT_DIR/actionlint.raw.json" \
+          jq --slurp -e '
+            if length == 1 and (.[0] | type) == "array"
+            then .[0]
+            else error("actionlint output must be exactly one JSON array")
+            end
+          ' "$REPORT_DIR/actionlint.raw.json" \
             > "$REPORT_DIR/actionlint-all.json"
           jq -e '
             type == "array" and
@@ -1088,7 +1093,6 @@ jobs:
             > "$REPORT_DIR/sbom-inputs-and-documents.sha256"
 
       - name: Enforce dependency SBOM vulnerability and license policy
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -1141,6 +1145,7 @@ jobs:
             --backend-report "$REPORT_DIR/trivy-backend-policy.json" \
             --frontend-report "$REPORT_DIR/trivy-frontend-policy.json" \
             --lambda-report "$REPORT_DIR/trivy-lambda-content-policy.json" \
+            --lambda-spdx "$REPORT_DIR/lambda-content.spdx.json" \
             --frontend-syft "$REPORT_DIR/frontend.syft.json" \
             --frontend-lock web/package-lock.json \
             --workflow .github/workflows/supply-chain.yml \
@@ -1184,6 +1189,20 @@ jobs:
               "frontend":1,
               "lambdaContent":0
             } and
+            .reportResultsEncoding == {
+              "backend":"array",
+              "frontend":"array",
+              "lambdaContent":"omitted-root-only"
+            } and
+            .lambdaInventory == {
+              "contract":"exact-root-only",
+              "spdxVersion":"SPDX-2.3",
+              "sourceName":"archon-memory-lambda-zip-content",
+              "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "totalPackages":1,
+              "catalogedDependencyPackages":0,
+              "relationships":1
+            } and
             .rawFindings == 4 and
             .vulnerabilityFindings == 0 and
             .licenseFindings == 4 and
@@ -1221,10 +1240,37 @@ jobs:
             ] and
             [.approvedBuildLicenses[].dev] == [true,true,true,true]
           ' "$REPORT_DIR/trivy-sbom-status.json" >/dev/null
-          for scope in backend frontend lambda-content; do
-            jq -e '.Results | type == "array"' \
+          for scope in backend frontend; do
+            jq -e --arg artifact \
+              "supply-chain-reports/sbom/${scope}.spdx.json" '
+                .SchemaVersion == 2 and
+                .Trivy == {"Version":"0.72.0"} and
+                .ArtifactName == $artifact and
+                .ArtifactType == "spdx" and
+                (.Results | type) == "array"
+              ' \
               "$REPORT_DIR/trivy-${scope}-policy.json" >/dev/null
           done
+          jq -e '
+            .SchemaVersion == 2 and
+            .Trivy == {"Version":"0.72.0"} and
+            .ArtifactName ==
+              "supply-chain-reports/sbom/lambda-content.spdx.json" and
+            .ArtifactType == "spdx" and
+            keys == [
+              "ArtifactName",
+              "ArtifactType",
+              "CreatedAt",
+              "ReportID",
+              "SchemaVersion",
+              "Trivy"
+            ] and
+            (.ReportID |
+              test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.CreatedAt |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            (has("Results") | not)
+          ' "$REPORT_DIR/trivy-lambda-content-policy.json" >/dev/null
           jq -e '
             length == 4 and
             map(.package) == [
@@ -1511,16 +1557,20 @@ jobs:
           jq --slurp -e \
             --slurpfile status \
               "$EVIDENCE_ROOT/static/actionlint-status.json" '
-            length == 6 and
-            all($status[0].compatibility.expectedDiagnostics[] as $site;
-              any(.[];
-                .kind == "syntax-check" and
-                .message == $status[0].compatibility.diagnostic and
-                .filepath == $site.filepath and
-                .line == $site.line and
-                .column == $site.column and
-                .end_column == $site.endColumn and
-                .snippet == $site.snippet
+            length == 1 and
+            (.[0] | type) == "array" and
+            (.[0] | length) == 6 and
+            (.[0] as $findings |
+              all($status[0].compatibility.expectedDiagnostics[] as $site;
+                any($findings[];
+                  .kind == "syntax-check" and
+                  .message == $status[0].compatibility.diagnostic and
+                  .filepath == $site.filepath and
+                  .line == $site.line and
+                  .column == $site.column and
+                  .end_column == $site.endColumn and
+                  .snippet == $site.snippet
+                )
               )
             )
           ' "$EVIDENCE_ROOT/static/actionlint.raw.json" >/dev/null
@@ -1695,12 +1745,31 @@ jobs:
             .scannerVersion == "0.72.0" and
             .inventoryScanner == "Syft" and
             .inventoryScannerVersion == "1.50.0" and
+            .versionEvidence == {
+              "trivyToolLock":"0.72.0",
+              "trivyCapturedCli":"0.72.0",
+              "syftToolLock":"1.50.0"
+            } and
             .scanners == ["vuln","license"] and
             .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
             .rawExitCodes == {
               "backend":0,
               "frontend":1,
               "lambdaContent":0
+            } and
+            .reportResultsEncoding == {
+              "backend":"array",
+              "frontend":"array",
+              "lambdaContent":"omitted-root-only"
+            } and
+            .lambdaInventory == {
+              "contract":"exact-root-only",
+              "spdxVersion":"SPDX-2.3",
+              "sourceName":"archon-memory-lambda-zip-content",
+              "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "totalPackages":1,
+              "catalogedDependencyPackages":0,
+              "relationships":1
             } and
             .rawFindings == 4 and
             .vulnerabilityFindings == 0 and
@@ -1709,12 +1778,20 @@ jobs:
             .blockingFindings == 0 and
             .acceptedWaivers == 0 and
             .effectiveExitCode == 0 and
+            .sourceExclusions == [
+              "./node_modules/resolve/test/resolver/baz/**",
+              "./node_modules/resolve/test/resolver/browser_field/**",
+              "./node_modules/resolve/test/resolver/false_main/**",
+              "./node_modules/resolve/test/resolver/invalid_main/**"
+            ] and
             [.approvedBuildLicenses[].package] == [
               "@csstools/color-helpers",
               "lightningcss",
               "lightningcss-linux-x64-gnu",
               "lightningcss-linux-x64-musl"
             ] and
+            [.approvedBuildLicenses[].version] ==
+              ["5.1.0","1.33.0","1.33.0","1.33.0"] and
             [.approvedBuildLicenses[].license] ==
               ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
             [.approvedBuildLicenses[].resolved] == [
@@ -1728,8 +1805,86 @@ jobs:
               "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
               "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
               "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
-            ]
+            ] and
+            [.approvedBuildLicenses[].dev] == [true,true,true,true]
           ' "$EVIDENCE_ROOT/sbom/trivy-sbom-status.json" >/dev/null
+          for scope in backend frontend; do
+            jq -e --arg artifact \
+              "supply-chain-reports/sbom/${scope}.spdx.json" '
+                .SchemaVersion == 2 and
+                .Trivy == {"Version":"0.72.0"} and
+                .ArtifactName == $artifact and
+                .ArtifactType == "spdx" and
+                (.Results | type) == "array"
+              ' \
+              "$EVIDENCE_ROOT/sbom/trivy-${scope}-policy.json" \
+              >/dev/null
+          done
+          jq -e '
+            .SchemaVersion == 2 and
+            .Trivy == {"Version":"0.72.0"} and
+            .ArtifactName ==
+              "supply-chain-reports/sbom/lambda-content.spdx.json" and
+            .ArtifactType == "spdx" and
+            keys == [
+              "ArtifactName",
+              "ArtifactType",
+              "CreatedAt",
+              "ReportID",
+              "SchemaVersion",
+              "Trivy"
+            ] and
+            (.ReportID |
+              test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.CreatedAt |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            (has("Results") | not)
+          ' \
+            "$EVIDENCE_ROOT/sbom/trivy-lambda-content-policy.json" \
+            >/dev/null
+          jq -e '
+            (keys | sort) == ([
+              "SPDXID",
+              "creationInfo",
+              "dataLicense",
+              "documentNamespace",
+              "name",
+              "packages",
+              "relationships",
+              "spdxVersion"
+            ] | sort) and
+            .spdxVersion == "SPDX-2.3" and
+            .dataLicense == "CC0-1.0" and
+            .SPDXID == "SPDXRef-DOCUMENT" and
+            .name == "archon-memory-lambda-zip-content" and
+            (.documentNamespace |
+              test("^https://anchore[.]com/syft/dir/archon-memory-lambda-zip-content-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.creationInfo | keys | sort) ==
+              (["created","creators","licenseListVersion"] | sort) and
+            .creationInfo.licenseListVersion == "3.28" and
+            .creationInfo.creators == [
+              "Organization: Anchore, Inc",
+              "Tool: syft-1.50.0"
+            ] and
+            (.creationInfo.created |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            .packages == [{
+              "name":"archon-memory-lambda-zip-content",
+              "SPDXID":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "supplier":"NOASSERTION",
+              "downloadLocation":"NOASSERTION",
+              "filesAnalyzed":false,
+              "licenseConcluded":"NOASSERTION",
+              "licenseDeclared":"NOASSERTION",
+              "copyrightText":"NOASSERTION",
+              "primaryPackagePurpose":"FILE"
+            }] and
+            .relationships == [{
+              "spdxElementId":"SPDXRef-DOCUMENT",
+              "relatedSpdxElement":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "relationshipType":"DESCRIBES"
+            }]
+          ' "$EVIDENCE_ROOT/sbom/lambda-content.spdx.json" >/dev/null
           jq -e '
             length == 4 and
             map(.package) == [
@@ -1901,6 +2056,21 @@ jobs:
                     version: "0.72.0",
                     inventoryAnalyzer: "Syft",
                     inventoryVersion: "1.50.0",
+                    reportResultsEncoding: {
+                      backend: "array",
+                      frontend: "array",
+                      lambdaContent: "omitted-root-only"
+                    },
+                    lambdaInventory: {
+                      contract: "exact-root-only",
+                      spdxVersion: "SPDX-2.3",
+                      sourceName: "archon-memory-lambda-zip-content",
+                      rootPackageId:
+                        "SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+                      totalPackages: 1,
+                      catalogedDependencyPackages: 0,
+                      relationships: 1
+                    },
                     packages: [
                       "@csstools/color-helpers@5.1.0",
                       "lightningcss@1.33.0",
@@ -2023,6 +2193,20 @@ jobs:
                 "version":"0.72.0",
                 "inventoryAnalyzer":"Syft",
                 "inventoryVersion":"1.50.0",
+                "reportResultsEncoding":{
+                  "backend":"array",
+                  "frontend":"array",
+                  "lambdaContent":"omitted-root-only"
+                },
+                "lambdaInventory":{
+                  "contract":"exact-root-only",
+                  "spdxVersion":"SPDX-2.3",
+                  "sourceName":"archon-memory-lambda-zip-content",
+                  "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+                  "totalPackages":1,
+                  "catalogedDependencyPackages":0,
+                  "relationships":1
+                },
                 "packages":[
                   "@csstools/color-helpers@5.1.0",
                   "lightningcss@1.33.0",

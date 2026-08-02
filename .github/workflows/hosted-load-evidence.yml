@@ -199,11 +199,13 @@ jobs:
           printf '%s\n' \
             '{"schema":"archon.hosted-load-evidence","version":2,"ok":false,"result":"not-finalized"}' \
             >"$receipt"
-          echo "RECEIPT_FILE=$receipt" >>"$GITHUB_ENV"
-          echo "SUMMARY_FILE=${RUNNER_TEMP:?}/hosted-k6-summary.json" \
-            >>"$GITHUB_ENV"
-          echo "CONTRACT_MANIFEST_FILE=${RUNNER_TEMP:?}/hosted-load-contract.sha256" \
-            >>"$GITHUB_ENV"
+          {
+            printf 'RECEIPT_FILE=%s\n' "$receipt"
+            printf 'SUMMARY_FILE=%s\n' \
+              "${RUNNER_TEMP:?}/hosted-k6-summary.json"
+            printf 'CONTRACT_MANIFEST_FILE=%s\n' \
+              "${RUNNER_TEMP:?}/hosted-load-contract.sha256"
+          } >>"$GITHUB_ENV"
 
       - name: Check out the authorized source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -280,11 +282,12 @@ jobs:
           k6_exit="$?"
           set -e
           measurement_completed_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          echo "k6_exit=$k6_exit" >>"$GITHUB_OUTPUT"
-          echo "measurement_started_at=$measurement_started_at" \
-            >>"$GITHUB_OUTPUT"
-          echo "measurement_completed_at=$measurement_completed_at" \
-            >>"$GITHUB_OUTPUT"
+          {
+            printf 'k6_exit=%s\n' "$k6_exit"
+            printf 'measurement_started_at=%s\n' "$measurement_started_at"
+            printf 'measurement_completed_at=%s\n' \
+              "$measurement_completed_at"
+          } >>"$GITHUB_OUTPUT"
           test -s "$SUMMARY_FILE"
 
       - name: Finalize sanitized machine-verifiable receipt

@@ -281,12 +281,14 @@ jobs:
             --tag-filters "Key=Application,Values=$APP_NAME" \
             --output json >"$forbidden_inventory"
 
-          readonly primary_count="$(
+          primary_count="$(
             jq -er '.ResourceTagMappingList | length' "$primary_inventory"
           )"
-          readonly forbidden_count="$(
+          readonly primary_count
+          forbidden_count="$(
             jq -er '.ResourceTagMappingList | length' "$forbidden_inventory"
           )"
+          readonly forbidden_count
           test "$primary_count" -gt 0
           test "$forbidden_count" -eq 0
 

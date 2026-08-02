@@ -7492,5 +7492,5 @@ jobs:
     uses: ./.github/workflows/security-dast.yml
     with:
       exact_sha: ${{ github.sha }}
-      deploy_run_id: ${{ github.run_id }}
-      deploy_run_attempt: ${{ github.run_attempt }}
+      deploy_run_id: ${{ fromJSON(github.run_id) }}
+      deploy_run_attempt: ${{ fromJSON(github.run_attempt) }}

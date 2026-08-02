@@ -498,7 +498,7 @@ async function verifyResolutionSandbox(
       .replace(/\s+/gu, "")
       .toLowerCase() !== "pg_catalog" ||
     transitionOwnerDefaults.rows[0].database !== null ||
-    transitionOwnerDefaults.rows[0].inherited_globally
+    !transitionOwnerDefaults.rows[0].inherited_globally
   ) {
     throw new Error(
       "Resolution transition owner search_path is not pinned to pg_catalog."

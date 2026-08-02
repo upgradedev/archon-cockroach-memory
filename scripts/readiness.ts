@@ -4124,6 +4124,8 @@ function sourceChecks(): SourceCheck[] {
           supplyChainWorkflow
         ) &&
         /"lambdaContent":0/u.test(supplyChainWorkflow) &&
+        /"lambdaContent":\s*"omitted-root-only"/u.test(supplyChainWorkflow) &&
+        /"catalogedDependencyPackages":\s*0/u.test(supplyChainWorkflow) &&
         /cfn-lint==1\.53\.1/u.test(supplyChainWorkflow) &&
         /cfn-lint --format json "\$template"/u.test(
           supplyChainWorkflow
@@ -5346,10 +5348,10 @@ function sourceChecks(): SourceCheck[] {
         /exact_sha:\s*\$\{\{\s*github\.sha\s*\}\}/u.test(
           deployHostedDastJob
         ) &&
-        /deploy_run_id:\s*\$\{\{\s*github\.run_id\s*\}\}/u.test(
+        /deploy_run_id:\s*\$\{\{\s*fromJSON\(github\.run_id\)\s*\}\}/u.test(
           deployHostedDastJob
         ) &&
-        /deploy_run_attempt:\s*\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+        /deploy_run_attempt:\s*\$\{\{\s*fromJSON\(github\.run_attempt\)\s*\}\}/u.test(
           deployHostedDastJob
         ) &&
         hostedDastSourceGateJob.length > 0 &&

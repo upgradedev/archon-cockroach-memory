@@ -407,9 +407,11 @@ jobs:
           set -euo pipefail
           test -f "$RECEIPT_PATH"
           test ! -L "$RECEIPT_PATH"
-          ! grep -Eqi \
+          grep_status=0
+          grep -Eqi \
             'arn:(aws|aws-cn|aws-us-gov):|:assumed-role/|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|cloudfront\.net' \
-            "$RECEIPT_PATH"
+            "$RECEIPT_PATH" || grep_status="$?"
+          test "$grep_status" -eq 1
           jq -e \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit "$TARGET_SHA" \

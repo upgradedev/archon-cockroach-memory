@@ -18,6 +18,40 @@ const FRONTEND_SOURCE_EXCLUSIONS = Object.freeze([
   "./node_modules/resolve/test/resolver/false_main/**",
   "./node_modules/resolve/test/resolver/invalid_main/**",
 ]);
+const LAMBDA_SOURCE_NAME = "archon-memory-lambda-zip-content";
+const LAMBDA_ROOT_PACKAGE_ID =
+  "SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content";
+const LAMBDA_SPDX_TOP_LEVEL_KEYS = Object.freeze([
+  "SPDXID",
+  "creationInfo",
+  "dataLicense",
+  "documentNamespace",
+  "name",
+  "packages",
+  "relationships",
+  "spdxVersion",
+]);
+const LAMBDA_SPDX_CREATION_KEYS = Object.freeze([
+  "created",
+  "creators",
+  "licenseListVersion",
+]);
+const LAMBDA_SPDX_PACKAGE_KEYS = Object.freeze([
+  "SPDXID",
+  "copyrightText",
+  "downloadLocation",
+  "filesAnalyzed",
+  "licenseConcluded",
+  "licenseDeclared",
+  "name",
+  "primaryPackagePurpose",
+  "supplier",
+]);
+const LAMBDA_SPDX_RELATIONSHIP_KEYS = Object.freeze([
+  "relatedSpdxElement",
+  "relationshipType",
+  "spdxElementId",
+]);
 const APPROVED_BUILD_LICENSES = Object.freeze([
   Object.freeze({
     package: "@csstools/color-helpers",
@@ -109,6 +143,16 @@ function parseJson(label, source) {
 
 function normalizeSource(source) {
   return source.replaceAll("\r\n", "\n");
+}
+
+function hasExactKeys(value, expectedKeys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify([...expectedKeys].sort())
+  );
 }
 
 function validateToolLock(toolLock) {
@@ -265,12 +309,150 @@ function validateFrontendInventory(frontendSyft, frontendLock) {
   }
 }
 
+function validateLambdaSpdx(lambdaSpdx) {
+  invariant(
+    hasExactKeys(lambdaSpdx, LAMBDA_SPDX_TOP_LEVEL_KEYS),
+    "Lambda-content SPDX top-level contract drifted"
+  );
+  invariant(lambdaSpdx.spdxVersion === "SPDX-2.3", "Lambda-content SPDX must be 2.3");
+  invariant(lambdaSpdx.dataLicense === "CC0-1.0", "Lambda-content SPDX data license drifted");
+  invariant(lambdaSpdx.SPDXID === "SPDXRef-DOCUMENT", "Lambda-content document ID drifted");
+  invariant(lambdaSpdx.name === LAMBDA_SOURCE_NAME, "Lambda-content source name drifted");
+  invariant(
+    /^https:\/\/anchore\.com\/syft\/dir\/archon-memory-lambda-zip-content-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+      lambdaSpdx.documentNamespace
+    ),
+    "Lambda-content SPDX namespace drifted"
+  );
+  invariant(
+    hasExactKeys(lambdaSpdx.creationInfo, LAMBDA_SPDX_CREATION_KEYS),
+    "Lambda-content SPDX creationInfo contract drifted"
+  );
+  invariant(
+    lambdaSpdx.creationInfo.licenseListVersion === "3.28",
+    "Lambda-content SPDX license-list version drifted"
+  );
+  invariant(
+    JSON.stringify(lambdaSpdx.creationInfo.creators) ===
+      JSON.stringify(["Organization: Anchore, Inc", `Tool: syft-${EXPECTED_SYFT_VERSION}`]),
+    "Lambda-content SPDX creator contract drifted"
+  );
+  invariant(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(
+      lambdaSpdx.creationInfo.created
+    ),
+    "Lambda-content SPDX creation time must be UTC"
+  );
+  invariant(
+    Array.isArray(lambdaSpdx.packages) && lambdaSpdx.packages.length === 1,
+    "Lambda-content SPDX must contain exactly the source-root package"
+  );
+  const rootPackage = lambdaSpdx.packages[0];
+  invariant(
+    hasExactKeys(rootPackage, LAMBDA_SPDX_PACKAGE_KEYS),
+    "Lambda-content SPDX root-package contract drifted"
+  );
+  invariant(rootPackage.name === LAMBDA_SOURCE_NAME, "Lambda-content root name drifted");
+  invariant(rootPackage.SPDXID === LAMBDA_ROOT_PACKAGE_ID, "Lambda-content root ID drifted");
+  invariant(rootPackage.supplier === "NOASSERTION", "Lambda-content root supplier drifted");
+  invariant(
+    rootPackage.downloadLocation === "NOASSERTION",
+    "Lambda-content root download location drifted"
+  );
+  invariant(rootPackage.filesAnalyzed === false, "Lambda-content root must not claim file analysis");
+  invariant(
+    rootPackage.licenseConcluded === "NOASSERTION" &&
+      rootPackage.licenseDeclared === "NOASSERTION" &&
+      rootPackage.copyrightText === "NOASSERTION",
+    "Lambda-content root legal assertions drifted"
+  );
+  invariant(
+    rootPackage.primaryPackagePurpose === "FILE",
+    "Lambda-content root package purpose drifted"
+  );
+  invariant(
+    Array.isArray(lambdaSpdx.relationships) && lambdaSpdx.relationships.length === 1,
+    "Lambda-content SPDX must contain exactly the root DESCRIBES relationship"
+  );
+  const relationship = lambdaSpdx.relationships[0];
+  invariant(
+    hasExactKeys(relationship, LAMBDA_SPDX_RELATIONSHIP_KEYS),
+    "Lambda-content SPDX relationship contract drifted"
+  );
+  invariant(
+    relationship.spdxElementId === "SPDXRef-DOCUMENT" &&
+      relationship.relationshipType === "DESCRIBES" &&
+      relationship.relatedSpdxElement === LAMBDA_ROOT_PACKAGE_ID,
+    "Lambda-content SPDX root relationship drifted"
+  );
+  return {
+    contract: "exact-root-only",
+    spdxVersion: "SPDX-2.3",
+    sourceName: LAMBDA_SOURCE_NAME,
+    rootPackageId: LAMBDA_ROOT_PACKAGE_ID,
+    totalPackages: 1,
+    catalogedDependencyPackages: 0,
+    relationships: 1,
+  };
+}
+
 function flattenReport(scope, report) {
   invariant(report && typeof report === "object", `${scope} Trivy report must be an object`);
   invariant(report.SchemaVersion === 2, `${scope} Trivy SchemaVersion must be 2`);
-  invariant(Array.isArray(report.Results), `${scope} Trivy Results must be an array`);
+  invariant(
+    report.Trivy?.Version === EXPECTED_SCANNER_VERSION,
+    `${scope} Trivy report version must be ${EXPECTED_SCANNER_VERSION}`
+  );
+  invariant(report.ArtifactType === "spdx", `${scope} Trivy ArtifactType must be spdx`);
+  invariant(
+    report.ArtifactName === `supply-chain-reports/sbom/${scope}.spdx.json`,
+    `${scope} Trivy ArtifactName drifted`
+  );
+  const hasResults = Object.hasOwn(report, "Results");
+  if (!hasResults) {
+    invariant(
+      scope === "lambda-content",
+      `${scope} Trivy Results may be omitted only for the exact root-only Lambda-content SBOM`
+    );
+    invariant(
+      JSON.stringify(Object.keys(report).sort()) ===
+        JSON.stringify(
+          [
+            "ArtifactName",
+            "ArtifactType",
+            "CreatedAt",
+            "ReportID",
+            "SchemaVersion",
+            "Trivy",
+          ].sort()
+        ),
+      "lambda-content omitted-results report envelope drifted"
+    );
+    invariant(
+      JSON.stringify(report.Trivy) ===
+        JSON.stringify({ Version: EXPECTED_SCANNER_VERSION }),
+      "lambda-content Trivy envelope must contain only the pinned version"
+    );
+    invariant(
+      typeof report.ReportID === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+          report.ReportID
+        ),
+      "lambda-content Trivy ReportID must be a UUID"
+    );
+    invariant(
+      typeof report.CreatedAt === "string" &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(
+          report.CreatedAt
+        ),
+      "lambda-content Trivy CreatedAt must be an exact UTC timestamp"
+    );
+  } else {
+    invariant(Array.isArray(report.Results), `${scope} Trivy Results must be an array`);
+  }
+  const results = hasResults ? report.Results : [];
   const findings = [];
-  for (const result of report.Results) {
+  for (const result of results) {
     invariant(result && typeof result === "object", `${scope} Trivy result must be an object`);
     if (result.Vulnerabilities !== undefined) {
       invariant(Array.isArray(result.Vulnerabilities), `${scope} Vulnerabilities must be an array`);
@@ -343,6 +525,7 @@ function evaluate({
   backendReport,
   frontendReport,
   lambdaReport,
+  lambdaSpdx,
   frontendSyft,
   frontendLock,
   workflowSource,
@@ -354,6 +537,7 @@ function evaluate({
   validateVersionOutput(versionOutput);
   validateFrontendWorkflowScope(workflowSource);
   validateFrontendInventory(frontendSyft, frontendLock);
+  const lambdaInventory = validateLambdaSpdx(lambdaSpdx);
 
   const findings = [
     ...flattenReport("backend", backendReport),
@@ -435,6 +619,14 @@ function evaluate({
         frontend: rawExitCodes.frontend,
         lambdaContent: rawExitCodes["lambda-content"],
       },
+      reportResultsEncoding: {
+        backend: Object.hasOwn(backendReport, "Results") ? "array" : "omitted",
+        frontend: Object.hasOwn(frontendReport, "Results") ? "array" : "omitted",
+        lambdaContent: Object.hasOwn(lambdaReport, "Results")
+          ? "array"
+          : "omitted-root-only",
+      },
+      lambdaInventory,
       rawFindings: findings.length,
       vulnerabilityFindings,
       licenseFindings,
@@ -462,9 +654,14 @@ function evaluate({
   };
 }
 
-function fixturePolicyReport(licenses = []) {
-  return {
+function fixturePolicyReport(scope, licenses = [], omitResults = false) {
+  const report = {
     SchemaVersion: 2,
+    Trivy: { Version: EXPECTED_SCANNER_VERSION },
+    ReportID: "019fc287-7752-7812-bf02-72e3f6483186",
+    CreatedAt: "2026-08-02T12:51:25.650530035Z",
+    ArtifactName: `supply-chain-reports/sbom/${scope}.spdx.json`,
+    ArtifactType: "spdx",
     Results:
       licenses.length === 0
         ? []
@@ -475,6 +672,46 @@ function fixturePolicyReport(licenses = []) {
               Licenses: licenses,
             },
           ],
+  };
+  if (omitResults) {
+    delete report.Results;
+  }
+  return report;
+}
+
+function fixtureLambdaSpdx() {
+  return {
+    spdxVersion: "SPDX-2.3",
+    dataLicense: "CC0-1.0",
+    SPDXID: "SPDXRef-DOCUMENT",
+    name: LAMBDA_SOURCE_NAME,
+    documentNamespace:
+      "https://anchore.com/syft/dir/archon-memory-lambda-zip-content-0a4f7265-bce8-41ba-8ad2-d8ac35b38034",
+    creationInfo: {
+      licenseListVersion: "3.28",
+      creators: ["Organization: Anchore, Inc", `Tool: syft-${EXPECTED_SYFT_VERSION}`],
+      created: "2026-08-02T12:51:19Z",
+    },
+    packages: [
+      {
+        name: LAMBDA_SOURCE_NAME,
+        SPDXID: LAMBDA_ROOT_PACKAGE_ID,
+        supplier: "NOASSERTION",
+        downloadLocation: "NOASSERTION",
+        filesAnalyzed: false,
+        licenseConcluded: "NOASSERTION",
+        licenseDeclared: "NOASSERTION",
+        copyrightText: "NOASSERTION",
+        primaryPackagePurpose: "FILE",
+      },
+    ],
+    relationships: [
+      {
+        spdxElementId: "SPDXRef-DOCUMENT",
+        relatedSpdxElement: LAMBDA_ROOT_PACKAGE_ID,
+        relationshipType: "DESCRIBES",
+      },
+    ],
   };
 }
 
@@ -569,9 +806,10 @@ function fixtureLicenses() {
 
 function runSelfTest() {
   const base = {
-    backendReport: fixturePolicyReport(),
-    frontendReport: fixturePolicyReport(fixtureLicenses()),
-    lambdaReport: fixturePolicyReport(),
+    backendReport: fixturePolicyReport("backend"),
+    frontendReport: fixturePolicyReport("frontend", fixtureLicenses()),
+    lambdaReport: fixturePolicyReport("lambda-content", [], true),
+    lambdaSpdx: fixtureLambdaSpdx(),
     frontendSyft: fixtureFrontendSyft(),
     frontendLock: fixtureFrontendLock(),
     workflowSource: fixtureWorkflow(),
@@ -584,8 +822,22 @@ function runSelfTest() {
   assert.equal(result.status.approvedBuildLicenseFindings, 4);
   assert.equal(result.status.blockingFindings, 0);
   assert.equal(result.status.effectiveExitCode, 0);
+  assert.deepEqual(result.status.reportResultsEncoding, {
+    backend: "array",
+    frontend: "array",
+    lambdaContent: "omitted-root-only",
+  });
+  assert.deepEqual(result.status.lambdaInventory, {
+    contract: "exact-root-only",
+    spdxVersion: "SPDX-2.3",
+    sourceName: LAMBDA_SOURCE_NAME,
+    rootPackageId: LAMBDA_ROOT_PACKAGE_ID,
+    totalPackages: 1,
+    catalogedDependencyPackages: 0,
+    relationships: 1,
+  });
 
-  const unexpectedLicense = fixturePolicyReport([
+  const unexpectedLicense = fixturePolicyReport("frontend", [
     ...fixtureLicenses(),
     {
       Severity: "UNKNOWN",
@@ -623,6 +875,43 @@ function runSelfTest() {
       ...base,
       rawExitCodes: { backend: 0, frontend: 0, "lambda-content": 0 },
     },
+    {
+      ...base,
+      backendReport: fixturePolicyReport("backend", [], true),
+    },
+    {
+      ...base,
+      lambdaReport: {
+        ...fixturePolicyReport("lambda-content", [], true),
+        Results: null,
+      },
+    },
+    {
+      ...base,
+      lambdaReport: {
+        ...fixturePolicyReport("lambda-content", [], true),
+        ArtifactName: "supply-chain-reports/sbom/other.spdx.json",
+      },
+    },
+    {
+      ...base,
+      lambdaReport: {
+        ...fixturePolicyReport("lambda-content", [], true),
+        Trivy: { Version: "0.72.1" },
+      },
+    },
+    {
+      ...base,
+      rawExitCodes: { backend: 0, frontend: 1, "lambda-content": 1 },
+    },
+    {
+      ...base,
+      lambdaSpdx: { ...fixtureLambdaSpdx(), packages: [] },
+    },
+    {
+      ...base,
+      lambdaSpdx: { ...fixtureLambdaSpdx(), relationships: [] },
+    },
   ];
   for (const candidate of failures) {
     assert.throws(() => evaluate(candidate));
@@ -637,6 +926,7 @@ function parseArguments(argv) {
     "--backend-report",
     "--frontend-report",
     "--lambda-report",
+    "--lambda-spdx",
     "--frontend-syft",
     "--frontend-lock",
     "--workflow",
@@ -690,6 +980,7 @@ if (process.argv.length === 3 && process.argv[2] === "--self-test") {
     backendReport: parseJson("backend Trivy report", read(args.get("--backend-report"))),
     frontendReport: parseJson("frontend Trivy report", read(args.get("--frontend-report"))),
     lambdaReport: parseJson("Lambda-content Trivy report", read(args.get("--lambda-report"))),
+    lambdaSpdx: parseJson("Lambda-content SPDX", read(args.get("--lambda-spdx"))),
     frontendSyft: parseJson("frontend Syft report", read(args.get("--frontend-syft"))),
     frontendLock: parseJson("frontend lockfile", read(args.get("--frontend-lock"))),
     workflowSource: read(args.get("--workflow")),

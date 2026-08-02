@@ -184,7 +184,7 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   assert.match(hostedDast, /"Upload production receipt"/u);
   assert.match(
     deploy,
-    /hosted-dast-production:[\s\S]*?needs:\s*\r?\n\s+- deploy-production\r?\n\s+- managed-mcp-production-audit[\s\S]*?uses:\s*\.\/\.github\/workflows\/security-dast\.yml[\s\S]*?exact_sha:\s*\$\{\{\s*github\.sha\s*\}\}[\s\S]*?deploy_run_id:\s*\$\{\{\s*github\.run_id\s*\}\}[\s\S]*?deploy_run_attempt:\s*\$\{\{\s*github\.run_attempt\s*\}\}/u
+    /hosted-dast-production:[\s\S]*?needs:\s*\r?\n\s+- deploy-production\r?\n\s+- managed-mcp-production-audit[\s\S]*?uses:\s*\.\/\.github\/workflows\/security-dast\.yml[\s\S]*?exact_sha:\s*\$\{\{\s*github\.sha\s*\}\}[\s\S]*?deploy_run_id:\s*\$\{\{\s*fromJSON\(github\.run_id\)\s*\}\}[\s\S]*?deploy_run_attempt:\s*\$\{\{\s*fromJSON\(github\.run_attempt\)\s*\}\}/u
   );
   assert.match(
     hostedDastScript,
@@ -3093,6 +3093,8 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     /for scope in backend frontend lambda-content/u
   );
   assert.match(supplyChain, /"lambdaContent":0/u);
+  assert.match(supplyChain, /"lambdaContent":\s*"omitted-root-only"/u);
+  assert.match(supplyChain, /"catalogedDependencyPackages":\s*0/u);
   assert.equal((supplyChain.match(/--exit-code 1/gu) ?? []).length, 1);
   assert.equal((supplyChain.match(/--exit-code 0/gu) ?? []).length >= 2, true);
   assert.match(
