@@ -333,15 +333,19 @@ async function proveExactPrincipal(
     throw new Error("Runtime principal relation grants are not exact.");
   }
 
+  // Principal-focused SHOW GRANTS classifies UDF rows as routines in v26.2.3.
   const functionGrants = await admin.query<{
     schema_name: string | null;
     object_name: string | null;
+    object_type: string;
+    grantee: string;
     privilege_type: string;
     is_grantable: boolean;
   }>(
-    `SELECT schema_name, object_name, privilege_type, is_grantable
+    `SELECT schema_name, object_name, object_type, grantee,
+            privilege_type, is_grantable
        FROM [SHOW GRANTS FOR ${principalSql}]
-      WHERE object_type = 'function'`
+      WHERE object_type = 'routine'`
   );
   const functionNames = functionGrants.rows.map((grant) =>
     String(grant.object_name ?? "")
@@ -358,6 +362,8 @@ async function proveExactPrincipal(
     functionGrants.rows.some(
       (grant) =>
         grant.schema_name !== "public" ||
+        grant.object_type !== "routine" ||
+        grant.grantee !== "archon_resolution_writer" ||
         grant.privilege_type !== "EXECUTE" ||
         grant.is_grantable
     )

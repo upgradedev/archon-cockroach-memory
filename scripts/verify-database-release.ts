@@ -365,6 +365,8 @@ async function verifyRuntimeGrants(
     );
   }
 
+  // CockroachDB v26.2.3 reports UDF rows from principal-focused SHOW GRANTS
+  // with object_type = 'routine'; object-focused SHOW GRANTS uses FUNCTION.
   const functionGrants = await client.query<{
     schema_name: string | null;
     object_name: string | null;
@@ -376,7 +378,7 @@ async function verifyRuntimeGrants(
     `SELECT schema_name, object_name, object_type, grantee,
             privilege_type, is_grantable
        FROM [SHOW GRANTS FOR ${principalSql}]
-      WHERE object_type = 'function'`
+      WHERE object_type = 'routine'`
   );
   const functionNames = functionGrants.rows.map((grant) =>
     String(grant.object_name ?? "")
@@ -394,7 +396,8 @@ async function verifyRuntimeGrants(
     functionGrants.rows.some(
       (grant) =>
         grant.schema_name !== "public" ||
-        ![principal, "archon_resolution_writer"].includes(grant.grantee) ||
+        grant.object_type !== "routine" ||
+        grant.grantee !== "archon_resolution_writer" ||
         grant.privilege_type !== "EXECUTE" ||
         grant.is_grantable
     )
@@ -1917,6 +1920,7 @@ async function verifyResolutionTransitionFunctions(
     }
   }
 
+  // Keep the principal-focused routine discriminator exact and fail closed.
   const effectiveFunctions = await client.query<{
     schema_name: string | null;
     object_name: string | null;
@@ -1928,7 +1932,7 @@ async function verifyResolutionTransitionFunctions(
     `SELECT schema_name, object_name, object_type, grantee,
             privilege_type, is_grantable
        FROM [SHOW GRANTS FOR archon_resolution_writer]
-      WHERE object_type = 'function'`
+      WHERE object_type = 'routine'`
   );
   const effectiveNames = effectiveFunctions.rows.map((grant) =>
     String(grant.object_name ?? "")
@@ -1943,6 +1947,7 @@ async function verifyResolutionTransitionFunctions(
     effectiveFunctions.rows.some(
       (grant) =>
         grant.schema_name !== "public" ||
+        grant.object_type !== "routine" ||
         grant.grantee !== "archon_resolution_writer" ||
         grant.privilege_type !== "EXECUTE" ||
         grant.is_grantable

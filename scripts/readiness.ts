@@ -5101,7 +5101,7 @@ function sourceChecks(): SourceCheck[] {
         /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u.test(
           databaseRelease
         ) &&
-        /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'function'/u.test(
+        /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'routine'/u.test(
           databaseRelease
         ) &&
         /sql\.ttl\.job\.enabled/u.test(resolutionSandboxVerifier) &&

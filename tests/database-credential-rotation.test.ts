@@ -214,6 +214,11 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
   assert.match(dropPrincipal, /safe to repeat/u);
   assert.match(script, /affirmativeSystemGrants\(systemGrants\.rows\)/u);
   assert.match(script, /SHOW GRANTS ON TABLE \* FOR \$\{principalSql\}/u);
+  assert.match(
+    script,
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?WHERE object_type = 'routine'/u
+  );
+  assert.doesNotMatch(script, /WHERE object_type = 'function'/u);
 });
 
 test("ambiguous cutover is reconciled and rollback precedes cleanup", () => {

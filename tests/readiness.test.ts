@@ -2700,8 +2700,44 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(verifier, /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u);
   assert.match(
     verifier,
-    /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'function'/u
+    /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'routine'/u
   );
+  const applySchemaVerifier = readFileSync(
+    new URL("../scripts/apply-schema.ts", import.meta.url),
+    "utf8"
+  );
+  const migrationRehearsalVerifier = readFileSync(
+    new URL("../scripts/schema-migration-rehearsal.ts", import.meta.url),
+    "utf8"
+  );
+  const runtimeRotationVerifier = readFileSync(
+    new URL("../scripts/rotate-runtime-secret.ts", import.meta.url),
+    "utf8"
+  );
+  for (const [principalGrantVerifier, expectedRoutineFilters] of [
+    [verifier, 2],
+    [applySchemaVerifier, 1],
+    [migrationRehearsalVerifier, 1],
+    [runtimeRotationVerifier, 1],
+  ] as const) {
+    assert.equal(
+      (principalGrantVerifier.match(/WHERE object_type = 'routine'/gu) ?? [])
+        .length,
+      expectedRoutineFilters
+    );
+    assert.equal(
+      (
+        principalGrantVerifier.match(
+          /grant\.grantee !== "archon_resolution_writer"/gu
+        ) ?? []
+      ).length,
+      expectedRoutineFilters
+    );
+    assert.doesNotMatch(
+      principalGrantVerifier,
+      /object_type = 'function'/u
+    );
+  }
   assert.match(verifier, /sql\.ttl\.job\.enabled/u);
   assert.match(verifier, /SHOW SCHEDULES/u);
 });

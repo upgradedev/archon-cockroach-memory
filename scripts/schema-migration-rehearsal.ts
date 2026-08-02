@@ -267,17 +267,19 @@ async function verifyFinalState(): Promise<void> {
         "Migrated runtime relation grants are not exact SELECT-only access."
       );
     }
+    // Principal-focused SHOW GRANTS classifies UDFs as routines in v26.2.3.
     const runtimeFunctionGrants = await client.query<{
       schema_name: string | null;
       object_name: string | null;
       object_type: string;
+      grantee: string;
       privilege_type: string;
       is_grantable: boolean;
     }>(
-      `SELECT schema_name, object_name, object_type,
+      `SELECT schema_name, object_name, object_type, grantee,
               privilege_type, is_grantable
          FROM [SHOW GRANTS FOR archon_migration_ci]
-        WHERE object_type = 'function'`
+        WHERE object_type = 'routine'`
     );
     const functionNames = new Set(
       runtimeFunctionGrants.rows.map((grant) =>
@@ -296,6 +298,8 @@ async function verifyFinalState(): Promise<void> {
       runtimeFunctionGrants.rows.some(
         (grant) =>
           grant.schema_name !== "public" ||
+          grant.object_type !== "routine" ||
+          grant.grantee !== "archon_resolution_writer" ||
           grant.privilege_type !== "EXECUTE" ||
           grant.is_grantable
       )
