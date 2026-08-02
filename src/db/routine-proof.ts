@@ -79,6 +79,7 @@ type RoutineContract = {
   selectStatements: number;
   insertStatements: number;
   updateStatements: number;
+  runtimeDuplicateNowTimestamptzCasts: number;
 };
 
 export type ResolutionRoutineBodyEvidence = {
@@ -89,9 +90,11 @@ export type ResolutionRoutineBodyEvidence = {
 export type ResolutionRoutineRuntimeEvidence =
   ResolutionRoutineBodyEvidence & {
     diagnostics: {
-      normalizationVersion: "cockroach-v26.2.3-fmt-parsable-exact-v1";
+      normalizationVersion: "cockroach-v26.2.3-fmt-parsable-exact-v2";
       sourceNormalizedTokenCount: number | null;
       runtimeNormalizedTokenCount: number | null;
+      expectedRuntimeDuplicateNowTimestamptzCastCount: number | null;
+      observedRuntimeDuplicateNowTimestamptzCastCount: number | null;
       firstMismatchIndex: number | null;
       sourceTokenKindAtMismatch: string | null;
       runtimeTokenKindAtMismatch: string | null;
@@ -123,6 +126,7 @@ const ROUTINE_CONTRACTS: Readonly<
     selectStatements: 1,
     insertStatements: 3,
     updateStatements: 0,
+    runtimeDuplicateNowTimestamptzCasts: 2,
   },
   archon_resolution_decide: {
     relations: {
@@ -154,6 +158,7 @@ const ROUTINE_CONTRACTS: Readonly<
     selectStatements: 3,
     insertStatements: 2,
     updateStatements: 4,
+    runtimeDuplicateNowTimestamptzCasts: 1,
   },
 };
 
@@ -1029,16 +1034,70 @@ function inspectRoutineBody(
   };
 }
 
+function isRuntimeDuplicateNowTimestamptzCast(
+  tokens: readonly RoutineToken[],
+  index: number
+): boolean {
+  if (index < 7) return false;
+  const nowPath = callPathAt(tokens, index - 7);
+  const hasObservedDirectComparator =
+    tokens[index - 8]?.value === ">" ||
+    (tokens[index - 8]?.value === "=" && tokens[index - 9]?.value === "<");
+  return (
+    tokens[index]?.value === ":" &&
+    tokens[index + 1]?.value === ":" &&
+    tokens[index + 2]?.value === ":" &&
+    tokens[index + 3]?.kind === "identifier" &&
+    tokens[index + 3]?.value === "timestamptz" &&
+    tokens[index - 1]?.kind === "identifier" &&
+    tokens[index - 1]?.value === "timestamptz" &&
+    tokens[index - 2]?.value === ":" &&
+    tokens[index - 3]?.value === ":" &&
+    tokens[index - 4]?.value === ":" &&
+    tokens[index - 5]?.value === ")" &&
+    tokens[index - 6]?.value === "(" &&
+    tokens[index - 7]?.kind === "identifier" &&
+    tokens[index - 7]?.value === "now" &&
+    nowPath.length === 1 &&
+    nowPath[0] === "now" &&
+    hasObservedDirectComparator
+  );
+}
+
+function runtimeDuplicateNowTimestamptzCastCount(
+  tokens: readonly RoutineToken[]
+): number {
+  return tokens.reduce(
+    (count, _token, index) =>
+      count + (isRuntimeDuplicateNowTimestamptzCast(tokens, index) ? 1 : 0),
+    0
+  );
+}
+
 function normalizedBindingTokens(
   tokens: readonly RoutineToken[],
   routineName: ResolutionRoutineName,
-  databaseName: string
+  databaseName: string,
+  origin: "source" | "runtime"
 ): readonly string[] {
   const output: string[] = [];
   const contract = ROUTINE_CONTRACTS[routineName];
   const expectedRelations = new Set(Object.keys(contract.relations));
   let index = 0;
   while (index < tokens.length) {
+    // CockroachDB v26.2.3 FmtParsable repeats the explicit TIMESTAMPTZ cast
+    // on unqualified now() at the observed direct `>` / `<=` TIMESTAMPTZ
+    // comparisons, but not when now() is part of interval arithmetic. Remove
+    // exactly that second runtime-origin cast. Source-origin duplicates,
+    // missing/wrong casts, qualified calls, and a third cast remain visible to
+    // the reviewed-source binding.
+    if (
+      origin === "runtime" &&
+      isRuntimeDuplicateNowTimestamptzCast(tokens, index)
+    ) {
+      index += 4;
+      continue;
+    }
     if (
       tokens[index]?.kind === "identifier" &&
       tokens[index]?.value === databaseName.toLowerCase() &&
@@ -1121,9 +1180,11 @@ export function resolutionRoutineRuntimeEvidence(
 ): ResolutionRoutineRuntimeEvidence {
   const diagnostics = {
     normalizationVersion:
-      "cockroach-v26.2.3-fmt-parsable-exact-v1" as const,
+      "cockroach-v26.2.3-fmt-parsable-exact-v2" as const,
     sourceNormalizedTokenCount: null as number | null,
     runtimeNormalizedTokenCount: null as number | null,
+    expectedRuntimeDuplicateNowTimestamptzCastCount: null as number | null,
+    observedRuntimeDuplicateNowTimestamptzCastCount: null as number | null,
     firstMismatchIndex: null as number | null,
     sourceTokenKindAtMismatch: null as string | null,
     runtimeTokenKindAtMismatch: null as string | null,
@@ -1138,6 +1199,8 @@ export function resolutionRoutineRuntimeEvidence(
   }
 
   const missingRuleIds: string[] = [];
+  diagnostics.expectedRuntimeDuplicateNowTimestamptzCastCount =
+    ROUTINE_CONTRACTS[supportedName].runtimeDuplicateNowTimestamptzCasts;
   const sourceEvidence = resolutionRoutineSourceEvidence(
     schemaSource,
     supportedName
@@ -1153,6 +1216,17 @@ export function resolutionRoutineRuntimeEvidence(
     databaseName
   );
   missingRuleIds.push(...runtime.missingRuleIds);
+  diagnostics.observedRuntimeDuplicateNowTimestamptzCastCount = runtime.tokens
+    ? runtimeDuplicateNowTimestamptzCastCount(runtime.tokens)
+    : null;
+  if (
+    diagnostics.observedRuntimeDuplicateNowTimestamptzCastCount !==
+    diagnostics.expectedRuntimeDuplicateNowTimestamptzCastCount
+  ) {
+    missingRuleIds.push(
+      "runtime.cockroach-v26.2.3-fmt-parsable-duplicate-casts-exact"
+    );
+  }
 
   const sourceTokens =
     source.body === null ? null : tokenizeRoutineBody(source.body);
@@ -1160,12 +1234,14 @@ export function resolutionRoutineRuntimeEvidence(
     const normalizedSource = normalizedBindingTokens(
       sourceTokens,
       supportedName,
-      databaseName
+      databaseName,
+      "source"
     );
     const normalizedRuntime = normalizedBindingTokens(
       runtime.tokens,
       supportedName,
-      databaseName
+      databaseName,
+      "runtime"
     );
     diagnostics.sourceNormalizedTokenCount = normalizedSource.length;
     diagnostics.runtimeNormalizedTokenCount = normalizedRuntime.length;

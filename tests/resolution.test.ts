@@ -202,7 +202,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
   function canonicalBody(
     routineName: (typeof routineNames)[number]
   ): string {
-    return sourceBody(routineName)
+    let body = sourceBody(routineName)
       .replace(
         /\bpublic\.(memory_demo_sessions|memory_resolution_(?:observations|proposals|decisions|consolidations))\b/gu,
         `${databaseName}.public.$1`
@@ -211,11 +211,39 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
         /\bpg_catalog\.(count|now|sha256|timezone|to_char)\b/gu,
         "$1"
       );
+    const runtimeCastInsertions =
+      routineName === "archon_resolution_create_session"
+        ? ([
+            [
+              "(p_expires_at <= now():::TIMESTAMPTZ)",
+              "(p_expires_at <= now():::TIMESTAMPTZ:::TIMESTAMPTZ)",
+            ],
+            [
+              "WHERE expires_at > now():::TIMESTAMPTZ",
+              "WHERE expires_at > now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+            ],
+          ] as const)
+        : ([
+            [
+              "AND (expires_at > now():::TIMESTAMPTZ)",
+              "AND (expires_at > now():::TIMESTAMPTZ:::TIMESTAMPTZ)",
+            ],
+          ] as const);
+    for (const [sourceCast, runtimeCast] of runtimeCastInsertions) {
+      const canonicalized = body.replace(sourceCast, runtimeCast);
+      assert.notEqual(canonicalized, body);
+      body = canonicalized;
+    }
+    return body;
   }
 
   const canonicalTokenCounts = {
     archon_resolution_create_session: 328,
     archon_resolution_decide: 750,
+  } as const;
+  const canonicalDuplicateCastCounts = {
+    archon_resolution_create_session: 2,
+    archon_resolution_decide: 1,
   } as const;
 
   for (const routineName of routineNames) {
@@ -233,7 +261,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     assert.deepEqual(runtime.missingRuleIds, []);
     assert.equal(
       runtime.diagnostics.normalizationVersion,
-      "cockroach-v26.2.3-fmt-parsable-exact-v1"
+      "cockroach-v26.2.3-fmt-parsable-exact-v2"
     );
     assert.equal(
       runtime.diagnostics.sourceNormalizedTokenCount,
@@ -242,6 +270,14 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     assert.equal(
       runtime.diagnostics.runtimeNormalizedTokenCount,
       canonicalTokenCounts[routineName]
+    );
+    assert.equal(
+      runtime.diagnostics.expectedRuntimeDuplicateNowTimestamptzCastCount,
+      canonicalDuplicateCastCounts[routineName]
+    );
+    assert.equal(
+      runtime.diagnostics.observedRuntimeDuplicateNowTimestamptzCastCount,
+      canonicalDuplicateCastCounts[routineName]
     );
     assert.equal(runtime.diagnostics.firstMismatchIndex, null);
   }
@@ -365,7 +401,14 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       "(p_session_id IS NULL)",
       "p_session_id IS NULL"
     ),
-    canonicalCreate.replace("now():::TIMESTAMPTZ", "now()"),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+      "now()"
+    ),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ + '01:01:00'",
+      "now() + '01:01:00'"
+    ),
     canonicalCreate.replace("'01:01:00':::INTERVAL", "'01:00:59':::INTERVAL"),
     canonicalCreate.replace("p_expires_at <=", "p_expires_at <"),
   ]) {
@@ -379,6 +422,71 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       true
     );
   }
+  for (const runtimeCastDrift of [
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ:::TIMESTAMPTZ"
+    ),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ + '01:01:00'",
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ + '01:01:00'"
+    ),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+      "pg_catalog.now():::TIMESTAMPTZ:::TIMESTAMPTZ"
+    ),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+      "now():::TIMESTAMPTZ:::STRING"
+    ),
+    canonicalCreate.replace(
+      "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+      "now():::TIMESTAMPTZ::TIMESTAMPTZ"
+    ),
+  ]) {
+    assert.equal(
+      resolutionRoutineRuntimeEvidence(
+        runtimeCastDrift,
+        source,
+        "archon_resolution_create_session",
+        databaseName
+      ).missingRuleIds.includes("runtime.reviewed-source-token-binding"),
+      true
+    );
+  }
+  const qualifiedNowCast = canonicalCreate.replace(
+    "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+    "attacker.now():::TIMESTAMPTZ:::TIMESTAMPTZ"
+  );
+  const qualifiedNowEvidence = resolutionRoutineRuntimeEvidence(
+    qualifiedNowCast,
+    source,
+    "archon_resolution_create_session",
+    databaseName
+  );
+  assert.equal(
+    qualifiedNowEvidence.missingRuleIds.includes("runtime.calls.closed-exact"),
+    true
+  );
+  assert.equal(
+    qualifiedNowEvidence.missingRuleIds.includes(
+      "runtime.reviewed-source-token-binding"
+    ),
+    true
+  );
+  const sourceDuplicateNowCast = source.replace(
+    "pg_catalog.now():::TIMESTAMPTZ",
+    "pg_catalog.now():::TIMESTAMPTZ:::TIMESTAMPTZ"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      canonicalCreate,
+      sourceDuplicateNowCast,
+      "archon_resolution_create_session",
+      databaseName
+    ).missingRuleIds.includes("runtime.reviewed-source-token-binding"),
+    true
+  );
   const qualifiedGrammarCall = canonicalCreate.replace(
     "IF (",
     "attacker.if("
@@ -404,6 +512,38 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       databaseName
     ).missingRuleIds.includes(
       "runtime.receipt.actor-role-canonical-assignment"
+    ),
+    true
+  );
+  const runtimeSingleDirectCast = canonicalCreate.replace(
+    "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+    "now():::TIMESTAMPTZ"
+  );
+  const runtimeSingleDirectCastEvidence = resolutionRoutineRuntimeEvidence(
+    runtimeSingleDirectCast,
+    source,
+    "archon_resolution_create_session",
+    databaseName
+  );
+  assert.equal(runtimeSingleDirectCastEvidence.matches, false);
+  assert.equal(
+    runtimeSingleDirectCastEvidence.missingRuleIds.includes(
+      "runtime.cockroach-v26.2.3-fmt-parsable-duplicate-casts-exact"
+    ),
+    true
+  );
+  const runtimeSingleDecideDirectCast = canonicalDecide.replace(
+    "now():::TIMESTAMPTZ:::TIMESTAMPTZ",
+    "now():::TIMESTAMPTZ"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      runtimeSingleDecideDirectCast,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes(
+      "runtime.cockroach-v26.2.3-fmt-parsable-duplicate-casts-exact"
     ),
     true
   );
