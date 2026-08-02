@@ -32,6 +32,9 @@ import {
 } from "../src/memory/demo-reconciliation.js";
 import {
   affirmativeSystemGrants,
+  privilegedRuntimeRoleOptions,
+  runtimeLoginIsDisabled,
+  runtimeRoleOptionsAreCanonical,
   type SystemGrant,
 } from "../src/db/system-grants.js";
 import {
@@ -39,6 +42,11 @@ import {
   resolutionRoutineRuntimeEvidence,
   resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
+import {
+  expectedRuntimeDatabaseGrants,
+  verifyClusterWideResolutionGrants,
+  type ClusterGrantProof,
+} from "../src/db/cluster-grant-proof.js";
 import {
   assertCockroachEndpointBinding,
   parseDatabaseSecret,
@@ -329,8 +337,9 @@ async function verifyExactIndexes(
 async function verifyRuntimeGrants(
   client: PgClient,
   principal: string,
-  databaseName: string
-): Promise<void> {
+  databaseName: string,
+  adminConnectionString: string
+): Promise<ClusterGrantProof> {
   const principalSql = quoteIdentifier(principal);
   const databaseSql = quoteIdentifier(databaseName);
   const tableGrants = await client.query<{
@@ -365,47 +374,15 @@ async function verifyRuntimeGrants(
     );
   }
 
-  // CockroachDB v26.2.3 reports UDF rows from principal-focused SHOW GRANTS
-  // with object_type = 'routine'; object-focused SHOW GRANTS uses FUNCTION.
-  const functionGrants = await client.query<{
-    schema_name: string | null;
-    object_name: string | null;
-    object_type: string;
-    grantee: string;
-    privilege_type: string;
-    is_grantable: boolean;
-  }>(
-    `SELECT schema_name, object_name, object_type, grantee,
-            privilege_type, is_grantable
-       FROM [SHOW GRANTS FOR ${principalSql}]
-      WHERE object_type = 'routine'`
-  );
-  const functionNames = functionGrants.rows.map((grant) =>
-    String(grant.object_name ?? "")
-      .replace(/\(.*/u, "")
-      .split(".")
-      .at(-1)
-  );
-  const expectedFunctionNames = RESOLUTION_FUNCTIONS.map(
-    (routine) => routine.name
-  );
-  if (
-    functionGrants.rows.length !== RESOLUTION_FUNCTIONS.length ||
-    new Set(functionNames).size !== RESOLUTION_FUNCTIONS.length ||
-    expectedFunctionNames.some((name) => !functionNames.includes(name)) ||
-    functionGrants.rows.some(
-      (grant) =>
-        grant.schema_name !== "public" ||
-        grant.object_type !== "routine" ||
-        grant.grantee !== "archon_resolution_writer" ||
-        grant.privilege_type !== "EXECUTE" ||
-        grant.is_grantable
-    )
-  ) {
-    throw new ReleaseGateError(
-      "Runtime function privileges exceed the exact two-routine transition API."
-    );
-  }
+  const clusterGrantProof = await verifyClusterWideResolutionGrants({
+    adminConnectionString,
+    principal,
+    applicationDatabase: databaseName,
+    expectedDatabaseGrants: expectedRuntimeDatabaseGrants(
+      databaseName,
+      principal
+    ),
+  });
 
   const schemaGrants = await client.query<{
     privilege_type: string;
@@ -424,18 +401,23 @@ async function verifyRuntimeGrants(
   }
 
   const databaseGrants = await client.query<{
+    database_name: string;
+    grantee: string;
     privilege_type: string;
     is_grantable: boolean;
   }>(`SHOW GRANTS ON DATABASE ${databaseSql} FOR ${principalSql}`);
   if (
-    databaseGrants.rows.length < 1 ||
+    databaseGrants.rows.length !== 1 ||
     databaseGrants.rows.some(
       (grant) =>
-        grant.privilege_type !== "CONNECT" || grant.is_grantable
+        grant.database_name !== databaseName ||
+        grant.grantee !== principal ||
+        grant.privilege_type !== "CONNECT" ||
+        grant.is_grantable
     )
   ) {
     throw new ReleaseGateError(
-      "Runtime database privileges exceed CONNECT."
+      "Runtime application-database privileges are not exact CONNECT-only access."
     );
   }
 
@@ -453,6 +435,7 @@ async function verifyRuntimeGrants(
       `Runtime principal has affirmative system privileges: ${privilegeTypes.join(", ")}.`
     );
   }
+  return clusterGrantProof;
 }
 
 function safeSqlState(error: unknown): string {
@@ -985,7 +968,8 @@ async function verifyRuntimeResolutionLoop(
 async function verifyRuntime(
   environment: "staging" | "production",
   connectionString: string,
-  canaryVectors: IsolationCanaryVector[]
+  canaryVectors: IsolationCanaryVector[],
+  adminConnectionString: string
 ): Promise<{
   environment: string;
   principal: string;
@@ -993,6 +977,7 @@ async function verifyRuntime(
   canonicalMemories: number;
   distinctIdempotencyKeys: number;
   distinctContentDigests: number;
+  clusterGrantProof: ClusterGrantProof;
   cspannRecall: RuntimeCspannProof;
   resolutionLoop: RuntimeResolutionProof;
 }> {
@@ -1028,10 +1013,11 @@ async function verifyRuntime(
         `${environment} runtime database identity is wrong.`
       );
     }
-    await verifyRuntimeGrants(
+    const clusterGrantProof = await verifyRuntimeGrants(
       client,
       expectedPrincipal,
-      identityRow.database_name
+      identityRow.database_name,
+      adminConnectionString
     );
     const isolation = await client.query<Record<string, unknown>>(
       "SHOW transaction_isolation"
@@ -1205,6 +1191,7 @@ async function verifyRuntime(
       canonicalMemories: canonicalVisible,
       distinctIdempotencyKeys,
       distinctContentDigests,
+      clusterGrantProof,
       cspannRecall: { noKind, kind },
       resolutionLoop,
     };
@@ -1263,20 +1250,8 @@ async function verifyRuntimeRoles(
     const options = stringArray(user.options).map((option) =>
       option.toUpperCase()
     );
-    const dangerousOptions = new Set([
-      "ADMIN",
-      "BYPASSRLS",
-      "CANCELQUERY",
-      "CONTROLJOB",
-      "CREATEROLE",
-      "MODIFYCLUSTERSETTING",
-      "VIEWACTIVITY",
-      "VIEWACTIVITYREDACTED",
-      "VIEWCLUSTERSETTING",
-    ]);
-    const hasDangerousOption = options.some((option) =>
-      dangerousOptions.has(option.split(/[=\s]/u, 1)[0] ?? option)
-    );
+    const hasDangerousOption =
+      privilegedRuntimeRoleOptions(options).length > 0;
     if (user.username === PUBLIC_RECALL_VIEW_OWNER) {
       const exactOptions = [...options].sort();
       if (
@@ -1326,7 +1301,9 @@ async function verifyRuntimeRoles(
           "archon_public_reader",
           "archon_resolution_writer",
         ]) ||
-      hasDangerousOption
+      hasDangerousOption ||
+      runtimeLoginIsDisabled(options) ||
+      !runtimeRoleOptionsAreCanonical(options)
     ) {
       throw new ReleaseGateError(
         `Runtime role ${user.username} is not least privilege.`
@@ -1768,7 +1745,8 @@ async function verifyExactResolutionRelationGrants(
 
 async function verifyResolutionTransitionFunctions(
   client: PgClient,
-  databaseName: string
+  databaseName: string,
+  adminConnectionString: string
 ): Promise<{
   transitionFunctionCount: 2;
   writerFunctionExecuteCount: 2;
@@ -1920,43 +1898,11 @@ async function verifyResolutionTransitionFunctions(
     }
   }
 
-  // Keep the principal-focused routine discriminator exact and fail closed.
-  const effectiveFunctions = await client.query<{
-    schema_name: string | null;
-    object_name: string | null;
-    object_type: string;
-    grantee: string;
-    privilege_type: string;
-    is_grantable: boolean;
-  }>(
-    `SELECT schema_name, object_name, object_type, grantee,
-            privilege_type, is_grantable
-       FROM [SHOW GRANTS FOR archon_resolution_writer]
-      WHERE object_type = 'routine'`
-  );
-  const effectiveNames = effectiveFunctions.rows.map((grant) =>
-    String(grant.object_name ?? "")
-      .replace(/\(.*/u, "")
-      .split(".")
-      .at(-1)
-  );
-  if (
-    effectiveFunctions.rows.length !== RESOLUTION_FUNCTIONS.length ||
-    new Set(effectiveNames).size !== RESOLUTION_FUNCTIONS.length ||
-    routineNames.some((name) => !effectiveNames.includes(name)) ||
-    effectiveFunctions.rows.some(
-      (grant) =>
-        grant.schema_name !== "public" ||
-        grant.object_type !== "routine" ||
-        grant.grantee !== "archon_resolution_writer" ||
-        grant.privilege_type !== "EXECUTE" ||
-        grant.is_grantable
-    )
-  ) {
-    throw new ReleaseGateError(
-      "Resolution writer can execute functions outside the exact transition API."
-    );
-  }
+  await verifyClusterWideResolutionGrants({
+    adminConnectionString,
+    principal: "archon_resolution_writer",
+    applicationDatabase: databaseName,
+  });
   return {
     transitionFunctionCount: 2,
     writerFunctionExecuteCount: 2,
@@ -1965,7 +1911,8 @@ async function verifyResolutionTransitionFunctions(
 
 async function verifyResolutionSandboxSecurity(
   client: PgClient,
-  databaseName: string
+  databaseName: string,
+  adminConnectionString: string
 ): Promise<{
   tables: 5;
   rlsPolicies: 15;
@@ -2197,7 +2144,11 @@ async function verifyResolutionSandboxSecurity(
       RESOLUTION_TRANSITION_OWNER_GRANTS
     );
   const transitionFunctions =
-    await verifyResolutionTransitionFunctions(client, databaseName);
+    await verifyResolutionTransitionFunctions(
+      client,
+      databaseName,
+      adminConnectionString
+    );
 
   return {
     tables: 5,
@@ -2505,7 +2456,8 @@ async function verifyAdmin(
     // search_path and isolation have been proven.
     const resolutionSandbox = await verifyResolutionSandboxSecurity(
       client,
-      databaseRow.database_name
+      databaseRow.database_name,
+      adminUrl
     );
     return {
       version: databaseRow.version.split(" ").slice(0, 3).join(" "),
@@ -2602,19 +2554,21 @@ async function main(): Promise<void> {
   const staging = await verifyRuntime(
     "staging",
     stagingUrl,
-    admin.isolationCanaryVectors
+    admin.isolationCanaryVectors,
+    adminUrl
   );
   const production = await verifyRuntime(
     "production",
     productionUrl,
-    admin.isolationCanaryVectors
+    admin.isolationCanaryVectors,
+    adminUrl
   );
   const digests = releaseDigests();
 
   process.stdout.write(
     `${JSON.stringify(
       {
-        schemaVersion: 5,
+        schemaVersion: 6,
         ok: true,
         targetSha,
         region,
@@ -2680,11 +2634,12 @@ async function main(): Promise<void> {
           runtimeRelationPrivilegeMatrix:
             "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE",
           runtimeFunctionPrivilegeMatrix:
-            "EXECUTE only on archon_resolution_create_session and archon_resolution_decide",
+            "cluster-wide EXECUTE only on the two canonical resolution routine signatures",
           runtimeSchemaPrivilegeMatrix: "USAGE only",
-          runtimeDatabasePrivilegeMatrix: "CONNECT only",
+          runtimeDatabasePrivilegeMatrix:
+            "cluster-wide exact five-row non-grantable matrix: public CONNECT+TEMPORARY on defaultdb/postgres; runtime principal CONNECT on archon; zero system rows",
           runtimeSystemPrivileges:
-            "no affirmative grants; restrictive role options only",
+            "exact-empty runtime role options; no affirmative system grants",
           contradiction: "INV-2043.total",
           recommendedValue: 18_400,
           absence: "PAY-118",

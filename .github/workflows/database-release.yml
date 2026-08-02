@@ -273,7 +273,7 @@ jobs:
           npm run --silent db:release:verify > database-release-receipt.json
           jq -e \
             --arg target "$TARGET_SHA" \
-            '.schemaVersion == 5 and
+            '.schemaVersion == 6 and
              .ok == true and
              .targetSha == $target and
              .region == "eu-west-1" and
@@ -332,7 +332,11 @@ jobs:
              .proofs.runtimeRelationPrivilegeMatrix ==
                "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE" and
              .proofs.runtimeFunctionPrivilegeMatrix ==
-               "EXECUTE only on archon_resolution_create_session and archon_resolution_decide" and
+               "cluster-wide EXECUTE only on the two canonical resolution routine signatures" and
+             .proofs.runtimeDatabasePrivilegeMatrix ==
+               "cluster-wide exact five-row non-grantable matrix: public CONNECT+TEMPORARY on defaultdb/postgres; runtime principal CONNECT on archon; zero system rows" and
+             .proofs.runtimeSystemPrivileges ==
+               "exact-empty runtime role options; no affirmative system grants" and
              (.proofs.indexDefinitionFingerprints.company |
                test("^[a-f0-9]{64}$")) and
              (.proofs.indexDefinitionFingerprints.kind |
@@ -347,11 +351,26 @@ jobs:
                unique | length) == 1 and
              ([.runtimes[].cspannRecall.kind.queryTemplateSha256] |
                unique | length) == 1 and
+             ([.runtimes[].clusterGrantProof.databaseMatrixSha256] |
+               unique | length) == 2 and
              all(.runtimes[];
                ((.environment == "staging" and
                  (.principal | test("^archon_staging_[a-z0-9]{6,40}$"))) or
                 (.environment == "production" and
-                 (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+                (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+               .clusterGrantProof.routineGrantCount == 2 and
+               .clusterGrantProof.databaseGrantCount == 5 and
+               .clusterGrantProof.databaseInventory ==
+                 ["archon", "defaultdb", "postgres", "system"] and
+               .clusterGrantProof.databaseGrantMatrix == [
+                 {"databaseName":"archon","grantee":.principal,"privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"defaultdb","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false},
+                 {"databaseName":"postgres","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false}
+               ] and
+               (.clusterGrantProof.databaseMatrixSha256 |
+                 test("^[a-f0-9]{64}$")) and
                .visibleMemories == 9 and
                .canonicalMemories == 9 and
                .distinctIdempotencyKeys == 9 and
@@ -416,6 +435,23 @@ jobs:
                  .resolutionLoop.rejectedReceiptSha256
              )' \
             database-release-receipt.json
+          for runtime_environment in staging production; do
+            expected_matrix_sha="$(jq -er \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseMatrixSha256' \
+              database-release-receipt.json)"
+            matrix_json="$(jq -cer \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseGrantMatrix' \
+              database-release-receipt.json)"
+            actual_matrix_sha="$(printf '%s' "$matrix_json" |
+              sha256sum | awk '{print $1}')"
+            test "$actual_matrix_sha" = "$expected_matrix_sha"
+          done
           unset ADMIN_SECRET DATABASE_URL
 
       - name: Upload sanitized database release receipt

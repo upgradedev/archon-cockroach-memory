@@ -86,17 +86,55 @@ jobs:
           test -f "$receipt"
           test ! -L "$receipt"
           jq -e --arg release "$RELEASE_SHA" '
-            .schemaVersion == 5 and
+            .schemaVersion == 6 and
             .ok == true and
             .targetSha == $release and
             .proofs.runtimePrincipalCspannPlanAndExecute == true and
             .proofs.runtimePrincipalNoKindCspann == true and
             .proofs.runtimePrincipalKindCspann == true and
+            (.runtimes | length) == 2 and
+            ([.runtimes[].environment] | sort) ==
+              ["production", "staging"] and
+            ([.runtimes[].clusterGrantProof.databaseMatrixSha256] |
+              unique | length) == 2 and
+            all(.runtimes[];
+              ((.environment == "staging" and
+                (.principal | test("^archon_staging_[a-z0-9]{6,40}$"))) or
+               (.environment == "production" and
+                (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+              .clusterGrantProof.routineGrantCount == 2 and
+              .clusterGrantProof.databaseGrantCount == 5 and
+              .clusterGrantProof.databaseInventory ==
+                ["archon", "defaultdb", "postgres", "system"] and
+              .clusterGrantProof.databaseGrantMatrix == [
+                {"databaseName":"archon","grantee":.principal,"privilegeType":"CONNECT","isGrantable":false},
+                {"databaseName":"defaultdb","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                {"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false},
+                {"databaseName":"postgres","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                {"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false}
+              ] and
+              (.clusterGrantProof.databaseMatrixSha256 |
+                test("^[a-f0-9]{64}$"))) and
             (.proofs.indexDefinitionFingerprints.company |
               test("^[a-f0-9]{64}$")) and
             (.proofs.indexDefinitionFingerprints.kind |
               test("^[a-f0-9]{64}$"))
           ' "$receipt" >/dev/null
+          for runtime_environment in staging production; do
+            expected_matrix_sha="$(jq -er \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseMatrixSha256' "$receipt")"
+            matrix_json="$(jq -cer \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseGrantMatrix' "$receipt")"
+            actual_matrix_sha="$(printf '%s' "$matrix_json" |
+              sha256sum | awk '{print $1}')"
+            test "$actual_matrix_sha" = "$expected_matrix_sha"
+          done
           receipt_sha256="$(sha256sum "$receipt" | awk '{print $1}')"
           [[ "$receipt_sha256" =~ ^[a-f0-9]{64}$ ]]
           echo "sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"

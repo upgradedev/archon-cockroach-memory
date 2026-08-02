@@ -310,7 +310,10 @@ test("WA-03 contract and operator documentation preserve honest activation state
   assert.match(runbook, /Some services incur charges/u);
   assert.match(evidence, /Protected WA-03 account security audit/u);
   assert.match(evidence, /all-pass `10\/10` exact-SHA receipt/u);
-  assert.match(evidence, /AWS Inspector[\s\S]*?outside the WA-03 receipt/u);
+  assert.match(
+    evidence,
+    /AWS Inspector[\s\S]*?outside\s+the WA-03 receipt/u
+  );
   assert.match(contractAudit, /wa03-account-security-baseline-source/u);
   assert.match(
     wellArchitectedWorkflow,

@@ -180,7 +180,15 @@ test("regional stack fails closed on mandatory WAF and secret-backed origin veri
   );
 
   const deploy = read(".github/workflows/deploy-aws.yml");
-  assert.doesNotMatch(deploy, /edge-waf\.yaml/u);
+  assert.equal((deploy.match(/edge-waf\.yaml/gmu) ?? []).length, 3);
+  assert.equal(
+    (deploy.match(/"aws\/edge-waf\.yaml"/gmu) ?? []).length,
+    3
+  );
+  assert.doesNotMatch(
+    deploy,
+    /(?:--template-file|--template-body|--template-url)[^\r\n]*edge-waf\.yaml/u
+  );
   assert.doesNotMatch(
     deploy,
     /CLOUDFRONT_WEB_ACL_ARN:\s*\$\{\{\s*vars\./u

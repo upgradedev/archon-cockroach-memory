@@ -30,6 +30,7 @@ import {
   resolutionRoutineRuntimeEvidence,
   resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
+import { verifyClusterWideResolutionGrants } from "../src/db/cluster-grant-proof.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = join(here, "..", "src", "db", "schema.sql");
@@ -528,7 +529,11 @@ async function verifyResolutionSandbox(
   // CockroachDB canonicalizes pg_catalog-qualified built-ins to unqualified
   // calls in pg_proc.prosrc. Prove the SECURITY DEFINER owner's fixed
   // pg_catalog search_path before accepting that descriptor-backed form.
-  await verifyResolutionFunctions(client, databaseName);
+  await verifyResolutionFunctions(
+    client,
+    databaseName,
+    process.env.DATABASE_URL!
+  );
 }
 
 function assertResolutionRoutineSourceContracts(): void {
@@ -592,7 +597,8 @@ async function verifyExactRelationGrants(
 
 async function verifyResolutionFunctions(
   client: PoolClient,
-  databaseName: string
+  databaseName: string,
+  adminConnectionString: string
 ): Promise<void> {
   const routineNames = RESOLUTION_FUNCTIONS.map((routine) => routine.name);
   const routines = await client.query<{
@@ -741,44 +747,11 @@ async function verifyResolutionFunctions(
     }
   }
 
-  // CockroachDB v26.2.3 reports UDF rows from principal-focused SHOW GRANTS
-  // with object_type = 'routine'; object-focused SHOW GRANTS uses FUNCTION.
-  const effectiveFunctions = await client.query<{
-    schema_name: string | null;
-    object_name: string | null;
-    object_type: string;
-    grantee: string;
-    privilege_type: string;
-    is_grantable: boolean;
-  }>(
-    `SELECT schema_name, object_name, object_type, grantee,
-            privilege_type, is_grantable
-       FROM [SHOW GRANTS FOR archon_resolution_writer]
-      WHERE object_type = 'routine'`
-  );
-  const effectiveNames = effectiveFunctions.rows.map((grant) =>
-    String(grant.object_name ?? "")
-      .replace(/\(.*/u, "")
-      .split(".")
-      .at(-1)
-  );
-  if (
-    effectiveFunctions.rows.length !== RESOLUTION_FUNCTIONS.length ||
-    new Set(effectiveNames).size !== RESOLUTION_FUNCTIONS.length ||
-    routineNames.some((name) => !effectiveNames.includes(name)) ||
-    effectiveFunctions.rows.some(
-      (grant) =>
-        grant.schema_name !== "public" ||
-        grant.object_type !== "routine" ||
-        grant.grantee !== "archon_resolution_writer" ||
-        grant.privilege_type !== "EXECUTE" ||
-        grant.is_grantable
-    )
-  ) {
-    throw new Error(
-      "Resolution writer can execute functions outside the exact transition API."
-    );
-  }
+  await verifyClusterWideResolutionGrants({
+    adminConnectionString,
+    principal: "archon_resolution_writer",
+    applicationDatabase: databaseName,
+  });
 }
 
 function isFixedResolutionWriterPolicy(

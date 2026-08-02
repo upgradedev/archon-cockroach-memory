@@ -96,7 +96,10 @@ test("hosted load is manual, protected, bounded, and exact-release gated", () =>
   assert.match(workflow, /test "\$P95_LATENCY_MS" -le 30000/u);
   assert.match(workflow, /test "\$MAX_ERROR_RATE_BPS" -le 500/u);
   assert.match(workflow, /--max-redirs 0/u);
-  assert.match(workflow, /\^https:\/\/[a-z0-9-]\+\\\.cloudfront\\\.net\$/u);
+  assert.match(
+    workflow,
+    /\^https:\/\/\[a-z0-9-\]\+\\\.cloudfront\\\.net\$/u
+  );
 });
 
 test("hosted load source is bound to current green deployed main", () => {
@@ -352,7 +355,7 @@ test("receipt is sanitized, threshold-enforced, and honest about evidence", () =
   assert.match(objectives, /Hosted Load Evidence/u);
   assert.match(
     objectives,
-    /does not silently convert them into a business SLA/u
+    /does not silently convert the results into a business SLA/u
   );
 });
 

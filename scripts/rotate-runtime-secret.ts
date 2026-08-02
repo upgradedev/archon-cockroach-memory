@@ -26,8 +26,15 @@ import {
 } from "../src/db/secret.js";
 import {
   affirmativeSystemGrants,
+  privilegedRuntimeRoleOptions,
+  runtimeLoginIsDisabled,
+  runtimeRoleOptionsAreCanonical,
   type SystemGrant,
 } from "../src/db/system-grants.js";
+import {
+  expectedRuntimeDatabaseGrants,
+  verifyClusterWideResolutionGrants,
+} from "../src/db/cluster-grant-proof.js";
 
 const { Client } = pg;
 
@@ -44,25 +51,6 @@ const EXPECTED_RUNTIME_RELATION_GRANTS = new Map<
   ["memory_resolution_decisions", ["SELECT"]],
   ["memory_resolution_consolidations", ["SELECT"]],
 ]);
-const EXPECTED_RUNTIME_FUNCTIONS = new Set([
-  "archon_resolution_create_session",
-  "archon_resolution_decide",
-]);
-const PRIVILEGED_ROLE_OPTIONS = new Set([
-  "ADMIN",
-  "BYPASSRLS",
-  "CANCELQUERY",
-  "CONTROLCHANGEFEED",
-  "CONTROLJOB",
-  "CREATEDB",
-  "CREATELOGIN",
-  "CREATEROLE",
-  "MODIFYCLUSTERSETTING",
-  "VIEWACTIVITY",
-  "VIEWACTIVITYREDACTED",
-  "VIEWCLUSTERSETTING",
-]);
-
 interface SecretVersion {
   connectionString: string;
   versionId: string;
@@ -255,7 +243,8 @@ function runtimePrincipal(
 async function proveExactPrincipal(
   admin: PgClient,
   principal: string,
-  databaseName: string
+  databaseName: string,
+  adminConnectionString: string
 ): Promise<void> {
   const principalSql = identifier(principal, "runtime principal");
   const databaseSql = identifier(databaseName, "application database");
@@ -267,16 +256,14 @@ async function proveExactPrincipal(
     principal,
   ]);
   const list = (value: string[] | string): string[] =>
-    (Array.isArray(value) ? value : value.replace(/[{}\"]/gu, "").split(","))
+    (Array.isArray(value) ? value : value.replace(/[{}"]/gu, "").split(","))
       .map((item) => item.trim())
       .filter(Boolean);
   const roles = list(user.rows[0]?.member_of ?? []).sort();
   const options = list(user.rows[0]?.options ?? []).map((item) =>
     item.toUpperCase()
   );
-  const privilegedOption = options.some((option) =>
-    PRIVILEGED_ROLE_OPTIONS.has(option.split(/[=\s]/u, 1)[0] ?? option)
-  );
+  const privilegedOption = privilegedRuntimeRoleOptions(options).length > 0;
   if (
     user.rows.length !== 1 ||
     JSON.stringify(roles) !==
@@ -284,7 +271,8 @@ async function proveExactPrincipal(
         ["archon_public_reader", "archon_resolution_writer"].sort()
       ) ||
     privilegedOption ||
-    options.includes("NOLOGIN")
+    runtimeLoginIsDisabled(options) ||
+    !runtimeRoleOptionsAreCanonical(options)
   ) {
     throw new Error("Runtime principal proof did not converge.");
   }
@@ -333,43 +321,15 @@ async function proveExactPrincipal(
     throw new Error("Runtime principal relation grants are not exact.");
   }
 
-  // Principal-focused SHOW GRANTS classifies UDF rows as routines in v26.2.3.
-  const functionGrants = await admin.query<{
-    schema_name: string | null;
-    object_name: string | null;
-    object_type: string;
-    grantee: string;
-    privilege_type: string;
-    is_grantable: boolean;
-  }>(
-    `SELECT schema_name, object_name, object_type, grantee,
-            privilege_type, is_grantable
-       FROM [SHOW GRANTS FOR ${principalSql}]
-      WHERE object_type = 'routine'`
-  );
-  const functionNames = functionGrants.rows.map((grant) =>
-    String(grant.object_name ?? "")
-      .replace(/\(.*/u, "")
-      .split(".")
-      .at(-1)
-  );
-  if (
-    functionGrants.rows.length !== EXPECTED_RUNTIME_FUNCTIONS.size ||
-    new Set(functionNames).size !== EXPECTED_RUNTIME_FUNCTIONS.size ||
-    [...EXPECTED_RUNTIME_FUNCTIONS].some(
-      (name) => !functionNames.includes(name)
-    ) ||
-    functionGrants.rows.some(
-      (grant) =>
-        grant.schema_name !== "public" ||
-        grant.object_type !== "routine" ||
-        grant.grantee !== "archon_resolution_writer" ||
-        grant.privilege_type !== "EXECUTE" ||
-        grant.is_grantable
-    )
-  ) {
-    throw new Error("Runtime principal function grants are not exact.");
-  }
+  await verifyClusterWideResolutionGrants({
+    adminConnectionString,
+    principal,
+    applicationDatabase: databaseName,
+    expectedDatabaseGrants: expectedRuntimeDatabaseGrants(
+      databaseName,
+      principal
+    ),
+  });
 
   const schemaGrants = await admin.query<{
     privilege_type: string;
@@ -385,16 +345,24 @@ async function proveExactPrincipal(
   }
 
   const databaseGrants = await admin.query<{
+    database_name: string;
+    grantee: string;
     privilege_type: string;
     is_grantable: boolean;
   }>(`SHOW GRANTS ON DATABASE ${databaseSql} FOR ${principalSql}`);
   if (
-    databaseGrants.rows.length < 1 ||
+    databaseGrants.rows.length !== 1 ||
     databaseGrants.rows.some(
-      (grant) => grant.privilege_type !== "CONNECT" || grant.is_grantable
+      (grant) =>
+        grant.database_name !== databaseName ||
+        grant.grantee !== principal ||
+        grant.privilege_type !== "CONNECT" ||
+        grant.is_grantable
     )
   ) {
-    throw new Error("Runtime principal database grants exceed CONNECT.");
+    throw new Error(
+      "Runtime principal application-database grants are not exact CONNECT-only access."
+    );
   }
 
   const systemGrants = await admin.query<SystemGrant>(
@@ -411,6 +379,7 @@ async function createRuntimePrincipal(
     principal: string;
     password: string;
     database: string;
+    adminConnectionString: string;
   }
 ): Promise<void> {
   const user = identifier(input.principal, "new runtime principal");
@@ -444,7 +413,12 @@ async function createRuntimePrincipal(
   await admin.query(`GRANT USAGE ON SCHEMA public TO ${user}`);
   await admin.query(`GRANT archon_public_reader TO ${user}`);
   await admin.query(`GRANT archon_resolution_writer TO ${user}`);
-  await proveExactPrincipal(admin, input.principal, input.database);
+  await proveExactPrincipal(
+    admin,
+    input.principal,
+    input.database,
+    input.adminConnectionString
+  );
 }
 
 async function testPendingCredential(
@@ -658,7 +632,7 @@ async function disableAndDrainPrincipal(
     Array.isArray(disabled.rows[0]?.options)
       ? disabled.rows[0].options
       : String(disabled.rows[0]?.options ?? "")
-          .replace(/[{}\"]/gu, "")
+          .replace(/[{}"]/gu, "")
           .split(",")
   ).map((option) => option.trim().toUpperCase());
   if (disabled.rows.length !== 1 || !disabledOptions.includes("NOLOGIN")) {
@@ -1064,7 +1038,7 @@ export async function rotateRuntimeCredential(): Promise<Record<string, unknown>
     if (databaseName !== "archon") {
       throw new Error("Runtime secret does not target the application database.");
     }
-    await proveExactPrincipal(admin, oldPrincipal, databaseName);
+    await proveExactPrincipal(admin, oldPrincipal, databaseName, adminUrl);
     phase = "current-principal-proved";
     const rotationId = randomBytes(5).toString("hex");
     newPrincipal = `archon_${environment}_${rotationId}`;
@@ -1074,6 +1048,7 @@ export async function rotateRuntimeCredential(): Promise<Record<string, unknown>
       principal: newPrincipal,
       password,
       database: databaseName,
+      adminConnectionString: adminUrl,
     });
     newPrincipalCreated = true;
     phase = "candidate-principal-created";
@@ -1193,7 +1168,7 @@ export async function rotateRuntimeCredential(): Promise<Record<string, unknown>
     ) {
       throw new Error("Final secret staging labels are invalid.");
     }
-    await proveExactPrincipal(admin, newPrincipal, databaseName);
+    await proveExactPrincipal(admin, newPrincipal, databaseName, adminUrl);
     await waitForHostedPrincipal({
       applicationUrl,
       principal: newPrincipal,

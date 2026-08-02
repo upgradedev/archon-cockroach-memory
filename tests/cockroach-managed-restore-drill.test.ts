@@ -115,11 +115,18 @@ test("preflight fails closed on placement, identity, history, and empty target",
     "DESTINATION_HAS_RESTORE_HISTORY",
     "USER_DATABASE_EXISTS",
     "USER_SCHEMA_OR_RELATION_EXISTS",
-    "INVALID_DESTINATION_EMPTY_ENDPOINT",
     "SOURCE_AND_DESTINATION_SQL_CLUSTER_COLLISION",
   ]) {
     assert.ok(implementation.includes(fragment), fragment);
   }
+  assert.match(
+    implementation,
+    /`INVALID_\$\{label\.toUpperCase\(\)\}_ENDPOINT`/u
+  );
+  assert.match(
+    implementation,
+    /const emptyEndpoint = assertSqlEndpoint\([\s\S]*?new Set\(\["defaultdb", "postgres"\]\),\s+"DESTINATION_EMPTY"\s+\);/u
+  );
   assert.match(implementation, /cluster\.regions\[0\]\?\.sql_dns/u);
   assert.match(
     implementation,

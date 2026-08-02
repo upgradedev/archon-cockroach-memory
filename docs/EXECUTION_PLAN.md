@@ -35,7 +35,35 @@ Exit criteria:
 - [x] Runtime mutation is exposed only through two exact
   `SECURITY DEFINER` transition routines owned by a bounded non-login role.
   The runtime role has five exact sandbox `SELECT` grants, two exact routine
-  `EXECUTE` grants, and zero direct table DML.
+  `EXECUTE` grants, and zero direct table DML. Schema, migration, release, and
+  credential-rotation CI use a short-lived admin connection with an anonymous
+  current database to prove the full cluster contains exactly those two
+  canonical routine signatures and no other effective UDF access. The shared
+  CI cluster creates, proves, and drops each migration/reconciliation rehearsal
+  database—and drops the migration login—before starting the next database so
+  fixtures or inherited memberships cannot contaminate that cluster-wide
+  invariant.
+- [x] Release and credential-rotation CI prove each runtime principal has one
+  exact, direct, non-grantable `CONNECT` row on the `archon` application
+  database and no `TEMPORARY` privilege there.
+- [x] Provisioning, release, and rotation close the full effective runtime
+  database-grant matrix: the only accepted rows are CockroachDB v26.2.3's four
+  non-grantable `public CONNECT`/`TEMPORARY` defaults on `defaultdb` and
+  `postgres`, plus one direct, non-grantable runtime-principal `CONNECT` row on
+  `archon`; `system` must return zero rows. Any additional grantee, privilege,
+  grant option, missing row, or duplicate fails closed; the proof path never
+  mutates built-in database grants. The pinned real-CockroachDB CI rehearsal
+  proves the five-row success state, injects and rejects app-database
+  `TEMPORARY` drift, `CONNECT WITH GRANT OPTION` drift, and an additional
+  database after revoking its inherited public grants. It therefore proves
+  inventory-only drift is rejected, restores the exact state after every
+  mutation, and records a canonical matrix digest.
+- [x] Provisioning, release, and rotation share one fail-closed runtime-role
+  contract: generated runtime users must retain an exact-empty role-option
+  array; privileged/legacy options (including replication and alternate
+  identity provisioning), disabled SQL login, unexpected memberships, admin
+  role grants, and every affirmative or unknown effective system privilege are
+  rejected before a credential is accepted.
 - [x] Every database credential is bound before mutation to the exact
   Cockroach Cloud API cluster UUID and its single primary `eu-west-1`
   `regions[].sql_dns` endpoint, port `26257`, and `sslmode=verify-full`.

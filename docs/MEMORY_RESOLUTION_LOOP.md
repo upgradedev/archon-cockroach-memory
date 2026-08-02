@@ -48,6 +48,41 @@ the role to unexpired, fixed-scope synthetic rows. Compromise of the database
 principal would expose disposable public fixtures, not customer or canonical
 memory, but remains an incident requiring credential rotation.
 
+Schema, migration, database-release, and credential-rotation pipelines also
+open a standalone, short-lived admin connection, set CockroachDB's current
+database to the anonymous database, assert the pinned-v26.2 SQL `NULL` session
+state, and run
+principal-focused `SHOW GRANTS`. The gate compares database, schema, canonical
+identity signature, granting role, `EXECUTE`, and grant-option fields and
+accepts exactly the two transition routines anywhere in the cluster. The
+connection is always destroyed so anonymous-database state cannot return to a
+pool. In the shared build-test cluster, migration and reconciliation databases
+are created sequentially and dropped after their rehearsal, and the migration
+login is dropped with its role memberships; the next proof therefore cannot
+inherit duplicate fixture routines or a rehearsal principal from an earlier
+database.
+
+Provisioning, release, and rotation close the cluster-wide database matrix for
+each runtime principal. They accept exactly CockroachDB v26.2.3's non-grantable
+`public CONNECT` and `TEMPORARY` rows on both `defaultdb` and `postgres`, plus
+one direct, non-grantable `CONNECT` row for that principal on `archon`; the
+targeted `system` query must return zero rows. Any additional grantee,
+privilege, grant option, missing row, duplicate, or database outside the exact
+`archon|defaultdb|postgres|system` inventory fails closed. The
+object-focused release/rotation check independently proves the `archon` row is
+direct, and no grant is changed by either production proof path. The four
+allowed public rows are CockroachDB defaults, not project-created exceptions
+([CockroachDB v26.2 `GRANT` example](https://www.cockroachlabs.com/docs/v26.2/grant#grant-privileges-on-databases),
+[pinned v26.2.3 database-grant logic test](https://github.com/cockroachdb/cockroach/blob/v26.2.3/pkg/sql/logictest/testdata/logic_test/grant_database)). The pinned v26.2.3 CI rehearsal also
+injects an app-database `TEMPORARY` grant, a `CONNECT WITH GRANT OPTION`
+elevation, and an extra database whose default `PUBLIC` grants are explicitly
+revoked, proves all three are rejected (including inventory-only drift),
+restores each state in `finally` paths, reruns the positive proof, and emits the
+five-row count, queried inventory, and canonical matrix digest. The same three
+production gates require an exact-empty generated runtime role-option array,
+including rejection of legacy replication and alternate identity provisioning,
+and reject all affirmative or unknown effective system privileges.
+
 ## Lifecycle policies
 
 | Policy | Enforced behavior |

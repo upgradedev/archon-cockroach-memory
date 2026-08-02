@@ -35,7 +35,7 @@ export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
 export const EXPECTED_WORKFLOW_ACTION_REFS = 213;
 export const EXPECTED_SETUP_NODE_STEPS = 31;
-export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
+export const EXPECTED_COCKROACH_IMAGE_REFS = 9;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 0;
 export const EXPECTED_WORKFLOW_FILES = [
@@ -1945,6 +1945,9 @@ function sourceChecks(): SourceCheck[] {
   const databaseCredentialRotationScript = read(
     "scripts/rotate-runtime-secret.ts"
   );
+  const databaseCredentialProvisioningScript = read(
+    "scripts/provision-runtime-secret.ts"
+  );
   const databaseCredentialRotationTests = read(
     "tests/database-credential-rotation.test.ts"
   );
@@ -2215,6 +2218,11 @@ function sourceChecks(): SourceCheck[] {
       /(?:^|\r?\n)  hosted-dast-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
   const databaseRelease = read("scripts/verify-database-release.ts");
+  const clusterGrantProof = read("src/db/cluster-grant-proof.ts");
+  const systemGrantContract = read("src/db/system-grants.ts");
+  const schemaMigrationRehearsal = read(
+    "scripts/schema-migration-rehearsal.ts"
+  );
   const databaseReleaseWorkflow = read(
     ".github/workflows/database-release.yml"
   );
@@ -2604,7 +2612,6 @@ function sourceChecks(): SourceCheck[] {
       /owner_payload="\$\([\s\S]*?\r?\n    \)"\r?\n    greenfield_owner="\$\(/u
     )?.[0] ?? "";
   const canaryTrafficFragments = [
-    "trap stop_canary_probe EXIT",
     "while true; do",
     "$CANARY_URL/api/proof",
     "$CANARY_URL/api/recall",
@@ -2647,6 +2654,10 @@ function sourceChecks(): SourceCheck[] {
     managedMcpWorkflow,
     managedMcpDeployJob,
   ];
+  const managedMcpDatabaseReleaseGrantProofGate =
+    /\.schemaVersion == 6[\s\S]*?\(\.runtimes \| length\) == 2[\s\S]*?\(\[\.runtimes\[\]\.environment\] \| sort\) ==[\s\S]*?\["production", "staging"\][\s\S]*?databaseMatrixSha256\] \|[\s\S]*?unique \| length\) == 2[\s\S]*?all\(\.runtimes\[\];[\s\S]*?archon_staging_[a-z0-9{}\[\],^-]+[\s\S]*?archon_production_[a-z0-9{}\[\],^-]+[\s\S]*?\.clusterGrantProof\.routineGrantCount == 2[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u;
+  const databaseMatrixDigestRecomputeGate =
+    /for runtime_environment in staging production; do[\s\S]*?expected_matrix_sha="\$\(jq -er[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256[\s\S]*?matrix_json="\$\(jq -cer[\s\S]*?\.clusterGrantProof\.databaseGrantMatrix[\s\S]*?actual_matrix_sha="\$\(printf '%s' "\$matrix_json"[\s\S]*?sha256sum[\s\S]*?test "\$actual_matrix_sha" = "\$expected_matrix_sha"/u;
   const managedMcpLeakChecksPrecedeJq = managedMcpGateBlocks.every(
     (block) => {
       const receipt = block.indexOf(
@@ -4042,6 +4053,12 @@ function sourceChecks(): SourceCheck[] {
             block.includes(fragment)
           )
       ) &&
+        managedMcpGateBlocks.every((block) =>
+          managedMcpDatabaseReleaseGrantProofGate.test(block)
+        ) &&
+        managedMcpGateBlocks.every((block) =>
+          databaseMatrixDigestRecomputeGate.test(block)
+        ) &&
         managedMcpLeakChecksPrecedeJq &&
         managedMcpSecretsAreStepScoped &&
         /needs:\s*\r?\n      - database-release/u.test(
@@ -4747,6 +4764,12 @@ function sourceChecks(): SourceCheck[] {
         /RuntimeCredentialRotationFailure/u.test(
           databaseCredentialRotationScript
         ) &&
+        /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseName,\s*principal\s*\)/u.test(
+          databaseCredentialRotationScript
+        ) &&
+        /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseRaw,\s*appUserRaw\s*\)/u.test(
+          databaseCredentialProvisioningScript
+        ) &&
         /process\.stdout\.write\(`\$\{JSON\.stringify\(receipt/u.test(
           databaseCredentialRotationScript
         ) &&
@@ -4779,7 +4802,7 @@ function sourceChecks(): SourceCheck[] {
         /wa05-database-credential-rotation-source/u.test(
           wellArchitectedContractAudit
         ),
-      "WA-05 has protected exact-release two-principal rotation, exact secret ARN suffixes, hot pool refresh, injected failure-state tests, phase-specific attested receipts, and fail-closed interrupted-run evidence.",
+      "WA-05 has protected exact-release two-principal rotation, a cluster-wide exact runtime database-grant matrix at provisioning and rotation, exact secret ARN suffixes, hot pool refresh, injected failure-state tests, phase-specific attested receipts, and fail-closed interrupted-run evidence.",
       "The WA-05 protected rotation, exact IAM boundary, behavioral failure tests, hot refresh, or actionable failure receipt contract is incomplete."
     ),
     sourceCheck(
@@ -4920,7 +4943,10 @@ function sourceChecks(): SourceCheck[] {
       "Technical Implementation",
       hasExactCodeqlActionPins(codeqlWorkflow) &&
         /queries:\s*security-and-quality/u.test(codeqlWorkflow) &&
-        /output:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u.test(
+        /output:\s*\$\{\{\s*env\.CODEQL_RAW_SARIF_DIR\s*\}\}/u.test(
+          codeqlWorkflow
+        ) &&
+        /post-processed-sarif-path:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u.test(
           codeqlWorkflow
         ) &&
         /upload:\s*always/u.test(codeqlWorkflow) &&
@@ -4996,11 +5022,11 @@ function sourceChecks(): SourceCheck[] {
         /safeRuntimeQuery<RecallQueryRow>\(\s*client,\s*statement\.text,\s*statement\.params/iu.test(
           databaseRelease
         ) &&
-        /schemaVersion:\s*5/u.test(databaseRelease) &&
+        /schemaVersion:\s*6/u.test(databaseRelease) &&
         /scopedServingQueriesRejectCanaries:\s*true/u.test(
           databaseRelease
         ) &&
-        /\.schemaVersion\s*==\s*5/u.test(databaseReleaseWorkflow) &&
+        /\.schemaVersion\s*==\s*6/u.test(databaseReleaseWorkflow) &&
         /\.proofs\.durableStoreIntegrity\s*==\s*true/u.test(
           databaseReleaseWorkflow
         ) &&
@@ -5101,8 +5127,148 @@ function sourceChecks(): SourceCheck[] {
         /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u.test(
           databaseRelease
         ) &&
-        /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'routine'/u.test(
+        /verifyClusterWideResolutionGrants/u.test(databaseRelease) &&
+        /const proofClient = new Client\(\{/u.test(clusterGrantProof) &&
+        /SET database = ''/u.test(clusterGrantProof) &&
+        /SELECT current_database\(\) AS database_name/u.test(
+          clusterGrantProof
+        ) &&
+        /database\.rows\[0\]\?\.database_name !== null/u.test(
+          clusterGrantProof
+        ) &&
+        /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u.test(
+          clusterGrantProof
+        ) &&
+        /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u.test(
+          clusterGrantProof
+        ) &&
+        /archon_resolution_decide\(text, text, uuid, uuid, uuid, timestamptz\)/u.test(
+          clusterGrantProof
+        ) &&
+        /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u.test(
+          clusterGrantProof
+        ) &&
+        /FROM \[SHOW DATABASES\]/u.test(clusterGrantProof) &&
+        /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u.test(
+          clusterGrantProof
+        ) &&
+        /JSON\.stringify\(finalDatabaseInventory\)[\s\S]*?JSON\.stringify\(databaseNames\)/u.test(
+          clusterGrantProof
+        ) &&
+        /JSON\.stringify\(actualDatabaseInventory\)[\s\S]*?JSON\.stringify\(requiredDatabaseInventory\)/u.test(
+          clusterGrantProof
+        ) &&
+        /databaseMatrixSha256: createHash\("sha256"\)/u.test(
+          clusterGrantProof
+        ) &&
+        /Supplied runtime database privilege matrix is not canonical/u.test(
+          clusterGrantProof
+        ) &&
+        /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseName,\s*"archon_migration_ci"\s*\)/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /GRANT TEMPORARY ON DATABASE "\$\{databaseName\}" TO archon_migration_ci[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE TEMPORARY ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci WITH GRANT OPTION[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE CONNECT ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci[\s\S]*?GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /CREATE DATABASE archon_unexpected_grants_ci[\s\S]*?REVOKE CONNECT, TEMPORARY ON DATABASE archon_unexpected_grants_ci FROM public[\s\S]*?expectClusterGrantProofRejected[\s\S]*?Cluster-wide grant proof could not bind the exact database inventory\.[\s\S]*?DROP DATABASE archon_unexpected_grants_ci CASCADE/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        [
+          "ADMIN",
+          "BYPASSRLS",
+          "CANCELQUERY",
+          "CONTROLCHANGEFEED",
+          "CONTROLJOB",
+          "CREATEDB",
+          "CREATELOGIN",
+          "CREATEROLE",
+          "MODIFYCLUSTERSETTING",
+          "PROVISIONSRC",
+          "REPLICATION",
+          "SUBJECT",
+          "VIEWACTIVITY",
+          "VIEWACTIVITYREDACTED",
+          "VIEWCLUSTERSETTING",
+        ].every((option) => systemGrantContract.includes(`"${option}"`)) &&
+        /export function privilegedRuntimeRoleOptions/u.test(
+          systemGrantContract
+        ) &&
+        /export function runtimeLoginIsDisabled/u.test(systemGrantContract) &&
+        /export function runtimeRoleOptionsAreCanonical/u.test(
+          systemGrantContract
+        ) &&
+        [
+          databaseRelease,
+          databaseCredentialRotationScript,
+          databaseCredentialProvisioningScript,
+        ].every(
+          (runtimeGate) =>
+            /privilegedRuntimeRoleOptions/u.test(runtimeGate) &&
+            /runtimeLoginIsDisabled/u.test(runtimeGate) &&
+            /runtimeRoleOptionsAreCanonical/u.test(runtimeGate) &&
+            /affirmativeSystemGrants/u.test(runtimeGate)
+        ) &&
+        /SHOW SYSTEM GRANTS FOR \$\{appUser\}/u.test(
+          databaseCredentialProvisioningScript
+        ) &&
+        /proof\.databaseGrantCount !== 5/u.test(schemaMigrationRehearsal) &&
+        /appTemporaryGrantDriftRejected:\s*true/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /databaseGrantOptionDriftRejected:\s*true/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /extraDatabaseGrantDriftRejected:\s*true/u.test(
+          schemaMigrationRehearsal
+        ) &&
+        /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseName,\s*principal\s*\)/u.test(
           databaseRelease
+        ) &&
+        /finally \{[\s\S]*?proofClient\.end\(\)\.catch/u.test(
+          clusterGrantProof
+        ) &&
+        /CREATE DATABASE IF NOT EXISTS archon_migration[\s\S]*?db:migration:rehearsal[\s\S]*?DROP DATABASE archon_migration CASCADE[\s\S]*?DROP USER archon_migration_ci[\s\S]*?CREATE DATABASE archon_reconciliation[\s\S]*?db:memory:reconciliation:rehearsal[\s\S]*?DROP DATABASE archon_reconciliation CASCADE[\s\S]*?local:bootstrap/u.test(
+          ci
+        ) &&
+        /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}[\s\S]*?databaseGrants\.rows\.length !== 1/u.test(
+          databaseRelease
+        ) &&
+        /\.proofs\.runtimeFunctionPrivilegeMatrix\s*==\s*\n?\s*"cluster-wide EXECUTE only on the two canonical resolution routine signatures"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.runtimeDatabasePrivilegeMatrix\s*==\s*\n?\s*"cluster-wide exact five-row non-grantable matrix: public CONNECT\+TEMPORARY on defaultdb\/postgres; runtime principal CONNECT on archon; zero system rows"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.runtimeSystemPrivileges\s*==\s*\n?\s*"exact-empty runtime role options; no affirmative system grants"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.clusterGrantProof\.routineGrantCount == 2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.clusterGrantProof\.databaseGrantCount == 5/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.clusterGrantProof\.databaseInventory ==\s*\n?\s*\["archon", "defaultdb", "postgres", "system"\]/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\[\.runtimes\[\]\.clusterGrantProof\.databaseMatrixSha256\][\s\S]*?unique \| length\) == 2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        databaseMatrixDigestRecomputeGate.test(databaseReleaseWorkflow) &&
+        /\.clusterGrantProof\.databaseMatrixSha256/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.schemaVersion == 6[\s\S]*?all\(\.runtimes\[\];[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u.test(
+          deploy
         ) &&
         /sql\.ttl\.job\.enabled/u.test(resolutionSandboxVerifier) &&
         /SHOW SCHEDULES/u.test(resolutionSandboxVerifier) &&
@@ -5189,7 +5355,7 @@ function sourceChecks(): SourceCheck[] {
         /\.resolutionLoop\.approvedReceiptSha256\s*!=\s*\n?\s*\.resolutionLoop\.rejectedReceiptSha256/u.test(
           databaseReleaseWorkflow
         ),
-      "The database release proves the five-table TTL/RLS sandbox, a two-routine DB-enforced transition API with zero runtime DML, and approve/reject/idempotency/conflict/receipt/consolidation behavior through both runtime principals while canonical memory remains unchanged.",
+      "The database release proves the five-table TTL/RLS sandbox, an exact cluster-wide two-signature transition API with isolated CI rehearsal databases, a live five-row runtime database matrix (public CONNECT+TEMPORARY on defaultdb/postgres, direct CONNECT on archon, zero system rows), drift rejection and a canonical digest, zero runtime DML, and approve/reject/idempotency/conflict/receipt/consolidation behavior through both runtime principals while canonical memory remains unchanged.",
       "The database release does not prove the bounded CockroachDB resolution action loop and its isolation, retention, or immutable receipt controls."
     ),
     sourceCheck(
@@ -5681,7 +5847,7 @@ function sourceChecks(): SourceCheck[] {
           deliveryBootstrap.match(
             /KmsMasterKeyId: !GetAtt AlarmNotificationsKey\.Arn/gu
           ) ?? []
-        ).length === 4 &&
+        ).length === 5 &&
         /StagingAlarmTopic:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?TopicName: !Sub "\$\{AppName\}-staging-alarms"/u.test(
           deliveryBootstrap
         ) &&
@@ -5716,7 +5882,7 @@ function sourceChecks(): SourceCheck[] {
           deliveryBootstrap.match(
             /Condition: EnableAlarmRouting\r?\n\s+Value:/gu
           ) ?? []
-        ).length === 6 &&
+        ).length === 7 &&
         /LogicalResourceId\/AlarmNotificationsKey/u.test(
           bootstrapStackPolicy
         ) &&
@@ -5912,7 +6078,7 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
         /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
@@ -5925,7 +6091,7 @@ function sourceChecks(): SourceCheck[] {
           foundationPromotionRole.match(
             /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
           ) ?? []
-        ).length === 10 &&
+        ).length === 21 &&
         (
           foundationPromotionRole.match(
             /Action: securityhub:ListTagsForResource/gmu
@@ -6244,7 +6410,7 @@ function sourceChecks(): SourceCheck[] {
         ).length === 2 &&
         (
           deploy.match(/--template-stage Original/gu) ?? []
-        ).length === 4 &&
+        ).length === 5 &&
         (
           deploy.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? []
         ).length === 2 &&
@@ -6398,7 +6564,10 @@ function sourceChecks(): SourceCheck[] {
           canaryTrafficFragments.every((fragment) =>
             block.includes(fragment)
           ) &&
-          /sam deploy[\s\S]*?--no-progressbar\s+stop_canary_probe\s+trap - EXIT/u.test(
+          /trap (?:stop_canary_probe|cleanup_deploy_background) EXIT/u.test(
+            block
+          ) &&
+          /sam deploy[\s\S]*?--no-progressbar[\s\S]*?stop_canary_probe[\s\S]*?trap - EXIT/u.test(
             block
           )
       ) &&

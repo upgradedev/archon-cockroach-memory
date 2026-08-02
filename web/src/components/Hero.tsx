@@ -31,8 +31,9 @@ export function Hero() {
             <span className="font-mono text-xs text-muted">{PUBLIC_COMPANY}</span>
           </div>
           <p className="mt-4 max-w-sm text-xs leading-5 text-muted">
-            Canonical evidence stays read-only. The optional action loop writes
-            only to an isolated, expiring synthetic session—never customer data.
+            Public, read-only demonstration data stays canonical. The optional
+            action loop writes only to an isolated, expiring synthetic
+            session—never customer data.
           </p>
         </div>
       </div>

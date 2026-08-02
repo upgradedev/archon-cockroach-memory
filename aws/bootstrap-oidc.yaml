@@ -414,7 +414,8 @@ Resources:
       BucketName: !Sub "${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}"
       # CloudFront standard logging (legacy) still requires bucket ACLs.
       # BucketOwnerPreferred enables the service-managed canonical grant; the
-      # deployment roles hold only GetBucketAcl/PutBucketAcl on this bucket.
+      # CloudFormation execution roles hold only GetBucketAcl/PutBucketAcl on
+      # this bucket; the GitHub deployment roles can only pass those roles.
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - BucketKeyEnabled: true

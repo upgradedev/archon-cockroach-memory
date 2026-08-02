@@ -24,6 +24,17 @@ import {
   assertCockroachEndpointBinding,
   parseDatabaseSecret,
 } from "../src/db/secret.js";
+import {
+  expectedRuntimeDatabaseGrants,
+  verifyClusterWideResolutionGrants,
+} from "../src/db/cluster-grant-proof.js";
+import {
+  affirmativeSystemGrants,
+  privilegedRuntimeRoleOptions,
+  runtimeLoginIsDisabled,
+  runtimeRoleOptionsAreCanonical,
+  type SystemGrant,
+} from "../src/db/system-grants.js";
 
 const { Client } = pg;
 
@@ -151,9 +162,10 @@ async function main(): Promise<void> {
     await sql.connect();
     const existing = await sql.query<{
       username: string;
+      options: string[] | string;
       member_of: string[] | string;
     }>(
-      "SELECT username, member_of FROM [SHOW USERS] WHERE username = $1",
+      "SELECT username, options, member_of FROM [SHOW USERS] WHERE username = $1",
       [appUserRaw]
     );
     if (existingDatabaseUrl && existing.rowCount !== 1) {
@@ -167,7 +179,13 @@ async function main(): Promise<void> {
     const existingMemberships = parseRoleArray(
       existing.rows[0]?.member_of ?? []
     );
+    const existingOptions = parseRoleArray(existing.rows[0]?.options ?? []);
+    const existingPrivilegedOptions =
+      privilegedRuntimeRoleOptions(existingOptions);
     if (
+      existingPrivilegedOptions.length > 0 ||
+      runtimeLoginIsDisabled(existingOptions) ||
+      !runtimeRoleOptionsAreCanonical(existingOptions) ||
       existingMemberships.some(
         (role) =>
           role !== "archon_public_reader" &&
@@ -175,7 +193,7 @@ async function main(): Promise<void> {
       )
     ) {
       throw new Error(
-        "Existing runtime principal has an unexpected role membership."
+        "Existing runtime principal has unsafe role options or membership."
       );
     }
     if (!existingDatabaseUrl) {
@@ -224,7 +242,9 @@ async function main(): Promise<void> {
         JSON.stringify(
           ["archon_public_reader", "archon_resolution_writer"].sort()
         ) ||
-      reconciledOptions.includes("BYPASSRLS")
+      privilegedRuntimeRoleOptions(reconciledOptions).length > 0 ||
+      runtimeLoginIsDisabled(reconciledOptions) ||
+      !runtimeRoleOptionsAreCanonical(reconciledOptions)
     ) {
       throw new Error(
         "Runtime principal role/options reconciliation did not converge."
@@ -247,6 +267,23 @@ async function main(): Promise<void> {
     ) {
       throw new Error(
         "Runtime principal role grants must be exact and non-admin."
+      );
+    }
+    await verifyClusterWideResolutionGrants({
+      adminConnectionString: adminUrl,
+      principal: appUserRaw,
+      applicationDatabase: databaseRaw,
+      expectedDatabaseGrants: expectedRuntimeDatabaseGrants(
+        databaseRaw,
+        appUserRaw
+      ),
+    });
+    const systemGrants = await sql.query<SystemGrant>(
+      `SHOW SYSTEM GRANTS FOR ${appUser}`
+    );
+    if (affirmativeSystemGrants(systemGrants.rows).length !== 0) {
+      throw new Error(
+        "Runtime principal retains affirmative system privileges."
       );
     }
   } catch {

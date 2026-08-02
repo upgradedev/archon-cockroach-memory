@@ -158,7 +158,7 @@ test("hosted load version 2 provides recall-only numerator boundaries and an exa
   );
   assert.match(hostedLoad, /hosted_scope_isolation:\s*\["rate>=1"\]/u);
   assert.match(hostedLoad, /hosted_recall_contract:\s*\["rate>=1"\]/u);
-  assert.match(hostedLoad, /--new-machine-readable-summary/u);
+  assert.match(hostedWorkflow, /--new-machine-readable-summary/u);
   assert.match(
     hostedLoad,
     /hosted_grounded_citations:\s*\["rate>=1"\]/u
@@ -239,7 +239,10 @@ test("measurement script uses bounded read APIs and conservative per-successful-
   assert.match(script, /\[ "\$AWS_REGION" = "eu-west-1" \]/u);
   assert.match(script, /--region us-east-1/u);
   assert.doesNotMatch(script, /--region us-west-2/u);
-  assert.match(script, /window_end_epoch - 1209600/u);
+  assert.match(
+    script,
+    /"\$window_end_epoch" -ge \$\(\(now_epoch - 1209600\)\)/u
+  );
   assert.match(script, /telemetry_duration" -le 780/u);
   assert.equal(
     (script.match(/\] -eq "\$expected_http_requests"/gu) ?? []).length,
@@ -279,7 +282,7 @@ test("measurement script uses bounded read APIs and conservative per-successful-
   assert.match(script, /\.rawSummary\.sha256 == \$summaryDigest/u);
   assert.match(
     script,
-    /\.metrics \| type\) == "object"/u
+    /\.results\.metrics \| map\(\{key: \.name, value: \.\}\) \| from_entries/u
   );
   assert.match(
     script,

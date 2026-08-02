@@ -236,12 +236,19 @@ any source-control drift—fails closed. The status and exact-main receipt
 disclose `rawFindings=3`, `compatibilityFindings=3`, and
 `blockingFindings=0`.
 
-No inline Trivy ignore is present, the raw HIGH result remains visible in
-uploaded evidence and code scanning, and the empty security waiver ledger is
-unchanged. The hosted job also fails if any repository Trivy ignore or
-configuration override file appears. This is a narrow scanner/platform
-compatibility disposition, not a claim that the scanner resolved those dynamic
-values and not a security-finding waiver.
+No inline Trivy ignore is present, the raw HIGH results remain visible in the
+immutable infrastructure artifact and exact-main release evidence, and the
+empty security waiver ledger is unchanged. After that raw SARIF, its exact
+source locations, the compatibility record, and the zero-item blocking record
+are revalidated, GitHub code scanning receives a policy-effective SARIF with
+zero results. Its run metadata discloses `rawFindings=3`,
+`compatibilityFindings=3`, `blockingFindings=0`, `acceptedWaivers=0`, and names
+the retained raw SARIF. This keeps the GitHub check aligned with the enforced
+blocking policy without hiding or mutating the canonical scanner evidence. The
+hosted job also fails if any repository Trivy ignore or configuration override
+file appears. This is a narrow scanner/platform compatibility disposition, not
+a claim that the scanner resolved those dynamic values and not a
+security-finding waiver.
 
 CodeQL writes its exact-run SARIF to the ephemeral runner, uploads it to code
 scanning, resolves each result to the corresponding rule metadata, and blocks

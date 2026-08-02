@@ -253,10 +253,10 @@ test("S3 log delivery policy binds each source to only its own prefix", () => {
   assert.match(policy, /UpdateReplacePolicy: Retain/u);
   assert.equal(
     (policy.match(/Service: logging\.s3\.amazonaws\.com/gmu) ?? []).length,
-    3
+    4
   );
-  assert.equal((policy.match(/Action: s3:PutObject/gmu) ?? []).length, 3);
-  assert.equal((policy.match(/aws:SourceAccount:/gmu) ?? []).length, 3);
+  assert.equal((policy.match(/Action: s3:PutObject/gmu) ?? []).length, 4);
+  assert.equal((policy.match(/aws:SourceAccount:/gmu) ?? []).length, 4);
   assert.match(
     policy,
     /AllowArtifactBucketServerAccessLogs[\s\S]*?\/artifacts\/\*[\s\S]*?-artifacts-\$\{AWS::AccountId\}-\$\{AWS::Region\}/u
@@ -268,6 +268,10 @@ test("S3 log delivery policy binds each source to only its own prefix", () => {
   assert.match(
     policy,
     /AllowProductionWebBucketServerAccessLogs[\s\S]*?\/production-web\/\*[\s\S]*?-production-web-\$\{AWS::AccountId\}-\$\{AWS::Region\}/u
+  );
+  assert.match(
+    policy,
+    /AllowCloudFrontLogBucketServerAccessLogs[\s\S]*?\/cloudfront-log-bucket\/\*[\s\S]*?-cloudfront-access-logs-\$\{AWS::AccountId\}-\$\{AWS::Region\}/u
   );
   assert.doesNotMatch(policy, /s3:x-amz-acl|PutObjectAcl|TargetGrants/u);
 
@@ -288,10 +292,21 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     "token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId",
     "token.actions.githubusercontent.com:ref: refs/heads/main",
     "token.actions.githubusercontent.com:environment: bootstrap",
-    "token.actions.githubusercontent.com:workflow: Bootstrap AWS Foundation",
   ]) {
     assert.ok(role.includes(condition), condition);
   }
+  assert.match(
+    role,
+    /token\.actions\.githubusercontent\.com:workflow:\s+- Bootstrap AWS Foundation\s+- Foundation Storage Migration/u
+  );
+  assert.equal(
+    (
+      role.match(
+        /^\s+- (?:Bootstrap AWS Foundation|Foundation Storage Migration)$/gmu
+      ) ?? []
+    ).length,
+    2
+  );
   assert.match(role, /Action: s3:PutBucketLogging/u);
   assert.match(
     role,
@@ -308,7 +323,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
-    /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
+    /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(
     role,
@@ -325,7 +340,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
         /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
       ) ?? []
     ).length,
-    10
+    21
   );
   assert.equal(
     (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
@@ -548,14 +563,34 @@ test("environment deploy roles can prove but cannot mutate the logging foundatio
       role,
       /Sid: AuditS3AccessLogArchive[\s\S]*?Action:\s+- s3:GetBucketLocation\s+- s3:GetBucketLogging\s+- s3:GetBucketOwnershipControls\s+- s3:GetBucketPolicy\s+- s3:GetBucketPublicAccessBlock\s+- s3:GetBucketVersioning\s+- s3:GetEncryptionConfiguration\s+- s3:GetLifecycleConfiguration\s+Resource: !GetAtt S3AccessLogArchive\.Arn/u
     );
+    const executionPolicy = resourceBlock(
+      `${title}CloudFormationResourcePolicy`
+    );
+    const executionRole = resourceBlock(`${title}ExecutionRole`);
+    assert.doesNotMatch(role, /s3:(?:Get|Put)BucketAcl/u);
     assert.match(
-      role,
+      executionPolicy,
       new RegExp(
         `Sid: Manage${title}CloudFrontLoggingAcl[\\s\\S]*?` +
           "Action:\\s+- s3:GetBucketAcl\\s+- s3:PutBucketAcl\\s+" +
           "Resource: !GetAtt CloudFrontAccessLogBucket\\.Arn",
         "u",
       ),
+    );
+    assert.match(
+      executionRole,
+      new RegExp(
+        `ManagedPolicyArns:[\\s\\S]*?- !Ref ${title}CloudFormationResourcePolicy`,
+        "u"
+      )
+    );
+    assert.match(
+      role,
+      new RegExp(
+        `Action:\\s+- iam:PassRole\\s+Resource: !GetAtt ${title}ExecutionRole\\.Arn[\\s\\S]*?` +
+          "iam:PassedToService: cloudformation\\.amazonaws\\.com",
+        "u"
+      )
     );
     assert.doesNotMatch(
       role,

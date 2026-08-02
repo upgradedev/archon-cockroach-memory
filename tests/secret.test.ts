@@ -4,7 +4,12 @@ import {
   assertCockroachEndpointBinding,
   parseDatabaseSecret,
 } from "../src/db/secret.js";
-import { affirmativeSystemGrants } from "../src/db/system-grants.js";
+import {
+  affirmativeSystemGrants,
+  privilegedRuntimeRoleOptions,
+  runtimeLoginIsDisabled,
+  runtimeRoleOptionsAreCanonical,
+} from "../src/db/system-grants.js";
 
 const TLS_URL =
   "postgresql://archon_runtime:example@cluster.example:26257/archon?sslmode=verify-full";
@@ -76,7 +81,7 @@ test("Cockroach endpoint binding accepts only the authenticated Cloud sql_dns", 
   for (const invalid of [
     TLS_URL.replace("cluster.example", "other.example"),
     TLS_URL.replace(":26257", ":5432"),
-    TLS_URL.replace("/archon", "/defaultdb"),
+    TLS_URL.replace(":26257/archon?", ":26257/defaultdb?"),
     TLS_URL.replace("sslmode=verify-full", "sslmode=require"),
     `${TLS_URL}&sslmode=disable`,
   ]) {
@@ -119,6 +124,7 @@ test("runtime privilege proof ignores only deny-only CockroachDB role options", 
     affirmativeSystemGrants([
       { privilege_type: "NOSQLLOGIN", is_grantable: false },
       { privilege_type: "NOBYPASSRLS", is_grantable: false },
+      { privilege_type: "NOREPLICATION", is_grantable: false },
       { privilege_type: "NOVIEWACTIVITY", is_grantable: false },
     ]),
     []
@@ -134,4 +140,35 @@ test("runtime privilege proof fails closed on positive, unknown, or grantable en
   ];
 
   assert.deepEqual(affirmativeSystemGrants(unsafe), unsafe);
+});
+
+test("runtime role-option proof rejects every privileged or disabled-login option", () => {
+  assert.deepEqual(
+    privilegedRuntimeRoleOptions([
+      "NOBYPASSRLS",
+      "CREATEDB",
+      "CREATELOGIN = true",
+      "CONTROLCHANGEFEED",
+      "REPLICATION",
+      "SUBJECT=CN=unexpected",
+      "PROVISIONSRC=oidc:https://unexpected.example",
+      "VIEWACTIVITYREDACTED",
+      "CREATEDB",
+    ]),
+    [
+      "CONTROLCHANGEFEED",
+      "CREATEDB",
+      "CREATELOGIN",
+      "PROVISIONSRC",
+      "REPLICATION",
+      "SUBJECT",
+      "VIEWACTIVITYREDACTED",
+    ]
+  );
+  assert.equal(runtimeLoginIsDisabled(["NOBYPASSRLS"]), false);
+  assert.equal(runtimeLoginIsDisabled(["NOLOGIN"]), true);
+  assert.equal(runtimeLoginIsDisabled(["NOSQLLOGIN = true"]), true);
+  assert.equal(runtimeRoleOptionsAreCanonical([]), true);
+  assert.equal(runtimeRoleOptionsAreCanonical(["VALID UNTIL=2099-01-01"]), false);
+  assert.equal(runtimeRoleOptionsAreCanonical(["FUTURE_OPTION"]), false);
 });

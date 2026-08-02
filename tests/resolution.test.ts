@@ -7,6 +7,12 @@ import {
   resolutionRoutineRuntimeEvidence,
   resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
+import {
+  RESOLUTION_ROUTINE_SIGNATURES,
+  expectedRuntimeDatabaseGrants,
+  validateClusterWideResolutionGrants,
+  type ClusterGrantRow,
+} from "../src/db/cluster-grant-proof.js";
 import { closePool, query } from "../src/db/client.js";
 import {
   handleCreateResolutionSession,
@@ -106,6 +112,240 @@ class RecordingResolutionStore implements ResolutionStore {
     return this.snapshot;
   }
 }
+
+test("cluster-wide grant proof requires exact routine identities and can close a database matrix", () => {
+  const applicationDatabase = "archon";
+  const principal = "archon_staging_abc123";
+  const routineRows: ClusterGrantRow[] = RESOLUTION_ROUTINE_SIGNATURES.map(
+    (signature) => ({
+      database_name: applicationDatabase,
+      schema_name: "public",
+      object_name: signature,
+      object_type: "routine",
+      grantee: "archon_resolution_writer",
+      privilege_type: "EXECUTE",
+      is_grantable: false,
+    })
+  );
+  const expectedDatabaseGrants = expectedRuntimeDatabaseGrants(
+    applicationDatabase,
+    principal
+  );
+  assert.deepEqual(expectedDatabaseGrants, [
+    {
+      databaseName: "defaultdb",
+      grantee: "public",
+      privilegeType: "CONNECT",
+      isGrantable: false,
+    },
+    {
+      databaseName: "defaultdb",
+      grantee: "public",
+      privilegeType: "TEMPORARY",
+      isGrantable: false,
+    },
+    {
+      databaseName: "postgres",
+      grantee: "public",
+      privilegeType: "CONNECT",
+      isGrantable: false,
+    },
+    {
+      databaseName: "postgres",
+      grantee: "public",
+      privilegeType: "TEMPORARY",
+      isGrantable: false,
+    },
+    {
+      databaseName: applicationDatabase,
+      grantee: principal,
+      privilegeType: "CONNECT",
+      isGrantable: false,
+    },
+  ]);
+  const databaseRows: ClusterGrantRow[] = expectedDatabaseGrants.map(
+    (grant) => ({
+      database_name: grant.databaseName,
+      schema_name: null,
+      object_name: null,
+      object_type: "database",
+      grantee: grant.grantee,
+      privilege_type: grant.privilegeType,
+      is_grantable: grant.isGrantable,
+    })
+  );
+  const unexpectedDatabaseGrant: ClusterGrantRow = {
+    ...databaseRows[0]!,
+    database_name: "unrelated",
+  };
+  const databaseInventory = [
+    applicationDatabase,
+    "defaultdb",
+    "postgres",
+    "system",
+  ];
+
+  const exactProof = validateClusterWideResolutionGrants(
+    [...routineRows, ...databaseRows],
+    applicationDatabase,
+    expectedDatabaseGrants,
+    databaseInventory
+  );
+  assert.equal(exactProof.routineGrantCount, 2);
+  assert.equal(exactProof.databaseGrantCount, 5);
+  assert.deepEqual(exactProof.databaseInventory, databaseInventory);
+  assert.deepEqual(exactProof.databaseGrantMatrix, [
+    expectedDatabaseGrants[4],
+    ...expectedDatabaseGrants.slice(0, 4),
+  ]);
+  assert.match(exactProof.databaseMatrixSha256, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    validateClusterWideResolutionGrants(
+      [...routineRows, ...databaseRows].reverse(),
+      applicationDatabase,
+      expectedDatabaseGrants,
+      databaseInventory
+    ).databaseMatrixSha256,
+    exactProof.databaseMatrixSha256
+  );
+  const routineOnlyProof = validateClusterWideResolutionGrants(
+    [...routineRows, ...databaseRows],
+    applicationDatabase
+  );
+  assert.equal(routineOnlyProof.routineGrantCount, 2);
+  assert.equal(routineOnlyProof.databaseGrantCount, 5);
+  assert.deepEqual(routineOnlyProof.databaseInventory, []);
+  assert.deepEqual(routineOnlyProof.databaseGrantMatrix, [
+    expectedDatabaseGrants[4],
+    ...expectedDatabaseGrants.slice(0, 4),
+  ]);
+
+  for (const driftedRows of [
+    [
+      { ...routineRows[0]!, database_name: "other_database" },
+      routineRows[1]!,
+    ],
+    [
+      {
+        ...routineRows[0]!,
+        object_name: "archon_resolution_create_session(text)",
+      },
+      routineRows[1]!,
+    ],
+    [
+      { ...routineRows[0]!, grantee: "public" },
+      routineRows[1]!,
+    ],
+    [
+      { ...routineRows[0]!, is_grantable: true },
+      routineRows[1]!,
+    ],
+    [...routineRows, { ...routineRows[0]!, database_name: "other_database" }],
+  ]) {
+    assert.throws(
+      () =>
+        validateClusterWideResolutionGrants(
+          driftedRows,
+          applicationDatabase
+        ),
+      /Cluster-wide routine privileges exceed/u
+    );
+  }
+  for (const driftedDatabaseRows of [
+    databaseRows.slice(1),
+    databaseRows.map((row, index) =>
+      index === 0 ? { ...row, privilege_type: "TEMPORARY" } : row
+    ),
+    databaseRows.map((row, index) =>
+      index === 1 ? { ...row, is_grantable: true } : row
+    ),
+    databaseRows.map((row, index) =>
+      index === databaseRows.length - 1
+        ? { ...row, grantee: "archon_public_reader" }
+        : row
+    ),
+    databaseRows.map((row, index) =>
+      index === databaseRows.length - 1
+        ? { ...row, privilege_type: "TEMPORARY" }
+        : row
+    ),
+    [
+      ...databaseRows,
+      {
+        ...databaseRows[databaseRows.length - 1]!,
+        privilege_type: "TEMPORARY",
+      },
+    ],
+    [...databaseRows, databaseRows[0]!],
+  ]) {
+    assert.throws(
+      () =>
+        validateClusterWideResolutionGrants(
+          [...routineRows, ...driftedDatabaseRows],
+          applicationDatabase,
+          expectedDatabaseGrants,
+          databaseInventory
+        ),
+      /Cluster-wide database privileges do not match/u
+    );
+  }
+  assert.throws(
+    () =>
+      validateClusterWideResolutionGrants(
+        [...routineRows, ...databaseRows, unexpectedDatabaseGrant],
+        applicationDatabase,
+        expectedDatabaseGrants,
+        [...databaseInventory, "unrelated"]
+      ),
+    /exact database inventory/u
+  );
+  assert.throws(
+    () =>
+      validateClusterWideResolutionGrants(
+        [
+          ...routineRows,
+          { ...databaseRows[0]!, schema_name: "public" },
+        ],
+        applicationDatabase
+      ),
+    /Cluster-wide database privilege rows are malformed/u
+  );
+  for (const driftedInventory of [
+    databaseInventory.filter((name) => name !== "system"),
+    [...databaseInventory, "system"],
+    [...databaseInventory, ""],
+    [...databaseInventory, "unrelated_without_grants"],
+  ]) {
+    assert.throws(
+      () =>
+        validateClusterWideResolutionGrants(
+          [...routineRows, ...databaseRows],
+          applicationDatabase,
+          expectedDatabaseGrants,
+          driftedInventory
+        ),
+      /exact database inventory/u
+    );
+  }
+  assert.throws(
+    () =>
+      validateClusterWideResolutionGrants(
+        [...routineRows, ...databaseRows],
+        applicationDatabase,
+        [...expectedDatabaseGrants, expectedDatabaseGrants[0]!],
+        databaseInventory
+      ),
+    /Expected cluster-wide database privilege matrix is not canonical/u
+  );
+  assert.throws(
+    () => expectedRuntimeDatabaseGrants("system", principal),
+    /requires non-empty, distinct application and principal identities/u
+  );
+  assert.throws(
+    () => expectedRuntimeDatabaseGrants(applicationDatabase, "public"),
+    /requires non-empty, distinct application and principal identities/u
+  );
+});
 
 test("resolution routine catalog gate trusts only descriptor-backed definer metadata", () => {
   const routineName = "archon_resolution_create_session";

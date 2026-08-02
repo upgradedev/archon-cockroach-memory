@@ -383,7 +383,7 @@ test("uploaded receipt is runner-temporary, digest-only, and fail-closed", () =>
 });
 
 test("FinOps documentation distinguishes prepared controls from live evidence", () => {
-  assert.match(costModel, /source-only control workflow/iu);
+  assert.match(costModel, /source-only control\s+workflow/iu);
   assert.match(costModel, /No hosted workflow receipt/iu);
   assert.match(costModel, /manual,\s+fail-closed `plan\|apply\|verify`/iu);
   assert.match(costModel, /not an application workload/iu);

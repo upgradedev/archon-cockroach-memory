@@ -1532,7 +1532,7 @@ test("readiness: every CockroachDB and Docker base image is digest-pinned", () =
   const dockerfiles = repositoryDockerfileSources();
   assert.equal(compose.length, 2);
   assert.equal(dockerfiles.length, 0);
-  assert.equal(EXPECTED_COCKROACH_IMAGE_REFS, 8);
+  assert.equal(EXPECTED_COCKROACH_IMAGE_REFS, 9);
   assert.equal(EXPECTED_COMPOSE_IMAGE_REFS, 4);
   assert.equal(EXPECTED_DOCKERFILE_BASE_REFS, 0);
   assert.equal(allComposeImagesPinned(compose), true);
@@ -1730,7 +1730,11 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   assert.match(codeql, /queries:\s*security-and-quality/u);
   assert.match(
     codeql,
-    /output:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u
+    /output:\s*\$\{\{\s*env\.CODEQL_RAW_SARIF_DIR\s*\}\}/u
+  );
+  assert.match(
+    codeql,
+    /post-processed-sarif-path:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u
   );
   assert.match(codeql, /upload:\s*always/u);
   assert.match(
@@ -2148,8 +2152,8 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
           ? {
               ...entry,
               source: entry.source.replace(
-                /    branches:\r?\n      - main\r?\n/u,
-                '    branches:\n      - release\n'
+                '    - cron: "7,22,37,52 * * * *"',
+                '    - cron: "0 * * * *"'
               ),
             }
           : entry
@@ -2452,6 +2456,14 @@ test("readiness: Managed MCP source and both protected workflows pin causal rece
       1
     );
     assert.match(workflow, /persist-credentials: false/u);
+    assert.match(
+      workflow,
+      /\.schemaVersion == 6[\s\S]*?\(\.runtimes \| length\) == 2[\s\S]*?\(\[\.runtimes\[\]\.environment\] \| sort\) ==[\s\S]*?\["production", "staging"\][\s\S]*?databaseMatrixSha256\] \|[\s\S]*?unique \| length\) == 2[\s\S]*?all\(\.runtimes\[\];[\s\S]*?archon_staging_[a-z0-9{}\[\],^-]+[\s\S]*?archon_production_[a-z0-9{}\[\],^-]+[\s\S]*?\.clusterGrantProof\.routineGrantCount == 2[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u
+    );
+    assert.match(
+      workflow,
+      /for runtime_environment in staging production; do[\s\S]*?expected_matrix_sha="\$\(jq -er[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256[\s\S]*?matrix_json="\$\(jq -cer[\s\S]*?\.clusterGrantProof\.databaseGrantMatrix[\s\S]*?actual_matrix_sha="\$\(printf '%s' "\$matrix_json"[\s\S]*?sha256sum[\s\S]*?test "\$actual_matrix_sha" = "\$expected_matrix_sha"/u
+    );
   }
   assert.match(
     standalone,
@@ -2533,7 +2545,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../.github/workflows/database-release.yml", import.meta.url),
     "utf8"
   );
-  assert.match(workflow, /\.schemaVersion == 5/u);
+  assert.match(workflow, /\.schemaVersion == 6/u);
   assert.match(workflow, /\.proofs\.durableStoreIntegrity == true/u);
   assert.match(workflow, /\.proofs\.canonicalActiveMemories == 9/u);
   assert.match(workflow, /\.proofs\.distinctIdempotencyKeys == 9/u);
@@ -2589,7 +2601,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../scripts/verify-database-release.ts", import.meta.url),
     "utf8"
   );
-  assert.match(verifier, /schemaVersion: 5/u);
+  assert.match(verifier, /schemaVersion: 6/u);
   assert.match(verifier, /assertCockroachEndpointBinding/u);
   assert.match(verifier, /scopedServingQueriesRejectCanaries: true/u);
   const scopedVerifier = verifier.match(
@@ -2698,9 +2710,17 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     /verifyExactResolutionRelationGrants\(\s*client,\s*"archon_resolution_writer",\s*RESOLUTION_WRITER_GRANTS/u
   );
   assert.match(verifier, /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u);
-  assert.match(
-    verifier,
-    /SHOW GRANTS FOR archon_resolution_writer[\s\S]*?object_type = 'routine'/u
+  const clusterGrantProof = readFileSync(
+    new URL("../src/db/cluster-grant-proof.ts", import.meta.url),
+    "utf8"
+  );
+  const systemGrantContract = readFileSync(
+    new URL("../src/db/system-grants.ts", import.meta.url),
+    "utf8"
+  );
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
   );
   const applySchemaVerifier = readFileSync(
     new URL("../scripts/apply-schema.ts", import.meta.url),
@@ -2714,30 +2734,205 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../scripts/rotate-runtime-secret.ts", import.meta.url),
     "utf8"
   );
-  for (const [principalGrantVerifier, expectedRoutineFilters] of [
+  const runtimeProvisioningVerifier = readFileSync(
+    new URL("../scripts/provision-runtime-secret.ts", import.meta.url),
+    "utf8"
+  );
+  for (const [principalGrantVerifier, expectedProofCalls] of [
     [verifier, 2],
     [applySchemaVerifier, 1],
     [migrationRehearsalVerifier, 1],
     [runtimeRotationVerifier, 1],
+    [runtimeProvisioningVerifier, 1],
   ] as const) {
-    assert.equal(
-      (principalGrantVerifier.match(/WHERE object_type = 'routine'/gu) ?? [])
-        .length,
-      expectedRoutineFilters
-    );
     assert.equal(
       (
         principalGrantVerifier.match(
-          /grant\.grantee !== "archon_resolution_writer"/gu
+          /verifyClusterWideResolutionGrants\(\{/gu
         ) ?? []
       ).length,
-      expectedRoutineFilters
-    );
-    assert.doesNotMatch(
-      principalGrantVerifier,
-      /object_type = 'function'/u
+      expectedProofCalls
     );
   }
+  assert.match(clusterGrantProof, /const proofClient = new Client\(\{/u);
+  assert.match(clusterGrantProof, /SET database = ''/u);
+  assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
+  assert.match(
+    clusterGrantProof,
+    /database\.rows\[0\]\?\.database_name !== null/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_decide\(text, text, uuid, uuid, uuid, timestamptz\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /routineRows\.length !== expectedRoutineKeys\.size/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u
+  );
+  assert.match(clusterGrantProof, /FROM \[SHOW DATABASES\]/u);
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /JSON\.stringify\(finalDatabaseInventory\)[\s\S]*?JSON\.stringify\(databaseNames\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /JSON\.stringify\(actualDatabaseInventory\)[\s\S]*?JSON\.stringify\(requiredDatabaseInventory\)/u
+  );
+  assert.match(clusterGrantProof, /databaseMatrixSha256: createHash\("sha256"\)/u);
+  assert.match(
+    clusterGrantProof,
+    /Supplied runtime database privilege matrix is not canonical/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /finally \{[\s\S]*?proofClient\.end\(\)\.catch/u
+  );
+  assert.match(
+    ci,
+    /CREATE DATABASE IF NOT EXISTS archon_migration[\s\S]*?db:migration:rehearsal[\s\S]*?DROP DATABASE archon_migration CASCADE[\s\S]*?DROP USER archon_migration_ci[\s\S]*?CREATE DATABASE archon_reconciliation[\s\S]*?db:memory:reconciliation:rehearsal[\s\S]*?DROP DATABASE archon_reconciliation CASCADE[\s\S]*?local:bootstrap/u
+  );
+  assert.equal(
+    (ci.match(/CREATE DATABASE (?:IF NOT EXISTS )?archon_reconciliation/gu) ?? [])
+      .length,
+    1
+  );
+  assert.doesNotMatch(clusterGrantProof, /object_type = 'function'/u);
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseName,\s*"archon_migration_ci"\s*\)/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT TEMPORARY ON DATABASE "\$\{databaseName\}" TO archon_migration_ci[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE TEMPORARY ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci WITH GRANT OPTION[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE CONNECT ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci[\s\S]*?GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /CREATE DATABASE archon_unexpected_grants_ci[\s\S]*?REVOKE CONNECT, TEMPORARY ON DATABASE archon_unexpected_grants_ci FROM public[\s\S]*?expectClusterGrantProofRejected[\s\S]*?Cluster-wide grant proof could not bind the exact database inventory\.[\s\S]*?DROP DATABASE archon_unexpected_grants_ci CASCADE/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /appTemporaryGrantDriftRejected:\s*true/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /databaseGrantOptionDriftRejected:\s*true/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /extraDatabaseGrantDriftRejected:\s*true/u
+  );
+  for (const runtimeVerifier of [
+    verifier,
+    runtimeRotationVerifier,
+    runtimeProvisioningVerifier,
+  ]) {
+    assert.match(
+      runtimeVerifier,
+      /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*database(?:Name|Raw),\s*(?:principal|appUserRaw)\s*\)/u
+    );
+    assert.match(runtimeVerifier, /privilegedRuntimeRoleOptions/u);
+    assert.match(runtimeVerifier, /runtimeLoginIsDisabled/u);
+    assert.match(runtimeVerifier, /runtimeRoleOptionsAreCanonical/u);
+    assert.match(runtimeVerifier, /affirmativeSystemGrants/u);
+  }
+  for (const option of [
+    "ADMIN",
+    "BYPASSRLS",
+    "CANCELQUERY",
+    "CONTROLCHANGEFEED",
+    "CONTROLJOB",
+    "CREATEDB",
+    "CREATELOGIN",
+    "CREATEROLE",
+    "MODIFYCLUSTERSETTING",
+    "PROVISIONSRC",
+    "REPLICATION",
+    "SUBJECT",
+    "VIEWACTIVITY",
+    "VIEWACTIVITYREDACTED",
+    "VIEWCLUSTERSETTING",
+  ]) {
+    assert.ok(systemGrantContract.includes(`"${option}"`), option);
+  }
+  assert.match(systemGrantContract, /export function privilegedRuntimeRoleOptions/u);
+  assert.match(systemGrantContract, /export function runtimeLoginIsDisabled/u);
+  assert.match(
+    systemGrantContract,
+    /export function runtimeRoleOptionsAreCanonical/u
+  );
+  assert.match(
+    runtimeProvisioningVerifier,
+    /SHOW SYSTEM GRANTS FOR \$\{appUser\}/u
+  );
+  for (const runtimeVerifier of [verifier, runtimeRotationVerifier]) {
+    assert.match(
+      runtimeVerifier,
+      /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}[\s\S]*?databaseGrants\.rows\.length !== 1[\s\S]*?grant\.database_name !== databaseName[\s\S]*?grant\.grantee !== principal/u
+    );
+  }
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeFunctionPrivilegeMatrix ==\s*\n?\s*"cluster-wide EXECUTE only on the two canonical resolution routine signatures"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeDatabasePrivilegeMatrix ==\s*\n?\s*"cluster-wide exact five-row non-grantable matrix: public CONNECT\+TEMPORARY on defaultdb\/postgres; runtime principal CONNECT on archon; zero system rows"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeSystemPrivileges ==\s*\n?\s*"exact-empty runtime role options; no affirmative system grants"/u
+  );
+  assert.match(workflow, /\.clusterGrantProof\.routineGrantCount == 2/u);
+  assert.match(workflow, /\.clusterGrantProof\.databaseGrantCount == 5/u);
+  assert.match(
+    workflow,
+    /\.clusterGrantProof\.databaseInventory ==\s*\n?\s*\["archon", "defaultdb", "postgres", "system"\]/u
+  );
+  assert.match(workflow, /\.clusterGrantProof\.databaseMatrixSha256/u);
+  assert.match(
+    workflow,
+    /\[\.runtimes\[\]\.clusterGrantProof\.databaseMatrixSha256\][\s\S]*?unique \| length\) == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false/u
+  );
+  assert.match(
+    workflow,
+    /for runtime_environment in staging production; do[\s\S]*?expected_matrix_sha="\$\(jq -er[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256[\s\S]*?matrix_json="\$\(jq -cer[\s\S]*?\.clusterGrantProof\.databaseGrantMatrix[\s\S]*?actual_matrix_sha="\$\(printf '%s' "\$matrix_json"[\s\S]*?sha256sum[\s\S]*?test "\$actual_matrix_sha" = "\$expected_matrix_sha"/u
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    deploy,
+    /\.schemaVersion == 6[\s\S]*?all\(\.runtimes\[\];[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u
+  );
   assert.match(verifier, /sql\.ttl\.job\.enabled/u);
   assert.match(verifier, /SHOW SCHEDULES/u);
 });
@@ -2837,7 +3032,7 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
   }
 
   for (const mutation of [
-    workflow.replace(
+    workflow.replaceAll(
       '.status == "reachable"',
       '.status == "degraded"'
     ),
@@ -2891,15 +3086,23 @@ test("readiness: AWS canary isolates and exercises the exact candidate version",
 
   for (const [index, block] of canaryBlocks.entries()) {
     assert.ok(block, `AWS canary block ${index + 1} must exist`);
-    assert.match(block, /trap stop_canary_probe EXIT/u);
+    assert.match(
+      block,
+      /trap (?:stop_canary_probe|cleanup_deploy_background) EXIT/u
+    );
     assert.match(block, /while true; do/u);
     assert.match(block, /\$CANARY_URL\/api\/proof/u);
     assert.match(block, /\$CANARY_URL\/api\/recall/u);
     assert.match(
       block,
-      /sam deploy[\s\S]*?--no-progressbar\s+stop_canary_probe\s+trap - EXIT/u
+      /sam deploy[\s\S]*?--no-progressbar[\s\S]*?stop_canary_probe[\s\S]*?trap - EXIT/u
     );
   }
+  assert.match(
+    canaryBlocks[0]!,
+    /cleanup_deploy_background\(\)[\s\S]*?stop_canary_probe[\s\S]*?stop_drill_observer/u
+  );
+  assert.match(canaryBlocks[1]!, /trap stop_canary_probe EXIT/u);
   assert.ok(deploymentPreference);
   assert.match(
     deploymentPreference,
@@ -3005,6 +3208,9 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     ),
     "utf8"
   );
+  const policyEffectiveTrivy = supplyChain.match(
+    /(?:^|\r?\n)      - name: Materialize policy-effective Trivy IaC SARIF\r?\n[\s\S]*?(?=\r?\n      - name: Upload policy-effective Trivy IaC SARIF\r?\n)/u
+  )?.[0];
   const sourceGate = deploy.match(
     /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
   )?.[0];
@@ -3076,7 +3282,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
         /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.equal(
     (
@@ -3084,7 +3290,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
         /gh attestation verify candidate-evidence-binding\.json/gu
       ) ?? []
     ).length,
-    3
+    2
   );
   assert.equal(
     (
@@ -3092,7 +3298,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
         /gh attestation verify supply-chain-release-receipt\.json/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.match(
     supplyChain,
@@ -3144,6 +3350,75 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   assert.match(
     supplyChain,
     /trivy-iac-blocking-findings\.json/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Materialize policy-effective Trivy IaC SARIF/u
+  );
+  assert.ok(policyEffectiveTrivy);
+  for (const contract of [
+    '.rawFindings == 3',
+    '.compatibilityFindings == 3',
+    '.blockingFindings == 0',
+    '.acceptedWaivers == 0',
+    'map(.namespace) == [',
+    '.logicalResource == $contract.logicalResource',
+    '.scannerResource == $contract.scannerResource',
+    '.startLine == $contract.sourceRange.startLine',
+    '.endLine == $contract.sourceRange.endLine',
+    '.sourceProperty == $contract.sourceProperty',
+    '.reason == $contract.reason',
+    '.controls == $contract.controls',
+    'WebACLId: !Ref CloudFrontWebAclArn',
+    'CloudFrontDefaultCertificate: true',
+    'KMSMasterKeyID: Fn::ImportValue \\"${AppName}-storage-kms-key-arn\\"',
+    '"mandatoryWebAclParameter":true',
+    '"customDomainAliases":false',
+    '"foundationCustomerManagedKey":true',
+    '"denyUnexpectedKeyWrites":true',
+    '$location.artifactLocation.uri == $finding.target',
+    '$location.region.startLine == $finding.startLine',
+    '$location.region.endLine == $finding.endLine',
+    '$location.region.startColumn == 1',
+    '$location.region.endColumn == 1',
+    '.results = [] |',
+    '$run.results == []',
+    '"rawFindings":3',
+    '"compatibilityFindings":3',
+    '"blockingFindings":0',
+    '"acceptedWaivers":0',
+    '"rawEvidence":"trivy-iac.sarif"',
+  ]) {
+    assert.ok(
+      policyEffectiveTrivy.includes(contract),
+      `policy-effective Trivy gate must retain ${contract}`
+    );
+  }
+  assert.ok(
+    policyEffectiveTrivy.includes(
+      'raw_sha_before="$(sha256sum "$raw" | awk \'{print $1}\')"'
+    )
+  );
+  assert.ok(
+    policyEffectiveTrivy.includes(
+      'test "$raw_sha_before" = "$(sha256sum "$raw" | awk \'{print $1}\')"'
+    )
+  );
+  assert.match(
+    policyEffectiveTrivy,
+    /\(\$run\.results \| length\) == 3[\s\S]*?\$location\.artifactLocation\.uri ==\s+\$contract\.target[\s\S]*?\$location\.region\.startLine ==\s+\$contract\.sourceRange\.startLine[\s\S]*?\$location\.region\.endLine ==\s+\$contract\.sourceRange\.endLine/u
+  );
+  assert.match(
+    policyEffectiveTrivy,
+    /jq -e 'length == 0' "\$blocking" >\/dev\/null/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Upload policy-effective Trivy IaC SARIF[\s\S]*?sarif_file: retrieved\/iac\/trivy-iac-policy\.sarif[\s\S]*?category: trivy\/iac/u
+  );
+  assert.doesNotMatch(
+    supplyChain,
+    /sarif_file: retrieved\/iac\/trivy-iac\.sarif/u
   );
   assert.match(supplyChain, /validate-trivy-sbom-policy\.mjs --self-test/u);
   assert.match(supplyChain, /trivy-sbom-compatibility-findings\.json/u);
@@ -3292,7 +3567,7 @@ test("readiness: exact-SHA memory evaluation is a required candidate-bound check
   );
   assert.match(
     buildOnce!,
-    /candidate-evidence-binding\.json[\s\S]*?memoryEvaluation:\s*\{[\s\S]*?memoryEvaluationReceiptSha256/u
+    /memoryEvaluation:\s*\{[\s\S]*?memoryEvaluationReceiptSha256[\s\S]*?candidate-evidence-binding\.json/u
   );
   assert.equal(
     (deploy.match(/memory-evaluation-receipt\.json/gu) ?? []).length >= 8,
@@ -3304,7 +3579,7 @@ test("readiness: exact-SHA memory evaluation is a required candidate-bound check
         /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
       ) ?? []
     ).length,
-    4
+    2
   );
 });
 
@@ -3625,7 +3900,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
         /and \.ReservedConcurrency == \$reservedConcurrency/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.equal(
     (
@@ -3633,7 +3908,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
         /select\(\.ParameterKey == "ReservedConcurrency"\)\s+\| \.ParameterValue\] == \[\$reservedConcurrency\]/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.match(
     template,
@@ -3650,7 +3925,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
         /select\(\.ParameterKey == "ReleaseCommitSha"\)\s+\| \.ParameterValue\] == \[\$releaseCommitSha\]/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.equal(
     (
@@ -3658,7 +3933,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
         /\.release\.commitSha == \$releaseCommitSha and\s+\.release\.evidence == "server-configured Lambda environment"/gu
       ) ?? []
     ).length,
-    4
+    2
   );
   assert.match(
     workflow,
@@ -3804,7 +4079,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/--template-stage Original/gu) ?? []).length,
-    4
+    5
   );
   assert.equal(
     (workflow.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? [])

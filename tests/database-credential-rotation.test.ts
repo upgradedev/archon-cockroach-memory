@@ -15,6 +15,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string): string => readFileSync(join(root, path), "utf8");
 const workflow = read(".github/workflows/database-credential-rotation.yml");
 const script = read("scripts/rotate-runtime-secret.ts");
+const provision = read("scripts/provision-runtime-secret.ts");
+const clusterGrantProof = read("src/db/cluster-grant-proof.ts");
+const systemGrantContract = read("src/db/system-grants.ts");
 const foundation = read("aws/bootstrap-oidc.yaml");
 const runbook = read("docs/runbooks/credential-compromise.md");
 const wellArchitectedAudit = read(
@@ -213,12 +216,66 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
   assert.match(createPrincipal, /autocommitted schema change/u);
   assert.match(dropPrincipal, /safe to repeat/u);
   assert.match(script, /affirmativeSystemGrants\(systemGrants\.rows\)/u);
+  for (const runtimeGate of [script, provision]) {
+    assert.match(runtimeGate, /privilegedRuntimeRoleOptions/u);
+    assert.match(runtimeGate, /runtimeLoginIsDisabled/u);
+    assert.match(runtimeGate, /runtimeRoleOptionsAreCanonical/u);
+    assert.match(runtimeGate, /affirmativeSystemGrants/u);
+  }
+  assert.match(provision, /SHOW SYSTEM GRANTS FOR \$\{appUser\}/u);
+  assert.match(systemGrantContract, /"CREATEDB"/u);
+  assert.match(systemGrantContract, /"CREATELOGIN"/u);
+  assert.match(systemGrantContract, /"CONTROLCHANGEFEED"/u);
+  assert.match(systemGrantContract, /"REPLICATION"/u);
+  assert.match(systemGrantContract, /"SUBJECT"/u);
+  assert.match(systemGrantContract, /"PROVISIONSRC"/u);
   assert.match(script, /SHOW GRANTS ON TABLE \* FOR \$\{principalSql\}/u);
+  assert.match(script, /verifyClusterWideResolutionGrants\(\{/u);
+  assert.match(provision, /verifyClusterWideResolutionGrants\(\{/u);
+  for (const runtimePrincipalProof of [script, provision]) {
+    assert.match(
+      runtimePrincipalProof,
+      /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*database(?:Name|Raw),\s*(?:principal|appUserRaw)\s*\)/u
+    );
+  }
   assert.match(
     script,
-    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?WHERE object_type = 'routine'/u
+    /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}[\s\S]*?databaseGrants\.rows\.length !== 1[\s\S]*?grant\.database_name !== databaseName[\s\S]*?grant\.grantee !== principal/u
   );
-  assert.doesNotMatch(script, /WHERE object_type = 'function'/u);
+  assert.match(clusterGrantProof, /const proofClient = new Client\(\{/u);
+  assert.match(clusterGrantProof, /SET database = ''/u);
+  assert.match(
+    clusterGrantProof,
+    /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u
+  );
+  assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u
+  );
+  assert.match(clusterGrantProof, /FROM \[SHOW DATABASES\]/u);
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /JSON\.stringify\(finalDatabaseInventory\)[\s\S]*?JSON\.stringify\(databaseNames\)/u
+  );
+  assert.match(clusterGrantProof, /databaseMatrixSha256: createHash\("sha256"\)/u);
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_decide\(text, text, uuid, uuid, uuid, timestamptz\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /finally \{[\s\S]*?proofClient\.end\(\)\.catch/u
+  );
+  assert.doesNotMatch(clusterGrantProof, /object_type = 'function'/u);
 });
 
 test("ambiguous cutover is reconciled and rollback precedes cleanup", () => {

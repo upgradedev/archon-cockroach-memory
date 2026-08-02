@@ -1397,10 +1397,214 @@ jobs:
           sarif_file: retrieved/static/zizmor.sarif
           category: zizmor/workflows
 
-      - name: Upload Trivy IaC SARIF
+      - name: Materialize policy-effective Trivy IaC SARIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          status="retrieved/iac/trivy-iac-status.json"
+          compatibility="retrieved/iac/trivy-iac-compatibility-findings.json"
+          blocking="retrieved/iac/trivy-iac-blocking-findings.json"
+          raw="retrieved/iac/trivy-iac.sarif"
+          effective="retrieved/iac/trivy-iac-policy.sarif"
+          for evidence in "$status" "$compatibility" "$blocking" "$raw"; do
+            test -s "$evidence"
+            test ! -L "$evidence"
+          done
+          raw_sha_before="$(sha256sum "$raw" | awk '{print $1}')"
+          [[ "$raw_sha_before" =~ ^[0-9a-f]{64}$ ]]
+          jq -e '
+            .schema == "archon.trivy-iac.compatibility" and
+            .version == 2 and
+            .mode ==
+              "blocking-exact-source-validated-parser-compatibilities" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .versionEvidence == {
+              "toolLock":"0.72.0",
+              "capturedCli":"0.72.0",
+              "sarifDriver":"0.72.0"
+            } and
+            .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
+            .rawFindings == 3 and
+            .compatibilityFindings == 3 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            .sourceEvidence == {
+              "applicationTemplate":"aws/template.yaml",
+              "foundationTemplate":"aws/bootstrap-oidc.yaml"
+            } and
+            (.compatibilities | length) == 3 and
+            [.compatibilities[].ruleId] ==
+              ["AWS-0011","AWS-0013","AWS-0132"] and
+            [.compatibilities[].logicalResource] ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.compatibilities[];
+              .findingType == "CloudFormation Security Check" and
+              .severity == "HIGH" and
+              .target == "aws/template.yaml" and
+              (.reason | type) == "string" and
+              (.reason | length) > 0 and
+              (.sourceRange as $range |
+                ($range.startLine | type) == "number" and
+                ($range.endLine | type) == "number" and
+                $range.startLine > 0 and
+                $range.endLine >= $range.startLine and
+                ($range.startLine | floor) == $range.startLine and
+                ($range.endLine | floor) == $range.endLine and
+                .scannerResource ==
+                  ("aws/template.yaml:" +
+                   ($range.startLine | tostring) + "-" +
+                   ($range.endLine | tostring)))) and
+            .compatibilities[0].sourceProperty ==
+              "WebACLId: !Ref CloudFrontWebAclArn" and
+            .compatibilities[0].controls == {
+              "mandatoryWebAclParameter":true,
+              "directWebAclBinding":true,
+              "globalUsEast1ArnConstraint":true,
+              "accessLogging":true
+            } and
+            .compatibilities[1].sourceProperty ==
+              "CloudFrontDefaultCertificate: true" and
+            .compatibilities[1].controls == {
+              "defaultViewerHttpsRedirect":true,
+              "apiViewerHttpsOnly":true,
+              "customOriginHttpsOnly":true,
+              "mandatoryWebAcl":true,
+              "dynamicOriginSecret":true,
+              "accessLogging":true,
+              "customDomainAliases":false
+            } and
+            .compatibilities[2].sourceProperty ==
+              "KMSMasterKeyID: Fn::ImportValue \"${AppName}-storage-kms-key-arn\"" and
+            .compatibilities[2].controls == {
+              "sseKms":true,
+              "bucketKeyEnabled":true,
+              "foundationCustomerManagedKey":true,
+              "keyRotation":true,
+              "importExportBound":true,
+              "denyUnencryptedWrites":true,
+              "denyUnexpectedKeyWrites":true
+            }
+          ' "$status" >/dev/null
+          jq -e \
+            --slurpfile status "$status" '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            map(.logicalResource) ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.[];
+              . as $finding |
+              ($status[0].compatibilities |
+                map(select(.ruleId == $finding.ruleId)) | .[0]) as $contract |
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              .findingType == $contract.findingType and
+              .severity == $contract.severity and
+              .target == $contract.target and
+              .logicalResource == $contract.logicalResource and
+              .scannerResource == $contract.scannerResource and
+              .startLine == $contract.sourceRange.startLine and
+              .endLine == $contract.sourceRange.endLine and
+              .sourceProperty == $contract.sourceProperty and
+              .reason == $contract.reason and
+              .controls == $contract.controls and
+              .scannerResource ==
+                ("aws/template.yaml:" + (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
+          ' "$compatibility" >/dev/null
+          jq -e 'length == 0' "$blocking" >/dev/null
+          jq -e \
+            --slurpfile status "$status" \
+            --slurpfile compatibility "$compatibility" '
+              .version == "2.1.0" and
+              (.runs | length) == 1 and
+              (.runs[0] as $run |
+                $run.tool.driver.name == "Trivy" and
+                $run.tool.driver.version == "0.72.0" and
+                ($run.tool.driver.rules | length) == 3 and
+                ([$run.tool.driver.rules[].id] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                ($run.results | length) == 3 and
+                ([$run.results[].ruleId] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                all($run.results[];
+                  . as $result |
+                  ($status[0].compatibilities |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
+                  ($compatibility[0] |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $finding |
+                  $result.level == "error" and
+                  ($result.locations | length) == 1 and
+                  ($result.locations[0].physicalLocation as $location |
+                    $location.artifactLocation.uri ==
+                      $contract.target and
+                    $location.artifactLocation.uri == $finding.target and
+                    $location.region.startLine ==
+                      $contract.sourceRange.startLine and
+                    $location.region.startLine == $finding.startLine and
+                    $location.region.endLine ==
+                      $contract.sourceRange.endLine and
+                    $location.region.endLine == $finding.endLine and
+                    $location.region.startColumn == 1 and
+                    $location.region.endColumn == 1)))
+            ' "$raw" >/dev/null
+          jq \
+            --slurpfile status "$status" '
+              .runs |= map(
+                .results = [] |
+                .properties = ((.properties // {}) + {
+                  archonPolicy: {
+                    schema: "archon.trivy-iac.code-scanning-policy",
+                    version: 1,
+                    mode: $status[0].mode,
+                    rawFindings: $status[0].rawFindings,
+                    compatibilityFindings:
+                      $status[0].compatibilityFindings,
+                    blockingFindings: $status[0].blockingFindings,
+                    acceptedWaivers: $status[0].acceptedWaivers,
+                    rawEvidence: "trivy-iac.sarif"
+                  }
+                })
+              )
+            ' "$raw" >"$effective"
+          jq -e '
+            .version == "2.1.0" and
+            (.runs | length) == 1 and
+            (.runs[0] as $run |
+              $run.tool.driver.name == "Trivy" and
+              $run.tool.driver.version == "0.72.0" and
+              ($run.tool.driver.rules | length) == 3 and
+              ([$run.tool.driver.rules[].id] | sort) ==
+                ["AWS-0011","AWS-0013","AWS-0132"] and
+              $run.results == [] and
+              $run.properties.archonPolicy == {
+                "schema":"archon.trivy-iac.code-scanning-policy",
+                "version":1,
+                "mode":
+                  "blocking-exact-source-validated-parser-compatibilities",
+                "rawFindings":3,
+                "compatibilityFindings":3,
+                "blockingFindings":0,
+                "acceptedWaivers":0,
+                "rawEvidence":"trivy-iac.sarif"
+              })
+          ' "$effective" >/dev/null
+          test "$raw_sha_before" = "$(sha256sum "$raw" | awk '{print $1}')"
+
+      - name: Upload policy-effective Trivy IaC SARIF
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
         with:
-          sarif_file: retrieved/iac/trivy-iac.sarif
+          sarif_file: retrieved/iac/trivy-iac-policy.sarif
           category: trivy/iac
 
       - name: Upload Trivy backend SARIF
