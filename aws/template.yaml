@@ -8,7 +8,9 @@ Parameters:
   AppName:
     Type: String
     Default: archon-memory
-    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
+    MinLength: 3
+    MaxLength: 17
+    AllowedPattern: "^[a-z][a-z0-9-]{2,16}$"
     Description: Lowercase application identifier used in resource names.
   Environment:
     Type: String
@@ -20,6 +22,13 @@ Parameters:
     Type: String
     AllowedPattern: "^[0-9a-f]{40}$"
     Description: Exact protected source commit promoted by the release workflow.
+  RecoveryDrillToken:
+    Type: String
+    Default: disabled
+    AllowedPattern: "^(disabled|drill-[1-9][0-9]*-[1-9][0-9]*)$"
+    Description: >-
+      Staging-only protected drill nonce. A non-default value creates a
+      behavior-neutral Lambda version transition for real rollback evidence.
   HttpApiStageName:
     Type: String
     Default: live
@@ -70,6 +79,12 @@ Parameters:
     Default: cockroach-cloud-api-release-gate
     AllowedValues:
       - cockroach-cloud-api-release-gate
+  CockroachSqlDns:
+    Type: String
+    AllowedPattern: "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    Description: >-
+      Exact primary eu-west-1 regions[].sql_dns authenticated by the protected
+      Cockroach Cloud database-release gate.
   PublicDemoTenantId:
     Type: String
     Default: public-demo
@@ -108,6 +123,21 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional SNS topic ARN for operational alarm notifications.
+  CloudFrontWebAclArn:
+    Type: String
+    AllowedPattern: "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
+    Description: >-
+      Required approval-gated CloudFront WebACL ARN provisioned by
+      aws/edge-waf.yaml in the us-east-1 CloudFront control plane. The
+      application release contract has no unprotected mode.
+
+Rules:
+  RecoveryDrillIsStagingOnly:
+    RuleCondition: !Not [!Equals [!Ref RecoveryDrillToken, disabled]]
+    Assertions:
+      - Assert: !Equals [!Ref Environment, staging]
+        AssertDescription: >-
+          A non-disabled RecoveryDrillToken is permitted only for staging.
 
 Conditions:
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
@@ -134,8 +164,11 @@ Resources:
       BucketName: !Sub "${AppName}-${Environment}-web-${AWS::AccountId}-${AWS::Region}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Fn::ImportValue: !Sub "${AppName}-storage-kms-key-arn"
+              SSEAlgorithm: aws:kms
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
@@ -279,7 +312,7 @@ Resources:
     DependsOn:
       - ApiVendedAccessLogGroup
     Properties:
-      Description: Public read-only judge API for Archon Memory
+      Description: Public fixed-scope judge API with read-only canonical memory and an isolated synthetic action sandbox
       # The regional SAM transform drops stage controls for a literal $default
       # stage. A named stage keeps the generated AWS::ApiGatewayV2::Stage
       # explicit in the processed template so throttling, metrics, and access
@@ -307,7 +340,7 @@ Resources:
       - ArchonFunctionLogGroup
     Properties:
       FunctionName: !Sub "${AppName}-${Environment}-api"
-      Description: Fixed-scope read-only memory recall, audit, and proof API
+      Description: Fixed-scope memory recall, audit, proof, and isolated human-gated resolution API
       CodeUri: ../
       Handler: lambda.handler
       Role: !Ref LambdaExecutionRoleArn
@@ -321,7 +354,9 @@ Resources:
           - !Ref LambdaCanaryErrorAlarm
       Environment:
         Variables:
+          APP_ENV: !Ref Environment
           DATABASE_SECRET_ID: !Ref DatabaseSecretId
+          COCKROACH_SQL_DNS: !Ref CockroachSqlDns
           BEDROCK_REGION: !Ref BedrockRegion
           BEDROCK_EMBED_MODEL_ID: !Ref BedrockEmbeddingModelId
           BEDROCK_MODEL_ID: !Ref BedrockNarratorModelId
@@ -330,10 +365,20 @@ Resources:
           COCKROACH_REGION: !Ref CockroachRegion
           COCKROACH_REGION_EVIDENCE: !Ref CockroachRegionEvidence
           RELEASE_COMMIT_SHA: !Ref ReleaseCommitSha
+          RECOVERY_DRILL_TOKEN: !Ref RecoveryDrillToken
           PGPOOL_MAX: "1"
           PGPOOL_MAX_LIFETIME_SECONDS: "300"
+          DATABASE_SECRET_REFRESH_SECONDS: "30"
           RECALL_MAX_QUESTION_CHARS: "500"
           RECALL_MIN_SCORE: "0.15"
+          RESOLUTION_SESSION_TTL_MINUTES: "30"
+          RESOLUTION_MAX_ACTIVE_SESSIONS: "500"
+          # The bootstrap stack generates this value. A versionless dynamic
+          # reference keeps it out of source, GitHub secrets, stack parameters,
+          # and rollback snapshots. Rotation requires a protected stack update
+          # so CloudFront and Lambda resolve the same AWSCURRENT version.
+          ORIGIN_VERIFY_TOKEN: !Sub >-
+            {{resolve:secretsmanager:${AppName}/${Environment}/origin-verification:SecretString:ORIGIN_VERIFY_TOKEN}}
           NODE_OPTIONS: "--enable-source-maps"
       Events:
         Health:
@@ -360,6 +405,24 @@ Resources:
             ApiId: !Ref ArchonHttpApi
             Path: /api/proof
             Method: GET
+        ResolutionSessionCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/session
+            Method: POST
+        ResolutionSessionRead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/session
+            Method: GET
+        ResolutionDecision:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ArchonHttpApi
+            Path: /api/resolution/decision
+            Method: POST
         ApiFallback:
           Type: HttpApi
           Properties:
@@ -400,6 +463,12 @@ Resources:
         Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
+        WebACLId: !Ref CloudFrontWebAclArn
+        Logging:
+          Bucket: !Sub >-
+            ${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}.s3.amazonaws.com
+          IncludeCookies: false
+          Prefix: !Sub "${Environment}/"
         PriceClass: PriceClass_100
         DefaultRootObject: index.html
         Origins:
@@ -413,6 +482,10 @@ Resources:
             # non-reserved API logical ID. This Ref resolves to the deployed
             # stage name and creates the required ordering edge.
             OriginPath: !Join ["", ["/", !Ref ArchonHttpApi.Stage]]
+            OriginCustomHeaders:
+              - HeaderName: x-archon-origin-verify
+                HeaderValue: !Sub >-
+                  {{resolve:secretsmanager:${AppName}/${Environment}/origin-verification:SecretString:ORIGIN_VERIFY_TOKEN}}
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only
@@ -455,6 +528,11 @@ Resources:
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
             Compress: true
             ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+        # Trivy AWS-0013 is a scanner/platform compatibility boundary here:
+        # CloudFrontDefaultCertificate cannot be combined with
+        # MinimumProtocolVersion. All behaviors still enforce HTTPS and the
+        # CloudFront-managed certificate serves only the generated distribution
+        # hostname. A custom domain is outside the approved demo boundary.
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
       Tags:
@@ -482,6 +560,23 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
+          - Sid: DenySpaWritesWithoutKms
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenySpaWritesWithUnexpectedKmsKey
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !Sub >-
+                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage
           - Sid: AllowCloudFrontServicePrincipalReadOnly
             Effect: Allow
             Principal:

@@ -19,6 +19,11 @@ import {
   type AuditRequest,
   type RecallRequest,
 } from "./handler.js";
+import {
+  handleCreateResolutionSession,
+  handleGetResolutionSession,
+  handleResolutionDecision,
+} from "./resolution-handler.js";
 import { closePool } from "../db/client.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -66,7 +71,19 @@ const server = createServer(async (req, res) => {
       const result = await handleProof();
       return send(result.status, result.body);
     }
-    if (pathname !== "/recall") return send(404, { error: "not found" });
+    if (pathname === "/resolution/session" && req.method === "GET") {
+      const result = await handleGetResolutionSession(
+        String(req.headers.authorization ?? "") || undefined
+      );
+      return send(result.status, result.body);
+    }
+    if (
+      pathname !== "/recall" &&
+      pathname !== "/resolution/session" &&
+      pathname !== "/resolution/decision"
+    ) {
+      return send(404, { error: "not found" });
+    }
     if (req.method !== "POST") {
       return send(405, { error: "method not allowed" });
     }
@@ -76,6 +93,17 @@ const server = createServer(async (req, res) => {
     }
     const text = await readBody(req);
     const raw: RecallRequest = text ? (JSON.parse(text) as RecallRequest) : {};
+    if (pathname === "/resolution/session") {
+      const result = await handleCreateResolutionSession(raw);
+      return send(result.status, result.body);
+    }
+    if (pathname === "/resolution/decision") {
+      const result = await handleResolutionDecision(
+        String(req.headers.authorization ?? "") || undefined,
+        raw
+      );
+      return send(result.status, result.body);
+    }
     const { status, body } = await handleRecall(raw);
     send(status, body);
   } catch (err) {

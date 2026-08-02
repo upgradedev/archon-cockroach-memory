@@ -1,0 +1,362 @@
+name: AWS Well-Architected Evidence Audit
+
+# Repository mode is the default and never requests AWS credentials. The
+# optional live mode is manual, protected, read-only, and fail-closed until the
+# human owner/SLO/RTO/RPO decisions in the contract have been completed.
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/well-architected-contract-audit.mjs"
+      - ".github/workflows/aws-security-baseline.yml"
+      - ".github/workflows/well-architected-audit.yml"
+      - ".github/workflows/bootstrap-aws.yml"
+      - ".github/workflows/cockroach-restore-drill.yml"
+      - ".github/workflows/database-release.yml"
+      - ".github/workflows/database-credential-rotation.yml"
+      - ".github/workflows/deploy-aws.yml"
+      - ".github/workflows/edge-controls.yml"
+      - ".github/workflows/hosted-load-evidence.yml"
+      - ".github/workflows/finops-controls.yml"
+      - ".github/workflows/sustainability-intensity-evidence.yml"
+      - ".github/workflows/recover-aws.yml"
+      - "aws/bootstrap-oidc.yaml"
+      - "aws/bootstrap-stack-policy.json"
+      - "aws/classify-durable-recovery-source.sh"
+      - "aws/classify-github-recovery-preflight.sh"
+      - "aws/fetch-codedeploy-appspec-revision.sh"
+      - "aws/select-staging-codedeploy-rollback.mjs"
+      - "aws/account-security-baseline-audit-policy.json"
+      - "aws/audit-account-security-baseline.sh"
+      - "aws/measure-sustainability-intensity.sh"
+      - "aws/sustainability-intensity-audit-policy.json"
+      - "aws/edge-waf.yaml"
+      - "aws/edge-stack-policy.json"
+      - "aws/foundation-storage-migration-policy.json"
+      - "aws/finops.yaml"
+      - "aws/template.yaml"
+      - "docs/finops/**"
+      - "docs/operations/**"
+      - "docs/runbooks/**"
+      - "docs/sustainability/**"
+      - "load/hosted-recall-contract.js"
+      - "load/hosted-recall.js"
+      - "load/k6-summary-schema-smoke.js"
+      - "scripts/cockroach-managed-restore-drill.ts"
+      - "scripts/rotate-runtime-secret.ts"
+      - "src/db/client.ts"
+      - "src/lambda.ts"
+      - "tests/cockroach-managed-restore-drill.test.ts"
+      - "tests/database-credential-rotation.test.ts"
+      - "tests/db-client-rotation.test.ts"
+      - "tests/hosted-load-evidence.test.ts"
+      - "tests/finops-controls.test.ts"
+      - "tests/github-recovery-preflight.test.ts"
+      - "tests/lambda.test.ts"
+      - "tests/recovery-watchdog.test.ts"
+      - "tests/staging-recovery-drill.test.ts"
+      - "tests/sustainability-intensity-evidence.test.ts"
+      - "tests/aws-security-baseline.test.ts"
+      - "tests/waf-controls.test.ts"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/well-architected-contract-audit.mjs"
+      - ".github/workflows/aws-security-baseline.yml"
+      - ".github/workflows/well-architected-audit.yml"
+      - ".github/workflows/bootstrap-aws.yml"
+      - ".github/workflows/cockroach-restore-drill.yml"
+      - ".github/workflows/database-release.yml"
+      - ".github/workflows/database-credential-rotation.yml"
+      - ".github/workflows/deploy-aws.yml"
+      - ".github/workflows/edge-controls.yml"
+      - ".github/workflows/hosted-load-evidence.yml"
+      - ".github/workflows/finops-controls.yml"
+      - ".github/workflows/sustainability-intensity-evidence.yml"
+      - ".github/workflows/recover-aws.yml"
+      - "aws/bootstrap-oidc.yaml"
+      - "aws/bootstrap-stack-policy.json"
+      - "aws/classify-durable-recovery-source.sh"
+      - "aws/classify-github-recovery-preflight.sh"
+      - "aws/fetch-codedeploy-appspec-revision.sh"
+      - "aws/select-staging-codedeploy-rollback.mjs"
+      - "aws/account-security-baseline-audit-policy.json"
+      - "aws/audit-account-security-baseline.sh"
+      - "aws/measure-sustainability-intensity.sh"
+      - "aws/sustainability-intensity-audit-policy.json"
+      - "aws/edge-waf.yaml"
+      - "aws/edge-stack-policy.json"
+      - "aws/foundation-storage-migration-policy.json"
+      - "aws/finops.yaml"
+      - "aws/template.yaml"
+      - "docs/finops/**"
+      - "docs/operations/**"
+      - "docs/runbooks/**"
+      - "docs/sustainability/**"
+      - "load/hosted-recall-contract.js"
+      - "load/hosted-recall.js"
+      - "load/k6-summary-schema-smoke.js"
+      - "scripts/cockroach-managed-restore-drill.ts"
+      - "scripts/rotate-runtime-secret.ts"
+      - "src/db/client.ts"
+      - "src/lambda.ts"
+      - "tests/cockroach-managed-restore-drill.test.ts"
+      - "tests/database-credential-rotation.test.ts"
+      - "tests/db-client-rotation.test.ts"
+      - "tests/hosted-load-evidence.test.ts"
+      - "tests/finops-controls.test.ts"
+      - "tests/github-recovery-preflight.test.ts"
+      - "tests/lambda.test.ts"
+      - "tests/recovery-watchdog.test.ts"
+      - "tests/staging-recovery-drill.test.ts"
+      - "tests/sustainability-intensity-evidence.test.ts"
+      - "tests/aws-security-baseline.test.ts"
+      - "tests/waf-controls.test.ts"
+  schedule:
+    - cron: "41 5 1 * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Repository evidence only, or approved live AWS read-only inventory.
+        required: true
+        default: repository
+        type: choice
+        options:
+          - repository
+          - live-read-only
+      live_activation_approved:
+        description: Required only for live-read-only; attests explicit approval for the bounded AWS inventory.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: well-architected-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repository-contract:
+    name: Validate repository evidence contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Initialize fail-closed repository receipt
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/well-architected-repository-receipt.json
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' \
+            '{"schema":"archon.aws-well-architected.repository-audit","version":1,"generatedAt":"not-finalized","repository":"unknown","commitSha":"","mode":"repository","passed":false,"checks":[{"id":"audit-not-finalized","status":"fail","detail":"The hosted audit did not reach receipt finalization."}]}' \
+            >"${RECEIPT_PATH:?}"
+
+      - name: Check out the exact audit source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up the pinned audit runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+
+      - name: Run the dependency-free repository contract audit
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/well-architected-repository-receipt.json
+        run: >-
+          node .github/scripts/well-architected-contract-audit.mjs
+          --mode repository
+          --receipt "$RECEIPT_PATH"
+
+      - name: Upload the sanitized repository receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: well-architected-repository-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/well-architected-repository-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  live-read-only:
+    name: Audit bounded live AWS region inventory
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'live-read-only'
+    needs:
+      - repository-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production-audit
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      APP_NAME: archon-memory
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_AUDIT_ROLE_ARN: ${{ vars.AWS_WAF_AUDIT_ROLE_ARN }}
+      AWS_REGION: eu-west-1
+      FORBIDDEN_REGION: us-west-2
+    steps:
+      - name: Initialize fail-closed live receipt
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/well-architected-live-receipt.json
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' \
+            '{"schema":"archon.aws-well-architected.live-read-only","version":1,"generatedAt":"not-finalized","repository":"unknown","commitSha":"","mode":"live-read-only","passed":false,"checks":[{"id":"audit-not-finalized","status":"fail","detail":"The approved live audit did not reach receipt finalization."}]}' \
+            >"${RECEIPT_PATH:?}"
+
+      - name: Check out the exact trusted source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up the pinned audit runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+
+      - name: Enforce explicit live-read-only activation
+        shell: bash
+        env:
+          LIVE_ACTIVATION_APPROVED: ${{ inputs.live_activation_approved }}
+        run: |
+          set -euo pipefail
+          test "$LIVE_ACTIVATION_APPROVED" = "true"
+          test "$GITHUB_REPOSITORY" = "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$AWS_REGION" = "eu-west-1"
+          test "$FORBIDDEN_REGION" = "us-west-2"
+          test -n "$AWS_ACCOUNT_ID"
+          test -n "$AWS_AUDIT_ROLE_ARN"
+
+      - name: Require assigned owners and approved objectives
+        env:
+          CONTRACT_RECEIPT_PATH: ${{ runner.temp }}/well-architected-live-contract-receipt.json
+        run: >-
+          node .github/scripts/well-architected-contract-audit.mjs
+          --mode live-read-only
+          --receipt "$CONTRACT_RECEIPT_PATH"
+
+      - name: Configure the existing least-privilege audit role
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_AUDIT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: archon-waf-audit-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Audit the bounded application-tag region inventory
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/well-architected-live-receipt.json
+        run: |
+          set -euo pipefail
+          umask 077
+          readonly primary_inventory="${RUNNER_TEMP:?}/waf-primary-inventory.json"
+          readonly forbidden_inventory="${RUNNER_TEMP:?}/waf-forbidden-inventory.json"
+
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "$AWS_ACCOUNT_ID"
+
+          aws resourcegroupstaggingapi get-resources \
+            --region "$AWS_REGION" \
+            --tag-filters "Key=Application,Values=$APP_NAME" \
+            --output json >"$primary_inventory"
+          aws resourcegroupstaggingapi get-resources \
+            --region "$FORBIDDEN_REGION" \
+            --tag-filters "Key=Application,Values=$APP_NAME" \
+            --output json >"$forbidden_inventory"
+
+          primary_count="$(
+            jq -er '.ResourceTagMappingList | length' "$primary_inventory"
+          )"
+          readonly primary_count
+          forbidden_count="$(
+            jq -er '.ResourceTagMappingList | length' "$forbidden_inventory"
+          )"
+          readonly forbidden_count
+          test "$primary_count" -gt 0
+          test "$forbidden_count" -eq 0
+
+          jq -n \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commitSha "$GITHUB_SHA" \
+            --arg primaryRegion "$AWS_REGION" \
+            --arg forbiddenRegion "$FORBIDDEN_REGION" \
+            --argjson primaryCount "$primary_count" \
+            --argjson forbiddenCount "$forbidden_count" \
+            '{
+              schema: "archon.aws-well-architected.live-read-only",
+              version: 1,
+              generatedAt: $generatedAt,
+              repository: $repository,
+              commitSha: $commitSha,
+              mode: "live-read-only",
+              passed: true,
+              approval: {
+                dispatchAttested: true,
+                environment: "production-audit"
+              },
+              identity: {
+                expectedAccountBound: true,
+                accountIdentifierRedacted: true
+              },
+              regionPolicy: {
+                primaryRegion: $primaryRegion,
+                forbiddenRegion: $forbiddenRegion,
+                globalFrontDoor: "cloudfront"
+              },
+              inventory: {
+                applicationTag: "archon-memory",
+                primaryRegionTaggedResourceCount: $primaryCount,
+                forbiddenRegionTaggedResourceCount: $forbiddenCount,
+                resourceIdentifiersRedacted: true,
+                limitation: "Scoped Resource Groups Tagging API evidence; not an account-wide inventory."
+              },
+              checks: [
+                {
+                  id: "explicit-approval",
+                  status: "pass",
+                  detail: "Dispatch attestation and protected environment gate completed."
+                },
+                {
+                  id: "account-binding",
+                  status: "pass",
+                  detail: "The short-lived audit session matched the configured account."
+                },
+                {
+                  id: "primary-region-tagged-inventory",
+                  status: "pass",
+                  detail: "At least one Application=archon-memory resource was observed in eu-west-1."
+                },
+                {
+                  id: "forbidden-region-tagged-inventory",
+                  status: "pass",
+                  detail: "No Application=archon-memory resource was observed in us-west-2."
+                }
+              ]
+            }' >"${RECEIPT_PATH:?}"
+
+      - name: Upload the sanitized live read-only receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: well-architected-live-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/well-architected-live-receipt.json
+          if-no-files-found: error
+          retention-days: 90

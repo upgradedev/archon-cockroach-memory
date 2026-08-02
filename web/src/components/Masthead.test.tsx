@@ -86,6 +86,6 @@ describe("Masthead and Hero", () => {
       screen.getByRole("heading", { name: /Memory that disagrees out loud/ }),
     ).toBeInTheDocument();
     expect(screen.getByText("Helios SA")).toBeInTheDocument();
-    expect(screen.getByText(/No customer records/)).toBeInTheDocument();
+    expect(screen.getByText(/never customer data/i)).toBeInTheDocument();
   });
 });

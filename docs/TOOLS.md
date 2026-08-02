@@ -1,12 +1,15 @@
 # Tool inventory and proof
 
-Archon Memory uses **2 of the 4 required CockroachDB tools**:
+Archon Memory meaningfully integrates **two CockroachDB tools**:
 
 1. Distributed Vector Indexing
 2. CockroachDB Cloud Managed MCP
 
-ccloud automation and the self-hosted application MCP server are useful
-additional surfaces, but are not counted toward the required two.
+Together they form one causal tool chain: the Financial Memory Agent uses
+Distributed Vector Indexing as its memory data plane, and the Memory Integrity
+Agent uses Cloud Managed MCP as an independent control plane that must pass
+before staging or production promotion. ccloud automation and the self-hosted
+application MCP server are useful additional surfaces, but are not counted.
 
 ## 1. Distributed Vector Indexing
 
@@ -77,8 +80,14 @@ Implementation:
 
 - `scripts/cloud-mcp-audit.ts` connects to CockroachDB Cloud's hosted Managed MCP
   endpoint with a service-account API key.
-- It calls exactly `get_cluster`, `list_tables`, `get_table_schema`, and
+- It always calls exactly `get_cluster`, `list_tables`, `get_table_schema`, and
   `select_query`, in that order.
+- If and only if the hosted server advertises `explain_query`, the agent inserts
+  that read-only call immediately before `select_query` and requires a
+  `vector search` plan on
+  `idx_agent_memory_company_scope_embedding`. An advertised but incompatible or
+  incorrect capability fails closed. If it is not advertised, the receipt says
+  `not-advertised`; it never claims the call occurred.
 - Its fixed SQL equality-constrains
   `public-demo / Helios SA / active / amazon.titan-embed-text-v2:0`, forces
   `idx_agent_memory_active_scope`, applies an inner `LIMIT 10` sentinel, and
@@ -89,12 +98,20 @@ Implementation:
   `9 / 9 / 9`.
 - It verifies cluster identity, table discovery, `agent_memory` schema, and a
   fixed-scope select.
-- Receipt schema v2 prints the exact scope, bound, aggregate, called-tool list,
-  and four proofs, with no API key, cluster identifier, host, user, password,
-  connection string, memory content, or embedding.
+- Receipt schema v3 binds the exact 40-character release SHA and SHA-256 of the
+  exact database-release C-SPANN receipt. It prints the exact scope, bounds,
+  aggregate, called-tool list, optional EXPLAIN status/plan fingerprint, and
+  fixed proof descriptions, with no API key, cluster identifier, host, user,
+  password, connection string, memory content, embedding, or raw query plan.
+- `.github/workflows/deploy-aws.yml` downloads and validates the exact
+  database-release receipt before invoking Managed MCP. Both staging and
+  production explicitly depend on this job, so the second CockroachDB tool is a
+  causal promotion gate rather than a post-deployment report.
 - `.github/workflows/managed-mcp-audit.yml` runs only in the protected
-  `production-audit` environment, exact-gates every v2 field, checks that secret
-  values are absent, and uploads the sanitized receipt.
+  `production-audit` environment, resolves the successful exact-SHA deployment,
+  downloads its database C-SPANN receipt, exact-gates every v3 field, checks
+  that secret values are absent, records the receipt digest, and uploads only
+  the sanitized receipt.
 
 Evidence status:
 
@@ -107,13 +124,18 @@ Evidence status:
   digest
   `sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`.
 - [MANAGED_MCP_SMOKE.md](./MANAGED_MCP_SMOKE.md) separates the successful
-  historical live read-only proof from the hardened v2 contract. The latter
+  historical live read-only proof from the hardened v2 contract. That historical
+  contract
   passed at exact commit `a2b69e3fad31010d14d0c3bca261421e635ca885`
   in [Deploy AWS run 30204081177](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30204081177);
   its fixed scope, bounds, strict parser, `9 / 9 / 9` aggregate, and sanitized
   artifact were all protected-workflow verified. The same contract passed for
   later historical protected release commit `8c09b7ee07f1a3a0cd8ea19bf1db900c992e3edf`
   in [Deploy AWS run 30331875727, attempt 2](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30331875727/attempts/2).
+
+These are immutable historical v2 receipts. Receipt v3 is deliberately not
+claimed as live until a protected exact-SHA CI, deploy, and standalone audit
+have all passed after this source change.
 
 This is the hosted CockroachDB Cloud Managed MCP product. It is distinct from the
 application MCP server below.
@@ -151,29 +173,40 @@ authenticated ccloud receipt is produced.
 
 - Amazon S3: encrypted, versioned private React/Tailwind origin.
 - Amazon CloudFront: OAC, same-origin delivery, security headers, HTTP/2+3.
-- Amazon API Gateway HTTP API: fixed read-only routes and throttling.
-- AWS Lambda Node.js 22: bounded recall/audit/proof adapter.
+- Amazon API Gateway HTTP API: fixed canonical-read routes, isolated synthetic
+  resolution routes, and throttling.
+- AWS Lambda Node.js 22: bounded recall/audit/proof adapter plus the
+  human-gated, idempotent resolution controller.
 - AWS Secrets Manager: least-privilege CockroachDB URL.
 - AWS X-Ray and CloudWatch: traces, logs, alarms, dashboard.
 - AWS CodeDeploy via SAM: 10%/5-minute canary continuously exercises live proof
   and recall while a fresh alarm isolates the candidate `ExecutedVersion`
   behind the weighted alias. Mandatory full-recall and hosted-browser gates
   follow, with explicit prior-release restoration.
-- Amazon SNS, Amazon SQS, and AWS KMS: a source-controlled but currently
-  dormant alarm-routing contract. Explicit foundation activation creates
+- Amazon SNS, Amazon SQS, AWS KMS, and CloudWatch: a source-controlled but
+  currently dormant alarm-routing contract with a manual protected
+  `plan|apply|verify|drill` workflow. Explicit foundation activation creates
   environment-isolated encrypted topics and 14-day audit queues; deploy
   auto-discovery and terminal proof refuse partial outputs or cross-environment
   alarm actions, and inactive proof rejects stale actions. The queues deny
   non-topic producers and are finite delivery/evidence buffers, not immutable
-  records or human-notification endpoints. Activation first requires an
-  authorized administrator to apply the exact stack policy and foundation
-  template. Until that synchronization, discovery emits the distinct
+  records or human-notification endpoints. Activation requires an exact green
+  main SHA, an `alarm-routing-controls` environment approval, and a dedicated
+  OIDC role that can pass only the dedicated CloudFormation execution role.
+  The accepted plan changes only `AlarmRoutingEnabled=false -> true`, adds the
+  exact 15 conditional resources, and permits no replacement or existing
+  resource mutation. Until that synchronization, discovery emits the distinct
   `legacy-inactive-not-provisioned` state, sends the complete SAM parameter map
   through a temporary runner-local `file://` YAML document, explicitly clears
   `AlarmTopicArn`, and relies on the existing CloudFormation drift gates;
-  afterward an unconditional read-only alarm policy enables direct
-  four-alarm verification even while routing is disabled. No live activation,
-  queue consumer, or human paging endpoint is claimed.
+  afterward an unconditional read-only alarm policy enables direct four-alarm
+  deployment verification even while routing is disabled. A separate
+  staging-only probe supports a bounded `ALARM -> OK` delivery drill through a
+  dedicated KMS-encrypted five-minute queue with an exact `AlarmName` payload
+  filter; its role cannot read the operational archive, mutate production alarm
+  state, or delete the observed queue message. Receipts hash AWS identifiers and human approval/ack references
+  and store no contact details. No live activation, live drill, queue consumer,
+  or human paging endpoint is claimed without hosted evidence.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
 
@@ -217,10 +250,11 @@ and foundation `IN_SYNC` drift state were verified.
   immutable bundle identity, archive/manifest digests, lease owner and expiry,
   and—only for `RECOVERED`—the immutable receipt and post-recovery
   CloudFormation-control object identities and digests.
-- The checked-in watchdog classifies the exact source run and terminal
-  environment job after `Deploy AWS` completion, every 15 minutes, or on
-  manual dispatch. It claims a two-hour lease bound to its exact run, attempt,
-  and environment. An active owner blocks competing work; an expired lease or
+- The checked-in watchdog runs every 15 minutes, on a daily audit schedule, or
+  by manual dispatch. It classifies only the exact `Deploy AWS` push
+  run/attempt and terminal environment job bound by the ledger. It claims a
+  two-hour lease bound to its exact run, attempt, and environment. An active
+  owner blocks competing work; an expired lease or
   an exactly proved completed non-success owner can be reclaimed through CAS.
 - Recovery emits a strict schema-v2
   `archon.durable-recovery.receipt`. Its validator cross-checks the sanitized
@@ -270,6 +304,7 @@ claimed by these successful no-failure runs.
 
 The source components are:
 
+- `aws/classify-github-recovery-preflight.sh`
 - `aws/classify-durable-recovery-source.sh`
 - `aws/create-durable-recovery-bundle.sh`
 - `aws/delete-greenfield-stack.sh`
@@ -277,11 +312,13 @@ The source components are:
 - `aws/enforce-cloudformation-controls.sh`
 - `aws/extract-durable-recovery-bundle.sh`
 - `aws/finalize-durable-recovery-receipt.sh`
+- `aws/fetch-codedeploy-appspec-revision.sh`
 - `aws/put-durable-recovery-object.sh`
 - `aws/recover-durable-environment.sh`
 - `aws/verify-durable-recovery-bundle.sh`
 - `aws/verify-durable-recovery-receipt.sh`
 - `aws/recovery-intent-ledger.sh`
+- `aws/select-staging-codedeploy-rollback.mjs`
 - `.github/workflows/deploy-aws.yml`
 - `.github/workflows/recover-aws.yml`
 
@@ -299,6 +336,19 @@ material. The independent manual
 [Recover AWS audit 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552)
 then passed fresh staging and production termination-protection and drift
 checks, uploading only sanitized audit receipts with GitHub-bound digests.
+
+For new releases, `Deploy AWS` is a direct `main` push workflow whose source
+gate waits for the successful same-SHA `CI` push run and records its exact
+run/attempt. CI blocks on the complete 21-check adversarial DAST contract and a
+digest-pinned ZAP scan of the exact candidate SPA over runner loopback. The
+candidate server mirrors transport-safe production headers but correctly omits
+HSTS and CSP transport upgrades on plain HTTP; both remain blocking evidence in
+the exact-release HTTPS scan. This means repairing production can never be
+blocked by the release it is meant to replace. The exact-release
+`Hosted DAST` workflow is then called from the same deploy run only after
+production promotion and Managed MCP proof; its receipt and ZAP artifacts are
+SHA/run/attempt-bound deployment evidence.
+Scheduled and manual DAST executions remain standalone production audits.
 
 Infrastructure and delivery proof live in:
 

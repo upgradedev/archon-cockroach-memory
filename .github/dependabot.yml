@@ -5,6 +5,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 0
     groups:
       backend-runtime:
@@ -16,6 +18,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 0
     groups:
       control-room:
@@ -27,6 +31,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 0
 
   - package-ecosystem: docker-compose
@@ -34,11 +40,6 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 0
-
-  - package-ecosystem: docker
-    directory: /aws
-    schedule:
-      interval: weekly
-      day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 0

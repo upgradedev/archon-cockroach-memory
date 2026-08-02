@@ -23,7 +23,9 @@ memory inspectable before a human acts on it.
 
 ## What it does
 
-The public, read-only demo uses a fixed, synthetic company called Helios SA.
+The public demo uses a fixed, synthetic company called Helios SA. Canonical
+memory is read-only; a separate disposable sandbox permits only one fixed,
+human-gated resolution action.
 A judge can:
 
 1. Ask a financial question in the Control Room.
@@ -35,6 +37,9 @@ A judge can:
 5. Inspect a live proof ledger for database identity, runtime principal,
    fixed scope, models, vector index, and the exact `9 / 9 / 9` Store
    integrity contract.
+6. Open a longitudinal resolution session, compare an older payroll memory
+   with newer signed evidence, explicitly approve or reject the proposal, and
+   inspect the consolidated state plus SHA-256 decision receipt.
 
 The system never hides weak grounding. It abstains when evidence is irrelevant,
 checks citations, numbers, and claims, and can replace unsafe model wording with
@@ -44,14 +49,19 @@ The lifecycle is explicit **Store → Retrieve → Act**. `MemoryAgent.ingestEve
 and `remember` idempotently store embedded facts with provenance, content
 digests, and lifecycle state. C-SPANN retrieves only the fixed active scope.
 The agent then acts by returning a cited grounded answer, abstaining, falling
-back to deterministic evidence wording, or presenting a contradiction
-recommendation for human review. Public mutation is disabled for judge safety;
-that does not turn the underlying Store path into a mock.
+back to deterministic evidence wording, or proposing a correction. The agent
+cannot finalize that proposal. A judge may explicitly act as the fixed
+synthetic controller role; CockroachDB then commits an idempotent serializable
+decision, consolidation record, and immutable receipt. This is not
+authenticated enterprise RBAC and has no external financial side effect.
 
 The nine-row live story is deliberately small enough to inspect end to end.
-Reproducible hosted evaluations separately exercise 5,000–10,000-row corpora,
-beam/recall behavior, multi-range fan-out, RF=3 placement, and recall after
-single-node loss.
+Reproducible hosted evaluations separately exercise 5,000–10,000-vector
+corpora, a deterministic 100,000-event lifecycle rehearsal, B0–B4 longitudinal
+baselines, eight policy ablations, beam/recall behavior, multi-range fan-out,
+RF=3 placement, and recall after single-node loss. These are explicitly
+synthetic/representative evaluations, not customer production data or human
+outcome evidence.
 
 ## Why it matters
 
@@ -80,22 +90,36 @@ canaries, and native index use before application promotion.
 
 ### CockroachDB Cloud Managed MCP
 
-The financial agent uses Distributed Vector Indexing for its runtime memory
-path. A separate deterministic release controller uses CockroachDB Cloud
-Managed MCP as its read-only verification interface. A protected workflow makes
-exactly four bounded hosted calls:
+The Financial Memory Agent uses Distributed Vector Indexing for its runtime
+memory data plane. A separate deterministic Memory Integrity Agent uses
+CockroachDB Cloud Managed MCP as its independent read-only control plane. This
+is a causal integration: after the protected database release, the Managed MCP
+agent must verify the same exact release before either staging or production can
+be promoted.
+
+The agent always makes four bounded hosted calls:
 
 - cluster identity;
 - table listing;
 - schema inspection;
 - one fixed-scope aggregate query.
 
+If and only if the hosted MCP server advertises `explain_query`, the agent also
+uses it to require a native `vector search` plan on
+`idx_agent_memory_company_scope_embedding`. If the advertised call cannot prove
+that exact C-SPANN path, the release fails closed. If the capability is absent,
+the receipt records `not-advertised` and links to the exact-SHA
+database-release C-SPANN receipt instead; the submission never claims a tool
+call that did not happen.
+
 The query is pinned to the synthetic public scope, forces the fixed-scope B-tree
 `idx_agent_memory_active_scope` (not the C-SPANN retrieval index), reads through
 a ten-row sentinel, returns at most one aggregate row, and accepts only
 `9 persisted / 9 unique idempotency keys / 9 payload-bound digests`.
-The resulting receipt is sanitized: credentials, connection material, memory
-text, and embeddings are never emitted.
+The resulting receipt schema v3 binds the 40-character release SHA, exact
+database C-SPANN receipt SHA-256, actual called-tool sequence, Store aggregate,
+and optional plan fingerprint. Credentials, connection material, memory text,
+embeddings, and raw query plans are never emitted.
 
 ## How we used AWS
 
@@ -103,7 +127,8 @@ The application follows the AWS serverless web reference pattern:
 
 - Amazon CloudFront provides the public same-origin edge.
 - A private, encrypted, versioned Amazon S3 origin serves React and Tailwind.
-- Amazon API Gateway exposes only bounded, read-only routes.
+- Amazon API Gateway exposes bounded canonical-read routes and one fixed
+  synthetic, TTL-scoped action surface.
 - AWS Lambda runs the Node.js 22 API with five bounded in-flight slots—three
   initial Control Room reads, one recall, and one spare—while API request rate
   and burst limits are enforced independently.
@@ -153,13 +178,18 @@ CockroachDB Cloud Managed MCP
    - the missing `PAY-118` counterpart referenced by `RECON-2043`.
 5. Open the proof ledger and confirm CockroachDB, native C-SPANN, `eu-west-1`,
    and exact `9 / 9 / 9` Store integrity.
-6. Inspect the owned, sanitized exact-SHA evidence card for the separate
+6. Start the Memory Resolution Loop, approve the higher-authority signed
+   correction, and inspect Session C plus the immutable receipt.
+7. Inspect the owned, sanitized exact-SHA evidence card for the separate
    Managed MCP release audit.
 
 ## Security, resilience, and production readiness
 
-- The demo has one server-configured synthetic scope and no public mutation
-  route, tenant selector, model selector, or database selector.
+- The demo has one server-configured synthetic scope and no canonical-memory
+  mutation route, tenant selector, model selector, or database selector.
+- The only public write capability is an opaque-token, fixed-fixture,
+  rate/cap-bounded sandbox with same-session foreign keys, RLS, idempotency,
+  immutable decisions, logical expiry checks, and CockroachDB row-level TTL.
 - CockroachDB row-level security is role-bound; Lambda principals cannot bypass
   it.
 - Memory text is untrusted evidence, never instructions.
@@ -205,8 +235,9 @@ proof into verifiable receipts.
 - The app is a public AWS serverless deployment with protected build-once
   promotion, rollback, durable recovery ledgers, and a verified no-op watchdog
   classification. No fault-injected live `RECOVERED` drill is claimed.
-- Managed MCP independently gates the same release without exposing sensitive
-  data.
+- Managed MCP independently and causally gates the same exact release without
+  exposing sensitive data; an optional advertised `explain_query` also links
+  the control plane directly to the native C-SPANN serving path.
 
 ## What we learned
 
@@ -235,10 +266,10 @@ The complete source is public and [MIT licensed](https://github.com/upgradedev/a
 
 ## What's next
 
-After judging, the next product work is an authenticated multi-tenant boundary,
-human-approved memory correction/supersession, a two-principal secret-rotation
-workflow, and a separately approved live alarm consumer. None of those are
-represented as shipped in this submission.
+After judging, the next product work is an authenticated multi-tenant identity
+boundary, a two-principal secret-rotation workflow, a separately approved live
+alarm consumer, and consenting human/production outcome studies. None of those
+are represented as shipped in this submission.
 
 ## Built with
 

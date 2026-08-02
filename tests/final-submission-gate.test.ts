@@ -105,13 +105,19 @@ function recoveryJobs(runId = 303, sha = SHA): Record<string, unknown> {
   };
 }
 
-function hostedDastJobs(runId = 302, sha = SHA): Record<string, unknown> {
+function hostedDastJobs(
+  runId = 301,
+  sha = SHA,
+  runAttempt = 1
+): Record<string, unknown> {
+  const prefix =
+    "Run hosted DAST against exact production release / ";
   const job = (id: number, name: string, steps: string[]) => ({
     id,
     run_id: runId,
-    run_attempt: 1,
+    run_attempt: runAttempt,
     head_sha: sha,
-    name,
+    name: `${prefix}${name}`,
     status: "completed",
     conclusion: "success",
     steps: steps.map((step) => ({
@@ -137,11 +143,15 @@ function hostedDastJobs(runId = 302, sha = SHA): Record<string, unknown> {
   };
 }
 
-function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
+function deployJobs(
+  runId = 301,
+  sha = SHA,
+  runAttempt = 1
+): Record<string, unknown> {
   const job = (id: number, name: string, steps: string[]) => ({
     id,
     run_id: runId,
-    run_attempt: 1,
+    run_attempt: runAttempt,
     head_sha: sha,
     name,
     status: "completed",
@@ -153,7 +163,7 @@ function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
     })),
   });
   return {
-    total_count: 6,
+    total_count: 9,
     jobs: [
       job(600, "Validate Deploy AWS source CI", [
         "Require successful exact-main push CI source",
@@ -189,7 +199,21 @@ function deployJobs(runId = 301, sha = SHA): Record<string, unknown> {
           "Upload sanitized Managed MCP receipt",
         ]
       ),
-      job(605, "Reusable database release evidence", []),
+      job(
+        605,
+        "Reconcile CockroachDB memory release / " +
+          "Schema, runtime RLS, C-SPANN, and resolution-loop execution proof",
+        [
+          "Prove target is still current main",
+          "Prove CockroachDB Cloud provider, plan, state, and region",
+          "Gate real Titan and Claude quality on the golden judge question",
+          "Reconcile schema, canonical memory, and runtime credentials",
+          "Upload sanitized database release receipt",
+        ]
+      ),
+      ...(hostedDastJobs(runId, sha, runAttempt).jobs as Array<
+        Record<string, unknown>
+      >),
     ],
   };
 }
@@ -403,8 +427,7 @@ function descriptorZip(path: string, value: unknown): Uint8Array {
 }
 
 function hostedDastReceipt(
-  deployRun: GitHubWorkflowRun,
-  hostedDastRun: GitHubWorkflowRun
+  deployRun: GitHubWorkflowRun
 ): Record<string, unknown> {
   const ids = [
     "root-security-headers",
@@ -422,22 +445,27 @@ function hostedDastReceipt(
     "limit-boundary",
     "write-route-absent",
     "audit-scope-injection",
+    "resolution-session-method-boundary",
+    "resolution-session-fixed-scope-boundary",
+    "resolution-session-auth-boundary",
+    "resolution-capability-shape-boundary",
+    "resolution-decision-auth-boundary",
     "unknown-route-boundary",
   ];
   const statuses = [
     200, 200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400,
-    404, 400, 404,
+    404, 400, 405, 400, 401, 401, 401, 404,
   ];
   return {
     schema: "archon.hosted-dast",
-    version: 3,
+    version: 4,
     generatedAt: "2026-07-29T12:03:00.000Z",
     profile: "exact-release",
     targetOrigin: "https://d2s5v0o0eg2aaw.cloudfront.net",
     releaseSha: SHA,
     scannerSha: SHA,
-    scannerRunId: hostedDastRun.id,
-    scannerRunAttempt: hostedDastRun.run_attempt,
+    scannerRunId: deployRun.id,
+    scannerRunAttempt: deployRun.run_attempt,
     sourceDeployRunId: deployRun.id,
     sourceDeployRunAttempt: deployRun.run_attempt,
     passed: true,
@@ -529,62 +557,53 @@ test("final gate: a newer failed or queued run blocks an older success", () => {
   }
 });
 
-test("final gate: exact-release Hosted DAST selection is workflow-run and path bound", () => {
-  const hostedDast = workflowRun({
+test("final gate: exact-release Hosted DAST belongs to the exact Deploy push run", () => {
+  const deploy = workflowRun({
     id: 150,
-    name: "Hosted DAST",
-    display_title: "Hosted DAST",
-    path: ".github/workflows/security-dast.yml",
-    event: "workflow_run",
+    name: "Deploy AWS",
+    display_title: "Deploy AWS",
+    path: ".github/workflows/deploy-aws.yml",
+    event: "push",
   });
   assert.equal(
     selectSuccessfulRun(
-      [hostedDast],
-      "Hosted DAST",
-      "workflow_run",
+      [deploy],
+      "Deploy AWS",
+      "push",
       SHA,
-      ".github/workflows/security-dast.yml"
+      ".github/workflows/deploy-aws.yml"
     ).id,
-    hostedDast.id
+    deploy.id
   );
   for (const mutation of [
-    { ...hostedDast, event: "workflow_dispatch" },
-    { ...hostedDast, path: ".github/workflows/ci.yml" },
-    { ...hostedDast, head_sha: "b".repeat(40) },
-    { ...hostedDast, name: "Not Hosted DAST" },
+    { ...deploy, event: "workflow_run" },
+    { ...deploy, path: ".github/workflows/security-dast.yml" },
+    { ...deploy, head_sha: "b".repeat(40) },
+    { ...deploy, name: "Hosted DAST" },
   ]) {
     assert.throws(() =>
       selectSuccessfulRun(
         [mutation],
-        "Hosted DAST",
-        "workflow_run",
+        "Deploy AWS",
+        "push",
         SHA,
-        ".github/workflows/security-dast.yml"
+        ".github/workflows/deploy-aws.yml"
       )
     );
   }
 });
 
-test("final gate: Hosted DAST artifact is unique, unexpired, and operation named", () => {
+test("final gate: Hosted DAST artifact is unique, unexpired, and Deploy-run bound", () => {
   const deploy = workflowRun({
     id: 201,
     name: "Deploy AWS",
     display_title: "Deploy AWS",
     path: ".github/workflows/deploy-aws.yml",
     run_started_at: "2026-07-29T11:45:00.000Z",
-    updated_at: "2026-07-29T12:00:00.000Z",
-  });
-  const hostedDast = workflowRun({
-    id: 302,
-    name: "Hosted DAST",
-    display_title: "Hosted DAST",
-    path: ".github/workflows/security-dast.yml",
-    event: "workflow_run",
-    run_started_at: "2026-07-29T12:01:00.000Z",
     updated_at: "2026-07-29T12:05:00.000Z",
   });
   const expectedName =
-    `hosted-dast-${SHA}-${deploy.id}-${deploy.run_attempt}-${hostedDast.run_attempt}`;
+    `hosted-dast-${SHA}-${deploy.id}-${deploy.run_attempt}`;
   const artifact = {
     id: 700,
     name: expectedName,
@@ -596,14 +615,14 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     created_at: "2026-07-29T12:04:00.000Z",
     updated_at: "2026-07-29T12:04:30.000Z",
     workflow_run: {
-      id: hostedDast.id,
+      id: deploy.id,
       head_sha: SHA,
     },
   };
   const zapArtifact = {
     ...artifact,
     id: 702,
-    name: `zap-baseline-${SHA}-${hostedDast.run_attempt}`,
+    name: `zap-baseline-${SHA}-${deploy.run_attempt}`,
     size_in_bytes: 2_000_000,
     archive_download_url:
       "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/702/zip",
@@ -620,7 +639,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     selectExactHostedDastArtifact(
       response,
       expectedName,
-      hostedDast
+      deploy
     ).name,
     expectedName
   );
@@ -628,7 +647,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     selectExactHostedDastArtifact(
       response,
       zapArtifact.name,
-      hostedDast,
+      deploy,
       100_000_000
     ).id,
     zapArtifact.id
@@ -637,7 +656,19 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     selectExactHostedDastArtifact(
       response,
       zapArtifact.name,
-      hostedDast
+      deploy
+    )
+  );
+  assert.throws(() =>
+    selectExactHostedDastArtifact(
+      response,
+      expectedName,
+      workflowRun({
+        id: deploy.id,
+        name: "Hosted DAST",
+        path: ".github/workflows/security-dast.yml",
+        event: "workflow_run",
+      })
     )
   );
 
@@ -655,7 +686,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
     }),
     mutation({
       workflow_run: {
-        id: hostedDast.id,
+        id: deploy.id,
         head_sha: "b".repeat(40),
       },
     }),
@@ -681,7 +712,7 @@ test("final gate: Hosted DAST artifact is unique, unexpired, and operation named
       selectExactHostedDastArtifact(
         invalid,
         expectedName,
-        hostedDast
+        deploy
       )
     );
   }
@@ -691,17 +722,10 @@ test("final gate: Hosted DAST ZIP accepts one integrity-checked JSON receipt", (
   const deploy = workflowRun({
     id: 201,
     name: "Deploy AWS",
-    updated_at: "2026-07-29T12:00:00.000Z",
-  });
-  const hostedDast = workflowRun({
-    id: 302,
-    name: "Hosted DAST",
-    path: ".github/workflows/security-dast.yml",
-    event: "workflow_run",
-    run_started_at: "2026-07-29T12:01:00.000Z",
+    path: ".github/workflows/deploy-aws.yml",
     updated_at: "2026-07-29T12:05:00.000Z",
   });
-  const receipt = hostedDastReceipt(deploy, hostedDast);
+  const receipt = hostedDastReceipt(deploy);
   const archive = storedZip("hosted-dast.json", receipt);
   const compressedArchive = Buffer.from(
     descriptorZip("hosted-dast.json", receipt)
@@ -763,30 +787,21 @@ test("final gate: Hosted DAST ZIP accepts one integrity-checked JSON receipt", (
   }
 });
 
-test("final gate: Hosted DAST receipt proves exact scanner, deploy, checks, and time", () => {
+test("final gate: Hosted DAST receipt proves one exact Deploy run, checks, and time", () => {
   const deploy = workflowRun({
     id: 201,
     name: "Deploy AWS",
     display_title: "Deploy AWS",
     path: ".github/workflows/deploy-aws.yml",
     run_started_at: "2026-07-29T11:45:00.000Z",
-    updated_at: "2026-07-29T12:00:00.000Z",
-  });
-  const hostedDast = workflowRun({
-    id: 302,
-    name: "Hosted DAST",
-    display_title: "Hosted DAST",
-    path: ".github/workflows/security-dast.yml",
-    event: "workflow_run",
-    run_started_at: "2026-07-29T12:01:00.000Z",
     updated_at: "2026-07-29T12:05:00.000Z",
   });
-  const receipt = hostedDastReceipt(deploy, hostedDast);
+  const receipt = hostedDastReceipt(deploy);
   assert.doesNotThrow(() =>
     requireExactHostedDastReceipt(
       receipt,
       deploy,
-      hostedDast,
+      deploy,
       SHA,
       NOW
     )
@@ -842,7 +857,7 @@ test("final gate: Hosted DAST receipt proves exact scanner, deploy, checks, and 
       copy.releaseSha = "b".repeat(40);
     }),
     change((copy) => {
-      copy.generatedAt = "2026-07-29T12:00:59.999Z";
+      copy.generatedAt = "2026-07-29T11:44:59.999Z";
     }),
     change((copy) => {
       copy.generatedAt = "2026-07-29T12:07:00.001Z";
@@ -862,12 +877,26 @@ test("final gate: Hosted DAST receipt proves exact scanner, deploy, checks, and 
       requireExactHostedDastReceipt(
         invalid,
         deploy,
-        hostedDast,
+        deploy,
         SHA,
         NOW
       )
     );
   }
+  assert.throws(() =>
+    requireExactHostedDastReceipt(
+      receipt,
+      deploy,
+      workflowRun({
+        id: 302,
+        name: "Hosted DAST",
+        path: ".github/workflows/security-dast.yml",
+        event: "workflow_run",
+      }),
+      SHA,
+      NOW
+    )
+  );
 });
 
 test("final gate: recovery audit proves both exact jobs and executed evidence steps", () => {
@@ -905,15 +934,15 @@ test("final gate: recovery audit proves both exact jobs and executed evidence st
   }
 });
 
-test("final gate: Hosted DAST proves its source gate and both release scanners", () => {
-  const baseline = hostedDastJobs();
+test("final gate: Deploy AWS contains the exact reusable Hosted DAST jobs", () => {
+  const baseline = deployJobs();
   assert.doesNotThrow(() =>
-    requireSuccessfulHostedDastJobs(baseline, 302, SHA)
+    requireSuccessfulHostedDastJobs(baseline, 301, SHA, 1)
   );
 
   const skippedStep = structuredClone(baseline);
   const skippedJobs = skippedStep.jobs as Array<Record<string, unknown>>;
-  const skippedSteps = skippedJobs[0]?.steps as Array<
+  const skippedSteps = skippedJobs[6]?.steps as Array<
     Record<string, unknown>
   >;
   skippedSteps[0] = {
@@ -923,25 +952,52 @@ test("final gate: Hosted DAST proves its source gate and both release scanners",
 
   const failedJob = structuredClone(baseline);
   const failedJobs = failedJob.jobs as Array<Record<string, unknown>>;
-  failedJobs[1] = {
-    ...failedJobs[1],
+  failedJobs[7] = {
+    ...failedJobs[7],
     conclusion: "failure",
   };
 
   const missingJob = structuredClone(baseline);
-  missingJob.total_count = 2;
+  missingJob.total_count = 8;
   (missingJob.jobs as unknown[]).pop();
+
+  const unprefixedJob = structuredClone(baseline);
+  const unprefixedJobs = unprefixedJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  unprefixedJobs[6] = {
+    ...unprefixedJobs[6],
+    name: "Validate Hosted DAST source deployment",
+  };
+
+  const duplicateDastJob = structuredClone(baseline);
+  const duplicateDastJobs = duplicateDastJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  duplicateDastJobs.push({
+    ...structuredClone(duplicateDastJobs[6]!),
+    id: 999,
+  });
+  duplicateDastJob.total_count = 10;
+
+  const malformedJobInventory = structuredClone(baseline);
+  (malformedJobInventory.jobs as unknown[]).push("malformed job");
+  malformedJobInventory.total_count = 10;
 
   for (const mutation of [
     skippedStep,
     failedJob,
     missingJob,
-    { ...structuredClone(baseline), total_count: 4 },
+    unprefixedJob,
+    duplicateDastJob,
+    malformedJobInventory,
+    { ...structuredClone(baseline), total_count: 10 },
     hostedDastJobs(999, SHA),
-    hostedDastJobs(302, "b".repeat(40)),
+    hostedDastJobs(301, "b".repeat(40)),
+    hostedDastJobs(301, SHA, 2),
   ]) {
     assert.throws(() =>
-      requireSuccessfulHostedDastJobs(mutation, 302, SHA)
+      requireSuccessfulHostedDastJobs(mutation, 301, SHA, 1)
     );
   }
 });
@@ -949,7 +1005,7 @@ test("final gate: Hosted DAST proves its source gate and both release scanners",
 test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt operation", () => {
   const baseline = deployJobs();
   assert.doesNotThrow(() =>
-    requireSuccessfulDeployJobs(baseline, 301, SHA)
+    requireSuccessfulDeployJobs(baseline, 301, SHA, 1)
   );
 
   const skippedSource = structuredClone(baseline);
@@ -987,7 +1043,7 @@ test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt 
     Record<string, unknown>
   >;
   requiredJobs.splice(3, 1);
-  missingRequiredJob.total_count = 5;
+  missingRequiredJob.total_count = 8;
 
   const duplicateRequiredJob = structuredClone(baseline);
   const duplicateJobs = duplicateRequiredJob.jobs as Array<
@@ -997,7 +1053,7 @@ test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt 
     ...structuredClone(duplicateJobs[0]),
     id: 606,
   });
-  duplicateRequiredJob.total_count = 7;
+  duplicateRequiredJob.total_count = 10;
 
   const duplicateRequiredStep = structuredClone(baseline);
   const duplicateStepJobs = duplicateRequiredStep.jobs as Array<
@@ -1038,6 +1094,22 @@ test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt 
   }
   oversizedInventory.total_count = 101;
 
+  const unexpectedJob = structuredClone(baseline);
+  const unexpectedJobs = unexpectedJob.jobs as Array<
+    Record<string, unknown>
+  >;
+  unexpectedJobs.push({
+    id: 899,
+    run_id: 301,
+    run_attempt: 1,
+    head_sha: SHA,
+    name: "Unbound release evidence",
+    status: "completed",
+    conclusion: "success",
+    steps: [],
+  });
+  unexpectedJob.total_count = 10;
+
   for (const mutation of [
     skippedSource,
     failedProduction,
@@ -1047,20 +1119,23 @@ test("final gate: Deploy AWS proves a real build, promotion, smoke, and receipt 
     duplicateRequiredStep,
     incompleteJob,
     oversizedInventory,
-    { ...structuredClone(baseline), total_count: 7 },
+    unexpectedJob,
+    { ...structuredClone(baseline), total_count: 10 },
     deployJobs(999, SHA),
     deployJobs(301, "b".repeat(40)),
+    deployJobs(301, SHA, 2),
   ]) {
     assert.throws(() =>
-      requireSuccessfulDeployJobs(mutation, 301, SHA)
+      requireSuccessfulDeployJobs(mutation, 301, SHA, 1)
     );
   }
 });
 
-test("final gate: post-deploy audits must be ordered, completed, and fresh", () => {
+test("final gate: independent post-deploy audits are ordered, completed, and fresh", () => {
   const deploy = workflowRun({
     id: 201,
     name: "Deploy AWS",
+    path: ".github/workflows/deploy-aws.yml",
     run_started_at: "2026-07-29T11:45:00.000Z",
     updated_at: "2026-07-29T12:00:00.000Z",
   });
@@ -1070,12 +1145,6 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
     run_started_at: "2026-07-29T12:01:00.000Z",
     updated_at: "2026-07-29T12:05:00.000Z",
   });
-  const hostedDast = workflowRun({
-    id: 204,
-    name: "Hosted DAST",
-    run_started_at: "2026-07-29T12:00:30.000Z",
-    updated_at: "2026-07-29T12:04:00.000Z",
-  });
   const recovery = workflowRun({
     id: 203,
     name: "Recover AWS",
@@ -1083,12 +1152,12 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
     updated_at: "2026-07-29T12:10:00.000Z",
   });
   assert.doesNotThrow(() =>
-    requirePostDeployAuditTiming(deploy, hostedDast, mcp, recovery, NOW)
+    requirePostDeployAuditTiming(deploy, deploy, mcp, recovery, NOW)
   );
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
-      hostedDast,
+      deploy,
       { ...mcp, run_started_at: deploy.updated_at },
       recovery,
       NOW
@@ -1097,7 +1166,7 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
-      hostedDast,
+      deploy,
       {
         ...mcp,
         updated_at: new Date(
@@ -1111,7 +1180,7 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
-      hostedDast,
+      deploy,
       mcp,
       {
         ...recovery,
@@ -1125,7 +1194,7 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       { ...deploy, updated_at: "not-a-date" },
-      hostedDast,
+      { ...deploy, updated_at: "not-a-date" },
       mcp,
       recovery,
       NOW
@@ -1134,7 +1203,12 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
-      { ...hostedDast, run_started_at: deploy.updated_at },
+      workflowRun({
+        id: 204,
+        name: "Hosted DAST",
+        path: ".github/workflows/security-dast.yml",
+        event: "workflow_run",
+      }),
       mcp,
       recovery,
       NOW
@@ -1143,14 +1217,14 @@ test("final gate: post-deploy audits must be ordered, completed, and fresh", () 
   assert.throws(() =>
     requirePostDeployAuditTiming(
       deploy,
+      deploy,
+      { ...mcp, run_attempt: 2 },
       {
-        ...hostedDast,
+        ...recovery,
         updated_at: new Date(
           NOW - 24 * 60 * 60 * 1_000 - 1
         ).toISOString(),
       },
-      mcp,
-      recovery,
       NOW
     )
   );

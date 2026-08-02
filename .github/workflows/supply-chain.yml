@@ -1,0 +1,2497 @@
+name: Supply Chain (enforced)
+
+# Findings at the documented policy thresholds block. The canonical waiver
+# ledger is deliberately empty, so a successful run is a zero-unwaived-finding
+# assertion for these scanners and scopes, not a vulnerability-free claim.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-and-workflows:
+    name: Shell and workflow policy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/static
+    steps:
+      - name: Bind ephemeral static-analysis paths
+        shell: bash
+        run: echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin" >>"$GITHUB_ENV"
+
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate tool lock and install verified static analyzers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          jq -e '
+            .schemaVersion == 1 and
+            ([.tools[] | (.sha256 | test("^[0-9a-f]{64}$"))] | all) and
+            ([.actions[] | (.sha | test("^[0-9a-f]{40}$"))] | all)
+          ' .github/toolchain-lock.json >/dev/null
+
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+
+          install_locked_tool shellcheck
+          install_locked_tool actionlint
+          install_locked_tool zizmor
+          "$TOOL_BIN/shellcheck" --version
+          "$TOOL_BIN/actionlint" -version
+          "$TOOL_BIN/zizmor" --version
+
+      - name: Inventory tracked shell and workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+          git ls-files -- '*.sh' | LC_ALL=C sort > "$REPORT_DIR/shell-files.txt"
+          git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml' |
+            LC_ALL=C sort > "$REPORT_DIR/workflow-files.txt"
+          test -s "$REPORT_DIR/shell-files.txt"
+          test -s "$REPORT_DIR/workflow-files.txt"
+
+      - name: Run blocking ShellCheck policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t shell_files < "$REPORT_DIR/shell-files.txt"
+          set +e
+          "$TOOL_BIN/shellcheck" \
+            --external-sources \
+            --severity=warning \
+            --format=checkstyle \
+            "${shell_files[@]}" > "$REPORT_DIR/shellcheck.xml"
+          status=$?
+          set -e
+          jq -n \
+            --argjson exitCode "$status" \
+            --argjson files "${#shell_files[@]}" \
+            '{mode:"blocking",exitCode:$exitCode,trackedFiles:$files}' \
+            > "$REPORT_DIR/shellcheck-status.json"
+
+      - name: Run blocking actionlint with inline ShellCheck
+        continue-on-error: true
+        shell: bash
+        env:
+          PATH: ${{ runner.temp }}/archon-supply-chain/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          set -euo pipefail
+          actionlint_version="$(
+            jq -er '.tools.actionlint.version' .github/toolchain-lock.json
+          )"
+          test "$actionlint_version" = "1.7.12"
+          queue_message='unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
+          queue_sites='[
+            {
+              "path":".github/workflows/bootstrap-aws.yml",
+              "concurrency":"concurrency:",
+              "group":"  group: aws-production-delivery",
+              "cancel":"  cancel-in-progress: false",
+              "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/deploy-aws.yml",
+              "concurrency":"concurrency:",
+              "group":"  group: aws-production-delivery",
+              "cancel":"  cancel-in-progress: false",
+              "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/foundation-migration.yml",
+              "concurrency":"concurrency:",
+              "group":"  group: aws-foundation-migration",
+              "cancel":"  cancel-in-progress: false",
+              "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/recover-aws.yml",
+              "concurrency":"concurrency:",
+              "group":"  group: aws-recovery-watchdog",
+              "cancel":"  cancel-in-progress: false",
+              "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/recover-aws.yml",
+              "concurrency":"    concurrency:",
+              "group":"      group: aws-production-delivery",
+              "cancel":"      cancel-in-progress: false",
+              "queue":"      queue: max",
+              "count":2
+            }
+          ]'
+          queue_paths="$(
+            jq -c '[.[].path] | unique | sort' <<<"$queue_sites"
+          )"
+          mapfile -t expected_queue_paths < <(
+            jq -r '.[]' <<<"$queue_paths"
+          )
+          actual_queue_sites='[]'
+          expected_queue_diagnostics='[]'
+          for path in "${expected_queue_paths[@]}"; do
+            mapfile -t queue_lines < <(
+              awk '/^[[:space:]]+queue: max$/ { print NR }' "$path"
+            )
+            expected_count="$(
+              jq -er \
+                --arg path "$path" '
+                  [.[] | select(.path == $path) | .count] | add
+                ' <<<"$queue_sites"
+            )"
+            test "${#queue_lines[@]}" -eq "$expected_count"
+            for queue_line in "${queue_lines[@]}"; do
+              test "$queue_line" -ge 4
+              concurrency_line="$(sed -n "$((queue_line - 3))p" "$path")"
+              group_line="$(sed -n "$((queue_line - 2))p" "$path")"
+              cancel_line="$(sed -n "$((queue_line - 1))p" "$path")"
+              queue_text="$(sed -n "${queue_line}p" "$path")"
+              matched_site="$(
+                jq -c \
+                  --arg cancel "$cancel_line" \
+                  --arg concurrency "$concurrency_line" \
+                  --arg group "$group_line" \
+                  --arg path "$path" \
+                  --arg queue "$queue_text" '
+                    [
+                      .[]
+                      | select(
+                          .path == $path
+                          and .concurrency == $concurrency
+                          and .group == $group
+                          and .cancel == $cancel
+                          and .queue == $queue
+                        )
+                      | del(.count)
+                    ]
+                  ' <<<"$queue_sites"
+              )"
+              test "$(jq -er 'length' <<<"$matched_site")" -eq 1
+              actual_queue_sites="$(
+                jq -c \
+                  --argjson actual "$actual_queue_sites" \
+                  --argjson matched "$(jq -c '.[0]' <<<"$matched_site")" '
+                    $actual + [$matched]
+                  ' <<<"null"
+              )"
+              indent="${queue_text%%queue: max}"
+              column=$((${#indent} + 1))
+              end_column=$((column + 5))
+              expected_queue_diagnostics="$(
+                jq -c \
+                  --arg path "$path" \
+                  --arg snippet "${queue_text}"$'\n'"${indent}^~~~~~" \
+                  --argjson column "$column" \
+                  --argjson endColumn "$end_column" \
+                  --argjson expected "$expected_queue_diagnostics" \
+                  --argjson line "$queue_line" '
+                    $expected + [{
+                      filepath:$path,
+                      line:$line,
+                      column:$column,
+                      endColumn:$endColumn,
+                      snippet:$snippet
+                    }]
+                  ' <<<"null"
+              )"
+            done
+          done
+          jq -e \
+            --argjson actual "$actual_queue_sites" \
+            --argjson expected "$queue_sites" '
+              ($actual
+               | group_by([.path, .concurrency, .group, .cancel, .queue])
+               | map(.[0] + {count:length})
+               | sort_by([.path, .concurrency, .group, .cancel, .queue]))
+              ==
+              ($expected
+               | sort_by([.path, .concurrency, .group, .cancel, .queue]))
+            ' <<<"null" >/dev/null
+          test "$(
+            jq -er 'length' <<<"$expected_queue_diagnostics"
+          )" -eq 6
+
+          set +e
+          actionlint -format '{{json .}}' > "$REPORT_DIR/actionlint.raw.json"
+          raw_status=$?
+          set -e
+
+          jq --slurp -e '
+            if length == 1 and (.[0] | type) == "array"
+            then .[0]
+            else error("actionlint output must be exactly one JSON array")
+            end
+          ' "$REPORT_DIR/actionlint.raw.json" \
+            > "$REPORT_DIR/actionlint-all.json"
+          jq -e '
+            type == "array" and
+            all(.[];
+              (.message | type == "string") and
+              (.filepath | type == "string") and
+              (.line | type == "number" and . > 0 and floor == .) and
+              (.column | type == "number" and . > 0 and floor == .) and
+              (.kind | type == "string") and
+              (.snippet | type == "string") and
+              (.end_column | type == "number" and . > 0 and floor == .)
+            )
+          ' "$REPORT_DIR/actionlint-all.json" >/dev/null
+          jq \
+            --arg message "$queue_message" \
+            --argjson expected "$expected_queue_diagnostics" '
+              [ .[] as $finding
+                | select(
+                    $finding.kind == "syntax-check"
+                    and $finding.message == $message
+                    and any($expected[];
+                      $finding.filepath == .filepath
+                      and $finding.line == .line
+                      and $finding.column == .column
+                      and $finding.end_column == .endColumn
+                      and $finding.snippet == .snippet
+                    )
+                  )
+                | $finding
+              ]
+            ' "$REPORT_DIR/actionlint-all.json" \
+            > "$REPORT_DIR/actionlint-queue-compatibility.json"
+          jq \
+            --arg message "$queue_message" \
+            --argjson expected "$expected_queue_diagnostics" '
+              [ .[] as $finding
+                | select(
+                    (
+                      $finding.kind == "syntax-check"
+                      and $finding.message == $message
+                      and any($expected[];
+                        $finding.filepath == .filepath
+                        and $finding.line == .line
+                        and $finding.column == .column
+                        and $finding.end_column == .endColumn
+                        and $finding.snippet == .snippet
+                      )
+                    ) | not
+                  )
+                | $finding
+              ]
+            ' "$REPORT_DIR/actionlint-all.json" \
+            > "$REPORT_DIR/actionlint-blocking-findings.json"
+
+          jq -e \
+            --arg message "$queue_message" \
+            --argjson expected "$expected_queue_diagnostics" '
+              . as $findings |
+              length == ($expected | length)
+              and all($expected[];
+                . as $site |
+                any($findings[];
+                  .kind == "syntax-check"
+                  and .message == $message
+                  and .filepath == $site.filepath
+                  and .line == $site.line
+                  and .column == $site.column
+                  and .end_column == $site.endColumn
+                  and .snippet == $site.snippet
+                )
+              )
+            ' "$REPORT_DIR/actionlint-queue-compatibility.json" >/dev/null
+
+          raw_findings="$(
+            jq -er 'length' "$REPORT_DIR/actionlint-all.json"
+          )"
+          compatibility_diagnostics="$(
+            jq -er 'length' \
+              "$REPORT_DIR/actionlint-queue-compatibility.json"
+          )"
+          blocking_findings="$(
+            jq -er 'length' \
+              "$REPORT_DIR/actionlint-blocking-findings.json"
+          )"
+          test "$raw_status" -eq 1
+          test "$raw_findings" -eq 6
+          test "$compatibility_diagnostics" -eq 6
+          test "$blocking_findings" -eq 0
+
+          jq -n \
+            --arg actionlintVersion "$actionlint_version" \
+            --arg diagnostic "$queue_message" \
+            --argjson expectedDiagnostics "$expected_queue_diagnostics" \
+            --argjson expectedPaths "$queue_paths" \
+            --argjson rawExitCode "$raw_status" \
+            --argjson rawFindings "$raw_findings" \
+            --argjson sourceAnchors "$queue_sites" \
+            --argjson compatibilityDiagnostics \
+              "$compatibility_diagnostics" \
+            --argjson blockingFindings "$blocking_findings" '
+              {
+                mode:"blocking-exact-parser-compatibility",
+                effectiveExitCode:0,
+                rawExitCode:$rawExitCode,
+                rawFindings:$rawFindings,
+                blockingFindings:$blockingFindings,
+                compatibility:{
+                  analyzer:"actionlint",
+                  version:$actionlintVersion,
+                  feature:"concurrency.queue",
+                  diagnostic:$diagnostic,
+                  acceptedDiagnostics:$compatibilityDiagnostics,
+                  expectedPaths:$expectedPaths,
+                  expectedDiagnostics:$expectedDiagnostics,
+                  sourceAnchors:$sourceAnchors
+                }
+              }
+            ' \
+            > "$REPORT_DIR/actionlint-status.json"
+
+      - name: Run blocking zizmor regular-persona policy and SARIF
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          "$TOOL_BIN/zizmor" \
+            --offline \
+            --strict-collection \
+            --persona=regular \
+            --format=json-v1 \
+            . > "$REPORT_DIR/zizmor.json"
+          json_status=$?
+          "$TOOL_BIN/zizmor" \
+            --offline \
+            --strict-collection \
+            --persona=regular \
+            --format=sarif \
+            . > "$REPORT_DIR/zizmor.sarif"
+          sarif_status=$?
+          set -e
+          jq -n \
+            --argjson jsonExitCode "$json_status" \
+            --argjson sarifExitCode "$sarif_status" \
+            '{
+              mode:"blocking",
+              jsonExitCode:$jsonExitCode,
+              sarifExitCode:$sarifExitCode
+            }' \
+            > "$REPORT_DIR/zizmor-status.json"
+
+      - name: Enforce zero-unwaived static findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0 and
+             (.trackedFiles | type == "number" and . > 0)' \
+            "$REPORT_DIR/shellcheck-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking-exact-parser-compatibility" and
+             .effectiveExitCode == 0 and
+             .rawExitCode == 1 and
+             .rawFindings == 6 and
+             .blockingFindings == 0 and
+             .compatibility.analyzer == "actionlint" and
+             .compatibility.version == "1.7.12" and
+             .compatibility.feature == "concurrency.queue" and
+             .compatibility.acceptedDiagnostics == 6 and
+             .compatibility.expectedPaths == [
+               ".github/workflows/bootstrap-aws.yml",
+               ".github/workflows/deploy-aws.yml",
+               ".github/workflows/foundation-migration.yml",
+               ".github/workflows/recover-aws.yml"
+             ] and
+             (.compatibility.expectedDiagnostics | length) == 6 and
+             ([.compatibility.expectedDiagnostics[].filepath] | unique) ==
+               .compatibility.expectedPaths and
+             (.compatibility.sourceAnchors | length) == 5 and
+             ([.compatibility.sourceAnchors[].count] | add) == 6 and
+             ([.compatibility.sourceAnchors[]
+               | select(
+                   .path == ".github/workflows/recover-aws.yml" and
+                   .group == "  group: aws-recovery-watchdog" and
+                   .count == 1
+                 )] | length) == 1 and
+             ([.compatibility.sourceAnchors[]
+               | select(
+                   .path == ".github/workflows/recover-aws.yml" and
+                   .group == "      group: aws-production-delivery" and
+                   .count == 2
+                 )] | length) == 1' \
+            "$REPORT_DIR/actionlint-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and
+             .jsonExitCode == 0 and
+             .sarifExitCode == 0' \
+            "$REPORT_DIR/zizmor-status.json" >/dev/null
+          test -s "$REPORT_DIR/shellcheck.xml"
+          test -s "$REPORT_DIR/actionlint.raw.json"
+          jq -e 'length == 6' \
+            "$REPORT_DIR/actionlint-all.json" >/dev/null
+          jq -e 'length == 6' \
+            "$REPORT_DIR/actionlint-queue-compatibility.json" >/dev/null
+          jq -e 'length == 0' \
+            "$REPORT_DIR/actionlint-blocking-findings.json" >/dev/null
+          jq -e '.runs | type == "array"' \
+            "$REPORT_DIR/zizmor.sarif" >/dev/null
+
+      - name: Summarize enforced semantics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Enforced supply-chain static policy"
+            echo
+            echo "- Enforcement: **blocking**"
+            echo "- Any ShellCheck or zizmor finding blocks."
+            echo "- Any actionlint diagnostic blocks except the six exact source-validated \`concurrency.queue\` schema diagnostics represented by five AWS serialization-anchor contracts under pinned actionlint 1.7.12."
+            echo "- The six raw compatibility diagnostics remain in evidence; the effective actionlint finding count must be zero."
+            echo "- The exact waiver ledger is empty; the parser compatibility boundary is not a finding waiver."
+            echo "- See \`docs/SUPPLY_CHAIN_SECURITY.md\` before citing this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Name static-analysis evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-static-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist static-analysis evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/static/
+          if-no-files-found: error
+          retention-days: 90
+
+  infrastructure-policy:
+    name: Infrastructure policy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/iac
+    steps:
+      - name: Bind ephemeral infrastructure-analysis paths
+        shell: bash
+        run: |
+          {
+            echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin"
+            echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy-cache"
+          } >>"$GITHUB_ENV"
+
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js for deterministic policy validation
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          package-manager-cache: false
+
+      - name: Install verified Guard and Trivy binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+          install_locked_tool cfn_guard
+          install_locked_tool trivy
+          "$TOOL_BIN/cfn-guard" --version
+          "$TOOL_BIN/trivy" --version
+
+      - name: Install pinned CloudFormation linter
+        run: python -m pip install --disable-pip-version-check cfn-lint==1.53.1
+
+      - name: Validate the empty waiver ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Run blocking cfn-lint policy on every current template
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          lint_template() {
+            local label="$1"
+            local template="$2"
+            local report="$REPORT_DIR/cfn-lint-${label}.json"
+            local error_report="$REPORT_DIR/cfn-lint-${label}.stderr"
+            local status
+            set +e
+            cfn-lint --format json "$template" \
+              >"$report" 2>"$error_report"
+            status=$?
+            set -e
+            jq -e 'type == "array"' "$report" >/dev/null
+            echo "$status"
+          }
+          application_status="$(
+            lint_template application aws/template.yaml
+          )"
+          foundation_status="$(
+            lint_template foundation aws/bootstrap-oidc.yaml
+          )"
+          edge_waf_status="$(
+            lint_template edge-waf aws/edge-waf.yaml
+          )"
+          finops_status="$(
+            lint_template finops aws/finops.yaml
+          )"
+          jq -n \
+            --argjson applicationExitCode "$application_status" \
+            --argjson foundationExitCode "$foundation_status" \
+            --argjson edgeWafControlPlaneExitCode "$edge_waf_status" \
+            --argjson finopsControlPlaneExitCode "$finops_status" \
+            '{
+              mode:"blocking",
+              applicationExitCode:$applicationExitCode,
+              foundationExitCode:$foundationExitCode,
+              edgeWafControlPlaneExitCode:$edgeWafControlPlaneExitCode,
+              finopsControlPlaneExitCode:$finopsControlPlaneExitCode,
+              templates:[
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ]
+            }' > "$REPORT_DIR/cfn-lint-status.json"
+
+      - name: Run blocking Guard policy unit fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOL_BIN/cfn-guard" test \
+            --rules-file aws/guard/archon.guard \
+            --test-data aws/guard/tests/archon_tests.yaml \
+            --output-format junit > "$REPORT_DIR/guard-tests.junit.xml"
+          test -s "$REPORT_DIR/guard-tests.junit.xml"
+
+      - name: Run blocking Guard policy on every current template
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_template() {
+            local label="$1"
+            local template="$2"
+            local report="$REPORT_DIR/guard-${label}.txt"
+            local status
+            set +e
+            "$TOOL_BIN/cfn-guard" validate \
+              --rules aws/guard/archon.guard \
+              --data "$template" \
+              --type CFNTemplate \
+              --show-summary all > "$report" 2>&1
+            status=$?
+            set -e
+            echo "$status"
+          }
+          app_status="$(audit_template application aws/template.yaml)"
+          foundation_status="$(audit_template foundation aws/bootstrap-oidc.yaml)"
+          edge_waf_status="$(audit_template edge-waf aws/edge-waf.yaml)"
+          finops_status="$(audit_template finops aws/finops.yaml)"
+          jq -n \
+            --argjson applicationExitCode "$app_status" \
+            --argjson foundationExitCode "$foundation_status" \
+            --argjson edgeWafControlPlaneExitCode "$edge_waf_status" \
+            --argjson finopsControlPlaneExitCode "$finops_status" \
+            '{
+              mode:"blocking",
+              applicationExitCode:$applicationExitCode,
+              foundationExitCode:$foundationExitCode,
+              edgeWafControlPlaneExitCode:$edgeWafControlPlaneExitCode,
+              finopsControlPlaneExitCode:$finopsControlPlaneExitCode,
+              templates:[
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ]
+            }' \
+            > "$REPORT_DIR/guard-current-status.json"
+
+      - name: Run raw Trivy evidence and exact IaC compatibility policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t trivy_override_files < <(
+            find . \
+              -path './.git' -prune -o \
+              \( -type f -o -type l \) \
+              \( \
+                -name '.trivyignore' -o \
+                -name '.trivyignore.yaml' -o \
+                -name '.trivyignore.yml' -o \
+                -name '.trivy.yaml' -o \
+                -name '.trivy.yml' -o \
+                -name 'trivy.yaml' -o \
+                -name 'trivy.yml' \
+              \) \
+              -print
+          )
+          test "${#trivy_override_files[@]}" -eq 0
+          node .github/scripts/validate-trivy-iac-compatibility.mjs \
+            --self-test
+          "$TOOL_BIN/trivy" config \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --misconfig-scanners cloudformation,dockerfile \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --exit-code 0 \
+            --format json \
+            --output "$REPORT_DIR/trivy-iac.json" \
+            .
+          "$TOOL_BIN/trivy" config \
+            --cache-dir "$TRIVY_CACHE_DIR" \
+            --misconfig-scanners cloudformation,dockerfile \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --exit-code 0 \
+            --format sarif \
+            --output "$REPORT_DIR/trivy-iac.sarif" \
+            .
+          "$TOOL_BIN/trivy" --version > "$REPORT_DIR/trivy-version.txt"
+          node .github/scripts/validate-trivy-iac-compatibility.mjs \
+            --report "$REPORT_DIR/trivy-iac.json" \
+            --sarif "$REPORT_DIR/trivy-iac.sarif" \
+            --template aws/template.yaml \
+            --bootstrap aws/bootstrap-oidc.yaml \
+            --tool-lock .github/toolchain-lock.json \
+            --version-file "$REPORT_DIR/trivy-version.txt" \
+            --compatibility-output \
+              "$REPORT_DIR/trivy-iac-compatibility-findings.json" \
+            --blocking-output \
+              "$REPORT_DIR/trivy-iac-blocking-findings.json" \
+            --status-output "$REPORT_DIR/trivy-iac-status.json"
+
+      - name: Enforce zero-unwaived infrastructure findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          expected_templates='[
+            "aws/template.yaml",
+            "aws/bootstrap-oidc.yaml",
+            "aws/edge-waf.yaml",
+            "aws/finops.yaml"
+          ]'
+          for status_file in \
+            "$REPORT_DIR/cfn-lint-status.json" \
+            "$REPORT_DIR/guard-current-status.json"; do
+            jq -e \
+              --argjson templates "$expected_templates" '
+                .mode == "blocking" and
+                .applicationExitCode == 0 and
+                .foundationExitCode == 0 and
+                .edgeWafControlPlaneExitCode == 0 and
+                .finopsControlPlaneExitCode == 0 and
+                .templates == $templates
+              ' "$status_file" >/dev/null
+          done
+          jq -e \
+            '.schema == "archon.trivy-iac.compatibility" and
+             .version == 2 and
+             .mode ==
+               "blocking-exact-source-validated-parser-compatibilities" and
+             .scanner == "Trivy" and
+             .scannerVersion == "0.72.0" and
+             .versionEvidence == {
+               "toolLock":"0.72.0",
+               "capturedCli":"0.72.0",
+               "sarifDriver":"0.72.0"
+             } and
+             .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
+             .rawFindings == 3 and
+             .compatibilityFindings == 3 and
+             .blockingFindings == 0 and
+             .acceptedWaivers == 0 and
+             .effectiveExitCode == 0 and
+             .sourceEvidence == {
+               "applicationTemplate":"aws/template.yaml",
+               "foundationTemplate":"aws/bootstrap-oidc.yaml"
+             } and
+             (.compatibilities | length) == 3 and
+             [.compatibilities[].ruleId] ==
+               ["AWS-0011","AWS-0013","AWS-0132"] and
+             all(.compatibilities[];
+               .findingType == "CloudFormation Security Check" and
+               .severity == "HIGH" and
+               .target == "aws/template.yaml" and
+               (.scannerResource |
+                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+               (.sourceRange as $range |
+                 ($range.startLine | type) == "number" and
+                 ($range.endLine | type) == "number" and
+                 $range.startLine > 0 and
+                 $range.endLine >= $range.startLine and
+                 ($range.startLine | floor) == $range.startLine and
+                 ($range.endLine | floor) == $range.endLine and
+                 .scannerResource ==
+                   ("aws/template.yaml:" +
+                    ($range.startLine | tostring) + "-" +
+                    ($range.endLine | tostring)))) and
+             .compatibilities[0].logicalResource == "Distribution" and
+             .compatibilities[0].sourceProperty ==
+               "WebACLId: !Ref CloudFrontWebAclArn" and
+             .compatibilities[0].controls == {
+               "mandatoryWebAclParameter":true,
+               "directWebAclBinding":true,
+               "globalUsEast1ArnConstraint":true,
+               "accessLogging":true
+             } and
+             .compatibilities[1].logicalResource == "Distribution" and
+             .compatibilities[1].sourceProperty ==
+               "CloudFrontDefaultCertificate: true" and
+             .compatibilities[1].controls == {
+               "defaultViewerHttpsRedirect":true,
+               "apiViewerHttpsOnly":true,
+               "customOriginHttpsOnly":true,
+               "mandatoryWebAcl":true,
+               "dynamicOriginSecret":true,
+               "accessLogging":true,
+               "customDomainAliases":false
+             } and
+             .compatibilities[2].logicalResource == "SpaBucket" and
+             .compatibilities[2].sourceProperty ==
+               "KMSMasterKeyID: Fn::ImportValue \"${AppName}-storage-kms-key-arn\"" and
+             .compatibilities[2].controls == {
+               "sseKms":true,
+               "bucketKeyEnabled":true,
+               "foundationCustomerManagedKey":true,
+               "keyRotation":true,
+               "importExportBound":true,
+               "denyUnencryptedWrites":true,
+               "denyUnexpectedKeyWrites":true
+             }' \
+            "$REPORT_DIR/trivy-iac-status.json" >/dev/null
+          test -s "$REPORT_DIR/guard-tests.junit.xml"
+          test -s "$REPORT_DIR/guard-edge-waf.txt"
+          test -s "$REPORT_DIR/guard-finops.txt"
+          jq -e '.Results | type == "array"' \
+            "$REPORT_DIR/trivy-iac.json" >/dev/null
+          jq -e '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            all(.[];
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              (.logicalResource == "Distribution" or
+               .logicalResource == "SpaBucket") and
+              (.scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+              .scannerResource ==
+                ("aws/template.yaml:" +
+                 (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
+          ' \
+            "$REPORT_DIR/trivy-iac-compatibility-findings.json" >/dev/null
+          jq -e 'length == 0' \
+            "$REPORT_DIR/trivy-iac-blocking-findings.json" >/dev/null
+          jq -e '
+            .version == "2.1.0" and
+            ([.runs[].results[]] | length) == 3 and
+            ([.runs[].results[].ruleId] | sort) ==
+              ["AWS-0011","AWS-0013","AWS-0132"]
+          ' "$REPORT_DIR/trivy-iac.sarif" >/dev/null
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+          {
+            echo "### Enforced Trivy IaC policy"
+            echo
+            echo "- Raw findings: **3**"
+            echo "- Exact compatibility findings: **3**"
+            echo "- Blocking findings: **0**"
+            echo "- Boundaries: Trivy 0.72.0 HIGH \`AWS-0011\` and \`AWS-0013\` on \`Distribution\`, plus \`AWS-0132\` on \`SpaBucket\`; mandatory WAF, HTTPS-only paths, and the imported rotating foundation CMK are source-validated."
+            echo "- Raw JSON and SARIF retain the finding; no Trivy ignore or security waiver is used."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Name infrastructure evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-iac-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/iac/
+          if-no-files-found: error
+          retention-days: 90
+
+  dependency-review:
+    name: Dependency change gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Review dependency and license changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          config-file: ./.github/dependency-review-config.yml
+
+  sbom:
+    name: Canonical ZIP-content and dependency SBOM gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+    permissions:
+      contents: read
+    env:
+      REPORT_DIR: supply-chain-reports/sbom
+    steps:
+      - name: Bind ephemeral SBOM-analysis paths
+        shell: bash
+        run: |
+          {
+            echo "TOOL_BIN=$RUNNER_TEMP/archon-supply-chain/bin"
+            echo "SAM_BUILD_DIR=$RUNNER_TEMP/archon-sam-build"
+            echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy-cache"
+          } >>"$GITHUB_ENV"
+
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+
+      - name: Set up pinned AWS SAM CLI
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.164.0
+
+      - name: Install verified Syft and Trivy binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_BIN" "$REPORT_DIR"
+          install_locked_tool() {
+            local key="$1"
+            local url expected binary archive extract found
+            url="$(jq -er --arg key "$key" '.tools[$key].url' .github/toolchain-lock.json)"
+            expected="$(jq -er --arg key "$key" '.tools[$key].sha256' .github/toolchain-lock.json)"
+            binary="$(jq -er --arg key "$key" '.tools[$key].binary' .github/toolchain-lock.json)"
+            archive="${RUNNER_TEMP:?}/${key}.tar.gz"
+            extract="${RUNNER_TEMP:?}/${key}-extract"
+            mkdir -p "$extract"
+            curl --fail --show-error --silent --location --output "$archive" "$url"
+            echo "$expected  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$extract"
+            found="$(find "$extract" -type f -name "$binary" -print -quit)"
+            test -n "$found"
+            install -m 0755 "$found" "$TOOL_BIN/$binary"
+          }
+          install_locked_tool syft
+          install_locked_tool trivy
+          "$TOOL_BIN/syft" version
+          "$TOOL_BIN/trivy" --version
+
+      - name: Install exact backend and frontend dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm ci --prefix web
+
+      - name: Validate the empty waiver ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            .policy == "docs/SUPPLY_CHAIN_SECURITY.md" and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          sha256sum security/waivers.yml \
+            > "$REPORT_DIR/waiver-ledger.sha256"
+
+      - name: Run blocking SAM validation and build canonical Lambda ZIP content
+        shell: bash
+        run: |
+          set -euo pipefail
+          sam validate \
+            --lint \
+            --template-file aws/template.yaml \
+            --region eu-west-1
+          PATH="$PWD/node_modules/.bin:$PATH" sam build \
+            --template-file aws/template.yaml \
+            --build-dir "$SAM_BUILD_DIR" \
+            --parallel
+          test -d "$SAM_BUILD_DIR/ArchonFunction"
+          if grep -q "Type: AWS::IAM::" "$SAM_BUILD_DIR/template.yaml"; then
+            echo "Application stack must not synthesize IAM resources." >&2
+            exit 1
+          fi
+          (
+            cd "$SAM_BUILD_DIR/ArchonFunction"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) > "$REPORT_DIR/lambda-zip-content.sha256"
+          test -s "$REPORT_DIR/lambda-zip-content.sha256"
+
+      - name: Generate SPDX and CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOL_BIN/syft" dir:. \
+            --exclude './.git/**' \
+            --exclude './web/**' \
+            --exclude './supply-chain-reports/**' \
+            --select-catalogers javascript \
+            --select-catalogers +javascript-package-cataloger \
+            --source-name archon-memory-backend \
+            --output "spdx-json=$REPORT_DIR/backend.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/backend.cyclonedx.json" \
+            --output "syft-json=$REPORT_DIR/backend.syft.json"
+          "$TOOL_BIN/syft" dir:web \
+            --exclude './dist/**' \
+            --exclude './node_modules/resolve/test/resolver/baz/**' \
+            --exclude './node_modules/resolve/test/resolver/browser_field/**' \
+            --exclude './node_modules/resolve/test/resolver/false_main/**' \
+            --exclude './node_modules/resolve/test/resolver/invalid_main/**' \
+            --select-catalogers javascript \
+            --select-catalogers +javascript-package-cataloger \
+            --source-name archon-memory-control-room \
+            --output "spdx-json=$REPORT_DIR/frontend.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/frontend.cyclonedx.json" \
+            --output "syft-json=$REPORT_DIR/frontend.syft.json"
+          "$TOOL_BIN/syft" "dir:$SAM_BUILD_DIR/ArchonFunction" \
+            --source-name archon-memory-lambda-zip-content \
+            --output "spdx-json=$REPORT_DIR/lambda-content.spdx.json" \
+            --output "cyclonedx-json=$REPORT_DIR/lambda-content.cyclonedx.json"
+
+          for file in \
+            "$REPORT_DIR/backend.syft.json" \
+            "$REPORT_DIR/frontend.syft.json"; do
+            jq -e '
+              .descriptor.configuration.catalogers.used as $catalogers |
+              ($catalogers | type == "array") and
+              (($catalogers | sort) == [
+                "file-content-cataloger",
+                "file-digest-cataloger",
+                "file-executable-cataloger",
+                "file-metadata-cataloger",
+                "javascript-lock-cataloger",
+                "javascript-package-cataloger"
+              ])
+            ' "$file" >/dev/null
+          done
+          for file in "$REPORT_DIR"/*.spdx.json; do
+            jq -e '.spdxVersion | startswith("SPDX-2.")' "$file" >/dev/null
+          done
+          for file in "$REPORT_DIR"/*.cyclonedx.json; do
+            jq -e '.bomFormat == "CycloneDX"' "$file" >/dev/null
+          done
+          sha256sum \
+            package-lock.json \
+            web/package-lock.json \
+            "$REPORT_DIR"/*.spdx.json \
+            "$REPORT_DIR"/*.cyclonedx.json \
+            "$REPORT_DIR"/*.syft.json \
+            > "$REPORT_DIR/sbom-inputs-and-documents.sha256"
+
+      - name: Enforce dependency SBOM vulnerability and license policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend_status=255
+          frontend_status=255
+          lambda_content_status=255
+          for scope in backend frontend lambda-content; do
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 0 \
+              --format json \
+              --output "$REPORT_DIR/trivy-${scope}.json" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 0 \
+              --format sarif \
+              --output "$REPORT_DIR/trivy-${scope}.sarif" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            set +e
+            "$TOOL_BIN/trivy" sbom \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --scanners vuln,license \
+              --severity UNKNOWN,MEDIUM,HIGH,CRITICAL \
+              --exit-code 1 \
+              --format json \
+              --output "$REPORT_DIR/trivy-${scope}-policy.json" \
+              "$REPORT_DIR/${scope}.spdx.json"
+            status=$?
+            set -e
+            case "$scope" in
+              backend)
+                backend_status="$status"
+                ;;
+              frontend)
+                frontend_status="$status"
+                ;;
+              lambda-content)
+                lambda_content_status="$status"
+                ;;
+            esac
+          done
+          "$TOOL_BIN/trivy" --version > "$REPORT_DIR/trivy-version.txt"
+          node .github/scripts/validate-trivy-sbom-policy.mjs --self-test
+          node .github/scripts/validate-trivy-sbom-policy.mjs \
+            --backend-report "$REPORT_DIR/trivy-backend-policy.json" \
+            --frontend-report "$REPORT_DIR/trivy-frontend-policy.json" \
+            --lambda-report "$REPORT_DIR/trivy-lambda-content-policy.json" \
+            --lambda-spdx "$REPORT_DIR/lambda-content.spdx.json" \
+            --frontend-syft "$REPORT_DIR/frontend.syft.json" \
+            --frontend-lock web/package-lock.json \
+            --workflow .github/workflows/supply-chain.yml \
+            --tool-lock .github/toolchain-lock.json \
+            --version-file "$REPORT_DIR/trivy-version.txt" \
+            --backend-exit-code "$backend_status" \
+            --frontend-exit-code "$frontend_status" \
+            --lambda-exit-code "$lambda_content_status" \
+            --compatibility-output \
+              "$REPORT_DIR/trivy-sbom-compatibility-findings.json" \
+            --blocking-output \
+              "$REPORT_DIR/trivy-sbom-blocking-findings.json" \
+            --status-output "$REPORT_DIR/trivy-sbom-status.json"
+
+      - name: Enforce zero-unwaived vulnerability and license findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == 1 and
+            (.waivers | type == "array" and length == 0)
+          ' security/waivers.yml >/dev/null
+          jq -e '
+            .schema == "archon.trivy-sbom.compatibility" and
+            .version == 1 and
+            .mode == "blocking-exact-build-license-compatibility" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .inventoryScanner == "Syft" and
+            .inventoryScannerVersion == "1.50.0" and
+            .versionEvidence == {
+              "trivyToolLock":"0.72.0",
+              "trivyCapturedCli":"0.72.0",
+              "syftToolLock":"1.50.0"
+            } and
+            .scanners == ["vuln","license"] and
+            .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
+            .rawExitCodes == {
+              "backend":0,
+              "frontend":1,
+              "lambdaContent":0
+            } and
+            .reportResultsEncoding == {
+              "backend":"array",
+              "frontend":"array",
+              "lambdaContent":"omitted-root-only"
+            } and
+            .lambdaInventory == {
+              "contract":"exact-root-only",
+              "spdxVersion":"SPDX-2.3",
+              "sourceName":"archon-memory-lambda-zip-content",
+              "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "totalPackages":1,
+              "catalogedDependencyPackages":0,
+              "relationships":1
+            } and
+            .rawFindings == 4 and
+            .vulnerabilityFindings == 0 and
+            .licenseFindings == 4 and
+            .approvedBuildLicenseFindings == 4 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            .sourceExclusions == [
+              "./node_modules/resolve/test/resolver/baz/**",
+              "./node_modules/resolve/test/resolver/browser_field/**",
+              "./node_modules/resolve/test/resolver/false_main/**",
+              "./node_modules/resolve/test/resolver/invalid_main/**"
+            ] and
+            [.approvedBuildLicenses[].package] == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            [.approvedBuildLicenses[].version] ==
+              ["5.1.0","1.33.0","1.33.0","1.33.0"] and
+            [.approvedBuildLicenses[].license] ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            [.approvedBuildLicenses[].resolved] == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            [.approvedBuildLicenses[].integrity] == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            [.approvedBuildLicenses[].dev] == [true,true,true,true]
+          ' "$REPORT_DIR/trivy-sbom-status.json" >/dev/null
+          for scope in backend frontend; do
+            jq -e --arg artifact \
+              "supply-chain-reports/sbom/${scope}.spdx.json" '
+                .SchemaVersion == 2 and
+                .Trivy == {"Version":"0.72.0"} and
+                .ArtifactName == $artifact and
+                .ArtifactType == "spdx" and
+                (.Results | type) == "array"
+              ' \
+              "$REPORT_DIR/trivy-${scope}-policy.json" >/dev/null
+          done
+          jq -e '
+            .SchemaVersion == 2 and
+            .Trivy == {"Version":"0.72.0"} and
+            .ArtifactName ==
+              "supply-chain-reports/sbom/lambda-content.spdx.json" and
+            .ArtifactType == "spdx" and
+            keys == [
+              "ArtifactName",
+              "ArtifactType",
+              "CreatedAt",
+              "ReportID",
+              "SchemaVersion",
+              "Trivy"
+            ] and
+            (.ReportID |
+              test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.CreatedAt |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            (has("Results") | not)
+          ' "$REPORT_DIR/trivy-lambda-content-policy.json" >/dev/null
+          jq -e '
+            length == 4 and
+            map(.package) == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            map(.license) ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            map(.resolved) == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            map(.integrity) == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            all(.[];
+              .scope == "frontend" and
+              .kind == "build-license" and
+              .cataloger == "javascript-package-cataloger" and
+              .dev == true and
+              (.location | startswith("/node_modules/")))
+          ' "$REPORT_DIR/trivy-sbom-compatibility-findings.json" >/dev/null
+          jq -e 'length == 0' \
+            "$REPORT_DIR/trivy-sbom-blocking-findings.json" >/dev/null
+          test -s "$REPORT_DIR/waiver-ledger.sha256"
+          {
+            echo "### Enforced Trivy SBOM policy"
+            echo
+            echo "- Vulnerabilities: **0**"
+            echo "- Exact build-only license compatibility findings: **4**"
+            echo "- Blocking findings: **0**"
+            echo "- Four resolve test-fixture package manifests are excluded by exact source paths; no dependency or broad node_modules scope is excluded."
+            echo "- Raw frontend license evidence is retained and bound to exact Syft licenses/locations plus lockfile versions, resolved URLs, and SHA-512 integrity; the empty waiver ledger is unchanged."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Record exact run provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg mode blocking \
+            '{
+              schemaVersion: 1,
+              sourceSha: $sourceSha,
+              runId: $runId,
+              runAttempt: $runAttempt,
+              enforcement: $mode,
+              canonicalArtifact: "SAM ArchonFunction Lambda ZIP content",
+              containerPath: "retired-non-release"
+            }' > "$REPORT_DIR/provenance.json"
+
+      - name: Name SBOM and scan evidence
+        if: always()
+        id: artifact-metadata
+        shell: bash
+        run: |
+          echo "name=supply-chain-sbom-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Persist SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: supply-chain-reports/sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  upload-sarif:
+    name: Publish trusted SARIF evidence
+    needs:
+      - shell-and-workflows
+      - infrastructure-policy
+      - sbom
+    if: >-
+      always() &&
+      needs.shell-and-workflows.result == 'success' &&
+      needs.infrastructure-policy.result == 'success' &&
+      needs.sbom.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download static-analysis evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          path: retrieved/static
+
+      - name: Download infrastructure evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          path: retrieved/iac
+
+      - name: Download SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.sbom.outputs.artifact-name }}
+          path: retrieved/sbom
+
+      - name: Upload zizmor SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/static/zizmor.sarif
+          category: zizmor/workflows
+
+      - name: Materialize policy-effective Trivy IaC SARIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          status="retrieved/iac/trivy-iac-status.json"
+          compatibility="retrieved/iac/trivy-iac-compatibility-findings.json"
+          blocking="retrieved/iac/trivy-iac-blocking-findings.json"
+          raw="retrieved/iac/trivy-iac.sarif"
+          effective="retrieved/iac/trivy-iac-policy.sarif"
+          for evidence in "$status" "$compatibility" "$blocking" "$raw"; do
+            test -s "$evidence"
+            test ! -L "$evidence"
+          done
+          raw_sha_before="$(sha256sum "$raw" | awk '{print $1}')"
+          [[ "$raw_sha_before" =~ ^[0-9a-f]{64}$ ]]
+          jq -e '
+            .schema == "archon.trivy-iac.compatibility" and
+            .version == 2 and
+            .mode ==
+              "blocking-exact-source-validated-parser-compatibilities" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .versionEvidence == {
+              "toolLock":"0.72.0",
+              "capturedCli":"0.72.0",
+              "sarifDriver":"0.72.0"
+            } and
+            .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
+            .rawFindings == 3 and
+            .compatibilityFindings == 3 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            .sourceEvidence == {
+              "applicationTemplate":"aws/template.yaml",
+              "foundationTemplate":"aws/bootstrap-oidc.yaml"
+            } and
+            (.compatibilities | length) == 3 and
+            [.compatibilities[].ruleId] ==
+              ["AWS-0011","AWS-0013","AWS-0132"] and
+            [.compatibilities[].logicalResource] ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.compatibilities[];
+              .findingType == "CloudFormation Security Check" and
+              .severity == "HIGH" and
+              .target == "aws/template.yaml" and
+              (.reason | type) == "string" and
+              (.reason | length) > 0 and
+              (.sourceRange as $range |
+                ($range.startLine | type) == "number" and
+                ($range.endLine | type) == "number" and
+                $range.startLine > 0 and
+                $range.endLine >= $range.startLine and
+                ($range.startLine | floor) == $range.startLine and
+                ($range.endLine | floor) == $range.endLine and
+                .scannerResource ==
+                  ("aws/template.yaml:" +
+                   ($range.startLine | tostring) + "-" +
+                   ($range.endLine | tostring)))) and
+            .compatibilities[0].sourceProperty ==
+              "WebACLId: !Ref CloudFrontWebAclArn" and
+            .compatibilities[0].controls == {
+              "mandatoryWebAclParameter":true,
+              "directWebAclBinding":true,
+              "globalUsEast1ArnConstraint":true,
+              "accessLogging":true
+            } and
+            .compatibilities[1].sourceProperty ==
+              "CloudFrontDefaultCertificate: true" and
+            .compatibilities[1].controls == {
+              "defaultViewerHttpsRedirect":true,
+              "apiViewerHttpsOnly":true,
+              "customOriginHttpsOnly":true,
+              "mandatoryWebAcl":true,
+              "dynamicOriginSecret":true,
+              "accessLogging":true,
+              "customDomainAliases":false
+            } and
+            .compatibilities[2].sourceProperty ==
+              "KMSMasterKeyID: Fn::ImportValue \"${AppName}-storage-kms-key-arn\"" and
+            .compatibilities[2].controls == {
+              "sseKms":true,
+              "bucketKeyEnabled":true,
+              "foundationCustomerManagedKey":true,
+              "keyRotation":true,
+              "importExportBound":true,
+              "denyUnencryptedWrites":true,
+              "denyUnexpectedKeyWrites":true
+            }
+          ' "$status" >/dev/null
+          jq -e \
+            --slurpfile status "$status" '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            map(.logicalResource) ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.[];
+              . as $finding |
+              ($status[0].compatibilities |
+                map(select(.ruleId == $finding.ruleId)) | .[0]) as $contract |
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              .findingType == $contract.findingType and
+              .severity == $contract.severity and
+              .target == $contract.target and
+              .logicalResource == $contract.logicalResource and
+              .scannerResource == $contract.scannerResource and
+              .startLine == $contract.sourceRange.startLine and
+              .endLine == $contract.sourceRange.endLine and
+              .sourceProperty == $contract.sourceProperty and
+              .reason == $contract.reason and
+              .controls == $contract.controls and
+              .scannerResource ==
+                ("aws/template.yaml:" + (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
+          ' "$compatibility" >/dev/null
+          jq -e 'length == 0' "$blocking" >/dev/null
+          jq -e \
+            --slurpfile status "$status" \
+            --slurpfile compatibility "$compatibility" '
+              .version == "2.1.0" and
+              (.runs | length) == 1 and
+              (.runs[0] as $run |
+                $run.tool.driver.name == "Trivy" and
+                $run.tool.driver.version == "0.72.0" and
+                ($run.tool.driver.rules | length) == 3 and
+                ([$run.tool.driver.rules[].id] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                ($run.results | length) == 3 and
+                ([$run.results[].ruleId] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                all($run.results[];
+                  . as $result |
+                  ($status[0].compatibilities |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
+                  ($compatibility[0] |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $finding |
+                  $result.level == "error" and
+                  ($result.locations | length) == 1 and
+                  ($result.locations[0].physicalLocation as $location |
+                    $location.artifactLocation.uri ==
+                      $contract.target and
+                    $location.artifactLocation.uri == $finding.target and
+                    $location.region.startLine ==
+                      $contract.sourceRange.startLine and
+                    $location.region.startLine == $finding.startLine and
+                    $location.region.endLine ==
+                      $contract.sourceRange.endLine and
+                    $location.region.endLine == $finding.endLine and
+                    $location.region.startColumn == 1 and
+                    $location.region.endColumn == 1)))
+            ' "$raw" >/dev/null
+          jq \
+            --slurpfile status "$status" '
+              .runs |= map(
+                .results = [] |
+                .properties = ((.properties // {}) + {
+                  archonPolicy: {
+                    schema: "archon.trivy-iac.code-scanning-policy",
+                    version: 1,
+                    mode: $status[0].mode,
+                    rawFindings: $status[0].rawFindings,
+                    compatibilityFindings:
+                      $status[0].compatibilityFindings,
+                    blockingFindings: $status[0].blockingFindings,
+                    acceptedWaivers: $status[0].acceptedWaivers,
+                    rawEvidence: "trivy-iac.sarif"
+                  }
+                })
+              )
+            ' "$raw" >"$effective"
+          jq -e '
+            .version == "2.1.0" and
+            (.runs | length) == 1 and
+            (.runs[0] as $run |
+              $run.tool.driver.name == "Trivy" and
+              $run.tool.driver.version == "0.72.0" and
+              ($run.tool.driver.rules | length) == 3 and
+              ([$run.tool.driver.rules[].id] | sort) ==
+                ["AWS-0011","AWS-0013","AWS-0132"] and
+              $run.results == [] and
+              $run.properties.archonPolicy == {
+                "schema":"archon.trivy-iac.code-scanning-policy",
+                "version":1,
+                "mode":
+                  "blocking-exact-source-validated-parser-compatibilities",
+                "rawFindings":3,
+                "compatibilityFindings":3,
+                "blockingFindings":0,
+                "acceptedWaivers":0,
+                "rawEvidence":"trivy-iac.sarif"
+              })
+          ' "$effective" >/dev/null
+          test "$raw_sha_before" = "$(sha256sum "$raw" | awk '{print $1}')"
+
+      - name: Upload policy-effective Trivy IaC SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/iac/trivy-iac-policy.sarif
+          category: trivy/iac
+
+      - name: Upload Trivy backend SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/sbom/trivy-backend.sarif
+          category: trivy/backend
+
+      - name: Upload Trivy frontend SARIF
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: retrieved/sbom/trivy-frontend.sarif
+          category: trivy/frontend
+
+  release-evidence:
+    name: Bind exact-SHA supply-chain release evidence
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - shell-and-workflows
+      - infrastructure-policy
+      - sbom
+      - upload-sarif
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind ephemeral release-evidence paths
+        shell: bash
+        run: |
+          {
+            echo "EVIDENCE_ROOT=$RUNNER_TEMP/archon-supply-chain-release-inputs"
+            echo "RELEASE_ROOT=$RUNNER_TEMP/archon-supply-chain-release"
+          } >>"$GITHUB_ENV"
+
+      - name: Download exact-run static-analysis evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/static
+
+      - name: Download exact-run infrastructure evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/iac
+
+      - name: Download exact-run SBOM evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.sbom.outputs.artifact-name }}
+          path: ${{ runner.temp }}/archon-supply-chain-release-inputs/sbom
+
+      - name: Create fail-closed exact-SHA release receipt
+        id: receipt
+        shell: bash
+        env:
+          STATIC_ARTIFACT: ${{ needs.shell-and-workflows.outputs.artifact-name }}
+          IAC_ARTIFACT: ${{ needs.infrastructure-policy.outputs.artifact-name }}
+          SBOM_ARTIFACT: ${{ needs.sbom.outputs.artifact-name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_EVENT_NAME" = "push"
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          test -d "$EVIDENCE_ROOT/static"
+          test -d "$EVIDENCE_ROOT/iac"
+          test -d "$EVIDENCE_ROOT/sbom"
+          test -z "$(find "$EVIDENCE_ROOT" -type l -print -quit)"
+
+          for required in \
+            static/shellcheck-status.json \
+            static/actionlint.raw.json \
+            static/actionlint-all.json \
+            static/actionlint-blocking-findings.json \
+            static/actionlint-queue-compatibility.json \
+            static/actionlint-status.json \
+            static/zizmor-status.json \
+            static/waiver-ledger.sha256 \
+            iac/cfn-lint-status.json \
+            iac/cfn-lint-finops.json \
+            iac/guard-current-status.json \
+            iac/guard-edge-waf.txt \
+            iac/guard-finops.txt \
+            iac/trivy-iac-status.json \
+            iac/trivy-iac.json \
+            iac/trivy-iac.sarif \
+            iac/trivy-iac-compatibility-findings.json \
+            iac/trivy-iac-blocking-findings.json \
+            iac/trivy-version.txt \
+            sbom/provenance.json \
+            sbom/trivy-sbom-status.json \
+            sbom/trivy-backend-policy.json \
+            sbom/trivy-frontend-policy.json \
+            sbom/trivy-lambda-content-policy.json \
+            sbom/trivy-sbom-compatibility-findings.json \
+            sbom/trivy-sbom-blocking-findings.json \
+            sbom/trivy-version.txt \
+            sbom/waiver-ledger.sha256 \
+            sbom/lambda-zip-content.sha256 \
+            sbom/sbom-inputs-and-documents.sha256 \
+            sbom/backend.spdx.json \
+            sbom/backend.syft.json \
+            sbom/frontend.spdx.json \
+            sbom/frontend.syft.json \
+            sbom/lambda-content.spdx.json; do
+            test -s "$EVIDENCE_ROOT/$required"
+          done
+
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" '
+              .schemaVersion == 1 and
+              .sourceSha == $sourceSha and
+              .runId == $runId and
+              .runAttempt == $runAttempt and
+              .enforcement == "blocking" and
+              .canonicalArtifact ==
+                "SAM ArchonFunction Lambda ZIP content" and
+              .containerPath == "retired-non-release"
+            ' "$EVIDENCE_ROOT/sbom/provenance.json" >/dev/null
+          jq -e \
+            '.mode == "blocking" and .exitCode == 0' \
+            "$EVIDENCE_ROOT/static/shellcheck-status.json" >/dev/null
+          jq -e \
+            '.mode == "blocking-exact-parser-compatibility" and
+             .effectiveExitCode == 0 and
+             .rawExitCode == 1 and
+             .rawFindings == 6 and
+             .blockingFindings == 0 and
+             .compatibility.analyzer == "actionlint" and
+             .compatibility.version == "1.7.12" and
+             .compatibility.feature == "concurrency.queue" and
+             .compatibility.diagnostic ==
+               "unexpected key \"queue\" for \"concurrency\" section. expected one of \"cancel-in-progress\", \"group\"" and
+             .compatibility.acceptedDiagnostics == 6 and
+             .compatibility.expectedPaths == [
+               ".github/workflows/bootstrap-aws.yml",
+               ".github/workflows/deploy-aws.yml",
+               ".github/workflows/foundation-migration.yml",
+               ".github/workflows/recover-aws.yml"
+             ] and
+             (.compatibility.expectedDiagnostics | length) == 6 and
+             ([.compatibility.expectedDiagnostics[].filepath] | unique) ==
+               .compatibility.expectedPaths and
+             (.compatibility.sourceAnchors | length) == 5 and
+             ([.compatibility.sourceAnchors[].count] | add) == 6' \
+            "$EVIDENCE_ROOT/static/actionlint-status.json" >/dev/null
+          jq --slurp -e \
+            --slurpfile status \
+              "$EVIDENCE_ROOT/static/actionlint-status.json" '
+            length == 1 and
+            (.[0] | type) == "array" and
+            (.[0] | length) == 6 and
+            (.[0] as $findings |
+              all($status[0].compatibility.expectedDiagnostics[];
+                . as $site |
+                any($findings[];
+                  .kind == "syntax-check" and
+                  .message == $status[0].compatibility.diagnostic and
+                  .filepath == $site.filepath and
+                  .line == $site.line and
+                  .column == $site.column and
+                  .end_column == $site.endColumn and
+                  .snippet == $site.snippet
+                )
+              )
+            )
+          ' "$EVIDENCE_ROOT/static/actionlint.raw.json" >/dev/null
+          jq -e \
+            --slurpfile status \
+              "$EVIDENCE_ROOT/static/actionlint-status.json" '
+            . as $findings |
+            length == 6 and
+            all($status[0].compatibility.expectedDiagnostics[];
+              . as $site |
+              any($findings[];
+                .kind == "syntax-check" and
+                .message == $status[0].compatibility.diagnostic and
+                .filepath == $site.filepath and
+                .line == $site.line and
+                .column == $site.column and
+                .end_column == $site.endColumn and
+                .snippet == $site.snippet
+              )
+            )
+          ' \
+            "$EVIDENCE_ROOT/static/actionlint-queue-compatibility.json" \
+            >/dev/null
+          jq -e 'length == 6' \
+            "$EVIDENCE_ROOT/static/actionlint-all.json" >/dev/null
+          jq -e 'length == 0' \
+            "$EVIDENCE_ROOT/static/actionlint-blocking-findings.json" \
+            >/dev/null
+          jq -e \
+            '.mode == "blocking" and
+             .jsonExitCode == 0 and
+             .sarifExitCode == 0' \
+            "$EVIDENCE_ROOT/static/zizmor-status.json" >/dev/null
+          expected_templates='[
+            "aws/template.yaml",
+            "aws/bootstrap-oidc.yaml",
+            "aws/edge-waf.yaml",
+            "aws/finops.yaml"
+          ]'
+          for status_file in \
+            "$EVIDENCE_ROOT/iac/cfn-lint-status.json" \
+            "$EVIDENCE_ROOT/iac/guard-current-status.json"; do
+            jq -e \
+              --argjson templates "$expected_templates" '
+                .mode == "blocking" and
+                .applicationExitCode == 0 and
+                .foundationExitCode == 0 and
+                .edgeWafControlPlaneExitCode == 0 and
+                .finopsControlPlaneExitCode == 0 and
+                .templates == $templates
+              ' "$status_file" >/dev/null
+          done
+          jq -e \
+            '.schema == "archon.trivy-iac.compatibility" and
+             .version == 2 and
+             .mode ==
+               "blocking-exact-source-validated-parser-compatibilities" and
+             .scanner == "Trivy" and
+             .scannerVersion == "0.72.0" and
+             .versionEvidence == {
+               "toolLock":"0.72.0",
+               "capturedCli":"0.72.0",
+               "sarifDriver":"0.72.0"
+             } and
+             .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
+             .rawFindings == 3 and
+             .compatibilityFindings == 3 and
+             .blockingFindings == 0 and
+             .acceptedWaivers == 0 and
+             .effectiveExitCode == 0 and
+             .sourceEvidence == {
+               "applicationTemplate":"aws/template.yaml",
+               "foundationTemplate":"aws/bootstrap-oidc.yaml"
+             } and
+             [.compatibilities[].ruleId] ==
+               ["AWS-0011","AWS-0013","AWS-0132"] and
+             [.compatibilities[].logicalResource] ==
+               ["Distribution","Distribution","SpaBucket"] and
+             all(.compatibilities[];
+               .findingType == "CloudFormation Security Check" and
+               .severity == "HIGH" and
+               .target == "aws/template.yaml" and
+               (.scannerResource |
+                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+               .scannerResource ==
+                 ("aws/template.yaml:" +
+                  (.sourceRange.startLine | tostring) + "-" +
+                  (.sourceRange.endLine | tostring)))' \
+            "$EVIDENCE_ROOT/iac/trivy-iac-status.json" >/dev/null
+          jq -e '
+            [
+              .Results[]? as $result
+              | $result.Misconfigurations[]?
+              | select(.Status == "FAIL")
+              | {target:$result.Target, finding:.}
+            ] as $findings
+            | ($findings | length) == 3 and
+              ([$findings[].finding.ID] | sort) ==
+                ["AWS-0011","AWS-0013","AWS-0132"] and
+              all($findings[];
+                .target == "aws/template.yaml" and
+                .finding.Type == "CloudFormation Security Check" and
+                (.finding.AVDID == null) and
+                .finding.Severity == "HIGH" and
+                (.finding.CauseMetadata.Resource |
+                  test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")))
+          ' "$EVIDENCE_ROOT/iac/trivy-iac.json" >/dev/null
+          jq -e '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            all(.[];
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              (.scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+              .scannerResource ==
+                ("aws/template.yaml:" +
+                 (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
+          ' \
+            "$EVIDENCE_ROOT/iac/trivy-iac-compatibility-findings.json" \
+            >/dev/null
+          jq -e \
+            --slurpfile status \
+              "$EVIDENCE_ROOT/iac/trivy-iac-status.json" '
+              .version == "2.1.0" and
+              (.runs | length) == 1 and
+              (.runs[0] as $run |
+                $run.tool.driver.name == "Trivy" and
+                $run.tool.driver.version == "0.72.0" and
+                ($run.tool.driver.rules | length) == 3 and
+                ([$run.tool.driver.rules[].id |
+                  select(. == "AWS-0011" or
+                         . == "AWS-0013" or
+                         . == "AWS-0132")] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                ($run.results | length) == 3 and
+                ([$run.results[].ruleId] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                all($run.results[];
+                  . as $result |
+                  ($status[0].compatibilities |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
+                  $result.level == "error" and
+                  ($result.locations | length) == 1 and
+                  ($result.locations[0].physicalLocation as $location |
+                    $location.artifactLocation.uri ==
+                      "aws/template.yaml" and
+                    $location.region.startLine ==
+                      $contract.sourceRange.startLine and
+                    $location.region.endLine ==
+                      $contract.sourceRange.endLine and
+                    $location.region.startColumn == 1 and
+                    $location.region.endColumn == 1)))
+            ' "$EVIDENCE_ROOT/iac/trivy-iac.sarif" >/dev/null
+          test "$(
+            sed -n '1p' "$EVIDENCE_ROOT/iac/trivy-version.txt"
+          )" = "Version: 0.72.0"
+          jq -e 'length == 0' \
+            "$EVIDENCE_ROOT/iac/trivy-iac-blocking-findings.json" \
+            >/dev/null
+          jq -e '
+            .schema == "archon.trivy-sbom.compatibility" and
+            .version == 1 and
+            .mode == "blocking-exact-build-license-compatibility" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .inventoryScanner == "Syft" and
+            .inventoryScannerVersion == "1.50.0" and
+            .versionEvidence == {
+              "trivyToolLock":"0.72.0",
+              "trivyCapturedCli":"0.72.0",
+              "syftToolLock":"1.50.0"
+            } and
+            .scanners == ["vuln","license"] and
+            .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
+            .rawExitCodes == {
+              "backend":0,
+              "frontend":1,
+              "lambdaContent":0
+            } and
+            .reportResultsEncoding == {
+              "backend":"array",
+              "frontend":"array",
+              "lambdaContent":"omitted-root-only"
+            } and
+            .lambdaInventory == {
+              "contract":"exact-root-only",
+              "spdxVersion":"SPDX-2.3",
+              "sourceName":"archon-memory-lambda-zip-content",
+              "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "totalPackages":1,
+              "catalogedDependencyPackages":0,
+              "relationships":1
+            } and
+            .rawFindings == 4 and
+            .vulnerabilityFindings == 0 and
+            .licenseFindings == 4 and
+            .approvedBuildLicenseFindings == 4 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            .sourceExclusions == [
+              "./node_modules/resolve/test/resolver/baz/**",
+              "./node_modules/resolve/test/resolver/browser_field/**",
+              "./node_modules/resolve/test/resolver/false_main/**",
+              "./node_modules/resolve/test/resolver/invalid_main/**"
+            ] and
+            [.approvedBuildLicenses[].package] == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            [.approvedBuildLicenses[].version] ==
+              ["5.1.0","1.33.0","1.33.0","1.33.0"] and
+            [.approvedBuildLicenses[].license] ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            [.approvedBuildLicenses[].resolved] == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            [.approvedBuildLicenses[].integrity] == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            [.approvedBuildLicenses[].dev] == [true,true,true,true]
+          ' "$EVIDENCE_ROOT/sbom/trivy-sbom-status.json" >/dev/null
+          for scope in backend frontend; do
+            jq -e --arg artifact \
+              "supply-chain-reports/sbom/${scope}.spdx.json" '
+                .SchemaVersion == 2 and
+                .Trivy == {"Version":"0.72.0"} and
+                .ArtifactName == $artifact and
+                .ArtifactType == "spdx" and
+                (.Results | type) == "array"
+              ' \
+              "$EVIDENCE_ROOT/sbom/trivy-${scope}-policy.json" \
+              >/dev/null
+          done
+          jq -e '
+            .SchemaVersion == 2 and
+            .Trivy == {"Version":"0.72.0"} and
+            .ArtifactName ==
+              "supply-chain-reports/sbom/lambda-content.spdx.json" and
+            .ArtifactType == "spdx" and
+            keys == [
+              "ArtifactName",
+              "ArtifactType",
+              "CreatedAt",
+              "ReportID",
+              "SchemaVersion",
+              "Trivy"
+            ] and
+            (.ReportID |
+              test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.CreatedAt |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            (has("Results") | not)
+          ' \
+            "$EVIDENCE_ROOT/sbom/trivy-lambda-content-policy.json" \
+            >/dev/null
+          jq -e '
+            (keys | sort) == ([
+              "SPDXID",
+              "creationInfo",
+              "dataLicense",
+              "documentNamespace",
+              "name",
+              "packages",
+              "relationships",
+              "spdxVersion"
+            ] | sort) and
+            .spdxVersion == "SPDX-2.3" and
+            .dataLicense == "CC0-1.0" and
+            .SPDXID == "SPDXRef-DOCUMENT" and
+            .name == "archon-memory-lambda-zip-content" and
+            (.documentNamespace |
+              test("^https://anchore[.]com/syft/dir/archon-memory-lambda-zip-content-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+            (.creationInfo | keys | sort) ==
+              (["created","creators","licenseListVersion"] | sort) and
+            .creationInfo.licenseListVersion == "3.28" and
+            .creationInfo.creators == [
+              "Organization: Anchore, Inc",
+              "Tool: syft-1.50.0"
+            ] and
+            (.creationInfo.created |
+              test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$")) and
+            .packages == [{
+              "name":"archon-memory-lambda-zip-content",
+              "SPDXID":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "supplier":"NOASSERTION",
+              "downloadLocation":"NOASSERTION",
+              "filesAnalyzed":false,
+              "licenseConcluded":"NOASSERTION",
+              "licenseDeclared":"NOASSERTION",
+              "copyrightText":"NOASSERTION",
+              "primaryPackagePurpose":"FILE"
+            }] and
+            .relationships == [{
+              "spdxElementId":"SPDXRef-DOCUMENT",
+              "relatedSpdxElement":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+              "relationshipType":"DESCRIBES"
+            }]
+          ' "$EVIDENCE_ROOT/sbom/lambda-content.spdx.json" >/dev/null
+          jq -e '
+            length == 4 and
+            map(.package) == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            map(.version) == ["5.1.0","1.33.0","1.33.0","1.33.0"] and
+            map(.license) ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            map(.resolved) == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            map(.integrity) == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            all(.[];
+              .scope == "frontend" and
+              .kind == "build-license" and
+              .cataloger == "javascript-package-cataloger" and
+              .dev == true)
+          ' "$EVIDENCE_ROOT/sbom/trivy-sbom-compatibility-findings.json" \
+            >/dev/null
+          jq -e 'length == 0' \
+            "$EVIDENCE_ROOT/sbom/trivy-sbom-blocking-findings.json" \
+            >/dev/null
+          test "$(
+            sed -n '1p' "$EVIDENCE_ROOT/sbom/trivy-version.txt"
+          )" = "Version: 0.72.0"
+          cmp \
+            "$EVIDENCE_ROOT/static/waiver-ledger.sha256" \
+            "$EVIDENCE_ROOT/sbom/waiver-ledger.sha256"
+          waiver_ledger_sha256="$(
+            awk '{print $1}' \
+              "$EVIDENCE_ROOT/static/waiver-ledger.sha256"
+          )"
+          [[ "$waiver_ledger_sha256" =~ ^[0-9a-f]{64}$ ]]
+
+          mkdir -p "$RELEASE_ROOT"
+          (
+            cd "$EVIDENCE_ROOT"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) >"$RELEASE_ROOT/evidence-manifest.sha256"
+          test -s "$RELEASE_ROOT/evidence-manifest.sha256"
+
+          install -m 0600 \
+            "$EVIDENCE_ROOT/sbom/lambda-zip-content.sha256" \
+            "$RELEASE_ROOT/lambda-zip-content.sha256"
+          install -m 0600 \
+            "$EVIDENCE_ROOT/sbom/sbom-inputs-and-documents.sha256" \
+            "$RELEASE_ROOT/sbom-inputs-and-documents.sha256"
+
+          evidence_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/evidence-manifest.sha256" |
+              awk '{print $1}'
+          )"
+          lambda_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/lambda-zip-content.sha256" |
+              awk '{print $1}'
+          )"
+          sbom_manifest_sha256="$(
+            sha256sum "$RELEASE_ROOT/sbom-inputs-and-documents.sha256" |
+              awk '{print $1}'
+          )"
+          for digest in \
+            "$evidence_manifest_sha256" \
+            "$lambda_manifest_sha256" \
+            "$sbom_manifest_sha256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          done
+          trivy_scanner_resources="$(
+            jq -ec '[.compatibilities[] | {
+              ruleId,
+              logicalResource,
+              scannerResource
+            }]' \
+              "$EVIDENCE_ROOT/iac/trivy-iac-status.json"
+          )"
+          jq -e '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.logicalResource) ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.[];
+              .scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
+          ' <<<"$trivy_scanner_resources" >/dev/null
+
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg staticArtifact "$STATIC_ARTIFACT" \
+            --arg iacArtifact "$IAC_ARTIFACT" \
+            --arg sbomArtifact "$SBOM_ARTIFACT" \
+            --arg evidenceManifestSha256 "$evidence_manifest_sha256" \
+            --arg lambdaManifestSha256 "$lambda_manifest_sha256" \
+            --arg sbomManifestSha256 "$sbom_manifest_sha256" \
+            --argjson trivyScannerResources "$trivy_scanner_resources" \
+            --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
+              {
+                schema: "archon.supply-chain.release-evidence",
+                version: 1,
+                sourceSha: $sourceSha,
+                repository: $repository,
+                workflow: {
+                  name: "Supply Chain (enforced)",
+                  path: ".github/workflows/supply-chain.yml",
+                  event: "push",
+                  ref: "refs/heads/main",
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                passed: true,
+                enforcement: {
+                  mode: "blocking-zero-unwaived-findings",
+                  blocks: [
+                    "shellcheck-warning-or-higher",
+                    "actionlint-workflow-and-inline-shell",
+                    "zizmor-regular-persona",
+                    "cfn-lint-all-current-templates",
+                    "sam-validate-lint-and-build",
+                    "cloudformation-guard-current-templates",
+                    "trivy-iac-medium-or-higher",
+                    "trivy-sbom-vulnerability-and-license-policy"
+                  ],
+                  acceptedWaivers: 0,
+                  unwaivedFindings: 0,
+                  toolCompatibility: {
+                    analyzer: "actionlint",
+                    version: "1.7.12",
+                    feature: "concurrency.queue",
+                    rawDiagnostics: 6,
+                    effectiveFindings: 0,
+                    exactPaths: [
+                      ".github/workflows/bootstrap-aws.yml",
+                      ".github/workflows/deploy-aws.yml",
+                      ".github/workflows/foundation-migration.yml",
+                      ".github/workflows/recover-aws.yml"
+                    ],
+                    disposition:
+                      "Exact source-validated parser/schema compatibility boundary; raw diagnostics retained; not a waiver."
+                  },
+                  trivyIaCCompatibility: {
+                    analyzer: "Trivy",
+                    version: "0.72.0",
+                    ruleIds: ["AWS-0011", "AWS-0013", "AWS-0132"],
+                    severity: "HIGH",
+                    target: "aws/template.yaml",
+                    scannerResources: $trivyScannerResources,
+                    rawFindings: 3,
+                    compatibilityFindings: 3,
+                    blockingFindings: 0,
+                    disposition:
+                      "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+                  },
+                  trivySbomLicenseCompatibility: {
+                    analyzer: "Trivy",
+                    version: "0.72.0",
+                    inventoryAnalyzer: "Syft",
+                    inventoryVersion: "1.50.0",
+                    reportResultsEncoding: {
+                      backend: "array",
+                      frontend: "array",
+                      lambdaContent: "omitted-root-only"
+                    },
+                    lambdaInventory: {
+                      contract: "exact-root-only",
+                      spdxVersion: "SPDX-2.3",
+                      sourceName: "archon-memory-lambda-zip-content",
+                      rootPackageId:
+                        "SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+                      totalPackages: 1,
+                      catalogedDependencyPackages: 0,
+                      relationships: 1
+                    },
+                    packages: [
+                      "@csstools/color-helpers@5.1.0",
+                      "lightningcss@1.33.0",
+                      "lightningcss-linux-x64-gnu@1.33.0",
+                      "lightningcss-linux-x64-musl@1.33.0"
+                    ],
+                    resolvedUrls: [
+                      "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+                      "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+                      "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+                      "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+                    ],
+                    integrity: [
+                      "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+                      "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+                      "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+                      "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+                    ],
+                    rawFindings: 4,
+                    vulnerabilityFindings: 0,
+                    compatibilityFindings: 4,
+                    blockingFindings: 0,
+                    disposition:
+                      "Exact build-only MIT-0/MPL-2.0 license classifications are bound to Syft licenses/locations and lockfile versions, resolved URLs, and SHA-512 integrity; raw evidence is retained and no waiver is accepted."
+                  },
+                  limitation:
+                    "A pass proves zero findings at configured scanner thresholds with an empty waiver ledger; it is not a vulnerability-free, penetration-test, or legal-review claim."
+                },
+                evidence: {
+                  staticArtifact: $staticArtifact,
+                  infrastructureArtifact: $iacArtifact,
+                  sbomArtifact: $sbomArtifact,
+                  cloudFormationTemplates: [
+                    "aws/template.yaml",
+                    "aws/bootstrap-oidc.yaml",
+                    "aws/edge-waf.yaml",
+                    "aws/finops.yaml"
+                  ],
+                  manifestSha256: $evidenceManifestSha256,
+                  lambdaContentManifestSha256: $lambdaManifestSha256,
+                  sbomDocumentsManifestSha256: $sbomManifestSha256,
+                  waiverLedgerSha256: $waiverLedgerSha256
+                }
+              }
+            ' >"$RELEASE_ROOT/supply-chain-release-receipt.json"
+
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson trivyScannerResources "$trivy_scanner_resources" \
+            --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
+              keys == [
+                "enforcement",
+                "evidence",
+                "passed",
+                "repository",
+                "schema",
+                "sourceSha",
+                "version",
+                "workflow"
+              ] and
+              .schema == "archon.supply-chain.release-evidence" and
+              .version == 1 and
+              .sourceSha == $sourceSha and
+              .repository == "upgradedev/archon-cockroach-memory" and
+              .workflow == {
+                "name":"Supply Chain (enforced)",
+                "path":".github/workflows/supply-chain.yml",
+                "event":"push",
+                "ref":"refs/heads/main",
+                "runId":$runId,
+                "runAttempt":$runAttempt
+              } and
+              .passed == true and
+              .enforcement.mode ==
+                "blocking-zero-unwaived-findings" and
+              .enforcement.blocks == [
+                "shellcheck-warning-or-higher",
+                "actionlint-workflow-and-inline-shell",
+                "zizmor-regular-persona",
+                "cfn-lint-all-current-templates",
+                "sam-validate-lint-and-build",
+                "cloudformation-guard-current-templates",
+                "trivy-iac-medium-or-higher",
+                "trivy-sbom-vulnerability-and-license-policy"
+              ] and
+              .enforcement.acceptedWaivers == 0 and
+              .enforcement.unwaivedFindings == 0 and
+              .enforcement.toolCompatibility == {
+                "analyzer":"actionlint",
+                "version":"1.7.12",
+                "feature":"concurrency.queue",
+                "rawDiagnostics":6,
+                "effectiveFindings":0,
+                "exactPaths":[
+                  ".github/workflows/bootstrap-aws.yml",
+                  ".github/workflows/deploy-aws.yml",
+                  ".github/workflows/foundation-migration.yml",
+                  ".github/workflows/recover-aws.yml"
+                ],
+                "disposition":
+                  "Exact source-validated parser/schema compatibility boundary; raw diagnostics retained; not a waiver."
+              } and
+              .enforcement.trivyIaCCompatibility == {
+                "analyzer":"Trivy",
+                "version":"0.72.0",
+                "ruleIds":["AWS-0011","AWS-0013","AWS-0132"],
+                "severity":"HIGH",
+                "target":"aws/template.yaml",
+                "scannerResources":$trivyScannerResources,
+                "rawFindings":3,
+                "compatibilityFindings":3,
+                "blockingFindings":0,
+                "disposition":
+                  "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+              } and
+              .enforcement.trivySbomLicenseCompatibility == {
+                "analyzer":"Trivy",
+                "version":"0.72.0",
+                "inventoryAnalyzer":"Syft",
+                "inventoryVersion":"1.50.0",
+                "reportResultsEncoding":{
+                  "backend":"array",
+                  "frontend":"array",
+                  "lambdaContent":"omitted-root-only"
+                },
+                "lambdaInventory":{
+                  "contract":"exact-root-only",
+                  "spdxVersion":"SPDX-2.3",
+                  "sourceName":"archon-memory-lambda-zip-content",
+                  "rootPackageId":"SPDXRef-DocumentRoot-Directory-archon-memory-lambda-zip-content",
+                  "totalPackages":1,
+                  "catalogedDependencyPackages":0,
+                  "relationships":1
+                },
+                "packages":[
+                  "@csstools/color-helpers@5.1.0",
+                  "lightningcss@1.33.0",
+                  "lightningcss-linux-x64-gnu@1.33.0",
+                  "lightningcss-linux-x64-musl@1.33.0"
+                ],
+                "resolvedUrls":[
+                  "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+                  "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+                  "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+                  "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+                ],
+                "integrity":[
+                  "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+                  "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+                  "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+                  "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+                ],
+                "rawFindings":4,
+                "vulnerabilityFindings":0,
+                "compatibilityFindings":4,
+                "blockingFindings":0,
+                "disposition":
+                  "Exact build-only MIT-0/MPL-2.0 license classifications are bound to Syft licenses/locations and lockfile versions, resolved URLs, and SHA-512 integrity; raw evidence is retained and no waiver is accepted."
+              } and
+              .evidence.cloudFormationTemplates == [
+                "aws/template.yaml",
+                "aws/bootstrap-oidc.yaml",
+                "aws/edge-waf.yaml",
+                "aws/finops.yaml"
+              ] and
+              (.evidence.manifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.evidence.lambdaContentManifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.evidence.sbomDocumentsManifestSha256 |
+                test("^[0-9a-f]{64}$")) and
+              .evidence.waiverLedgerSha256 ==
+                $waiverLedgerSha256
+            ' "$RELEASE_ROOT/supply-chain-release-receipt.json" >/dev/null
+
+          receipt_sha256="$(
+            sha256sum "$RELEASE_ROOT/supply-chain-release-receipt.json" |
+              awk '{print $1}'
+          )"
+          [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Attest exact-SHA supply-chain release receipt
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/archon-supply-chain-release/supply-chain-release-receipt.json
+
+      - name: Persist exact-SHA release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supply-chain-release-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archon-supply-chain-release/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summarize exact-SHA release evidence
+        shell: bash
+        env:
+          RECEIPT_SHA256: ${{ steps.receipt.outputs.sha256 }}
+        run: |
+          {
+            echo "### Exact-SHA supply-chain release evidence"
+            echo
+            echo "| Evidence | Value |"
+            echo "|---|---|"
+            echo "| Source SHA | \`$GITHUB_SHA\` |"
+            echo "| Receipt SHA-256 | \`$RECEIPT_SHA256\` |"
+            echo "| Provenance attestation | GitHub artifact attestation |"
+            echo "| Enforcement | Blocking; zero unwaived findings; exact actionlint, Trivy IaC, and build-license compatibility dispositions retained in raw evidence |"
+            echo "| Trivy IaC | raw=3; compatibility=3; blocking=0; Trivy 0.72.0 HIGH AWS-0011/AWS-0013/AWS-0132 with source-validated WAF, TLS, and CMK contracts |"
+            echo "| Trivy SBOM | vulnerabilities=0; raw licenses=4; exact build-only compatibility=4; blocking=0; Syft and lockfile bound |"
+          } >>"$GITHUB_STEP_SUMMARY"

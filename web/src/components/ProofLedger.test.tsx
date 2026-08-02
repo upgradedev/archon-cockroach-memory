@@ -27,6 +27,22 @@ function verifiedProof(): ProofSnapshot {
       recallAt10Percent: 0.99,
       p95Ms: 21,
     },
+    resolutionLoop: {
+      enabled: true,
+      schemaTables: 5,
+      activeSandboxSessions: 0,
+      transactionIsolation: "SERIALIZABLE",
+      authorityBoundary: "financial-controller-human-gate",
+      identityAssurance: "fixed-demo-role-assertion-not-authenticated",
+      idempotency: "decision-key+database-unique-constraint",
+      receipt: "SHA-256 immutable decision record",
+      learning: "conflict-observation+human-decision",
+      consolidation: "versioned current/superseded state",
+      forgetting: "CockroachDB row-level TTL",
+      canonicalMemoryMutable: false,
+      externalSideEffects: "none",
+      evidence: "live fixed-scope sandbox schema query",
+    },
     embeddingModel: "amazon.titan-embed-text-v2:0",
     narrationModel: "eu.anthropic.claude-sonnet-4-6:0",
     scope: {
@@ -90,6 +106,9 @@ describe("ProofLedger", () => {
     render(ledger(verifiedProof()));
 
     expect(screen.getByTestId("store-proof")).toHaveTextContent("Store verified");
+    expect(screen.getByTestId("resolution-proof")).toHaveTextContent(
+      "Human gate verified",
+    );
     expect(screen.getByText("Index verified")).toBeInTheDocument();
     expect(screen.getByText("1024 dimensions · cosine")).toBeInTheDocument();
     expect(screen.getByText("3-region RF=3")).toBeInTheDocument();
@@ -106,7 +125,11 @@ describe("ProofLedger", () => {
     );
     expect(screen.getByText("amazon.titan-embed-text-v2")).toBeInTheDocument();
     expect(screen.getByText("anthropic.claude-sonnet-4-6")).toBeInTheDocument();
-    expect(screen.getByText("Fixed synthetic public dataset · read-only")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Canonical dataset read-only · action sandbox isolated",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("C-SPANN vector search")).toBeInTheDocument();
     expect(screen.getByText("RF=3 survivability")).toBeInTheDocument();
   });

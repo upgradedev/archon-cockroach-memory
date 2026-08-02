@@ -7,6 +7,14 @@ on:
         description: Exact green main commit to reconcile
         required: true
         type: string
+    secrets:
+      CCLOUD_API_KEY:
+        description: CockroachDB Cloud service-account API key
+        required: true
+    outputs:
+      cockroach_sql_dns:
+        description: Authenticated primary eu-west-1 Cockroach Cloud SQL DNS name.
+        value: ${{ jobs.reconcile.outputs.cockroach_sql_dns }}
   workflow_dispatch:
     inputs:
       target_sha:
@@ -23,10 +31,12 @@ permissions:
 
 jobs:
   reconcile:
-    name: Atomic schema, seed, runtime RLS, and C-SPANN execution proof
+    name: Schema, runtime RLS, C-SPANN, and resolution-loop execution proof
     if: github.event_name == 'workflow_call' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      cockroach_sql_dns: ${{ steps.cluster.outputs.cockroach_sql_dns }}
     environment:
       name: production-db
     permissions:
@@ -37,7 +47,6 @@ jobs:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
       AWS_DATABASE_OPERATOR_ROLE_ARN: ${{ vars.AWS_DATABASE_OPERATOR_ROLE_ARN }}
-      CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
       COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
       COCKROACH_ADMIN_SECRET_ID: ${{ vars.COCKROACH_ADMIN_SECRET_ID || 'archon-memory/operator/cockroach-admin' }}
       STAGING_DATABASE_SECRET_ID: ${{ vars.STAGING_DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
@@ -51,6 +60,7 @@ jobs:
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Prove target is still current main
         run: |
@@ -69,6 +79,8 @@ jobs:
         run: npm ci
 
       - name: Validate protected environment configuration
+        env:
+          CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
         run: |
           set -euo pipefail
           test -n "$AWS_ACCOUNT_ID"
@@ -78,6 +90,9 @@ jobs:
           test "$AWS_REGION" = "eu-west-1"
 
       - name: Prove CockroachDB Cloud provider, plan, state, and region
+        id: cluster
+        env:
+          CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
         run: |
           set -euo pipefail
           CLUSTER_METADATA="$(curl --fail --silent --show-error \
@@ -94,16 +109,29 @@ jobs:
              .state == "CREATED" and
              (.cockroach_version |
                test("^v26\\.2(?:\\.|$)")) and
-             any(.regions[];
-               .name == "eu-west-1" and .primary == true)' \
-            <<<"$CLUSTER_METADATA"
+             ([.regions[] |
+                select(.name == "eu-west-1" and .primary == true)] |
+                length) == 1 and
+             ([.regions[] |
+                select(.name == "eu-west-1" and .primary == true)][0].sql_dns |
+                type == "string" and
+                length <= 253 and
+                test("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"))' \
+             <<<"$CLUSTER_METADATA"
+          COCKROACH_SQL_DNS="$(jq -er \
+            '[.regions[] |
+               select(.name == "eu-west-1" and .primary == true)][0].sql_dns' \
+            <<<"$CLUSTER_METADATA")"
           {
             echo "COCKROACH_CLOUD_PROVIDER=AWS"
             echo "COCKROACH_CLOUD_PLAN=BASIC"
             echo "COCKROACH_CLOUD_REGION=eu-west-1"
             echo "COCKROACH_CLOUD_VERSION=$(jq -er '.cockroach_version' <<<"$CLUSTER_METADATA")"
+            echo "COCKROACH_SQL_DNS=$COCKROACH_SQL_DNS"
           } >> "$GITHUB_ENV"
-          unset CLUSTER_METADATA
+          printf 'cockroach_sql_dns=%s\n' "$COCKROACH_SQL_DNS" \
+            >>"$GITHUB_OUTPUT"
+          unset CLUSTER_METADATA COCKROACH_SQL_DNS
 
       - name: Configure short-lived database-operator credentials
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
@@ -142,6 +170,46 @@ jobs:
           fi
           echo "::add-mask::$DATABASE_URL"
           export DATABASE_URL
+
+          npm run --silent db:endpoint:verify \
+            > database-endpoint-binding-receipt.json
+          jq -e \
+            '.schemaVersion == 1 and
+             .ok == true and
+             .clusterIdBoundBy ==
+               "authenticated Cockroach Cloud API primary eu-west-1 sql_dns" and
+             (.endpointHostnameSha256 | test("^[a-f0-9]{64}$")) and
+             .port == 26257 and
+             .database == "archon" and
+             .tlsMode == "verify-full" and
+             .routingOverrides == "none" and
+             .secretMaterialPrinted == false' \
+            database-endpoint-binding-receipt.json
+
+          for RUNTIME_SECRET_ID in \
+            "$STAGING_DATABASE_SECRET_ID" \
+            "$PRODUCTION_DATABASE_SECRET_ID"; do
+            if aws secretsmanager describe-secret \
+              --secret-id "$RUNTIME_SECRET_ID" \
+              --region "$AWS_REGION" >/dev/null 2>&1; then
+              RUNTIME_SECRET="$(aws secretsmanager get-secret-value \
+                --secret-id "$RUNTIME_SECRET_ID" \
+                --region "$AWS_REGION" \
+                --query SecretString \
+                --output text)"
+              if [[ "$RUNTIME_SECRET" == postgres://* ||
+                    "$RUNTIME_SECRET" == postgresql://* ]]; then
+                RUNTIME_URL="$RUNTIME_SECRET"
+              else
+                RUNTIME_URL="$(jq -er '.DATABASE_URL' <<<"$RUNTIME_SECRET")"
+              fi
+              echo "::add-mask::$RUNTIME_URL"
+              DATABASE_URL="$RUNTIME_URL" \
+                npm run --silent db:endpoint:verify >/dev/null
+              unset RUNTIME_SECRET RUNTIME_URL
+            fi
+          done
+          unset RUNTIME_SECRET_ID
 
           npm run db:schema
           npm run demo:seed
@@ -184,6 +252,10 @@ jobs:
             APP_DB_USER="archon_staging_${TARGET_SHA:0:10}" \
             DATABASE_SECRET_NAME="$STAGING_DATABASE_SECRET_ID" \
             npm run aws:provision-secret
+          else
+            APP_ENV=staging \
+            DATABASE_SECRET_NAME="$STAGING_DATABASE_SECRET_ID" \
+            npm run aws:provision-secret
           fi
           if ! aws secretsmanager describe-secret \
             --secret-id "$PRODUCTION_DATABASE_SECRET_ID" \
@@ -192,17 +264,30 @@ jobs:
             APP_DB_USER="archon_production_${TARGET_SHA:0:10}" \
             DATABASE_SECRET_NAME="$PRODUCTION_DATABASE_SECRET_ID" \
             npm run aws:provision-secret
+          else
+            APP_ENV=production \
+            DATABASE_SECRET_NAME="$PRODUCTION_DATABASE_SECRET_ID" \
+            npm run aws:provision-secret
           fi
 
           npm run --silent db:release:verify > database-release-receipt.json
           jq -e \
             --arg target "$TARGET_SHA" \
-            '.schemaVersion == 5 and
+            '.schemaVersion == 6 and
              .ok == true and
              .targetSha == $target and
              .region == "eu-west-1" and
              .cockroachCloud.provider == "AWS" and
              .cockroachCloud.region == "eu-west-1" and
+             .cockroachCloud.sqlEndpointBinding.source ==
+               "exact primary eu-west-1 regions[].sql_dns" and
+             (.cockroachCloud.sqlEndpointBinding.endpointHostnameSha256 |
+               test("^[a-f0-9]{64}$")) and
+             .cockroachCloud.sqlEndpointBinding.port == 26257 and
+             .cockroachCloud.sqlEndpointBinding.database == "archon" and
+             .cockroachCloud.sqlEndpointBinding.tlsMode == "verify-full" and
+             .cockroachCloud.sqlEndpointBinding.routingOverrides == "none" and
+             .cockroachCloud.sqlEndpointBinding.boundUrlCount == 3 and
              .fixtureRows == 12 and
              .proofs.roleBoundRls == true and
              .proofs.wrongCompanyInvisible == true and
@@ -224,6 +309,34 @@ jobs:
              .proofs.runtimePrincipalNoKindCspann == true and
              .proofs.runtimePrincipalKindCspann == true and
              .proofs.runtimeCspannEnvironmentCount == 2 and
+             .proofs.memoryResolutionLoop == true and
+             .proofs.runtimeResolutionEnvironmentCount == 2 and
+             .proofs.resolutionSandbox.tables == 5 and
+             .proofs.resolutionSandbox.rlsPolicies == 15 and
+             .proofs.resolutionSandbox.ttlExpirationExpression ==
+               "expires_at" and
+             .proofs.resolutionSandbox.ttlSchedule ==
+               "0 */4 * * *" and
+             .proofs.resolutionSandbox.ttlClusterEnabled == true and
+             .proofs.resolutionSandbox.ttlScheduleStatus == "ACTIVE" and
+             .proofs.resolutionSandbox.ttlPaused == false and
+             .proofs.resolutionSandbox.writerRelationGrantCount == 5 and
+             .proofs.resolutionSandbox.transitionOwnerRelationGrantCount == 13 and
+             .proofs.resolutionSandbox.transitionFunctionCount == 2 and
+             .proofs.resolutionSandbox.writerFunctionExecuteCount == 2 and
+             .proofs.resolutionSandbox.directRuntimeDml == "none" and
+             .proofs.resolutionIsolationBoundary ==
+               "trusted Lambda validates opaque bearer tokens; CockroachDB SECURITY DEFINER transition API confines mutation to fixed synthetic TTL rows" and
+             .proofs.transitionOwnerPrivilegeBoundary ==
+               "NOLOGIN/NOBYPASSRLS; no members or parent roles; schema USAGE without CREATE; 13 bounded relation grants; owns exactly two SECURITY DEFINER routines" and
+             .proofs.runtimeRelationPrivilegeMatrix ==
+               "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE" and
+             .proofs.runtimeFunctionPrivilegeMatrix ==
+               "cluster-wide EXECUTE only on the two canonical resolution routine signatures" and
+             .proofs.runtimeDatabasePrivilegeMatrix ==
+               "cluster-wide exact five-row non-grantable matrix: public CONNECT+TEMPORARY on defaultdb/postgres; runtime principal CONNECT on archon; zero system rows" and
+             .proofs.runtimeSystemPrivileges ==
+               "exact-empty runtime role options; no affirmative system grants" and
              (.proofs.indexDefinitionFingerprints.company |
                test("^[a-f0-9]{64}$")) and
              (.proofs.indexDefinitionFingerprints.kind |
@@ -238,11 +351,26 @@ jobs:
                unique | length) == 1 and
              ([.runtimes[].cspannRecall.kind.queryTemplateSha256] |
                unique | length) == 1 and
+             ([.runtimes[].clusterGrantProof.databaseMatrixSha256] |
+               unique | length) == 2 and
              all(.runtimes[];
                ((.environment == "staging" and
                  (.principal | test("^archon_staging_[a-z0-9]{6,40}$"))) or
                 (.environment == "production" and
-                 (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+                (.principal | test("^archon_production_[a-z0-9]{6,40}$")))) and
+               .clusterGrantProof.routineGrantCount == 2 and
+               .clusterGrantProof.databaseGrantCount == 5 and
+               .clusterGrantProof.databaseInventory ==
+                 ["archon", "defaultdb", "postgres", "system"] and
+               .clusterGrantProof.databaseGrantMatrix == [
+                 {"databaseName":"archon","grantee":.principal,"privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"defaultdb","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false},
+                 {"databaseName":"postgres","grantee":"public","privilegeType":"CONNECT","isGrantable":false},
+                 {"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false}
+               ] and
+               (.clusterGrantProof.databaseMatrixSha256 |
+                 test("^[a-f0-9]{64}$")) and
                .visibleMemories == 9 and
                .canonicalMemories == 9 and
                .distinctIdempotencyKeys == 9 and
@@ -279,9 +407,51 @@ jobs:
                (.cspannRecall.kind.returnedRows >= 1 and
                 .cspannRecall.kind.returnedRows <= 5) and
                (.cspannRecall.kind.queryTemplateSha256 |
-                 test("^[a-f0-9]{64}$"))
+                 test("^[a-f0-9]{64}$")) and
+               .resolutionLoop.fixedSyntheticScenario == true and
+               .resolutionLoop.serializableTransactions == true and
+               .resolutionLoop.databaseEnforcedTransitions == true and
+               .resolutionLoop.exactTransitionFunctionExecute == true and
+               .resolutionLoop.directResolutionDmlDenied == true and
+               .resolutionLoop.approvePath == true and
+               .resolutionLoop.rejectPath == true and
+               .resolutionLoop.idempotentReplay == true and
+               .resolutionLoop.conflictingFinalDecisionRejected == true and
+               .resolutionLoop.receiptVerified == true and
+               .resolutionLoop.receiptDatabaseDerived == true and
+               .resolutionLoop.consolidationVerified == true and
+               .resolutionLoop.canonicalMemoryUnchanged == true and
+               .resolutionLoop.immutableDecisionTables == true and
+               .resolutionLoop.deletePrivilegeAbsent == true and
+               .resolutionLoop.externalSideEffects == "none" and
+               .resolutionLoop.sessionIsolationBoundary ==
+                 "trusted-lambda-bearer-token" and
+               .resolutionLoop.retention == "cockroach-row-level-ttl" and
+               (.resolutionLoop.approvedReceiptSha256 |
+                 test("^[a-f0-9]{64}$")) and
+               (.resolutionLoop.rejectedReceiptSha256 |
+                 test("^[a-f0-9]{64}$")) and
+               .resolutionLoop.approvedReceiptSha256 !=
+                 .resolutionLoop.rejectedReceiptSha256
              )' \
             database-release-receipt.json
+          for runtime_environment in staging production; do
+            expected_matrix_sha="$(jq -er \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseMatrixSha256' \
+              database-release-receipt.json)"
+            matrix_json="$(jq -cer \
+              --arg environment "$runtime_environment" \
+              '.runtimes[] |
+               select(.environment == $environment) |
+               .clusterGrantProof.databaseGrantMatrix' \
+              database-release-receipt.json)"
+            actual_matrix_sha="$(printf '%s' "$matrix_json" |
+              sha256sum | awk '{print $1}')"
+            test "$actual_matrix_sha" = "$expected_matrix_sha"
+          done
           unset ADMIN_SECRET DATABASE_URL
 
       - name: Upload sanitized database release receipt
@@ -289,6 +459,7 @@ jobs:
         with:
           name: database-release-${{ env.TARGET_SHA }}
           path: |
+            database-endpoint-binding-receipt.json
             database-release-receipt.json
             legacy-reconciliation-receipt.json
           if-no-files-found: error

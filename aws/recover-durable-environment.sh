@@ -42,6 +42,7 @@ test "$GITHUB_REPOSITORY" = "upgradedev/archon-cockroach-memory"
 test "$GITHUB_WORKFLOW_REF" = \
   "upgradedev/archon-cockroach-memory/.github/workflows/recover-aws.yml@refs/heads/main"
 test "$STACK_NAME" = "${APP_NAME}-${RECOVERY_ENVIRONMENT}"
+storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
 test -d "$bundle_dir"
 test ! -L "$bundle_dir"
 if [ -e "$output_receipt" ] || [ -L "$output_receipt" ]; then
@@ -493,7 +494,8 @@ case "$stack_state:$has_previous_stack" in
         --key index.html
         --body "$previous_index"
         --expected-bucket-owner "$AWS_ACCOUNT_ID"
-        --server-side-encryption AES256
+        --server-side-encryption aws:kms
+        --ssekms-key-id "$storage_key_alias"
         --checksum-algorithm SHA256
         --checksum-sha256 "$checksum_base64"
         --region "$AWS_REGION"
@@ -528,11 +530,20 @@ case "$stack_state:$has_previous_stack" in
         --arg cacheControl "$cache_control" \
         --arg checksum "$checksum_base64" \
         --arg contentType "$content_type" \
+        --arg kmsPrefix \
+          "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/" \
         --arg version "$restored_index_version" \
         --argjson length "$(wc -c <"$previous_index")" \
         '
           .VersionId == $version
           and .ChecksumSHA256 == $checksum
+          and .ServerSideEncryption == "aws:kms"
+          and (
+            .SSEKMSKeyId
+            | type == "string"
+              and startswith($kmsPrefix)
+          )
+          and .BucketKeyEnabled == true
           and .ContentLength == $length
           and (.ContentType // "") == $contentType
           and (.CacheControl // "") == $cacheControl

@@ -116,3 +116,79 @@ test("Lambda adapter strips only the exact trusted named-stage prefix", async ()
   );
   assert.equal(defaultStageDoesNotStrip.statusCode, 404);
 });
+
+test("Lambda can fail closed against direct origin bypass without exposing the capability", async () => {
+  const previous = process.env.ORIGIN_VERIFY_TOKEN;
+  const capability = "A".repeat(43);
+  process.env.ORIGIN_VERIFY_TOKEN = capability;
+  try {
+    const missing = await handler(event("GET", "/api/health"));
+    assert.equal(missing.statusCode, 403);
+    assert.deepEqual(JSON.parse(missing.body), { error: "forbidden" });
+    assert.doesNotMatch(missing.body, new RegExp(capability, "u"));
+
+    const wrong = {
+      ...event("GET", "/api/health"),
+      headers: {
+        "content-type": "application/json",
+        "x-archon-origin-verify": "B".repeat(43),
+      },
+    };
+    assert.equal((await handler(wrong)).statusCode, 403);
+
+    const throughCloudFront = {
+      ...event("GET", "/api/health"),
+      headers: {
+        "content-type": "application/json",
+        "x-archon-origin-verify": capability,
+      },
+    };
+    assert.equal((await handler(throughCloudFront)).statusCode, 200);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ORIGIN_VERIFY_TOKEN;
+    } else {
+      process.env.ORIGIN_VERIFY_TOKEN = previous;
+    }
+  }
+});
+
+test("deployed environments reject missing, blank, or malformed origin capability", async () => {
+  const previousToken = process.env.ORIGIN_VERIFY_TOKEN;
+  const previousEnvironment = process.env.APP_ENV;
+  try {
+    for (const environment of ["staging", "production"] as const) {
+      process.env.APP_ENV = environment;
+      delete process.env.ORIGIN_VERIFY_TOKEN;
+      assert.equal((await handler(event("GET", "/api/health"))).statusCode, 403);
+
+      process.env.ORIGIN_VERIFY_TOKEN = "   ";
+      assert.equal((await handler(event("GET", "/api/health"))).statusCode, 403);
+
+      process.env.ORIGIN_VERIFY_TOKEN = "too-short";
+      const malformed = {
+        ...event("GET", "/api/health"),
+        headers: {
+          "content-type": "application/json",
+          "x-archon-origin-verify": "too-short",
+        },
+      };
+      assert.equal((await handler(malformed)).statusCode, 403);
+    }
+
+    process.env.APP_ENV = "local";
+    delete process.env.ORIGIN_VERIFY_TOKEN;
+    assert.equal((await handler(event("GET", "/api/health"))).statusCode, 200);
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.ORIGIN_VERIFY_TOKEN;
+    } else {
+      process.env.ORIGIN_VERIFY_TOKEN = previousToken;
+    }
+    if (previousEnvironment === undefined) {
+      delete process.env.APP_ENV;
+    } else {
+      process.env.APP_ENV = previousEnvironment;
+    }
+  }
+});

@@ -1,0 +1,278 @@
+name: AWS Account Security Baseline Audit
+
+# WA-03 is evidence only. This workflow can neither provision nor remediate
+# account controls. A human dispatches an exact current green main SHA, then a
+# protected environment releases only a pre-existing read-only OIDC role.
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact 40-character current main SHA proven by CI, CodeQL, and Supply Chain.
+        required: true
+        type: string
+
+concurrency:
+  group: aws-account-security-baseline-audit
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: eu-west-1
+  TARGET_SHA: ${{ inputs.target_sha }}
+
+jobs:
+  authorize:
+    name: Authorize exact green main SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail closed unless the dispatch targets current green main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '::add-mask::%s\n' "$AWS_ACCOUNT_ID"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          test "$AWS_REGION" = "eu-west-1"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/aws-security-baseline.yml@refs/heads/main"
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          prove_workflow() {
+            local expected_name expected_path state workflow
+            workflow="$1"
+            expected_name="$2"
+            expected_path="$3"
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er \
+                  --arg sha "$TARGET_SHA" \
+                  --arg name "$expected_name" \
+                  --arg path "$expected_path" \
+                  '
+                    [
+                      .workflow_runs[]
+                      | select(
+                          .head_sha == $sha
+                          and .head_branch == "main"
+                          and .event == "push"
+                          and .name == $name
+                          and .path == $path
+                        )
+                    ]
+                    | sort_by(.run_number, .run_attempt)
+                    | last
+                    | select(.conclusion == "success")
+                    | .conclusion
+                  '
+            )"
+            test "$state" = "success"
+          }
+          prove_workflow ci.yml CI .github/workflows/ci.yml
+          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml
+          prove_workflow \
+            supply-chain.yml "Supply Chain (enforced)" \
+            .github/workflows/supply-chain.yml
+          jq -e '
+            .owners.security.status == "assigned"
+            and (.owners.security.value | type == "string")
+            and (
+              .owners.security.value
+              | gsub("^\\s+|\\s+$"; "")
+              | length > 0
+            )
+            and (
+              .owners.security.value
+              | gsub("^\\s+|\\s+$"; "")
+              | test("^(tbd|todo|unknown|unassigned|n/a)$"; "i")
+              | not
+            )
+          ' docs/operations/well-architected-contract.json >/dev/null
+
+  audit:
+    name: Inspect the read-only AWS account security baseline
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: security-audit
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_SECURITY_AUDIT_ROLE_ARN: ${{ vars.AWS_SECURITY_AUDIT_ROLE_ARN }}
+    steps:
+      - name: Initialize the sanitized fail-closed receipt
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
+        run: |
+          set -euo pipefail
+          umask 077
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$TARGET_SHA" \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schema: "archon.aws.account-security-baseline",
+              schemaVersion: 1,
+              ok: false,
+              mode: "live-read-only",
+              repository: $repository,
+              commit: $commit,
+              generatedAt: $generatedAt,
+              region: "eu-west-1",
+              identity: {
+                accountBound: false,
+                accountIdentifierRedacted: true,
+                roleIdentifierRedacted: true
+              },
+              summary: {total: 10, passed: 0, failed: 10},
+              controls: [{
+                id: "audit-not-finalized",
+                ok: false,
+                observed: {reason: "hosted-audit-did-not-finalize"}
+              }],
+              limitations: [
+                "No live security-baseline receipt was finalized."
+              ]
+            }' >"$RECEIPT_PATH"
+
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Rebind source and pre-existing role after protected approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '::add-mask::%s\n' "$AWS_ACCOUNT_ID"
+          printf '::add-mask::%s\n' "$AWS_SECURITY_AUDIT_ROLE_ARN"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          [[ "$AWS_SECURITY_AUDIT_ROLE_ARN" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]{1,512}$ ]]
+          test "$AWS_REGION" = "eu-west-1"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/aws-security-baseline.yml@refs/heads/main"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+      - name: Configure the existing read-only security-audit role
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_SECURITY_AUDIT_ROLE_ARN }}
+          role-duration-seconds: 900
+          role-session-name: archon-security-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Inspect account security controls without mutation
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
+        run: bash aws/audit-account-security-baseline.sh
+
+      - name: Require the exact sanitized all-pass receipt
+        shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
+        run: |
+          set -euo pipefail
+          test -f "$RECEIPT_PATH"
+          test ! -L "$RECEIPT_PATH"
+          grep_status=0
+          grep -Eqi \
+            'arn:(aws|aws-cn|aws-us-gov):|:assumed-role/|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}' \
+            "$RECEIPT_PATH" || grep_status="$?"
+          test "$grep_status" -eq 1
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$TARGET_SHA" \
+            '
+              (keys | sort) == [
+                "commit",
+                "controls",
+                "generatedAt",
+                "identity",
+                "limitations",
+                "mode",
+                "ok",
+                "region",
+                "repository",
+                "schema",
+                "schemaVersion",
+                "summary"
+              ]
+              and .schema == "archon.aws.account-security-baseline"
+              and .schemaVersion == 1
+              and .ok == true
+              and .mode == "live-read-only"
+              and .repository == $repository
+              and .commit == $commit
+              and .region == "eu-west-1"
+              and .identity == {
+                accountBound: true,
+                accountIdentifierRedacted: true,
+                roleIdentifierRedacted: true
+              }
+              and .summary == {total: 10, passed: 10, failed: 0}
+              and (.controls | length) == 10
+              and all(.controls[];
+                (keys | sort) == ["id", "observed", "ok"]
+                and .ok == true
+                and (.observed | type) == "object"
+              )
+              and ([.controls[].id] | sort) == [
+                "audit-identity-binding",
+                "aws-config-recorder-channel",
+                "cloudtrail-multi-region-validation",
+                "ebs-default-encryption",
+                "guardduty-detector",
+                "iam-access-analyzer",
+                "iam-password-policy",
+                "root-credential-posture",
+                "s3-account-public-access-block",
+                "security-hub-standards"
+              ]
+              and (.limitations | length) == 3
+              and all(.limitations[]; type == "string" and length > 0)
+            ' "$RECEIPT_PATH" >/dev/null
+
+      - name: Upload only the sanitized exact-SHA receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-account-security-baseline-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
+          if-no-files-found: error
+          retention-days: 90

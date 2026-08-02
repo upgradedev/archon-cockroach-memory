@@ -54,6 +54,7 @@ case "$object_key" in
 esac
 
 bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
 checksum_base64="$(
   openssl dgst -sha256 -binary "$source_file" | base64 -w0
 )"
@@ -84,7 +85,8 @@ for attempt in 1 2 3 4 5; do
     --body "$source_file" \
     --if-none-match '*' \
     --expected-bucket-owner "$AWS_ACCOUNT_ID" \
-    --server-side-encryption AES256 \
+    --server-side-encryption aws:kms \
+    --ssekms-key-id "$storage_key_alias" \
     --checksum-algorithm SHA256 \
     --checksum-sha256 "$checksum_base64" \
     --content-type "$content_type" \
@@ -139,12 +141,20 @@ jq -e \
   --arg contentType "$content_type" \
   --arg environment "$RECOVERY_ENVIRONMENT" \
   --arg intent "$RECOVERY_INTENT_ID" \
+  --arg kmsPrefix \
+    "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/" \
   --arg kind "$object_kind" \
   --argjson bytes "$file_bytes" \
   '
     (.VersionId | type == "string" and length > 0 and . != "null")
     and .ChecksumSHA256 == $checksum
-    and .ServerSideEncryption == "AES256"
+    and .ServerSideEncryption == "aws:kms"
+    and (
+      .SSEKMSKeyId
+      | type == "string"
+        and startswith($kmsPrefix)
+    )
+    and .BucketKeyEnabled == true
     and .ContentLength == $bytes
     and .ContentType == $contentType
     and .Metadata == {

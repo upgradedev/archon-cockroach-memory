@@ -31,7 +31,8 @@ Hosted measurements from the exact main CI run:
 - k6: 554/554 checks, 0.00% request failures, 100.00% recall correctness,
   and 773.67 ms p95 at 20 concurrent virtual users;
 - C-SPANN smoke: 98.6% mean recall@10 and 5.01 ms p95 over 1,500 vectors;
-- exact-release active DAST: 16/16 checks; and
+- exact-release active DAST: 21/21 checks, including the isolated resolution
+  capability and authority boundaries; and
 - exact-release ZAP: 13 URLs, 63 PASS, 0 FAIL, 0 WARN, with CSP alert
   `10055` and site-isolation alert `90004` both passing.
 
@@ -118,9 +119,10 @@ and exited successfully without a lease or restoration mutation:
   `If-Match` against its current ETag, forming a compare-and-swap chain that
   implements `ARMED → COMMITTED` or
   `ARMED → RECOVERING → RECOVERED`;
-- the independent `Recover AWS` workflow is defined for the exact completed
-  `Deploy AWS` run, manual dispatch, and a 15-minute watchdog schedule. Its
-  two-hour lease is bound to the exact watchdog run, attempt, and environment;
+- the independent `Recover AWS` workflow runs on a 15-minute watchdog
+  schedule, a daily audit schedule, or manual dispatch, and classifies only
+  the exact `Deploy AWS` push run/attempt bound by the ledger. Its two-hour
+  lease is bound to the exact watchdog run, attempt, and environment;
   an active owner blocks a competitor, while expiry or an exactly proved dead
   owner permits a CAS reclaim;
 - recovery emits a strict schema-v2
@@ -187,6 +189,8 @@ pipeline. Its migration requires a separate two-principal
 pending→prove→activate→observe→retire workflow. It is no longer attached to a
 `us-west-2` compute workload.
 
-`aws/deploy-lambda.sh` remains break-glass only. It requires both
-`ALLOW_LEGACY_DEPLOY=1` and an explicit region, uses a temporary package
-directory, and cannot silently recreate a default `us-west-2` workload.
+The former direct `aws/deploy-lambda.sh`/Dockerfile path has been removed. It
+could recreate an ungoverned second deployment mechanism and placed a database
+URL directly in Lambda configuration. Recovery and deployment now have one
+pipeline-owned SAM path only; the historical source remains recoverable from
+Git.

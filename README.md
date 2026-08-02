@@ -1,8 +1,8 @@
 # Archon Memory Control Room
 
 **A Financial Memory Control Room that lets a CFO ask what the books forgot,
-inspect the exact evidence behind the answer, and see when persistent memory
-disagrees with itself.**
+inspect the exact evidence, see persistent memory disagree, and explicitly
+resolve a correction without giving the agent financial authority.**
 
 This is an entry for the
 [CockroachDB × AWS Hackathon — Build with Agentic Memory](https://cockroachdb-ai.devpost.com/)
@@ -16,14 +16,20 @@ embeddings and grounded narration.
 The working challenge slice is intentionally precise:
 
 - One fixed synthetic company: **Helios SA**.
-- A public, read-only investigation surface; callers cannot select a tenant,
-  company, database, model, or write tool.
+- A public investigation surface over read-only canonical memory; callers
+  cannot select a tenant, company, database, model, or canonical write tool.
 - Persistent memories stored beside provenance and lifecycle state.
 - Native C-SPANN semantic recall, filtered by tenant, embedding model, active
   lifecycle state, and company.
 - A cited Bedrock answer with relevance abstention, per-claim citation checks,
   numeric checks, and deterministic evidence fallback.
 - A complete-scope, read-only audit for contradictions and missing counterparts.
+- A disposable Memory Resolution Loop that observes a cross-session
+  correction, requires an explicit synthetic controller decision, applies one
+  serializable/idempotent CockroachDB state transition, and returns an
+  immutable receipt.
+- Explicit learning, consolidation, and CockroachDB row-level TTL forgetting
+  policies, with no external financial side effect.
 - A live proof ledger for database version, runtime principal, active record
   count, vector index, models, and fixed scope.
 
@@ -43,7 +49,10 @@ durable facts learned across independent sessions and makes their state explicit
 3. The answer cites exact stored memories; unsupported or weakly related evidence
    causes abstention or deterministic fallback.
 4. A separate exhaustive audit compares the memory across sessions and surfaces
-   contradictions and dangling references without mutating the data.
+   contradictions and dangling references without mutating canonical data.
+5. A bounded sandbox can propose a higher-authority correction, wait for a
+   human click, preserve both sources, consolidate current/superseded state, and
+   expire the disposable graph through CockroachDB TTL.
 
 The differentiator is simple: **the memory can disagree out loud before an agent
 acts on it.**
@@ -51,9 +60,10 @@ acts on it.**
 The working loop is **Store → Retrieve → Act**: `ingestEvent`/`remember`
 idempotently persist embedded facts, provenance, content digests, and lifecycle
 state; native C-SPANN retrieves only the fixed active scope; the agent returns a
-cited answer, abstains, uses deterministic evidence wording, or surfaces a
-contradiction recommendation for human review. Public mutation is disabled only
-at the judge boundary.
+cited answer, abstains, uses deterministic evidence wording, or proposes a
+correction. The judge-facing action is real but deliberately narrow: only an
+explicit human can commit the fixed synthetic resolution graph, while
+`agent_memory` remains read-only.
 
 ## Architecture
 
@@ -62,11 +72,11 @@ flowchart LR
     Judge["Judge browser"]
     CF["Amazon CloudFront<br/>same-origin edge"]
     S3["Private Amazon S3<br/>React + Tailwind"]
-    API["Amazon API Gateway<br/>bounded read-only routes"]
+    API["Amazon API Gateway<br/>bounded recall + isolated action routes"]
     Lambda["AWS Lambda<br/>Node.js 22"]
     Titan["Amazon Bedrock<br/>Titan Embeddings V2"]
     Claude["Amazon Bedrock<br/>Claude Sonnet 4.6"]
-    CRDB["CockroachDB Cloud on AWS<br/>SQL + RLS + C-SPANN"]
+    CRDB["CockroachDB Cloud on AWS<br/>SQL + RLS + C-SPANN + TTL"]
     MCP["CockroachDB Cloud<br/>Managed MCP"]
 
     Judge --> CF
@@ -83,10 +93,14 @@ cluster, are anchored in `eu-west-1`; CloudFront is global and Claude uses an EU
 cross-region inference profile. The scoped inventory contains no application
 resources in `us-west-2`.
 
-## Required CockroachDB tools: 2 of 4
+## Two meaningfully integrated CockroachDB tools
 
-The entry uses the two required tools below. It does not count ccloud or the
-self-hosted MCP surface toward this total.
+The entry has one CockroachDB memory data plane and one independent
+CockroachDB control plane. The Financial Memory Agent uses Distributed Vector
+Indexing for live recall. The Memory Integrity Agent uses Cloud Managed MCP to
+inspect the same release and blocks application promotion unless its exact
+Store and C-SPANN evidence is verified. It does not count ccloud or the
+self-hosted MCP surface toward the challenge minimum.
 
 ### 1. Distributed Vector Indexing
 
@@ -116,14 +130,28 @@ multi-range fan-out, RF=3 distribution, and node-loss survival are recorded in
 
 ### 2. CockroachDB Cloud Managed MCP
 
-The hardened receipt-schema-v2 audit uses exactly four hosted, read-only Managed
-MCP calls for cluster identity, table listing, schema inspection, and one
-fixed-scope aggregate. Its SQL is pinned to
+The hardened receipt-schema-v3 Memory Integrity Agent uses four required
+hosted, read-only Managed MCP calls for cluster identity, table listing, schema
+inspection, and one fixed-scope aggregate. When the hosted server advertises
+`explain_query`, it also requires that optional read-only call to prove
+`idx_agent_memory_company_scope_embedding`; an advertised capability that
+cannot prove the exact C-SPANN plan fails closed. When the capability is not
+advertised, the receipt says `not-advertised` and links instead to the exact-SHA
+database-release C-SPANN receipt digest—there is no fabricated tool use.
+
+The aggregate SQL is pinned to
 `public-demo / Helios SA / active / amazon.titan-embed-text-v2:0`, forces
 `idx_agent_memory_active_scope`, reads through a ten-row sentinel, returns at
-most one aggregate row, and accepts only the exact `9 / 9 / 9` Store proof.
-Credentials, cluster identifiers, connection material, memory text, and
-embeddings are never emitted.
+most one aggregate row, and accepts only the exact `9 / 9 / 9` Store proof. The
+v3 receipt binds the 40-character release SHA, the database C-SPANN receipt
+SHA-256, the exact Managed MCP tool sequence, and—when available—only a query
+plan fingerprint. Credentials, cluster identifiers, connection material,
+memory text, embeddings, and raw plans are never emitted.
+
+This is a causal gate, not a terminal report: the protected database release
+must complete first, Managed MCP must then verify it, and both staging and
+production explicitly depend on that successful job. A separate protected
+standalone audit reuses the same v3 contract and exact release evidence.
 
 [Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107)
 is historical pre-hardening evidence: it proves live Managed MCP connectivity and
@@ -165,8 +193,9 @@ The deployment follows the AWS serverless web application reference pattern:
 - CloudFront Origin Access Control, same-origin `/api/*`, HTTP/2+3, compression,
   CSP/HSTS/security headers, and SPA routing.
 - API Gateway HTTP API with a named `live` stage, stage-wide throttling,
-  detailed metrics, vended CloudWatch access logs, no per-route overrides, and
-  no public mutation route.
+  detailed metrics, vended CloudWatch access logs, no per-route overrides,
+  read-only canonical routes, and a fixed synthetic TTL-scoped resolution
+  route.
 - Lambda Node.js 22 with five bounded in-flight slots: three initial Control
   Room evidence reads, one recall, and one spare. API request-rate and burst
   limits are enforced independently; X-Ray, retained logs, and bounded
@@ -180,22 +209,29 @@ The deployment follows the AWS serverless web application reference pattern:
   `ExecutedVersion` behind the weighted alias; separate function/API/throttle
   alarms and an operations dashboard retain broad operational coverage.
 
-### Alarm routing — dormant protected contract
+### Alarm routing — protected activation and staging drill path
 
 The delivery foundation now source-controls a fail-closed alarm-routing
-contract, but it is deliberately **not claimed as live**. Its
+contract plus a manual `plan|apply|verify|drill` control workflow, but it is
+deliberately **not claimed as live** until hosted receipts exist. Its
 `AlarmRoutingEnabled` parameter defaults to `false`; no SNS topic ARN is guessed
 or prewired, and the deploy workflow no longer accepts an
 `ALARM_TOPIC_ARN` GitHub secret. A separately authorized administrator must
-first approve the billable AWS resources, apply the exact checked-in stack
-policy, and execute the exact foundation-template change. The existing
-foundation-promotion role cannot set that stack policy or provision these new
-KMS, SNS, SQS, and IAM resources, so it cannot silently self-activate the
+first approve the billable AWS resources and cross the protected
+`alarm-routing-controls` environment. The dedicated repository-bound OIDC role
+can submit only an immutable exact-SHA template to the existing foundation
+stack, pass only the dedicated CloudFormation execution role, and execute only
+an inspected `AlarmRoutingEnabled=false -> true` change set. Both plan and
+apply reject any replacement, deletion, or mutation of an existing resource;
+the only accepted plan adds the 15 conditional alarm resources. The existing
+foundation-promotion and deploy roles cannot silently self-activate the
 contract.
 
 When activated, the foundation creates one rotating customer-managed KMS key,
-separate encrypted staging/production SNS topics, and separate encrypted
-14-day SQS archives. CloudWatch publishing, SNS queue delivery, deploy-role
+separate encrypted staging/production SNS topics, separate encrypted 14-day
+SQS operational archives, and a five-minute KMS-encrypted staging drill queue
+whose SNS payload filter accepts only the synthetic probe's exact `AlarmName`.
+The probe is not attached to CodeDeploy. CloudWatch publishing, SNS queue delivery, deploy-role
 inspection, non-SNS producer denial, TLS enforcement, resource tags, retention,
 and archive subscriptions are all exact-resource policies protected against
 replacement or deletion. Each deployment discovers only complete foundation
@@ -207,14 +243,21 @@ retain a stale destination. It remains guarded by the existing pre/post
 CloudFormation drift gates. After the exact foundation template has been
 synchronized, its
 unconditional read-only alarm-inspection policy lets every deployment prove
-that exactly four environment alarms either route exclusively to the discovered
-topic or, while the contract is disabled, retain no actions at all. Any partial,
+that exactly four deployment alarms either route exclusively to the discovered
+topic or, while the contract is disabled, retain no actions at all. In the
+active staging state it additionally verifies the isolated routing probe. Any partial,
 inconsistent, cross-environment, or stale-action contract fails closed. The SQS
 archives are finite 14-day
 delivery/evidence buffers, not immutable records or human-notification
-endpoints; without a separately approved consumer, messages expire. Human
-paging endpoints and a live delivery drill remain intentionally outside this
-dormant phase and must not be represented as completed.
+endpoints; without a separately approved consumer, messages expire. The drill
+can force only the synthetic staging probe from `ALARM` to `OK`, observe the
+matching encrypted SNS-to-SQS envelope in the dedicated filtered queue without
+reading the operational archive or deleting the message, and bind hashed
+human approval/acknowledgement references without contact details. Its IAM
+authority cannot set production alarm state. This proves the encrypted probe route,
+not delivery to or acknowledgement by a paging destination. Human paging and
+all live activation/drill claims remain pending until separately approved
+hosted receipts exist.
 
 ### Durable AWS delivery recovery — live protected rollout
 
@@ -280,8 +323,9 @@ The checked-in control plane is AWS-native and fixed to `eu-west-1`:
    `COMMITTED`. A completely proved restoration may advance it to `RECOVERED`;
    cancellation and incomplete recovery leave it unresolved.
 5. The checked-in watchdog handles failed, cancelled, and timed-out delivery
-   runs after the exact `Deploy AWS` completion event, on a 15-minute schedule,
-   or by manual dispatch. A two-hour lease is bound to the exact watchdog
+   runs from a 15-minute schedule, a daily audit schedule, or manual dispatch.
+   It classifies only the exact `Deploy AWS` push run/attempt bound by the
+   durable ledger. A two-hour lease is bound to the exact watchdog
    run/attempt/environment. An active owner blocks competing work; an expired
    lease or an exactly proved completed non-success owner can be reclaimed
    through another CAS revision.
@@ -326,14 +370,18 @@ The release path is source-controlled:
 
 ```text
 secret scan
-  → dependency gates
+  → dependency + pipeline-only supply-chain gates, SBOMs, licenses, IaC and workflow scanners
   → TypeScript/unit/integration/security/load/node-loss tests
+  → longitudinal B0–B4 baselines, lifecycle ablations, 100k-event rehearsal,
+    and real C-SPANN-versus-exact evaluation
   → React unit + desktop/mobile Playwright
   → SAM lint/build
   → source-readiness gate
   → build once
   → cryptographic candidate receipt
   → protected database release (exact legacy supersession + payload-digest proof + fail-closed RLS + two-principal C-SPANN probes)
+  → exact-SHA Managed MCP Memory Integrity gate (Store + optional C-SPANN EXPLAIN
+    + database-release receipt digest)
   → exact, integrity-bound application S3 logging preflight and scoped delivery-role read proof
   → canonical recovery manifest binding account, run, candidate, immutable stack
     identity/revision, raw template/parameter/tag hashes, alias, and public URL
@@ -360,8 +408,12 @@ secret scan
     classification proved; a deliberate runner-loss recovery drill is not claimed)
 ```
 
-Supply-chain references are immutable commit/image digests. Staging, production,
-and database-operator OIDC subjects are bound to their GitHub environments.
+GitHub Action and container references are immutable commit/image digests, and
+standalone scanner archives are SHA-256 locked. cfn-lint is version-pinned with
+its pip transitive reproducibility limitation stated explicitly in
+[`docs/SUPPLY_CHAIN_SECURITY.md`](./docs/SUPPLY_CHAIN_SECURITY.md). Staging,
+production, and database-operator OIDC subjects are bound to their GitHub
+environments.
 Routine version updates are frozen under the checked and documented
 [dependency release policy](./docs/DEPENDENCY_RELEASE_POLICY.md); security
 updates remain enabled and must cross the full hosted gates.
@@ -438,7 +490,8 @@ stack. HTTP API delivery uses
 managed solely to keep exact-template rollback collision-free.
 
 This repository does **not** call the pipeline “live-complete” merely because
-the YAML exists. Full success-path CI/CD requires main CI, CodeQL, protected
+the YAML exists. Full success-path CI/CD requires main CI, CodeQL, Supply Chain,
+Memory architecture evaluation, protected
 database release, staging, production, hosted E2E, Managed MCP audit, terminal
 drift/protection gates, and deployment receipts to complete successfully. The
 protected release evidence linked above satisfies that boundary for the current
@@ -458,8 +511,17 @@ manufacture a `RECOVERED` receipt.
   `agent_memory`, owns only the two fixed-predicate serving views, and ends
   migration without `CREATE` authority on the schema.
 - Initial provisioning creates a dedicated login that inherits the NOLOGIN
-  reader role. Existing secrets fail closed; credential rotation is not claimed
-  until an explicit two-principal pending/activate/retire workflow is implemented.
+  reader role and the separate `archon_resolution_writer` role. The latter has
+  no write privilege on canonical memory and is limited to the five fixed
+  synthetic TTL tables. Existing secrets are reconciled to exactly those two
+  memberships; broader memberships fail closed. Credential rotation is not
+  claimed until an explicit two-principal pending/activate/retire workflow is
+  implemented.
+- Resolution sessions store only a SHA-256 token digest, accept no arbitrary
+  financial input, bind all graph edges to the same session with composite
+  foreign keys, cap active sessions, and require an idempotent explicit human
+  decision. The public role is a synthetic assertion, not authenticated
+  enterprise identity.
 - The public API accepts recall questions only in JSON `POST` bodies; questions
   never enter URLs or access logs.
 - Request bytes, question length, top-k, audit scan, API rate, concurrency, and
@@ -473,6 +535,39 @@ manufacture a `RECOVERED` receipt.
 - Memory text is escaped and treated as untrusted evidence, never as instructions.
 - The public database is a dedicated synthetic demonstration scope; no customer
   records are used.
+- [`aws/edge-waf.yaml`](./aws/edge-waf.yaml) has a protected, manual
+  plan/apply/verify workflow. The application template has no unprotected
+  mode: it requires the exact protected edge-stack WebACL output and the
+  bootstrap-generated Secrets Manager origin capability. No live activation
+  is claimed; foundation migration, both edge-stack receipts, deployment,
+  alarm routing, and abuse drills still require explicit approval and
+  exact-SHA pipeline evidence.
+- WA-03 has a separate manual, protected, exact-green-main
+  [read-only AWS account security baseline workflow](./.github/workflows/aws-security-baseline.yml).
+  Its reference IAM policy cannot mutate AWS, raw service responses remain
+  runner-temporary, and only a sanitized exact-SHA receipt is uploaded;
+  acceptance requires `10/10`. The audit role, protected environment,
+  account-control activation, and first live receipt still require explicit
+  approval; none is claimed here.
+- WA-10 has a separate manual, protected, exact-green-main
+  [sustainability intensity workflow](./.github/workflows/sustainability-intensity-evidence.yml).
+  It reads only the exact deployed stack and bounded hosted-load CloudWatch
+  telemetry, normalizes engineering proxies by successful recall, enforces
+  equivalent baseline/after workloads, and uploads only a sanitized receipt.
+  It does not claim emissions, carbon reduction, billed Lambda duration,
+  production scale, or a live improvement before the protected evidence exists.
+
+Implementation and evidence contracts:
+
+- [Exceptional-release execution plan](./docs/EXECUTION_PLAN.md)
+- [Memory Resolution Loop](./docs/MEMORY_RESOLUTION_LOOP.md)
+- [Memory architecture evaluation](./docs/EVALUATION.md)
+- [Pipeline-only supply-chain security](./docs/SUPPLY_CHAIN_SECURITY.md)
+- [AWS Well-Architected evidence](./docs/operations/WELL_ARCHITECTED_EVIDENCE.md)
+- [AWS account security baseline audit](./docs/runbooks/aws-account-security-baseline.md)
+- [Sustainability intensity evidence](./docs/runbooks/sustainability-intensity.md)
+- [Protected foundation storage migration](./docs/operations/FOUNDATION_STORAGE_MIGRATION.md)
+- [Managed-backup restore drill](./docs/runbooks/database-restore.md)
 
 ## Why CockroachDB instead of DynamoDB or Cosmos DB?
 
@@ -534,6 +629,14 @@ verification in hosted CI. Do not commit
 `node_modules`, `dist`, `.aws-sam`, Playwright output, readiness output, or
 generated video assets.
 
+Current release orchestration starts `Deploy AWS` only from a trusted `main`
+push. Its source gate waits for the successful same-SHA `CI` push run and
+exports that exact run/attempt into the deployment receipts. After production
+promotion and the Managed MCP proof pass, the deployment calls `Hosted DAST`
+as a reusable workflow with the same SHA and deploy run/attempt; active probes,
+ZAP, and their artifacts therefore remain part of the causal release run.
+Weekly scheduled and manual DAST runs remain independent production audits.
+
 ## Pinned release evidence
 
 The latest fully evidenced feature-bearing release baseline recorded before
@@ -558,7 +661,7 @@ rewrite this baseline.
 | Historical native-vector plans / recall benchmark | Verified |
 | Runtime-principal company + kind C-SPANN serving gate | Both principals are re-proved in every [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) release |
 | Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | `/api/proof` exposes `9 / 9 / 9` and the exact promoted commit SHA; deployment rejects a mismatch |
-| CockroachDB Cloud Managed MCP | The exact-scope receipt v2, strict parser, fixed B-tree aggregate, and `9 / 9 / 9` are re-proved by the release and standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) |
+| CockroachDB Cloud Managed MCP | The causal receipt v3 binds the exact release and database C-SPANN receipt digests, strict `9 / 9 / 9` Store parsing, and capability-safe optional `explain_query`; staging and production refuse promotion unless the protected gate passes, and the standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) reuses the same contract |
 | Real Titan V2 + Claude Sonnet 4.6 | Protected staging and production gates exercise Titan in `eu-west-1` and the Claude EU cross-region inference profile |
 | Control Room, protected DB release, SAM stack, OIDC CI/CD, canary/rollback | Exact-main build-once promotion, live release-SHA binding, and hosted browser verification are mandatory in [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) |
 | Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |

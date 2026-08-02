@@ -99,6 +99,7 @@ interface WatchdogFixture {
   env: NodeJS.ProcessEnv;
   fixture: string;
   ghCallLog: string;
+  jobsFile: string;
   stateFile: string;
 }
 
@@ -191,7 +192,7 @@ function recoveryLedger(
 function sourceRun(path: string): Record<string, unknown> {
   return {
     conclusion: "failure",
-    event: "workflow_run",
+    event: "push",
     head_branch: "main",
     head_repository: { full_name: REPOSITORY },
     head_sha: CANDIDATE_SHA,
@@ -234,6 +235,7 @@ function terminalJobs(jobName = TERMINAL_JOB_NAME): Record<string, unknown> {
         status: "completed",
       },
     ],
+    total_count: 1,
   };
 }
 
@@ -315,6 +317,9 @@ case "$2" in
     ;;
   put-object)
     body="$(arg_value --body "$@")"
+    test "$(arg_value --server-side-encryption "$@")" = "aws:kms"
+    test "$(arg_value --ssekms-key-id "$@")" = \
+      "arn:aws:kms:$AWS_REGION:$AWS_ACCOUNT_ID:alias/$APP_NAME-storage"
     revision="$(cat "$FAKE_S3_REVISION")"
     etag="$(printf '%032x' "$revision")"
     test "$(arg_value --if-match "$@")" = "\\"$etag\\""
@@ -333,7 +338,9 @@ case "$2" in
       '{
         VersionId: $versionId,
         ChecksumSHA256: $checksum,
-        ServerSideEncryption: "AES256"
+        ServerSideEncryption: "aws:kms",
+        SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+        BucketKeyEnabled: true
       }'
     ;;
   *) exit 97 ;;
@@ -391,7 +398,7 @@ esac
     RECOVERY_ENVIRONMENT: environment,
     TERMINAL_JOB_NAME: terminalJobName,
   });
-  return { awsCallLog, env, fixture, ghCallLog, stateFile };
+  return { awsCallLog, env, fixture, ghCallLog, jobsFile, stateFile };
 }
 
 function exactRecoverEnv(run: WatchdogFixture): NodeJS.ProcessEnv {
@@ -451,7 +458,7 @@ const ENVIRONMENT_JOB_CASES = [
 ] as const;
 
 test(
-  "classifier accepts every documented Deploy AWS path and only exact run lookups",
+  "classifier accepts every documented Deploy AWS path and trusted legacy workflow-run sources",
   { skip: process.platform === "win32" },
   () => {
     for (const workflowPath of DEPLOY_WORKFLOW_PATHS) {
@@ -488,6 +495,177 @@ test(
       } finally {
         rmSync(run.fixture, { recursive: true, force: true });
       }
+    }
+    const legacyWorkflowRun = createWatchdogFixture(
+      recoveryLedger("ARMED"),
+      undefined,
+      {
+        ...sourceRun(".github/workflows/deploy-aws.yml"),
+        event: "workflow_run",
+      }
+    );
+    try {
+      const result = runBash(CLASSIFY_SOURCE, [], legacyWorkflowRun.env);
+      assertSucceeded(result);
+      const proof = JSON.parse(result.stdout) as Record<string, unknown>;
+      assert.equal(proof.action, "recover");
+      assert.equal(proof.sourceRunId, SOURCE_RUN_ID);
+    } finally {
+      rmSync(legacyWorkflowRun.fixture, {
+        recursive: true,
+        force: true,
+      });
+    }
+  }
+);
+
+test(
+  "classifier accepts workflow dispatch only for the staging recovery drill",
+  { skip: process.platform === "win32" },
+  () => {
+    const dispatchSource = {
+      ...sourceRun(".github/workflows/deploy-aws.yml"),
+      event: "workflow_dispatch",
+    };
+    const staging = createWatchdogFixture(
+      recoveryLedger("ARMED", "staging"),
+      undefined,
+      dispatchSource,
+      "staging",
+      "Deploy and smoke staging"
+    );
+    try {
+      const result = runBash(CLASSIFY_SOURCE, [], staging.env);
+      assertSucceeded(result);
+      const proof = JSON.parse(result.stdout) as Record<string, unknown>;
+      assert.equal(proof.action, "recover");
+      assert.equal(proof.environment, "staging");
+    } finally {
+      rmSync(staging.fixture, { recursive: true, force: true });
+    }
+
+    const production = createWatchdogFixture(
+      recoveryLedger("ARMED", "production"),
+      undefined,
+      dispatchSource,
+      "production",
+      "Promote identical candidate to production"
+    );
+    try {
+      assertFailed(runBash(CLASSIFY_SOURCE, [], production.env));
+    } finally {
+      rmSync(production.fixture, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "classifier returns noop only for documented active Deploy AWS statuses",
+  { skip: process.platform === "win32" },
+  () => {
+    for (const status of [
+      "queued",
+      "in_progress",
+      "pending",
+      "waiting",
+      "requested",
+    ]) {
+      const run = createWatchdogFixture(
+        recoveryLedger("ARMED"),
+        undefined,
+        {
+          ...sourceRun(".github/workflows/deploy-aws.yml"),
+          conclusion: null,
+          status,
+        }
+      );
+      try {
+        const result = runBash(CLASSIFY_SOURCE, [], run.env);
+        assertSucceeded(result);
+        const proof = JSON.parse(result.stdout) as Record<string, unknown>;
+        assert.equal(proof.action, "noop");
+        assert.equal(proof.reason, "source-run-active");
+        assert.deepEqual(
+          readFileSync(run.ghCallLog, "utf8").trim().split(/\r?\n/u),
+          [
+            `repos/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}` +
+              `/attempts/${SOURCE_RUN_ATTEMPT}`,
+          ]
+        );
+      } finally {
+        rmSync(run.fixture, { recursive: true, force: true });
+      }
+    }
+  }
+);
+
+test(
+  "classifier fails closed on an unknown Deploy AWS source status",
+  { skip: process.platform === "win32" },
+  () => {
+    const run = createWatchdogFixture(
+      recoveryLedger("ARMED"),
+      undefined,
+      {
+        ...sourceRun(".github/workflows/deploy-aws.yml"),
+        conclusion: null,
+        status: "mystery",
+      }
+    );
+    try {
+      const result = runBash(CLASSIFY_SOURCE, [], run.env);
+      assertFailed(result);
+      assert.match(result.stderr, /The Deploy AWS run status is invalid\./u);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(
+        readFileSync(run.ghCallLog, "utf8").trim().split(/\r?\n/u),
+        [
+          `repos/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}` +
+            `/attempts/${SOURCE_RUN_ATTEMPT}`,
+        ]
+      );
+      assert.doesNotMatch(
+        readFileSync(run.awsCallLog, "utf8"),
+        /s3api put-object/u
+      );
+    } finally {
+      rmSync(run.fixture, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "classifier fails closed on a truncated Deploy AWS jobs response",
+  { skip: process.platform === "win32" },
+  () => {
+    const run = createWatchdogFixture(recoveryLedger("ARMED"));
+    try {
+      const truncatedJobs = terminalJobs();
+      truncatedJobs.total_count = 2;
+      writeJson(run.jobsFile, truncatedJobs);
+
+      const result = runBash(CLASSIFY_SOURCE, [], run.env);
+      assertFailed(result);
+      assert.match(
+        result.stderr,
+        /The Deploy AWS jobs response is incomplete or ambiguous\./u
+      );
+      assert.equal(result.stdout, "");
+      assert.deepEqual(
+        readFileSync(run.ghCallLog, "utf8").trim().split(/\r?\n/u),
+        [
+          `repos/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}` +
+            `/attempts/${SOURCE_RUN_ATTEMPT}`,
+          `repos/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}` +
+            `/attempts/${SOURCE_RUN_ATTEMPT}/jobs?per_page=100`,
+        ]
+      );
+      assert.doesNotMatch(
+        readFileSync(run.awsCallLog, "utf8"),
+        /s3api put-object/u
+      );
+    } finally {
+      rmSync(run.fixture, { recursive: true, force: true });
     }
   }
 );
@@ -564,14 +742,59 @@ test(
 );
 
 test(
-  "active exact prior watchdog owner causes a noop without source lookup",
+  "every documented active prior watchdog owner status causes a noop without source lookup",
+  { skip: process.platform === "win32" },
+  () => {
+    for (const status of [
+      "queued",
+      "in_progress",
+      "pending",
+      "waiting",
+      "requested",
+    ]) {
+      const run = createWatchdogFixture(
+        recoveryLedger("RECOVERING"),
+        ownerRun(".github/workflows/recover-aws.yml@main", {
+          conclusion: null,
+          status,
+        })
+      );
+      try {
+        const result = runBash(CLASSIFY_SOURCE, [], {
+          ...run.env,
+          RECOVERY_LEASE_OWNER: NEXT_OWNER,
+        });
+        assertSucceeded(result);
+        const proof = JSON.parse(result.stdout) as Record<
+          string,
+          unknown
+        >;
+        assert.equal(proof.action, "noop");
+        assert.equal(proof.reason, "active-recovery-lease");
+        assert.equal(proof.ledgerState, "RECOVERING");
+        assert.deepEqual(
+          readFileSync(run.ghCallLog, "utf8").trim().split(/\r?\n/u),
+          [
+            `repos/${REPOSITORY}/actions/runs/${OWNER_RUN_ID}` +
+              `/attempts/${OWNER_RUN_ATTEMPT}`,
+          ]
+        );
+      } finally {
+        rmSync(run.fixture, { recursive: true, force: true });
+      }
+    }
+  }
+);
+
+test(
+  "classifier fails closed on an unknown prior watchdog owner status",
   { skip: process.platform === "win32" },
   () => {
     const run = createWatchdogFixture(
       recoveryLedger("RECOVERING"),
-      ownerRun(".github/workflows/recover-aws.yml@main", {
+      ownerRun(".github/workflows/recover-aws.yml", {
         conclusion: null,
-        status: "in_progress",
+        status: "mystery",
       })
     );
     try {
@@ -579,20 +802,15 @@ test(
         ...run.env,
         RECOVERY_LEASE_OWNER: NEXT_OWNER,
       });
-      assertSucceeded(result);
-      const proof = JSON.parse(result.stdout) as Record<
-        string,
-        unknown
-      >;
-      assert.equal(proof.action, "noop");
-      assert.equal(proof.reason, "active-recovery-lease");
-      assert.equal(proof.ledgerState, "RECOVERING");
-      assert.deepEqual(
-        readFileSync(run.ghCallLog, "utf8").trim().split(/\r?\n/u),
-        [
-          `repos/${REPOSITORY}/actions/runs/${OWNER_RUN_ID}` +
-            `/attempts/${OWNER_RUN_ATTEMPT}`,
-        ]
+      assertFailed(result);
+      assert.match(
+        result.stderr,
+        /The recovery lease owner run state is invalid\./u
+      );
+      assert.equal(result.stdout, "");
+      assert.doesNotMatch(
+        readFileSync(run.awsCallLog, "utf8"),
+        /s3api put-object/u
       );
     } finally {
       rmSync(run.fixture, { recursive: true, force: true });
@@ -627,6 +845,26 @@ test(
       } finally {
         rmSync(run.fixture, { recursive: true, force: true });
       }
+    }
+
+    const legacyOwner = createWatchdogFixture(
+      recoveryLedger("RECOVERING"),
+      ownerRun(".github/workflows/recover-aws.yml", {
+        event: "workflow_run",
+      })
+    );
+    try {
+      const result = runBash(CLASSIFY_SOURCE, [], {
+        ...legacyOwner.env,
+        RECOVERY_LEASE_OWNER: NEXT_OWNER,
+      });
+      assertSucceeded(result);
+      const proof = JSON.parse(result.stdout) as Record<string, unknown>;
+      assert.equal(proof.action, "recover");
+      assert.equal(proof.previousOwnerProvedDead, true);
+      assert.equal(proof.previousLeaseOwner, PRIOR_OWNER);
+    } finally {
+      rmSync(legacyOwner.fixture, { recursive: true, force: true });
     }
   }
 );
@@ -974,6 +1212,9 @@ case "$2" in
     printf '%s' "$count" >"$FAKE_PUT_COUNTER"
     test "$(arg_value --body "$@")" = "$FAKE_OBJECT_FILE"
     test "$(arg_value --if-none-match "$@")" = "*"
+    test "$(arg_value --server-side-encryption "$@")" = "aws:kms"
+    test "$(arg_value --ssekms-key-id "$@")" = \
+      "arn:aws:kms:$AWS_REGION:$AWS_ACCOUNT_ID:alias/$APP_NAME-storage"
     test "$(arg_value --checksum-sha256 "$@")" = "$checksum"
     test "$(arg_value --content-type "$@")" = "application/x-tar"
     test "$(arg_value --metadata "$@")" = \\
@@ -986,7 +1227,9 @@ case "$2" in
     jq -n --arg checksum "$checksum" '{
       VersionId: "object-version-1",
       ChecksumSHA256: $checksum,
-      ServerSideEncryption: "AES256"
+      ServerSideEncryption: "aws:kms",
+      SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+      BucketKeyEnabled: true
     }'
     ;;
   head-object)
@@ -1002,7 +1245,9 @@ case "$2" in
     jq -n --arg checksum "$checksum" --argjson bytes "$bytes" '{
       VersionId: "object-version-1",
       ChecksumSHA256: $checksum,
-      ServerSideEncryption: "AES256",
+      ServerSideEncryption: "aws:kms",
+      SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+      BucketKeyEnabled: true,
       ContentLength: $bytes,
       ContentType: "application/x-tar",
       Metadata: {

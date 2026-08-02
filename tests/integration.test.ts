@@ -323,6 +323,7 @@ test(
     const vector = proof.body.vectorIndex as Record<string, unknown>;
     const database = proof.body.database as Record<string, unknown>;
     const memory = proof.body.memory as Record<string, unknown>;
+    const resolution = proof.body.resolutionLoop as Record<string, unknown>;
     assert.equal(vector.enabled, true);
     assert.equal(vector.name, EXPECTED_VECTOR_INDEX_NAME);
     assert.equal(
@@ -338,6 +339,15 @@ test(
     assert.equal(
       memory.evidence,
       "live bounded fixed-scope payload-digest verification"
+    );
+    assert.equal(resolution.enabled, true);
+    assert.equal(resolution.schemaTables, 5);
+    assert.equal(resolution.transactionIsolation, "SERIALIZABLE");
+    assert.equal(resolution.canonicalMemoryMutable, false);
+    assert.equal(resolution.externalSideEffects, "none");
+    assert.equal(
+      resolution.evidence,
+      "live fixed-scope sandbox schema query"
     );
   }
 );

@@ -1,18 +1,23 @@
 // Read-only production proof through CockroachDB Cloud's hosted Managed MCP Server.
 //
 // This is intentionally an audit client, not another memory implementation. It
-// inspects the live cluster through four allowlisted read-only tools and emits a
-// sanitized v2 receipt. The SQL proof is fixed in source, index-forced, and
-// bounded before aggregation; no row content, embedding, credential, or cluster
-// identifier is copied into the receipt.
+// inspects the live cluster through four required read-only tools and, when the
+// hosted server advertises it, one optional explain_query call. It emits a
+// sanitized v3 receipt bound to the exact release SHA and the exact
+// database-release C-SPANN receipt digest. The SQL proof is fixed in source,
+// index-forced, and bounded before aggregation; no row content, embedding,
+// credential, raw plan, or cluster identifier is copied into the receipt.
 //
 // Required:
 //   CCLOUD_API_KEY=<CockroachDB Cloud service-account API key>
+//   MANAGED_MCP_RELEASE_SHA=<exact 40-character release SHA>
+//   MANAGED_MCP_CSPANN_RECEIPT_SHA256=<exact database-release receipt digest>
 // Optional:
 //   COCKROACH_CLUSTER_ID=<cluster UUID>       (auto-discovered by name otherwise)
 //   COCKROACH_CLUSTER_NAME=archon-cockroachdb-cluster
 //   COCKROACH_DATABASE=archon
 
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -21,7 +26,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const CLOUD_API = "https://cockroachlabs.cloud/api/v1/clusters";
 const MANAGED_MCP_URL = "https://cockroachlabs.cloud/mcp";
 
-export const MANAGED_MCP_RECEIPT_SCHEMA_VERSION = 2 as const;
+export const MANAGED_MCP_RECEIPT_SCHEMA_VERSION = 3 as const;
 export const FIXED_MANAGED_MCP_SCOPE = Object.freeze({
   tenantId: "public-demo",
   company: "Helios SA",
@@ -39,18 +44,22 @@ export const EXPECTED_MANAGED_MCP_AGGREGATE = Object.freeze({
   idempotencyKeys: 9,
   contentDigests: 9,
 });
-export const MANAGED_MCP_CALLED_TOOLS = [
+export const MANAGED_MCP_REQUIRED_TOOLS = [
   "get_cluster",
   "list_tables",
   "get_table_schema",
   "select_query",
 ] as const;
+export const MANAGED_MCP_EXPLAIN_TOOL = "explain_query" as const;
+export const MANAGED_MCP_CSPANN_INDEX =
+  "idx_agent_memory_company_scope_embedding" as const;
 export const MANAGED_MCP_REDACTIONS = [
   "API key",
   "cluster identifier",
   "SQL credentials",
   "memory content",
   "embeddings",
+  "raw query plan",
 ] as const;
 
 // The ten-row inner sentinel makes a tenth matching row observable as
@@ -82,8 +91,31 @@ FROM (
 LIMIT 1
 `.trim();
 
+const MANAGED_MCP_PLAN_PROBE_VECTOR = `[1${",0".repeat(1023)}]`;
+
+// The query mirrors the public no-kind serving path. The view itself pins the
+// exact C-SPANN index, and every prefix column remains equality constrained.
+// The probe is synthetic and used only for EXPLAIN; neither it nor the raw plan
+// is copied into the sanitized receipt.
+export const MANAGED_MCP_CSPANN_EXPLAIN_QUERY = `
+SELECT id, idempotency_key,
+       (embedding <=> '${MANAGED_MCP_PLAN_PROBE_VECTOR}'::VECTOR) AS distance
+FROM archon_public_memory_recall
+WHERE tenant_id = 'public-demo'
+  AND embed_model = 'amazon.titan-embed-text-v2:0'
+  AND status = 'active'
+  AND company = 'Helios SA'
+ORDER BY embedding <=> '${MANAGED_MCP_PLAN_PROBE_VECTOR}'::VECTOR
+LIMIT 3
+`.trim();
+
 type JsonObject = Record<string, unknown>;
-export type ManagedMcpToolName = (typeof MANAGED_MCP_CALLED_TOOLS)[number];
+export type ManagedMcpRequiredToolName =
+  (typeof MANAGED_MCP_REQUIRED_TOOLS)[number];
+export type ManagedMcpToolName =
+  | ManagedMcpRequiredToolName
+  | typeof MANAGED_MCP_EXPLAIN_TOOL;
+export type ManagedMcpExplainStatus = "verified" | "not-advertised";
 
 interface ClusterSummary {
   id: string;
@@ -102,7 +134,7 @@ export interface ManagedMcpToolProof {
   detail: string;
 }
 
-export interface ManagedMcpReceiptV2 {
+export interface ManagedMcpReceiptV3 {
   schemaVersion: typeof MANAGED_MCP_RECEIPT_SCHEMA_VERSION;
   ok: boolean;
   checkedAt: string;
@@ -111,6 +143,17 @@ export interface ManagedMcpReceiptV2 {
   mode: "read-only";
   scope: typeof FIXED_MANAGED_MCP_SCOPE;
   bound: typeof MANAGED_MCP_QUERY_BOUND;
+  release: {
+    commitSha: string;
+    cspannReceiptSha256: string;
+  };
+  cspannLinkage: {
+    index: typeof MANAGED_MCP_CSPANN_INDEX;
+    explainQuery: {
+      status: ManagedMcpExplainStatus;
+      planSha256: string | null;
+    };
+  };
   aggregate: ManagedMcpAggregate;
   calledTools: ManagedMcpToolName[];
   toolsAdvertised: number;
@@ -131,6 +174,8 @@ const PROOF_DETAILS: Readonly<Record<ManagedMcpToolName, string>> =
       "`agent_memory` is present in the configured application database.",
     get_table_schema:
       "Live schema exposes VECTOR(1024) and a native vector index.",
+    explain_query:
+      "Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index.",
     select_query:
       "The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9.",
   });
@@ -270,14 +315,40 @@ export function parseManagedMcpAggregateResult(
 
 function assertExactToolSequence(
   actual: readonly string[],
+  explainStatus: ManagedMcpExplainStatus,
   label: string
 ): void {
+  const expected: readonly ManagedMcpToolName[] =
+    explainStatus === "verified"
+      ? [
+          "get_cluster",
+          "list_tables",
+          "get_table_schema",
+          MANAGED_MCP_EXPLAIN_TOOL,
+          "select_query",
+        ]
+      : MANAGED_MCP_REQUIRED_TOOLS;
   if (
-    actual.length !== MANAGED_MCP_CALLED_TOOLS.length ||
-    actual.some((name, index) => name !== MANAGED_MCP_CALLED_TOOLS[index])
+    actual.length !== expected.length ||
+    actual.some((name, index) => name !== expected[index])
   ) {
-    throw new Error(`${label} must be the exact four-tool read-only sequence.`);
+    throw new Error(
+      `${label} must match the capability-safe read-only tool sequence.`
+    );
   }
+}
+
+function safeLowerHex(
+  value: string,
+  length: 40 | 64,
+  label: string
+): string {
+  const pattern =
+    length === 40 ? /^[a-f0-9]{40}$/u : /^[a-f0-9]{64}$/u;
+  if (!pattern.test(value)) {
+    throw new Error(`${label} must be exactly ${length} lowercase hex characters.`);
+  }
+  return value;
 }
 
 function safeDatabaseName(value: string): string {
@@ -302,27 +373,66 @@ function validIsoTimestamp(value: string): boolean {
  * Build the sanitized receipt from typed proof outcomes. Human-readable proof
  * text is fixed in source rather than copied from MCP responses.
  */
-export function buildManagedMcpReceiptV2(input: {
+export function buildManagedMcpReceiptV3(input: {
   checkedAt: string;
   database: string;
+  releaseSha: string;
+  cspannReceiptSha256: string;
+  explainStatus: ManagedMcpExplainStatus;
+  explainPlanSha256: string | null;
   toolsAdvertised: number;
   calledTools: readonly string[];
   proofResults: readonly ProofResult[];
   aggregate: ManagedMcpAggregate;
-}): ManagedMcpReceiptV2 {
+}): ManagedMcpReceiptV3 {
   if (!validIsoTimestamp(input.checkedAt)) {
     throw new Error("checkedAt must be a canonical UTC ISO timestamp.");
   }
   const database = safeDatabaseName(input.database);
+  const releaseSha = safeLowerHex(input.releaseSha, 40, "releaseSha");
+  const cspannReceiptSha256 = safeLowerHex(
+    input.cspannReceiptSha256,
+    64,
+    "cspannReceiptSha256"
+  );
+  if (
+    input.explainStatus !== "verified" &&
+    input.explainStatus !== "not-advertised"
+  ) {
+    throw new Error("explainStatus must be verified or not-advertised.");
+  }
+  const explainPlanSha256 =
+    input.explainStatus === "verified"
+      ? safeLowerHex(
+          input.explainPlanSha256 ?? "",
+          64,
+          "explainPlanSha256"
+        )
+      : null;
+  if (
+    input.explainStatus === "not-advertised" &&
+    input.explainPlanSha256 !== null
+  ) {
+    throw new Error(
+      "A not-advertised explain_query capability cannot have a plan digest."
+    );
+  }
   if (
     !Number.isSafeInteger(input.toolsAdvertised) ||
-    input.toolsAdvertised < MANAGED_MCP_CALLED_TOOLS.length
+    input.toolsAdvertised < MANAGED_MCP_REQUIRED_TOOLS.length ||
+    (input.explainStatus === "verified" &&
+      input.toolsAdvertised < MANAGED_MCP_REQUIRED_TOOLS.length + 1)
   ) {
     throw new Error("toolsAdvertised must be a safe integer covering all tools.");
   }
-  assertExactToolSequence(input.calledTools, "calledTools");
+  assertExactToolSequence(
+    input.calledTools,
+    input.explainStatus,
+    "calledTools"
+  );
   assertExactToolSequence(
     input.proofResults.map((proof) => proof.name),
+    input.explainStatus,
     "proofResults"
   );
   if (input.proofResults.some((proof) => typeof proof.ok !== "boolean")) {
@@ -345,8 +455,19 @@ export function buildManagedMcpReceiptV2(input: {
     mode: "read-only",
     scope: FIXED_MANAGED_MCP_SCOPE,
     bound: MANAGED_MCP_QUERY_BOUND,
+    release: {
+      commitSha: releaseSha,
+      cspannReceiptSha256,
+    },
+    cspannLinkage: {
+      index: MANAGED_MCP_CSPANN_INDEX,
+      explainQuery: {
+        status: input.explainStatus,
+        planSha256: explainPlanSha256,
+      },
+    },
     aggregate: { ...input.aggregate },
-    calledTools: [...MANAGED_MCP_CALLED_TOOLS],
+    calledTools: [...input.calledTools] as ManagedMcpToolName[],
     toolsAdvertised: input.toolsAdvertised,
     proofs,
     redactions: [...MANAGED_MCP_REDACTIONS],
@@ -412,6 +533,27 @@ function toolText(result: unknown): string {
     .join("\n");
 }
 
+/**
+ * Accept only an EXPLAIN result that proves both native vector search and the
+ * exact fixed-scope production index. The raw plan never leaves this process;
+ * only its normalized SHA-256 fingerprint enters the receipt.
+ */
+export function parseManagedMcpCspannExplainResult(result: unknown): string {
+  const plan = toolText(result).replace(/\s+/gu, " ").trim();
+  if (!plan) {
+    throw new Error("Managed MCP explain_query returned no readable plan.");
+  }
+  if (
+    !/vector search/iu.test(plan) ||
+    !new RegExp(`\\b${MANAGED_MCP_CSPANN_INDEX}\\b`, "u").test(plan)
+  ) {
+    throw new Error(
+      "Managed MCP explain_query did not prove the exact C-SPANN serving index."
+    );
+  }
+  return createHash("sha256").update(plan, "utf8").digest("hex");
+}
+
 function hasAny(haystack: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(haystack));
 }
@@ -450,9 +592,19 @@ export function compatibleArgs(
   return compatible;
 }
 
-async function main(): Promise<void> {
+export async function runMemoryIntegrityAgent(): Promise<void> {
   const apiKey = stringValue(process.env.CCLOUD_API_KEY);
   if (!apiKey) throw new Error("CCLOUD_API_KEY is required.");
+  const releaseSha = safeLowerHex(
+    stringValue(process.env.MANAGED_MCP_RELEASE_SHA) ?? "",
+    40,
+    "MANAGED_MCP_RELEASE_SHA"
+  );
+  const cspannReceiptSha256 = safeLowerHex(
+    stringValue(process.env.MANAGED_MCP_CSPANN_RECEIPT_SHA256) ?? "",
+    64,
+    "MANAGED_MCP_CSPANN_RECEIPT_SHA256"
+  );
 
   const clusterId = await resolveClusterId(apiKey);
   const database = safeDatabaseName(
@@ -462,7 +614,7 @@ async function main(): Promise<void> {
   );
 
   const client = new Client(
-    { name: "archon-managed-mcp-audit", version: "2.0.0" },
+    { name: "archon-managed-mcp-audit", version: "3.0.0" },
     { capabilities: {} }
   );
   const transport = new StreamableHTTPClientTransport(
@@ -488,7 +640,7 @@ async function main(): Promise<void> {
     });
     const tools = new Map(listed.tools.map((tool) => [tool.name, tool]));
 
-    for (const name of MANAGED_MCP_CALLED_TOOLS) {
+    for (const name of MANAGED_MCP_REQUIRED_TOOLS) {
       if (!tools.has(name)) {
         throw new Error(`Managed MCP tool "${name}" is unavailable.`);
       }
@@ -565,6 +717,41 @@ async function main(): Promise<void> {
         ]),
     });
 
+    let explainStatus: ManagedMcpExplainStatus = "not-advertised";
+    let explainPlanSha256: string | null = null;
+    const explainTool = tools.get(MANAGED_MCP_EXPLAIN_TOOL);
+    if (explainTool) {
+      const explainArgs = compatibleArgs(
+        explainTool.inputSchema,
+        {
+          database,
+          database_name: database,
+          query: MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+          sql: MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+        },
+        [
+          ["database", "database_name"],
+          ["query", "sql"],
+        ]
+      );
+      if (
+        explainArgs.query !== MANAGED_MCP_CSPANN_EXPLAIN_QUERY &&
+        explainArgs.sql !== MANAGED_MCP_CSPANN_EXPLAIN_QUERY
+      ) {
+        throw new Error(
+          "Managed MCP explain_query schema exposes no supported fixed-SQL argument."
+        );
+      }
+      const explainResult = await call(
+        MANAGED_MCP_EXPLAIN_TOOL,
+        explainArgs
+      );
+      explainPlanSha256 =
+        parseManagedMcpCspannExplainResult(explainResult);
+      explainStatus = "verified";
+      proofResults.push({ name: MANAGED_MCP_EXPLAIN_TOOL, ok: true });
+    }
+
     const selectTool = tools.get("select_query");
     const selectArgs = compatibleArgs(
       selectTool?.inputSchema,
@@ -591,9 +778,13 @@ async function main(): Promise<void> {
     const aggregate = parseManagedMcpAggregateResult(aggregateResult);
     proofResults.push({ name: "select_query", ok: true });
 
-    const receipt = buildManagedMcpReceiptV2({
+    const receipt = buildManagedMcpReceiptV3({
       checkedAt: new Date().toISOString(),
       database,
+      releaseSha,
+      cspannReceiptSha256,
+      explainStatus,
+      explainPlanSha256,
       toolsAdvertised: listed.tools.length,
       calledTools,
       proofResults,
@@ -611,7 +802,7 @@ const invokedDirectly =
   import.meta.url === pathToFileURL(resolve(process.argv[1]!)).href;
 
 if (invokedDirectly) {
-  main().catch(() => {
+  runMemoryIntegrityAgent().catch(() => {
     process.stderr.write(
       "Managed MCP audit failed closed without publishing remote response data.\n"
     );

@@ -17,9 +17,14 @@ import {
   buildRecallQuery,
   type RecallQueryRow,
 } from "../src/memory/memory.js";
+import {
+  expectedRuntimeDatabaseGrants,
+  verifyClusterWideResolutionGrants,
+  type ClusterGrantProof,
+} from "../src/db/cluster-grant-proof.js";
 
 const { Client } = pg;
-const databaseUrl = process.env.DATABASE_URL?.trim();
+const databaseUrl = process.env.DATABASE_URL?.trim() ?? "";
 if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
 const parsed = new URL(databaseUrl);
@@ -31,6 +36,82 @@ if (!/^archon_migration(?:_ci)?$/u.test(databaseName)) {
 }
 
 const unitVector = `[1,${new Array(1023).fill("0").join(",")}]`;
+const expectedRuntimeRelationGrants = new Set([
+  "agent_memory:SELECT",
+  `${PUBLIC_RECALL_VIEW_NAME}:SELECT`,
+  `${PUBLIC_KIND_RECALL_VIEW_NAME}:SELECT`,
+  "memory_demo_sessions:SELECT",
+  "memory_resolution_observations:SELECT",
+  "memory_resolution_proposals:SELECT",
+  "memory_resolution_decisions:SELECT",
+  "memory_resolution_consolidations:SELECT",
+]);
+
+function assertExactMigrationGrantProof(
+  proof: ClusterGrantProof
+): void {
+  const expectedInventory = [
+    databaseName,
+    "defaultdb",
+    "postgres",
+    "system",
+  ].sort();
+  if (
+    proof.routineGrantCount !== 2 ||
+    proof.databaseGrantCount !== 5 ||
+    JSON.stringify([...proof.databaseInventory].sort()) !==
+      JSON.stringify(expectedInventory) ||
+    !/^[a-f0-9]{64}$/u.test(proof.databaseMatrixSha256)
+  ) {
+    throw new Error(
+      "Migration runtime grant proof did not bind the exact five-row matrix."
+    );
+  }
+}
+
+async function expectClusterGrantProofRejected(
+  expectedMessage =
+    "Cluster-wide database privileges do not match the exact principal matrix."
+): Promise<void> {
+  try {
+    await verifyClusterWideResolutionGrants({
+      adminConnectionString: databaseUrl,
+      principal: "archon_migration_ci",
+      applicationDatabase: databaseName,
+      expectedDatabaseGrants: expectedRuntimeDatabaseGrants(
+        databaseName,
+        "archon_migration_ci"
+      ),
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === expectedMessage
+    ) {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Cluster-wide runtime database-grant drift was accepted.");
+}
+async function expectInsufficientPrivilege(
+  operation: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "42501"
+    ) {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Runtime direct DML unexpectedly succeeded.");
+}
 
 async function setupLegacy(): Promise<void> {
   const client = new Client({ connectionString: databaseUrl });
@@ -135,7 +216,7 @@ async function proveFailedClosedDrift(): Promise<void> {
   }
 }
 
-async function verifyFinalState(): Promise<void> {
+async function verifyFinalState(): Promise<ClusterGrantProof> {
   const client = new Client({ connectionString: databaseUrl });
   try {
     await client.connect();
@@ -203,11 +284,130 @@ async function verifyFinalState(): Promise<void> {
     `, [unitVector]);
     await client.query("CREATE USER IF NOT EXISTS archon_migration_ci");
     await client.query(
+      `GRANT CONNECT ON DATABASE "${databaseName}" TO archon_migration_ci`
+    );
+    await client.query(
       "GRANT archon_public_reader TO archon_migration_ci"
     );
+    await client.query(
+      "GRANT archon_resolution_writer TO archon_migration_ci"
+    );
+    const runtimeGrants = await client.query<{
+      table_name: string;
+      privilege_type: string;
+      is_grantable: boolean;
+    }>(
+      `SHOW GRANTS ON TABLE *
+         FOR archon_migration_ci`
+    );
+    const grantKeys = new Set(
+      runtimeGrants.rows.map(
+        (grant) => `${grant.table_name}:${grant.privilege_type}`
+      )
+    );
+    if (
+      runtimeGrants.rows.length !== expectedRuntimeRelationGrants.size ||
+      grantKeys.size !== expectedRuntimeRelationGrants.size ||
+      runtimeGrants.rows.some((grant) => grant.is_grantable) ||
+      [...expectedRuntimeRelationGrants].some(
+        (grant) => !grantKeys.has(grant)
+      ) ||
+      [...grantKeys].some((grant) => !grant.endsWith(":SELECT"))
+    ) {
+      throw new Error(
+        "Migrated runtime relation grants are not exact SELECT-only access."
+      );
+    }
+    const grantProofInput = {
+      adminConnectionString: databaseUrl,
+      principal: "archon_migration_ci",
+      applicationDatabase: databaseName,
+      expectedDatabaseGrants: expectedRuntimeDatabaseGrants(
+        databaseName,
+        "archon_migration_ci"
+      ),
+    } as const;
+    assertExactMigrationGrantProof(
+      await verifyClusterWideResolutionGrants(grantProofInput)
+    );
+
+    let temporaryGranted = false;
+    try {
+      await client.query(
+        `GRANT TEMPORARY ON DATABASE "${databaseName}" TO archon_migration_ci`
+      );
+      temporaryGranted = true;
+      await expectClusterGrantProofRejected();
+    } finally {
+      if (temporaryGranted) {
+        await client.query(
+          `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM archon_migration_ci`
+        );
+      }
+    }
+    assertExactMigrationGrantProof(
+      await verifyClusterWideResolutionGrants(grantProofInput)
+    );
+
+    let grantOptionElevated = false;
+    try {
+      await client.query(
+        `GRANT CONNECT ON DATABASE "${databaseName}" TO archon_migration_ci WITH GRANT OPTION`
+      );
+      grantOptionElevated = true;
+      await expectClusterGrantProofRejected();
+    } finally {
+      if (grantOptionElevated) {
+        await client.query(
+          `REVOKE CONNECT ON DATABASE "${databaseName}" FROM archon_migration_ci`
+        );
+        await client.query(
+          `GRANT CONNECT ON DATABASE "${databaseName}" TO archon_migration_ci`
+        );
+      }
+    }
+    assertExactMigrationGrantProof(
+      await verifyClusterWideResolutionGrants(grantProofInput)
+    );
+
+    let unexpectedDatabaseCreated = false;
+    try {
+      await client.query("CREATE DATABASE archon_unexpected_grants_ci");
+      unexpectedDatabaseCreated = true;
+      await client.query(
+        "REVOKE CONNECT, TEMPORARY ON DATABASE archon_unexpected_grants_ci FROM public"
+      );
+      await expectClusterGrantProofRejected(
+        "Cluster-wide grant proof could not bind the exact database inventory."
+      );
+    } finally {
+      if (unexpectedDatabaseCreated) {
+        await client.query(
+          "DROP DATABASE archon_unexpected_grants_ci CASCADE"
+        );
+      }
+    }
+    const finalClusterGrantProof =
+      await verifyClusterWideResolutionGrants(grantProofInput);
+    assertExactMigrationGrantProof(finalClusterGrantProof);
     await client.query("SET ROLE archon_migration_ci");
     await client.query(
       "SET application_name = 'archon.attacker-selected-scope'"
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "UPDATE public.memory_demo_sessions SET state = state WHERE false"
+      )
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "INSERT INTO public.memory_resolution_decisions DEFAULT VALUES"
+      )
+    );
+    await expectInsufficientPrivilege(() =>
+      client.query(
+        "DELETE FROM public.memory_resolution_consolidations WHERE false"
+      )
     );
     const visible = await client.query<{
       total: string;
@@ -284,6 +484,7 @@ async function verifyFinalState(): Promise<void> {
       }
     }
     await client.query("RESET ROLE");
+    return finalClusterGrantProof;
   } finally {
     await client.end().catch(() => undefined);
   }
@@ -294,7 +495,7 @@ async function main(): Promise<void> {
   await proveFailedClosedDrift();
   await applySchema();
   await applySchema();
-  await verifyFinalState();
+  const clusterGrantProof = await verifyFinalState();
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
@@ -307,6 +508,15 @@ async function main(): Promise<void> {
       exactKindCspannDefinition: true,
       roleBoundThreeAxisRls: true,
       runtimePrincipalCspannPlanAndExecute: true,
+      exactFiveTableResolutionSandbox: true,
+      resolutionWriterMembership: true,
+      exactTransitionFunctionExecute: true,
+      directResolutionDmlDenied: true,
+      canonicalMemoryRemainsReadOnly: true,
+      appTemporaryGrantDriftRejected: true,
+      databaseGrantOptionDriftRejected: true,
+      extraDatabaseGrantDriftRejected: true,
+      clusterGrantProof,
     })}\n`
   );
 }

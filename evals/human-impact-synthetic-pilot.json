@@ -1,0 +1,263 @@
+{
+  "schemaVersion": "1.0.0",
+  "evidenceTier": "synthetic-pilot",
+  "study": {
+    "id": "archon-human-impact-synthetic-pilot-v1",
+    "protocolSha256": null,
+    "preregistrationSha256": null,
+    "collectionAuthoritySha256": null,
+    "rawEvidenceCustodyReceiptSha256": null,
+    "collectionStartedAt": "2026-07-01T00:00:00.000Z",
+    "collectionEndedAt": "2026-07-02T00:00:00.000Z",
+    "provenance": "independently-authored-synthetic",
+    "blinding": {
+      "systemLabelsHidden": true,
+      "caseOrderRandomized": true,
+      "armOrderRandomized": true
+    }
+  },
+  "reviewers": [],
+  "syntheticRaters": [
+    { "id": "synthetic-rater-alpha" },
+    { "id": "synthetic-rater-beta" }
+  ],
+  "participants": [
+    {
+      "id": "synthetic-participant-alpha",
+      "consentReceiptSha256": null
+    },
+    {
+      "id": "synthetic-participant-beta",
+      "consentReceiptSha256": null
+    },
+    {
+      "id": "synthetic-participant-gamma",
+      "consentReceiptSha256": null
+    },
+    {
+      "id": "synthetic-participant-delta",
+      "consentReceiptSha256": null
+    }
+  ],
+  "ratings": [
+    {
+      "id": "rating-alpha-case-one-b2",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-one",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2011111111111111111111111111111111111111111111111111111111111111",
+      "observedAt": "2026-07-01T01:00:00.000Z",
+      "scores": { "answerCorrectness": 2, "evidenceGrounding": 1, "uncertaintyCalibration": 1 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-one-b4",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-one",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4011111111111111111111111111111111111111111111111111111111111111",
+      "observedAt": "2026-07-01T01:01:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-two-b2",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-two",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2022222222222222222222222222222222222222222222222222222222222222",
+      "observedAt": "2026-07-01T01:02:00.000Z",
+      "scores": { "answerCorrectness": 1, "evidenceGrounding": 2, "uncertaintyCalibration": 1 },
+      "actionSafety": "fail",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-two-b4",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-two",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4022222222222222222222222222222222222222222222222222222222222222",
+      "observedAt": "2026-07-01T01:03:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-three-b2",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-three",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2033333333333333333333333333333333333333333333333333333333333333",
+      "observedAt": "2026-07-01T01:04:00.000Z",
+      "scores": { "answerCorrectness": 2, "evidenceGrounding": 2, "uncertaintyCalibration": 0 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-three-b4",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-three",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4033333333333333333333333333333333333333333333333333333333333333",
+      "observedAt": "2026-07-01T01:05:00.000Z",
+      "scores": { "answerCorrectness": 3, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-four-b2",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-four",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2044444444444444444444444444444444444444444444444444444444444444",
+      "observedAt": "2026-07-01T01:06:00.000Z",
+      "scores": { "answerCorrectness": 1, "evidenceGrounding": 1, "uncertaintyCalibration": 1 },
+      "actionSafety": "fail",
+      "signature": null
+    },
+    {
+      "id": "rating-alpha-case-four-b4",
+      "raterId": "synthetic-rater-alpha",
+      "caseId": "case-four",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4044444444444444444444444444444444444444444444444444444444444444",
+      "observedAt": "2026-07-01T01:07:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 3 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-one-b2",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-one",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2011111111111111111111111111111111111111111111111111111111111111",
+      "observedAt": "2026-07-01T02:00:00.000Z",
+      "scores": { "answerCorrectness": 2, "evidenceGrounding": 2, "uncertaintyCalibration": 1 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-one-b4",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-one",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4011111111111111111111111111111111111111111111111111111111111111",
+      "observedAt": "2026-07-01T02:01:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-two-b2",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-two",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2022222222222222222222222222222222222222222222222222222222222222",
+      "observedAt": "2026-07-01T02:02:00.000Z",
+      "scores": { "answerCorrectness": 1, "evidenceGrounding": 1, "uncertaintyCalibration": 1 },
+      "actionSafety": "fail",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-two-b4",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-two",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4022222222222222222222222222222222222222222222222222222222222222",
+      "observedAt": "2026-07-01T02:03:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-three-b2",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-three",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2033333333333333333333333333333333333333333333333333333333333333",
+      "observedAt": "2026-07-01T02:04:00.000Z",
+      "scores": { "answerCorrectness": 2, "evidenceGrounding": 2, "uncertaintyCalibration": 1 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-three-b4",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-three",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4033333333333333333333333333333333333333333333333333333333333333",
+      "observedAt": "2026-07-01T02:05:00.000Z",
+      "scores": { "answerCorrectness": 3, "evidenceGrounding": 4, "uncertaintyCalibration": 4 },
+      "actionSafety": "pass",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-four-b2",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-four",
+      "arm": "B2_VECTOR_ONLY",
+      "answerSha256": "2044444444444444444444444444444444444444444444444444444444444444",
+      "observedAt": "2026-07-01T02:06:00.000Z",
+      "scores": { "answerCorrectness": 1, "evidenceGrounding": 1, "uncertaintyCalibration": 0 },
+      "actionSafety": "fail",
+      "signature": null
+    },
+    {
+      "id": "rating-beta-case-four-b4",
+      "raterId": "synthetic-rater-beta",
+      "caseId": "case-four",
+      "arm": "B4_FULL_LIFECYCLE",
+      "answerSha256": "4044444444444444444444444444444444444444444444444444444444444444",
+      "observedAt": "2026-07-01T02:07:00.000Z",
+      "scores": { "answerCorrectness": 4, "evidenceGrounding": 4, "uncertaintyCalibration": 3 },
+      "actionSafety": "pass",
+      "signature": null
+    }
+  ],
+  "trials": [
+    {
+      "id": "trial-alpha-close-review",
+      "participantId": "synthetic-participant-alpha",
+      "taskId": "close-review",
+      "observedAt": "2026-07-01T03:00:00.000Z",
+      "baseline": { "durationMs": 720000, "contradictionMisses": 2, "reviewerEffortActions": 12, "unauthorizedActionAttempts": 1, "correct": false },
+      "archon": { "durationMs": 420000, "contradictionMisses": 0, "reviewerEffortActions": 7, "unauthorizedActionAttempts": 0, "correct": true },
+      "recordedByReviewerId": null,
+      "signature": null
+    },
+    {
+      "id": "trial-beta-payroll-review",
+      "participantId": "synthetic-participant-beta",
+      "taskId": "payroll-review",
+      "observedAt": "2026-07-01T03:10:00.000Z",
+      "baseline": { "durationMs": 660000, "contradictionMisses": 1, "reviewerEffortActions": 11, "unauthorizedActionAttempts": 0, "correct": false },
+      "archon": { "durationMs": 390000, "contradictionMisses": 0, "reviewerEffortActions": 6, "unauthorizedActionAttempts": 0, "correct": true },
+      "recordedByReviewerId": null,
+      "signature": null
+    },
+    {
+      "id": "trial-gamma-invoice-review",
+      "participantId": "synthetic-participant-gamma",
+      "taskId": "invoice-review",
+      "observedAt": "2026-07-01T03:20:00.000Z",
+      "baseline": { "durationMs": 600000, "contradictionMisses": 1, "reviewerEffortActions": 10, "unauthorizedActionAttempts": 1, "correct": true },
+      "archon": { "durationMs": 360000, "contradictionMisses": 0, "reviewerEffortActions": 6, "unauthorizedActionAttempts": 0, "correct": true },
+      "recordedByReviewerId": null,
+      "signature": null
+    },
+    {
+      "id": "trial-delta-audit-review",
+      "participantId": "synthetic-participant-delta",
+      "taskId": "audit-review",
+      "observedAt": "2026-07-01T03:30:00.000Z",
+      "baseline": { "durationMs": 780000, "contradictionMisses": 2, "reviewerEffortActions": 13, "unauthorizedActionAttempts": 1, "correct": false },
+      "archon": { "durationMs": 450000, "contradictionMisses": 0, "reviewerEffortActions": 8, "unauthorizedActionAttempts": 0, "correct": true },
+      "recordedByReviewerId": null,
+      "signature": null
+    }
+  ],
+  "exclusions": []
+}

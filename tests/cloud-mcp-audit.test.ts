@@ -4,14 +4,24 @@ import {
   EXPECTED_MANAGED_MCP_AGGREGATE,
   FIXED_MANAGED_MCP_SCOPE,
   MANAGED_MCP_AGGREGATE_QUERY,
-  MANAGED_MCP_CALLED_TOOLS,
+  MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+  MANAGED_MCP_CSPANN_INDEX,
+  MANAGED_MCP_EXPLAIN_TOOL,
   MANAGED_MCP_QUERY_BOUND,
+  MANAGED_MCP_REQUIRED_TOOLS,
   MANAGED_MCP_REQUEST_TIMEOUT_MS,
   MANAGED_MCP_RECEIPT_SCHEMA_VERSION,
-  buildManagedMcpReceiptV2,
+  type ManagedMcpExplainStatus,
+  type ManagedMcpToolName,
+  buildManagedMcpReceiptV3,
   compatibleArgs,
   parseManagedMcpAggregateResult,
+  parseManagedMcpCspannExplainResult,
 } from "../scripts/cloud-mcp-audit.js";
+
+const RELEASE_SHA = "a".repeat(40);
+const CSPANN_RECEIPT_SHA256 = "b".repeat(64);
+const EXPLAIN_PLAN_SHA256 = "c".repeat(64);
 
 const exactRow = Object.freeze({
   persisted: 9,
@@ -29,13 +39,30 @@ function textResult(payload: unknown = { rows: [exactRow] }): unknown {
   };
 }
 
-function validReceiptInput() {
+function validReceiptInput(
+  explainStatus: ManagedMcpExplainStatus = "not-advertised"
+) {
+  const calledTools: ManagedMcpToolName[] =
+    explainStatus === "verified"
+      ? [
+          "get_cluster",
+          "list_tables",
+          "get_table_schema",
+          MANAGED_MCP_EXPLAIN_TOOL,
+          "select_query",
+        ]
+      : [...MANAGED_MCP_REQUIRED_TOOLS];
   return {
     checkedAt: "2026-07-25T12:34:56.789Z",
     database: "archon",
+    releaseSha: RELEASE_SHA,
+    cspannReceiptSha256: CSPANN_RECEIPT_SHA256,
+    explainStatus,
+    explainPlanSha256:
+      explainStatus === "verified" ? EXPLAIN_PLAN_SHA256 : null,
     toolsAdvertised: 12,
-    calledTools: [...MANAGED_MCP_CALLED_TOOLS],
-    proofResults: MANAGED_MCP_CALLED_TOOLS.map((name) => ({
+    calledTools,
+    proofResults: calledTools.map((name) => ({
       name,
       ok: true,
     })),
@@ -78,6 +105,66 @@ test("managed MCP aggregate SQL is immutable, fixed-scope, index-forced, and bou
     MANAGED_MCP_AGGREGATE_QUERY,
     /\b(?:content|embedding|metadata|source_ref)\b/iu
   );
+});
+
+test("managed MCP optional EXPLAIN mirrors the fixed public C-SPANN serving path", () => {
+  assert.match(
+    MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+    /FROM archon_public_memory_recall/u
+  );
+  assert.match(
+    MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+    /tenant_id = 'public-demo'/u
+  );
+  assert.match(
+    MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+    /embed_model = 'amazon\.titan-embed-text-v2:0'/u
+  );
+  assert.match(MANAGED_MCP_CSPANN_EXPLAIN_QUERY, /status = 'active'/u);
+  assert.match(MANAGED_MCP_CSPANN_EXPLAIN_QUERY, /company = 'Helios SA'/u);
+  assert.match(
+    MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+    /ORDER BY embedding <=> '\[[^\]]+\]'::VECTOR[\s\S]*LIMIT 3/u
+  );
+  const probe = MANAGED_MCP_CSPANN_EXPLAIN_QUERY.match(
+    /<=> '\[([^\]]+)\]'::VECTOR/u
+  )?.[1];
+  assert.ok(probe);
+  assert.equal(probe.split(",").length, 1024);
+  assert.doesNotMatch(
+    MANAGED_MCP_CSPANN_EXPLAIN_QUERY,
+    /\b(?:INSERT|UPSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b/iu
+  );
+});
+
+test("managed MCP optional EXPLAIN emits only a plan fingerprint", () => {
+  const plan = `vector search on ${MANAGED_MCP_CSPANN_INDEX}`;
+  const digest = parseManagedMcpCspannExplainResult({
+    structuredContent: { plan },
+  });
+  assert.match(digest, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    digest,
+    parseManagedMcpCspannExplainResult({
+      structuredContent: { plan },
+    })
+  );
+
+  for (const invalid of [
+    {},
+    { structuredContent: {} },
+    { structuredContent: { plan: "scan agent_memory" } },
+    {
+      structuredContent: {
+        plan: "vector search on idx_agent_memory_embedding",
+      },
+    },
+  ]) {
+    assert.throws(
+      () => parseManagedMcpCspannExplainResult(invalid),
+      /explain_query/u
+    );
+  }
 });
 
 test("managed MCP parser accepts only exact 9/9/9 structured or JSON-text rows", () => {
@@ -264,19 +351,21 @@ test("managed MCP parser treats missing, extra, or tenth rows as proof failure",
   }
 });
 
-test("managed MCP receipt v2 has exact public scope, bounds, aggregate, and proofs", () => {
-  const receipt = buildManagedMcpReceiptV2(validReceiptInput());
+test("managed MCP receipt v3 binds exact release, C-SPANN evidence, scope, and proofs", () => {
+  const receipt = buildManagedMcpReceiptV3(validReceiptInput());
   assert.deepEqual(Object.keys(receipt).sort(), [
     "aggregate",
     "bound",
     "calledTools",
     "checkedAt",
+    "cspannLinkage",
     "database",
     "endpoint",
     "mode",
     "ok",
     "proofs",
     "redactions",
+    "release",
     "schemaVersion",
     "scope",
     "toolsAdvertised",
@@ -286,12 +375,23 @@ test("managed MCP receipt v2 has exact public scope, bounds, aggregate, and proo
   assert.equal(receipt.mode, "read-only");
   assert.deepEqual(receipt.scope, FIXED_MANAGED_MCP_SCOPE);
   assert.deepEqual(receipt.bound, MANAGED_MCP_QUERY_BOUND);
+  assert.deepEqual(receipt.release, {
+    commitSha: RELEASE_SHA,
+    cspannReceiptSha256: CSPANN_RECEIPT_SHA256,
+  });
+  assert.deepEqual(receipt.cspannLinkage, {
+    index: MANAGED_MCP_CSPANN_INDEX,
+    explainQuery: {
+      status: "not-advertised",
+      planSha256: null,
+    },
+  });
   assert.deepEqual(receipt.aggregate, EXPECTED_MANAGED_MCP_AGGREGATE);
-  assert.deepEqual(receipt.calledTools, MANAGED_MCP_CALLED_TOOLS);
+  assert.deepEqual(receipt.calledTools, MANAGED_MCP_REQUIRED_TOOLS);
   assert.equal(receipt.proofs.length, 4);
   assert.deepEqual(
     receipt.proofs.map(({ name, ok }) => ({ name, ok })),
-    MANAGED_MCP_CALLED_TOOLS.map((name) => ({ name, ok: true }))
+    MANAGED_MCP_REQUIRED_TOOLS.map((name) => ({ name, ok: true }))
   );
   for (const proof of receipt.proofs) {
     assert.deepEqual(Object.keys(proof).sort(), ["detail", "name", "ok"]);
@@ -312,6 +412,32 @@ test("managed MCP receipt v2 has exact public scope, bounds, aggregate, and proo
   assert.equal(Object.hasOwn(receipt, "clusterId"), false);
   assert.equal(Object.hasOwn(receipt, "apiKey"), false);
   assert.equal(Object.hasOwn(receipt, "query"), false);
+  assert.doesNotMatch(serialized, /vector search on/iu);
+});
+
+test("managed MCP receipt v3 records an advertised, verified EXPLAIN capability", () => {
+  const receipt = buildManagedMcpReceiptV3(validReceiptInput("verified"));
+  assert.equal(receipt.ok, true);
+  assert.deepEqual(receipt.calledTools, [
+    "get_cluster",
+    "list_tables",
+    "get_table_schema",
+    "explain_query",
+    "select_query",
+  ]);
+  assert.equal(receipt.proofs.length, 5);
+  assert.deepEqual(receipt.cspannLinkage, {
+    index: MANAGED_MCP_CSPANN_INDEX,
+    explainQuery: {
+      status: "verified",
+      planSha256: EXPLAIN_PLAN_SHA256,
+    },
+  });
+  assert.equal(receipt.proofs[3]?.name, "explain_query");
+  assert.equal(
+    receipt.proofs[3]?.detail,
+    "Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index."
+  );
 });
 
 test("managed MCP receipt builder fails closed on non-exact metadata and sequences", () => {
@@ -320,8 +446,12 @@ test("managed MCP receipt builder fails closed on non-exact metadata and sequenc
     { ...base, checkedAt: "2026-07-25" },
     { ...base, checkedAt: "2026-99-99T12:34:56.789Z" },
     { ...base, database: "postgresql://user:password@host/archon" },
+    { ...base, releaseSha: "a".repeat(39) },
+    { ...base, releaseSha: "A".repeat(40) },
+    { ...base, cspannReceiptSha256: "b".repeat(63) },
     { ...base, toolsAdvertised: 3 },
     { ...base, toolsAdvertised: Number.MAX_SAFE_INTEGER + 1 },
+    { ...validReceiptInput("verified"), toolsAdvertised: 4 },
     { ...base, calledTools: base.calledTools.slice(0, 3) },
     {
       ...base,
@@ -331,6 +461,26 @@ test("managed MCP receipt builder fails closed on non-exact metadata and sequenc
         "list_tables",
         "select_query",
       ],
+    },
+    {
+      ...base,
+      explainStatus: "not-advertised",
+      explainPlanSha256: EXPLAIN_PLAN_SHA256,
+    },
+    {
+      ...base,
+      explainStatus: "ignored",
+      explainPlanSha256: null,
+    },
+    {
+      ...base,
+      explainStatus: "verified",
+      explainPlanSha256: null,
+    },
+    {
+      ...base,
+      explainStatus: "verified",
+      explainPlanSha256: EXPLAIN_PLAN_SHA256,
     },
     { ...base, proofResults: base.proofResults.slice(0, 3) },
     {
@@ -353,8 +503,8 @@ test("managed MCP receipt builder fails closed on non-exact metadata and sequenc
 
   for (const candidate of invalid) {
     assert.throws(() =>
-      buildManagedMcpReceiptV2(
-        candidate as Parameters<typeof buildManagedMcpReceiptV2>[0]
+      buildManagedMcpReceiptV3(
+        candidate as Parameters<typeof buildManagedMcpReceiptV3>[0]
       )
     );
   }
@@ -366,7 +516,7 @@ test("managed MCP receipt remains failed when any exact proof is false", () => {
     name: "get_table_schema",
     ok: false,
   };
-  const receipt = buildManagedMcpReceiptV2(input);
+  const receipt = buildManagedMcpReceiptV3(input);
   assert.equal(receipt.ok, false);
   assert.equal(receipt.proofs[2]?.ok, false);
 });

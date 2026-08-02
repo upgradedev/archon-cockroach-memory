@@ -211,8 +211,9 @@ mapfile -t actual_paths < <(
     sort
 )
 expected_paths=(recovery-intent.json "${declared_paths[@]}")
-IFS=$'\n' expected_paths=($(printf '%s\n' "${expected_paths[@]}" | sort))
-unset IFS
+mapfile -t expected_paths < <(
+  printf '%s\n' "${expected_paths[@]}" | LC_ALL=C sort
+)
 if [ "${#actual_paths[@]}" -ne "${#expected_paths[@]}" ]; then
   echo "The recovery bundle has an unexpected file count." >&2
   exit 1
@@ -285,8 +286,9 @@ case "$stack_state:$has_previous_stack" in
     elif [ "$had_previous_index" != "false" ]; then
       exit 1
     fi
-    IFS=$'\n' expected_existing=($(printf '%s\n' "${expected_existing[@]}" | sort))
-    unset IFS
+    mapfile -t expected_existing < <(
+      printf '%s\n' "${expected_existing[@]}" | LC_ALL=C sort
+    )
     test "${#declared_paths[@]}" -eq "${#expected_existing[@]}"
     for index in "${!declared_paths[@]}"; do
       test "${declared_paths[$index]}" = "${expected_existing[$index]}"

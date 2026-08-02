@@ -2,8 +2,10 @@ name: CodeQL
 
 # Static application security testing (SAST) via GitHub CodeQL.
 # Analyses the TypeScript source for injection, unsafe deserialization, and other
-# CWE-class weaknesses. Findings surface in the repo Security tab (Code scanning);
-# the workflow going green means the scan ran, not that it is finding-free.
+# CWE-class weaknesses. Findings remain available in GitHub code scanning while
+# this workflow also enforces the release threshold against the exact generated
+# SARIF: security-severity >= 7.0 or SARIF level=error. The canonical waiver
+# ledger is schema-checked and must remain empty, so every threshold match blocks.
 # Kept in its own file so the elevated security-events permission does not leak
 # into the offline test job in ci.yml.
 
@@ -33,6 +35,8 @@ jobs:
         language: [javascript-typescript]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
@@ -44,6 +48,432 @@ jobs:
         uses: github/codeql-action/autobuild@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
 
       - name: Perform CodeQL Analysis
+        id: analyze
         uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        env:
+          CODEQL_RAW_SARIF_DIR: ${{ runner.temp }}/archon-codeql-raw-sarif
+          CODEQL_SARIF_DIR: ${{ runner.temp }}/archon-codeql-post-processed-sarif
         with:
           category: "/language:${{ matrix.language }}"
+          output: ${{ env.CODEQL_RAW_SARIF_DIR }}
+          post-processed-sarif-path: ${{ env.CODEQL_SARIF_DIR }}
+          upload: always
+
+      - name: Enforce the CodeQL high-severity policy
+        shell: bash
+        env:
+          CODEQL_SARIF_DIR: ${{ runner.temp }}/archon-codeql-post-processed-sarif
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const fail = (message) => {
+            throw new Error(message);
+          };
+          const isObject = (value) =>
+            value !== null && typeof value === "object" && !Array.isArray(value);
+          const parseJson = (file, label) => {
+            let raw;
+            try {
+              raw = fs.readFileSync(file, "utf8");
+            } catch (error) {
+              fail(`${label} is missing or unreadable: ${error.message}`);
+            }
+            try {
+              return JSON.parse(raw);
+            } catch (error) {
+              fail(`${label} is not valid JSON-compatible YAML: ${error.message}`);
+            }
+          };
+          const listSarif = (root) => {
+            if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+              fail("CodeQL SARIF output directory is missing.");
+            }
+            const files = [];
+            const visit = (directory) => {
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const fullPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  visit(fullPath);
+                } else if (entry.isFile() && entry.name.endsWith(".sarif")) {
+                  files.push(fullPath);
+                }
+              }
+            };
+            visit(root);
+            files.sort();
+            if (files.length === 0) {
+              fail("CodeQL produced no SARIF files.");
+            }
+            return files;
+          };
+
+          const sourceSha = process.env.SOURCE_SHA ?? "";
+          if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+            fail("SOURCE_SHA must be an exact lowercase 40-character commit SHA.");
+          }
+          if (!process.env.RUNNER_TEMP || !process.env.GITHUB_STEP_SUMMARY) {
+            fail("Required GitHub runner paths are unavailable.");
+          }
+
+          const waiverFile = "security/waivers.yml";
+          const waiverLedger = parseJson(waiverFile, "Waiver ledger");
+          const waiverKeys = isObject(waiverLedger)
+            ? Object.keys(waiverLedger).sort()
+            : [];
+          const expectedWaiverKeys = ["policy", "schema_version", "waivers"];
+          if (
+            !isObject(waiverLedger) ||
+            JSON.stringify(waiverKeys) !== JSON.stringify(expectedWaiverKeys) ||
+            waiverLedger.schema_version !== 1 ||
+            waiverLedger.policy !== "docs/SUPPLY_CHAIN_SECURITY.md" ||
+            !Array.isArray(waiverLedger.waivers) ||
+            waiverLedger.waivers.length !== 0
+          ) {
+            fail(
+              "Waiver ledger must match schema version 1 exactly and contain zero waivers."
+            );
+          }
+
+          const sarifFiles = listSarif(process.env.CODEQL_SARIF_DIR);
+          const blockingFindings = [];
+          let runCount = 0;
+          let resultCount = 0;
+
+          for (const sarifFile of sarifFiles) {
+            const sarif = parseJson(sarifFile, "CodeQL SARIF");
+            if (
+              !isObject(sarif) ||
+              sarif.version !== "2.1.0" ||
+              !Array.isArray(sarif.runs) ||
+              sarif.runs.length === 0
+            ) {
+              fail("CodeQL SARIF has an invalid version or no runs.");
+            }
+            for (const run of sarif.runs) {
+              runCount += 1;
+              if (
+                !isObject(run) ||
+                !isObject(run.tool) ||
+                !isObject(run.tool.driver) ||
+                !Array.isArray(run.results)
+              ) {
+                fail(`CodeQL SARIF run ${runCount} is malformed.`);
+              }
+              if (
+                run.tool.extensions !== undefined &&
+                !Array.isArray(run.tool.extensions)
+              ) {
+                fail(`CodeQL SARIF run ${runCount} has malformed extensions.`);
+              }
+
+              const parseToolComponent = (component, componentLabel) => {
+                if (
+                  !isObject(component) ||
+                  typeof component.name !== "string" ||
+                  component.name.trim().length === 0 ||
+                  (component.guid !== undefined &&
+                    (typeof component.guid !== "string" ||
+                      component.guid.trim().length === 0)) ||
+                  (component.rules !== undefined &&
+                    !Array.isArray(component.rules))
+                ) {
+                  fail(
+                    `CodeQL SARIF run ${runCount} has a malformed ${componentLabel} component.`
+                  );
+                }
+                const rules = component.rules ?? [];
+                rules.forEach((rule) => {
+                  if (
+                    !isObject(rule) ||
+                    typeof rule.id !== "string" ||
+                    rule.id.trim().length === 0 ||
+                    (rule.guid !== undefined &&
+                      (typeof rule.guid !== "string" ||
+                        rule.guid.trim().length === 0))
+                  ) {
+                    fail(
+                      `CodeQL SARIF run ${runCount} has a malformed rule.`
+                    );
+                  }
+                });
+                return { component, rules };
+              };
+
+              const driverEntry = parseToolComponent(
+                run.tool.driver,
+                "driver"
+              );
+              const extensionEntries = (run.tool.extensions ?? []).map(
+                (component, extensionIndex) =>
+                  parseToolComponent(
+                    component,
+                    `extension ${extensionIndex}`
+                  )
+              );
+              const componentEntries = [driverEntry, ...extensionEntries];
+
+              for (const result of run.results) {
+                resultCount += 1;
+                if (
+                  !isObject(result) ||
+                  (result.ruleId !== undefined &&
+                    (typeof result.ruleId !== "string" ||
+                      result.ruleId.trim().length === 0)) ||
+                  (result.ruleIndex !== undefined &&
+                    (!Number.isSafeInteger(result.ruleIndex) ||
+                      result.ruleIndex < 0)) ||
+                  (result.rule !== undefined && !isObject(result.rule))
+                ) {
+                  fail(`CodeQL SARIF result ${resultCount} is malformed.`);
+                }
+
+                const ruleReference = result.rule ?? {};
+                if (
+                  (ruleReference.id !== undefined &&
+                    (typeof ruleReference.id !== "string" ||
+                      ruleReference.id.trim().length === 0)) ||
+                  (ruleReference.index !== undefined &&
+                    (!Number.isSafeInteger(ruleReference.index) ||
+                      ruleReference.index < 0)) ||
+                  (ruleReference.guid !== undefined &&
+                    (typeof ruleReference.guid !== "string" ||
+                      ruleReference.guid.trim().length === 0)) ||
+                  (ruleReference.toolComponent !== undefined &&
+                    !isObject(ruleReference.toolComponent)) ||
+                  (ruleReference.id !== undefined &&
+                    result.ruleId !== undefined &&
+                    ruleReference.id !== result.ruleId) ||
+                  (ruleReference.index !== undefined &&
+                    result.ruleIndex !== undefined &&
+                    ruleReference.index !== result.ruleIndex)
+                ) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} has a malformed rule reference.`
+                  );
+                }
+
+                const componentReference = ruleReference.toolComponent;
+                let componentEntry = driverEntry;
+                if (componentReference !== undefined) {
+                  if (
+                    (componentReference.index !== undefined &&
+                      (!Number.isSafeInteger(componentReference.index) ||
+                        componentReference.index < 0)) ||
+                    (componentReference.guid !== undefined &&
+                      (typeof componentReference.guid !== "string" ||
+                        componentReference.guid.trim().length === 0)) ||
+                    (componentReference.name !== undefined &&
+                      (typeof componentReference.name !== "string" ||
+                        componentReference.name.trim().length === 0))
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} has a malformed tool-component reference.`
+                    );
+                  }
+
+                  if (componentReference.index !== undefined) {
+                    componentEntry =
+                      extensionEntries[componentReference.index];
+                    if (!componentEntry) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                      );
+                    }
+                  } else if (componentReference.guid !== undefined) {
+                    const matchingComponents = componentEntries.filter(
+                      ({ component }) =>
+                        component.guid === componentReference.guid
+                    );
+                    if (matchingComponents.length === 0) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                      );
+                    }
+                    if (matchingComponents.length > 1) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an ambiguous tool component.`
+                      );
+                    }
+                    [componentEntry] = matchingComponents;
+                  }
+
+                  if (
+                    (componentReference.guid !== undefined &&
+                      componentEntry.component.guid !==
+                        componentReference.guid) ||
+                    (componentReference.name !== undefined &&
+                      componentEntry.component.name !== componentReference.name)
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                    );
+                  }
+                }
+
+                const effectiveRuleId =
+                  ruleReference.id ?? result.ruleId;
+                const effectiveRuleIndex =
+                  ruleReference.index ?? result.ruleIndex;
+                const effectiveRuleGuid = ruleReference.guid;
+                let matchingRules;
+                if (effectiveRuleIndex !== undefined) {
+                  const indexedRule =
+                    componentEntry.rules[effectiveRuleIndex];
+                  matchingRules =
+                    indexedRule &&
+                    (effectiveRuleId === undefined ||
+                      indexedRule.id === effectiveRuleId) &&
+                    (effectiveRuleGuid === undefined ||
+                      indexedRule.guid === effectiveRuleGuid)
+                      ? [indexedRule]
+                      : [];
+                } else {
+                  if (
+                    effectiveRuleId === undefined &&
+                    effectiveRuleGuid === undefined
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} references an unknown rule.`
+                    );
+                  }
+                  matchingRules = componentEntry.rules.filter(
+                    (rule) =>
+                      (effectiveRuleId === undefined ||
+                        rule.id === effectiveRuleId) &&
+                      (effectiveRuleGuid === undefined ||
+                        rule.guid === effectiveRuleGuid)
+                  );
+                }
+                if (matchingRules.length === 0) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} references an unknown rule.`
+                  );
+                }
+                if (matchingRules.length > 1) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} references an ambiguous rule.`
+                  );
+                }
+                const ruleEntry = { rule: matchingRules[0] };
+                if (
+                  (result.properties !== undefined &&
+                    !isObject(result.properties)) ||
+                  (ruleEntry.rule.properties !== undefined &&
+                    !isObject(ruleEntry.rule.properties)) ||
+                  (ruleEntry.rule.defaultConfiguration !== undefined &&
+                    !isObject(ruleEntry.rule.defaultConfiguration))
+                ) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} has malformed rule metadata.`
+                  );
+                }
+
+                const rawSeverity =
+                  result.properties?.["security-severity"] ??
+                  ruleEntry.rule.properties?.["security-severity"];
+                let securitySeverity = null;
+                if (rawSeverity !== undefined) {
+                  if (
+                    !["number", "string"].includes(typeof rawSeverity) ||
+                    (typeof rawSeverity === "string" &&
+                      rawSeverity.trim().length === 0)
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} has malformed security-severity.`
+                    );
+                  }
+                  const parsedSeverity = Number(rawSeverity);
+                  if (
+                    !Number.isFinite(parsedSeverity) ||
+                    parsedSeverity < 0 ||
+                    parsedSeverity > 10
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} has malformed security-severity.`
+                    );
+                  }
+                  securitySeverity = parsedSeverity;
+                }
+                const rawLevel =
+                  result.level ??
+                  ruleEntry.rule.defaultConfiguration?.level ??
+                  "none";
+                if (
+                  typeof rawLevel !== "string" ||
+                  !["none", "note", "warning", "error"].includes(rawLevel)
+                ) {
+                  fail(`CodeQL SARIF result ${resultCount} has malformed level.`);
+                }
+                if (securitySeverity >= 7 || rawLevel === "error") {
+                  blockingFindings.push({
+                    ruleId: ruleEntry.rule.id,
+                    securitySeverity,
+                    level: rawLevel,
+                  });
+                }
+              }
+            }
+          }
+
+          blockingFindings.sort((left, right) =>
+            `${left.ruleId}:${left.securitySeverity}:${left.level}`.localeCompare(
+              `${right.ruleId}:${right.securitySeverity}:${right.level}`
+            )
+          );
+          const receipt = {
+            schemaVersion: 1,
+            sourceSha,
+            policy: "codeql-high-critical-or-error",
+            thresholds: {
+              securitySeverityMinimum: 7,
+              sarifLevel: "error",
+            },
+            acceptedWaivers: 0,
+            sarifFilesEvaluated: sarifFiles.length,
+            sarifRunsEvaluated: runCount,
+            sarifResultsEvaluated: resultCount,
+            blockingFindings: blockingFindings.length,
+            outcome: blockingFindings.length === 0 ? "passed" : "blocked",
+          };
+          const receiptJson = `${JSON.stringify(receipt, null, 2)}\n`;
+          const receiptPath = path.join(
+            process.env.RUNNER_TEMP,
+            "codeql-policy-receipt.json"
+          );
+          fs.writeFileSync(receiptPath, receiptJson, {
+            encoding: "utf8",
+            mode: 0o600,
+          });
+          fs.appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              "### Enforced CodeQL threshold policy",
+              "",
+              `- Exact source SHA: \`${sourceSha}\``,
+              "- Blocking threshold: `security-severity >= 7.0` or SARIF `level=error`",
+              "- Accepted waivers: `0`",
+              `- SARIF runs evaluated: \`${runCount}\``,
+              `- SARIF results evaluated: \`${resultCount}\``,
+              `- Blocking findings: \`${blockingFindings.length}\``,
+              "",
+              "<details><summary>Sanitized exact-SHA policy receipt</summary>",
+              "",
+              "```json",
+              receiptJson.trimEnd(),
+              "```",
+              "</details>",
+              "",
+            ].join("\n")
+          );
+
+          if (blockingFindings.length > 0) {
+            console.error(
+              JSON.stringify({ sourceSha, blockingFindings }, null, 2)
+            );
+            fail("Unwaived CodeQL findings met the enforced blocking threshold.");
+          }
+          NODE

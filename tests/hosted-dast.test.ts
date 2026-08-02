@@ -117,6 +117,14 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       return Response.json(
         {
           ok: true,
+          access:
+            "canonical-read-only+isolated-synthetic-resolution-write",
+          resolutionSandbox: {
+            state: "available",
+            authority: "financial-controller-human-gate",
+            persistence: "CockroachDB-row-level-TTL",
+            externalSideEffects: "none",
+          },
           scope: {
             tenantId: "public-demo",
             company: "Helios SA",
@@ -124,6 +132,22 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
           },
         },
         { status: 200, headers: securityHeaders }
+      );
+    }
+
+    if (url.pathname === "/api/resolution/session") {
+      const status =
+        method === "DELETE" ? 405 : method === "POST" ? 400 : 401;
+      return Response.json(
+        { error: `bounded resolution error ${status}` },
+        { status, headers: securityHeaders }
+      );
+    }
+
+    if (url.pathname === "/api/resolution/decision") {
+      return Response.json(
+        { error: "A resolution session token is required." },
+        { status: 401, headers: securityHeaders }
       );
     }
 
@@ -196,11 +220,22 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       "https://d2s5v0o0eg2aaw.cloudfront.net"
     );
     assert.equal(receipt.passed, true);
-    assert.equal(receipt.version, 3);
+    assert.equal(receipt.version, 4);
     assert.equal(receipt.profile, "predeploy");
     assert.equal(receipt.releaseSha, "unknown");
-    assert.equal(receipt.checks.length, 16);
+    assert.equal(receipt.checks.length, 21);
     assert.ok(receipt.checks.every((check) => check.status === "pass"));
+    assert.deepEqual(
+      receipt.checks.slice(-6).map((check) => check.id),
+      [
+        "resolution-session-method-boundary",
+        "resolution-session-fixed-scope-boundary",
+        "resolution-session-auth-boundary",
+        "resolution-capability-shape-boundary",
+        "resolution-decision-auth-boundary",
+        "unknown-route-boundary",
+      ]
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (previousExpectedRelease === undefined) {
@@ -279,6 +314,14 @@ test("hosted DAST exact-release refuses the legacy API Gateway fallback", async 
     if (url.pathname === "/api/health") {
       return Response.json(
         {
+          access:
+            "canonical-read-only+isolated-synthetic-resolution-write",
+          resolutionSandbox: {
+            state: "available",
+            authority: "financial-controller-human-gate",
+            persistence: "CockroachDB-row-level-TTL",
+            externalSideEffects: "none",
+          },
           scope: {
             tenantId: "public-demo",
             company: "Helios SA",
@@ -357,7 +400,7 @@ test("hosted DAST writes a sanitized fail-closed receipt before rethrowing", asy
     const serialized = readFileSync(receiptPath, "utf8");
     const receipt = JSON.parse(serialized);
     assert.equal(receipt.schema, "archon.hosted-dast");
-    assert.equal(receipt.version, 3);
+    assert.equal(receipt.version, 4);
     assert.equal(receipt.passed, false);
     assert.deepEqual(receipt.checks, [
       {
@@ -392,6 +435,14 @@ test("hosted DAST fails closed when production is not the expected release", asy
     if (url.pathname === "/api/health") {
       return Response.json(
         {
+          access:
+            "canonical-read-only+isolated-synthetic-resolution-write",
+          resolutionSandbox: {
+            state: "available",
+            authority: "financial-controller-human-gate",
+            persistence: "CockroachDB-row-level-TTL",
+            externalSideEffects: "none",
+          },
           scope: {
             tenantId: "public-demo",
             company: "Helios SA",

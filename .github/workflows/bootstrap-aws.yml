@@ -46,6 +46,7 @@ jobs:
         with:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Fail closed unless the dispatch targets current green main
         shell: bash
@@ -103,6 +104,7 @@ jobs:
         with:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Configure narrow foundation credentials
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
@@ -300,29 +302,47 @@ jobs:
           set -euo pipefail
           parameters="${RUNNER_TEMP:?}/foundation-parameters-enable.json"
           jq -e '
-            [.Stacks[0].Parameters[].ParameterKey] | sort
-            == [
-              "AppName",
-              "ArtifactAccessLoggingEnabled",
-              "ExistingGitHubOidcProviderArn",
-              "GitHubOrganization",
-              "GitHubRepository",
-              "GitHubRepositoryId",
-              "GitHubRepositoryOwnerId"
-            ]
+            ([.Stacks[0].Parameters[].ParameterKey] | sort) as $keys
+            | $keys == [
+                "AppName",
+                "ArtifactAccessLoggingEnabled",
+                "ExistingGitHubOidcProviderArn",
+                "GitHubOrganization",
+                "GitHubRepository",
+                "GitHubRepositoryId",
+                "GitHubRepositoryOwnerId"
+              ]
+              or $keys == [
+                "AlarmRoutingEnabled",
+                "AppName",
+                "ArtifactAccessLoggingEnabled",
+                "ExistingGitHubOidcProviderArn",
+                "GitHubOrganization",
+                "GitHubRepository",
+                "GitHubRepositoryId",
+                "GitHubRepositoryOwnerId"
+              ]
           ' "$CURRENT_STACK_FILE" >/dev/null
           jq '
-            [.Stacks[0].Parameters[]
-              | if .ParameterKey == "ArtifactAccessLoggingEnabled"
-                then {
-                  ParameterKey: .ParameterKey,
-                  ParameterValue: "true"
-                }
-                else {
-                  ParameterKey: .ParameterKey,
-                  UsePreviousValue: true
-                }
-                end]
+            (.Stacks[0].Parameters | map(.ParameterKey)) as $keys
+            | [.Stacks[0].Parameters[]
+                | if .ParameterKey == "ArtifactAccessLoggingEnabled"
+                  then {
+                    ParameterKey: .ParameterKey,
+                    ParameterValue: "true"
+                  }
+                  else {
+                    ParameterKey: .ParameterKey,
+                    UsePreviousValue: true
+                  }
+                  end]
+              + if $keys | index("AlarmRoutingEnabled")
+                then []
+                else [{
+                  ParameterKey: "AlarmRoutingEnabled",
+                  ParameterValue: "false"
+                }]
+                end
           ' "$CURRENT_STACK_FILE" >"$parameters"
 
           change_set_file="${RUNNER_TEMP:?}/foundation-change-set.json"
@@ -482,6 +502,13 @@ jobs:
                 | from_entries;
               ($current[0].Stacks[0].Parameters | parameter_map) as $before
               | (.Parameters | parameter_map) as $after
+              | (
+                  $before
+                  | .ArtifactAccessLoggingEnabled = "true"
+                  | .AlarmRoutingEnabled = (
+                      .AlarmRoutingEnabled // "false"
+                    )
+                ) as $expected
               | .ChangeSetId == $id
                 and .StackId == $current[0].Stacks[0].StackId
                 and .ChangeSetName == $name
@@ -490,14 +517,9 @@ jobs:
                 and .ExecutionStatus == "AVAILABLE"
                 and ((.IncludeNestedStacks // false) == false)
                 and .Capabilities == ["CAPABILITY_NAMED_IAM"]
-                and ($before | keys | sort) == ($after | keys | sort)
                 and $before.ArtifactAccessLoggingEnabled == "false"
                 and $after.ArtifactAccessLoggingEnabled == "true"
-                and (
-                  $before | del(.ArtifactAccessLoggingEnabled)
-                ) == (
-                  $after | del(.ArtifactAccessLoggingEnabled)
-                )
+                and $after == $expected
                 and (.Changes | length) == 1
                 and .Changes[0].ResourceChange.Action == "Modify"
                 and .Changes[0].ResourceChange.LogicalResourceId == "ArtifactBucket"

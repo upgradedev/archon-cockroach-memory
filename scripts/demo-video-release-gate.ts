@@ -24,6 +24,7 @@ import {
   requireSuccessfulDeployJobs,
   requireSuccessfulHostedDastJobs,
   requireSuccessfulRecoveryAuditJobs,
+  selectExactHostedDastArtifact,
   selectSuccessfulRun,
   validLiveResponseMetadata,
 } from "./final-submission-gate.js";
@@ -75,6 +76,8 @@ export interface DemoVideoRunSelections {
   ci: StoredRunSelection;
   codeql: StoredRunSelection;
   deploy: StoredRunSelection;
+  // Kept as a capture-receipt compatibility alias. It must be byte-for-byte
+  // identical to deploy because Hosted DAST executes inside that run.
   hostedDast: StoredRunSelection;
   managedMcp: StoredRunSelection;
   recovery: StoredRunSelection;
@@ -139,7 +142,6 @@ interface SelectedEvidenceRuns {
   ci: GitHubWorkflowRun;
   codeql: GitHubWorkflowRun;
   deploy: GitHubWorkflowRun;
-  dast: GitHubWorkflowRun;
   mcp: GitHubWorkflowRun;
   recovery: GitHubWorkflowRun;
 }
@@ -326,7 +328,6 @@ export function selectReleaseEvidenceRuns(
     ci: GitHubWorkflowRun[];
     codeql: GitHubWorkflowRun[];
     deploy: GitHubWorkflowRun[];
-    dast: GitHubWorkflowRun[];
     mcp: GitHubWorkflowRun[];
     recovery: GitHubWorkflowRun[];
   },
@@ -335,6 +336,13 @@ export function selectReleaseEvidenceRuns(
   if (!validExactCommitSha(sha)) {
     throw new Error("Release evidence selection requires an exact commit SHA");
   }
+  const deploy = selectSuccessfulRun(
+    value.deploy,
+    "Deploy AWS",
+    "push",
+    sha,
+    ".github/workflows/deploy-aws.yml"
+  );
   return {
     ci: selectSuccessfulRun(
       value.ci,
@@ -350,20 +358,7 @@ export function selectReleaseEvidenceRuns(
       sha,
       ".github/workflows/codeql.yml"
     ),
-    deploy: selectSuccessfulRun(
-      value.deploy,
-      "Deploy AWS",
-      "workflow_run",
-      sha,
-      ".github/workflows/deploy-aws.yml"
-    ),
-    dast: selectSuccessfulRun(
-      value.dast,
-      "Hosted DAST",
-      "workflow_run",
-      sha,
-      ".github/workflows/security-dast.yml"
-    ),
+    deploy,
     mcp: selectSuccessfulRun(
       value.mcp,
       "Cockroach Cloud Managed MCP Audit",
@@ -389,6 +384,7 @@ function requireSuccessfulJob(
   jobs: ParsedWorkflowJob[],
   runId: number,
   sha: string,
+  runAttempt: number,
   name: string,
   requiredSteps: readonly string[]
 ): void {
@@ -398,6 +394,9 @@ function requireSuccessfulJob(
     matches.length !== 1 ||
     !job ||
     job.run_id !== runId ||
+    !Number.isSafeInteger(runAttempt) ||
+    runAttempt < 1 ||
+    job.run_attempt !== runAttempt ||
     job.head_sha !== sha ||
     job.status !== "completed" ||
     job.conclusion !== "success"
@@ -419,12 +418,16 @@ function requireSuccessfulJob(
 export function requireDemoVideoDeployContract(
   value: unknown,
   runId: number,
-  sha: string
+  sha: string,
+  runAttempt: number
 ): void {
-  requireSuccessfulDeployJobs(value, runId, sha);
-  const { totalCount, jobs } = parseWorkflowJobs(value);
+  requireSuccessfulDeployJobs(value, runId, sha, runAttempt);
+  requireSuccessfulHostedDastJobs(value, runId, sha, runAttempt);
+  const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const databaseJobName =
-    "Reconcile CockroachDB memory release / Atomic schema, seed, runtime RLS, and C-SPANN execution proof";
+    "Reconcile CockroachDB memory release / Schema, runtime RLS, C-SPANN, and resolution-loop execution proof";
+  const hostedDastPrefix =
+    "Run hosted DAST against exact production release / ";
   const expectedNames = [
     "Validate Deploy AWS source CI",
     "Verify CI SHA and build once",
@@ -432,19 +435,24 @@ export function requireDemoVideoDeployContract(
     "Deploy and smoke staging",
     "Promote identical candidate to production",
     "Prove production memory through CockroachDB Managed MCP",
+    `${hostedDastPrefix}Validate Hosted DAST source deployment`,
+    `${hostedDastPrefix}Bounded active API and browser-boundary probes`,
+    `${hostedDastPrefix}OWASP ZAP passive and AJAX-spider baseline`,
   ].sort();
   if (
     totalCount !== expectedNames.length ||
+    rawCount !== expectedNames.length ||
     jobs.length !== expectedNames.length ||
     JSON.stringify(jobs.map((job) => job.name).sort()) !==
       JSON.stringify(expectedNames)
   ) {
-    throw new Error("Deploy AWS must contain the exact six-job release contract");
+    throw new Error("Deploy AWS must contain the exact nine-job release contract");
   }
   requireSuccessfulJob(
     jobs,
     runId,
     sha,
+    runAttempt,
     databaseJobName,
     [
       "Prove target is still current main",
@@ -459,7 +467,8 @@ export function requireDemoVideoDeployContract(
 export function requireManagedMcpJobContract(
   value: unknown,
   runId: number,
-  sha: string
+  sha: string,
+  runAttempt: number
 ): void {
   const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   if (totalCount !== 1 || rawCount !== 1 || jobs.length !== 1) {
@@ -469,6 +478,7 @@ export function requireManagedMcpJobContract(
     jobs,
     runId,
     sha,
+    runAttempt,
     "Verify the live cluster through Managed MCP",
     [
       "Check out the default branch",
@@ -483,7 +493,8 @@ export function requireManagedMcpJobContract(
 export function requireDemoVideoRecoveryContract(
   value: unknown,
   runId: number,
-  sha: string
+  sha: string,
+  runAttempt: number
 ): void {
   requireSuccessfulRecoveryAuditJobs(value, runId, sha);
   const { jobs } = parseWorkflowJobs(value);
@@ -491,6 +502,7 @@ export function requireDemoVideoRecoveryContract(
     jobs,
     runId,
     sha,
+    runAttempt,
     "Recover unresolved staging delivery",
     [
       "Check out trusted recovery code",
@@ -505,6 +517,7 @@ export function requireDemoVideoRecoveryContract(
     jobs,
     runId,
     sha,
+    runAttempt,
     "Recover unresolved production delivery",
     [
       "Check out trusted recovery code",
@@ -518,12 +531,12 @@ export function requireDemoVideoRecoveryContract(
 }
 
 export function requireFreshPostDeployTiming(
-  runs: Pick<SelectedEvidenceRuns, "deploy" | "dast" | "mcp" | "recovery">,
+  runs: Pick<SelectedEvidenceRuns, "deploy" | "mcp" | "recovery">,
   now = Date.now()
 ): void {
   requirePostDeployAuditTiming(
     runs.deploy,
-    runs.dast,
+    runs.deploy,
     runs.mcp,
     runs.recovery,
     now
@@ -537,7 +550,6 @@ export function requireFreshPostDeployTiming(
     throw new Error("Selected production deployment must be under 24 hours old");
   }
   for (const [label, run] of [
-    ["Hosted DAST", runs.dast],
     ["Managed MCP", runs.mcp],
     ["manual recovery audit", runs.recovery],
   ] as const) {
@@ -673,6 +685,71 @@ export function selectExactArtifactInventory(
   return output;
 }
 
+export function selectDeployHostedDastArtifacts(
+  value: unknown,
+  deployRun: GitHubWorkflowRun,
+  sha: string,
+  now = Date.now()
+): {
+  dastReceipt: GitHubArtifact;
+  dastZap: GitHubArtifact;
+} {
+  if (
+    !validExactCommitSha(sha) ||
+    deployRun.head_sha !== sha ||
+    deployRun.name !== "Deploy AWS" ||
+    deployRun.event !== "push" ||
+    deployRun.path !== ".github/workflows/deploy-aws.yml" ||
+    !Number.isSafeInteger(deployRun.run_attempt) ||
+    deployRun.run_attempt < 1 ||
+    !Number.isFinite(now)
+  ) {
+    throw new Error("Hosted DAST artifact owner is not the exact Deploy run");
+  }
+  const receiptName =
+    `hosted-dast-${sha}-${deployRun.id}-${deployRun.run_attempt}`;
+  const zapName = `zap-baseline-${sha}-${deployRun.run_attempt}`;
+  const dastReceipt = selectExactHostedDastArtifact(
+    value,
+    receiptName,
+    deployRun
+  );
+  const dastZap = selectExactHostedDastArtifact(
+    value,
+    zapName,
+    deployRun,
+    100_000_000
+  );
+  const runStartedAt = Date.parse(deployRun.run_started_at);
+  const runCompletedAt = Date.parse(deployRun.updated_at);
+  if (
+    dastReceipt.id === dastZap.id ||
+    [dastReceipt, dastZap].some((artifact) => {
+      const createdAt = Date.parse(artifact.createdAt);
+      const updatedAt = Date.parse(artifact.updatedAt);
+      return (
+        ![
+          createdAt,
+          updatedAt,
+          runStartedAt,
+          runCompletedAt,
+          now,
+        ].every(Number.isFinite) ||
+        createdAt < runStartedAt - CLOCK_SKEW_MS ||
+        updatedAt < createdAt ||
+        updatedAt > runCompletedAt + CLOCK_SKEW_MS ||
+        updatedAt > now + CLOCK_SKEW_MS ||
+        now - updatedAt > MAXIMUM_AGE_MS
+      );
+    })
+  ) {
+    throw new Error(
+      "Deploy-run Hosted DAST artifact timing or identity is invalid"
+    );
+  }
+  return { dastReceipt, dastZap };
+}
+
 export function requireCanonicalPublicProof(
   value: unknown,
   sha: string,
@@ -774,7 +851,7 @@ function storeRunSelections(runs: SelectedEvidenceRuns): DemoVideoRunSelections 
     ci: toStoredRun(runs.ci),
     codeql: toStoredRun(runs.codeql),
     deploy: toStoredRun(runs.deploy),
-    hostedDast: toStoredRun(runs.dast),
+    hostedDast: toStoredRun(runs.deploy),
     managedMcp: toStoredRun(runs.mcp),
     recovery: toStoredRun(runs.recovery),
   };
@@ -993,12 +1070,12 @@ export function requireStoredReleaseBinding(
       workflowPath: ".github/workflows/codeql.yml",
     },
     deploy: {
-      event: "workflow_run",
+      event: "push",
       workflowPath: ".github/workflows/deploy-aws.yml",
     },
     hostedDast: {
-      event: "workflow_run",
-      workflowPath: ".github/workflows/security-dast.yml",
+      event: "push",
+      workflowPath: ".github/workflows/deploy-aws.yml",
     },
     managedMcp: {
       event: "workflow_dispatch",
@@ -1065,21 +1142,26 @@ export function requireStoredReleaseBinding(
   const storedRuns = selectedRuns as unknown as DemoVideoRunSelections;
   const storedArtifacts =
     selectedArtifacts as unknown as DemoVideoArtifactSelections;
-  const selectedRunIds = Object.values(storedRuns).map((run) => run.id);
+  const selectedRunIds = [
+    storedRuns.ci.id,
+    storedRuns.codeql.id,
+    storedRuns.deploy.id,
+    storedRuns.managedMcp.id,
+    storedRuns.recovery.id,
+  ];
   const selectedArtifactIds = Object.values(storedArtifacts).map(
     (artifact) => artifact.id
   );
   const deployedAt = Date.parse(storedRuns.deploy.completedAt);
   const postDeployRuns = [
-    storedRuns.hostedDast,
     storedRuns.managedMcp,
     storedRuns.recovery,
   ];
   const expectedArtifactRuns: Array<
     [keyof DemoVideoArtifactSelections, StoredRunSelection]
   > = [
-    ["hostedDast", storedRuns.hostedDast],
-    ["hostedDastZap", storedRuns.hostedDast],
+    ["hostedDast", storedRuns.deploy],
+    ["hostedDastZap", storedRuns.deploy],
     ["managedMcp", storedRuns.managedMcp],
     ["recoveryStaging", storedRuns.recovery],
     ["recoveryProduction", storedRuns.recovery],
@@ -1087,6 +1169,8 @@ export function requireStoredReleaseBinding(
   if (
     new Set(selectedRunIds).size !== selectedRunIds.length ||
     new Set(selectedArtifactIds).size !== selectedArtifactIds.length ||
+    canonicalJson(storedRuns.hostedDast) !==
+      canonicalJson(storedRuns.deploy) ||
     deployedAt > now + CLOCK_SKEW_MS ||
     now - deployedAt > MAXIMUM_AGE_MS ||
     postDeployRuns.some((run) => {
@@ -1114,9 +1198,9 @@ export function requireStoredReleaseBinding(
     }) ||
     storedArtifacts.hostedDast.name !==
       `hosted-dast-${expected.sha}-${storedRuns.deploy.id}-` +
-        `${storedRuns.deploy.attempt}-${storedRuns.hostedDast.attempt}` ||
+        `${storedRuns.deploy.attempt}` ||
     storedArtifacts.hostedDastZap.name !==
-      `zap-baseline-${expected.sha}-${storedRuns.hostedDast.attempt}` ||
+      `zap-baseline-${expected.sha}-${storedRuns.deploy.attempt}` ||
     storedArtifacts.managedMcp.name !==
       `managed-mcp-proof-${storedRuns.managedMcp.id}-` +
         `${storedRuns.managedMcp.attempt}` ||
@@ -1299,7 +1383,7 @@ async function collectEvidence(
   sha: string,
   now = Date.now()
 ): Promise<EvidenceBundle> {
-  const [ci, codeql, deploy, dast, mcp, recovery] = await Promise.all([
+  const [ci, codeql, deploy, mcp, recovery] = await Promise.all([
     githubJson(
       workflowRunsPath("ci.yml", "push", sha),
       token,
@@ -1311,14 +1395,9 @@ async function collectEvidence(
       "Exact-SHA CodeQL runs"
     ),
     githubJson(
-      workflowRunsPath("deploy-aws.yml", "workflow_run", sha),
+      workflowRunsPath("deploy-aws.yml", "push", sha),
       token,
       "Exact-SHA Deploy AWS runs"
-    ),
-    githubJson(
-      workflowRunsPath("security-dast.yml", "workflow_run", sha),
-      token,
-      "Exact-SHA Hosted DAST runs"
     ),
     githubJson(
       workflowRunsPath("managed-mcp-audit.yml", "workflow_dispatch", sha),
@@ -1336,7 +1415,6 @@ async function collectEvidence(
       ci: parseWorkflowRuns(ci),
       codeql: parseWorkflowRuns(codeql),
       deploy: parseWorkflowRuns(deploy),
-      dast: parseWorkflowRuns(dast),
       mcp: parseWorkflowRuns(mcp),
       recovery: parseWorkflowRuns(recovery),
     },
@@ -1346,10 +1424,9 @@ async function collectEvidence(
 
   const [
     deployJobs,
-    dastJobs,
     mcpJobs,
     recoveryJobs,
-    dastArtifacts,
+    deployArtifacts,
     mcpArtifacts,
     recoveryArtifacts,
   ] = await Promise.all([
@@ -1357,11 +1434,6 @@ async function collectEvidence(
       `/repos/${REPOSITORY}/actions/runs/${runs.deploy.id}/attempts/${runs.deploy.run_attempt}/jobs?per_page=100`,
       token,
       "Attempt-specific Deploy AWS jobs"
-    ),
-    githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${runs.dast.id}/attempts/${runs.dast.run_attempt}/jobs?per_page=100`,
-      token,
-      "Attempt-specific Hosted DAST jobs"
     ),
     githubJson(
       `/repos/${REPOSITORY}/actions/runs/${runs.mcp.id}/attempts/${runs.mcp.run_attempt}/jobs?per_page=100`,
@@ -1374,9 +1446,9 @@ async function collectEvidence(
       "Attempt-specific manual recovery jobs"
     ),
     githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${runs.dast.id}/artifacts?per_page=100`,
+      `/repos/${REPOSITORY}/actions/runs/${runs.deploy.id}/artifacts?per_page=100`,
       token,
-      "Exact Hosted DAST artifacts"
+      "Exact Deploy AWS artifacts containing Hosted DAST"
     ),
     githubJson(
       `/repos/${REPOSITORY}/actions/runs/${runs.mcp.id}/artifacts?per_page=100`,
@@ -1390,15 +1462,25 @@ async function collectEvidence(
     ),
   ]);
 
-  requireDemoVideoDeployContract(deployJobs, runs.deploy.id, sha);
-  requireSuccessfulHostedDastJobs(dastJobs, runs.dast.id, sha);
-  requireManagedMcpJobContract(mcpJobs, runs.mcp.id, sha);
-  requireDemoVideoRecoveryContract(recoveryJobs, runs.recovery.id, sha);
+  requireDemoVideoDeployContract(
+    deployJobs,
+    runs.deploy.id,
+    sha,
+    runs.deploy.run_attempt
+  );
+  requireManagedMcpJobContract(
+    mcpJobs,
+    runs.mcp.id,
+    sha,
+    runs.mcp.run_attempt
+  );
+  requireDemoVideoRecoveryContract(
+    recoveryJobs,
+    runs.recovery.id,
+    sha,
+    runs.recovery.run_attempt
+  );
 
-  const dastReceiptName =
-    `hosted-dast-${sha}-${runs.deploy.id}-${runs.deploy.run_attempt}-` +
-    `${runs.dast.run_attempt}`;
-  const dastZapName = `zap-baseline-${sha}-${runs.dast.run_attempt}`;
   const mcpReceiptName =
     `managed-mcp-proof-${runs.mcp.id}-${runs.mcp.run_attempt}`;
   const recoveryStagingName =
@@ -1407,17 +1489,6 @@ async function collectEvidence(
   const recoveryProductionName =
     `production-cloudformation-controls-audit-${runs.recovery.id}-` +
     `${runs.recovery.run_attempt}`;
-  const priorDastNames = Array.from(
-    { length: Math.max(0, runs.dast.run_attempt - 1) },
-    (_, index) => {
-      const attempt = index + 1;
-      return [
-        `hosted-dast-${sha}-${runs.deploy.id}-` +
-          `${runs.deploy.run_attempt}-${attempt}`,
-        `zap-baseline-${sha}-${attempt}`,
-      ];
-    }
-  ).flat();
   const priorMcpNames = Array.from(
     { length: Math.max(0, runs.mcp.run_attempt - 1) },
     (_, index) => `managed-mcp-proof-${runs.mcp.id}-${index + 1}`
@@ -1433,13 +1504,11 @@ async function collectEvidence(
     }
   ).flat();
 
-  const selectedDastArtifacts = selectExactArtifactInventory(
-    dastArtifacts,
-    [dastReceiptName, dastZapName],
-    runs.dast,
-    now,
-    priorDastNames,
-    100_000_000
+  const selectedDastArtifacts = selectDeployHostedDastArtifacts(
+    deployArtifacts,
+    runs.deploy,
+    sha,
+    now
   );
   const selectedMcpArtifacts = selectExactArtifactInventory(
     mcpArtifacts,
@@ -1456,8 +1525,8 @@ async function collectEvidence(
     priorRecoveryNames
   );
   const artifacts: SelectedEvidenceArtifacts = {
-    dastReceipt: selectedDastArtifacts[dastReceiptName]!,
-    dastZap: selectedDastArtifacts[dastZapName]!,
+    dastReceipt: selectedDastArtifacts.dastReceipt,
+    dastZap: selectedDastArtifacts.dastZap,
     mcpReceipt: selectedMcpArtifacts[mcpReceiptName]!,
     recoveryStaging: selectedRecoveryArtifacts[recoveryStagingName]!,
     recoveryProduction: selectedRecoveryArtifacts[recoveryProductionName]!,
@@ -1543,8 +1612,8 @@ function emitOutputs(
     codeql_run_attempt: runs.codeql.run_attempt,
     deploy_run_id: runs.deploy.id,
     deploy_run_attempt: runs.deploy.run_attempt,
-    dast_run_id: runs.dast.id,
-    dast_run_attempt: runs.dast.run_attempt,
+    dast_run_id: runs.deploy.id,
+    dast_run_attempt: runs.deploy.run_attempt,
     mcp_run_id: runs.mcp.id,
     mcp_run_attempt: runs.mcp.run_attempt,
     recovery_run_id: runs.recovery.id,
@@ -1719,7 +1788,7 @@ async function main(): Promise<void> {
   console.error(
     `Demo-video release gate ${invocation.phase} PASS: ` +
       `SHA ${invocation.sha}; deploy ${evidence.runs.deploy.id}/` +
-      `${evidence.runs.deploy.run_attempt}; DAST ${evidence.runs.dast.id}; ` +
+      `${evidence.runs.deploy.run_attempt} includes DAST; ` +
       `MCP ${evidence.runs.mcp.id}; recovery ${evidence.runs.recovery.id}`
   );
   if (receiptHandoff !== "") {

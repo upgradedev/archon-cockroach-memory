@@ -1,11 +1,23 @@
 name: Hosted DAST
 
+# Exact-release scans are reusable jobs inside the causal Deploy AWS run.
+# Scheduled and manual invocations remain read-only production audits.
 on:
+  workflow_call:
+    inputs:
+      exact_sha:
+        description: Exact deployed main commit to scan
+        required: true
+        type: string
+      deploy_run_id:
+        description: Deploy AWS run that promoted the release
+        required: true
+        type: number
+      deploy_run_attempt:
+        description: Exact Deploy AWS run attempt
+        required: true
+        type: number
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Deploy AWS"]
-    branches: [main]
-    types: [completed]
   schedule:
     - cron: "43 4 * * 1"
 
@@ -18,12 +30,7 @@ permissions:
 
 env:
   DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net
-  DAST_CHECKOUT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  DAST_EXPECTED_RELEASE_SHA: ${{ github.event.workflow_run.head_sha || '' }}
   DAST_REQUIRE_HARDENED_HEADERS: "1"
-  DAST_SCANNER_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  DAST_SOURCE_DEPLOY_RUN_ID: ${{ github.event.workflow_run.id || '' }}
-  DAST_SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || '' }}
 
 jobs:
   source-gate:
@@ -33,38 +40,110 @@ jobs:
     permissions:
       actions: read
       contents: read
+    outputs:
+      checkout_sha: ${{ steps.source.outputs.checkout_sha }}
+      expected_release_sha: ${{ steps.source.outputs.expected_release_sha }}
+      source_deploy_run_id: ${{ steps.source.outputs.source_deploy_run_id }}
+      source_deploy_run_attempt: ${{ steps.source.outputs.source_deploy_run_attempt }}
+      artifact_run_id: ${{ steps.source.outputs.artifact_run_id }}
+      artifact_run_attempt: ${{ steps.source.outputs.artifact_run_attempt }}
     steps:
       - name: Require successful operation-bound Deploy AWS source
+        id: source
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
-          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || '' }}
-          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || '' }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          REQUESTED_RUN_ID: ${{ inputs.deploy_run_id || '' }}
+          REQUESTED_RUN_ATTEMPT: ${{ inputs.deploy_run_attempt || '' }}
+          REQUESTED_SHA: ${{ inputs.exact_sha || '' }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" != "workflow_run" ]]; then
+          checkout_sha="$GITHUB_SHA"
+          expected_release_sha=""
+          source_deploy_run_id=""
+          source_deploy_run_attempt=""
+          if [[ -z "$REQUESTED_SHA" &&
+                -z "$REQUESTED_RUN_ID" &&
+                -z "$REQUESTED_RUN_ATTEMPT" ]]; then
+            case "$EVENT_NAME" in
+              schedule|workflow_dispatch) ;;
+              *)
+                echo "Standalone Hosted DAST has an invalid trigger." >&2
+                exit 1
+                ;;
+            esac
+            test "$GITHUB_REF" = "refs/heads/main"
+            [[ "$checkout_sha" =~ ^[0-9a-f]{40}$ ]]
+            {
+              echo "checkout_sha=$checkout_sha"
+              echo "expected_release_sha="
+              echo "source_deploy_run_id="
+              echo "source_deploy_run_attempt="
+              echo "artifact_run_id=$GITHUB_RUN_ID"
+              echo "artifact_run_attempt=$GITHUB_RUN_ATTEMPT"
+            } >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          test "$SOURCE_CONCLUSION" = "success"
-          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          deploy_jobs="$(
+
+          test "$EVENT_NAME" = "push"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          [[ "$REQUESTED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REQUESTED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_RUN_ID" = "$REQUESTED_RUN_ID"
+          test "$GITHUB_RUN_ATTEMPT" = "$REQUESTED_RUN_ATTEMPT"
+          test "$GITHUB_SHA" = "$REQUESTED_SHA"
+
+          deploy_run="$(
             gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/attempts/${SOURCE_RUN_ATTEMPT}/jobs?per_page=100"
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUESTED_RUN_ID}/attempts/${REQUESTED_RUN_ATTEMPT}"
           )"
           jq -e \
-            --argjson run_id "$SOURCE_RUN_ID" \
-            --arg sha "$SOURCE_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$REQUESTED_SHA" \
+            --argjson run_id "$REQUESTED_RUN_ID" \
+            --argjson run_attempt "$REQUESTED_RUN_ATTEMPT" '
+              .id == $run_id and
+              .run_attempt == $run_attempt and
+              .name == "Deploy AWS" and
+              .event == "push" and
+              .head_branch == "main" and
+              .head_sha == $sha and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              (
+                .path == ".github/workflows/deploy-aws.yml" or
+                .path == ".github/workflows/deploy-aws.yml@main" or
+                .path ==
+                  ".github/workflows/deploy-aws.yml@refs/heads/main"
+              ) and
+              (
+                .status == "in_progress" or
+                .status == "queued" or
+                .status == "waiting" or
+                .status == "pending"
+              ) and
+              .conclusion == null
+            ' <<<"$deploy_run" >/dev/null
+
+          deploy_jobs="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUESTED_RUN_ID}/attempts/${REQUESTED_RUN_ATTEMPT}/jobs?per_page=100"
+          )"
+          jq -e \
+            --argjson run_attempt "$REQUESTED_RUN_ATTEMPT" \
+            --argjson run_id "$REQUESTED_RUN_ID" \
+            --arg sha "$REQUESTED_SHA" \
             '
               def exact_job($name):
                 [.jobs[] |
                   select(
                     .name == $name and
                     .run_id == $run_id and
+                    .run_attempt == $run_attempt and
                     .head_sha == $sha and
                     .status == "completed" and
                     .conclusion == "success"
@@ -150,16 +229,35 @@ jobs:
                 "Upload sanitized Managed MCP receipt"
               )
             ' <<< "$deploy_jobs"
+          checkout_sha="$REQUESTED_SHA"
+          expected_release_sha="$REQUESTED_SHA"
+          source_deploy_run_id="$REQUESTED_RUN_ID"
+          source_deploy_run_attempt="$REQUESTED_RUN_ATTEMPT"
+          {
+            echo "checkout_sha=$checkout_sha"
+            echo "expected_release_sha=$expected_release_sha"
+            echo "source_deploy_run_id=$source_deploy_run_id"
+            echo "source_deploy_run_attempt=$source_deploy_run_attempt"
+            echo "artifact_run_id=$GITHUB_RUN_ID"
+            echo "artifact_run_attempt=$GITHUB_RUN_ATTEMPT"
+          } >>"$GITHUB_OUTPUT"
 
   boundary-probes:
     needs: source-gate
     name: Bounded active API and browser-boundary probes
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      DAST_CHECKOUT_SHA: ${{ needs.source-gate.outputs.checkout_sha }}
+      DAST_EXPECTED_RELEASE_SHA: ${{ needs.source-gate.outputs.expected_release_sha }}
+      DAST_SCANNER_SHA: ${{ needs.source-gate.outputs.checkout_sha }}
+      DAST_SOURCE_DEPLOY_RUN_ID: ${{ needs.source-gate.outputs.source_deploy_run_id }}
+      DAST_SOURCE_DEPLOY_RUN_ATTEMPT: ${{ needs.source-gate.outputs.source_deploy_run_attempt }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.DAST_CHECKOUT_SHA }}
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
@@ -171,7 +269,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hosted-dast-${{ env.DAST_CHECKOUT_SHA }}-${{ github.event.workflow_run.id || github.run_id }}-${{ github.event.workflow_run.run_attempt || github.run_attempt }}-${{ github.run_attempt }}
+          name: hosted-dast-${{ env.DAST_CHECKOUT_SHA }}-${{ needs.source-gate.outputs.artifact_run_id }}-${{ needs.source-gate.outputs.artifact_run_attempt }}
           path: ${{ runner.temp }}/hosted-dast.json
           if-no-files-found: error
           retention-days: 90
@@ -181,10 +279,13 @@ jobs:
     name: OWASP ZAP passive and AJAX-spider baseline
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DAST_CHECKOUT_SHA: ${{ needs.source-gate.outputs.checkout_sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.DAST_CHECKOUT_SHA }}
+          persist-credentials: false
       - name: Scan the owned public production release
         uses: zaproxy/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874 # v0.15.0
         with:
@@ -194,4 +295,4 @@ jobs:
           cmd_options: "-a -j -m 2"
           fail_action: true
           allow_issue_writing: false
-          artifact_name: zap-baseline-${{ env.DAST_CHECKOUT_SHA }}-${{ github.run_attempt }}
+          artifact_name: zap-baseline-${{ env.DAST_CHECKOUT_SHA }}-${{ needs.source-gate.outputs.artifact_run_attempt }}

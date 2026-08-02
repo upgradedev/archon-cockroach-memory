@@ -1,0 +1,62 @@
+# Archon Memory CloudFormation policy baseline.
+#
+# These controls are deliberately small and deterministic. CloudFormation Guard
+# complements cfn-lint/SAM validation: it does not replace template/schema
+# validation or the live AWS control proofs in the deployment workflows.
+
+let s3_buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+let kms_keys = Resources.*[ Type == 'AWS::KMS::Key' ]
+let sns_topics = Resources.*[ Type == 'AWS::SNS::Topic' ]
+let sqs_queues = Resources.*[ Type == 'AWS::SQS::Queue' ]
+let log_groups = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
+let distributions = Resources.*[ Type == 'AWS::CloudFront::Distribution' ]
+let http_apis = Resources.*[ Type == 'AWS::Serverless::HttpApi' ]
+
+rule s3_buckets_are_encrypted when %s3_buckets !empty {
+  %s3_buckets.Properties.BucketEncryption exists
+}
+
+rule s3_buckets_block_all_public_access when %s3_buckets !empty {
+  %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicAcls == true
+  %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicPolicy == true
+  %s3_buckets.Properties.PublicAccessBlockConfiguration.IgnorePublicAcls == true
+  %s3_buckets.Properties.PublicAccessBlockConfiguration.RestrictPublicBuckets == true
+}
+
+rule s3_buckets_enable_versioning when %s3_buckets !empty {
+  %s3_buckets.Properties.VersioningConfiguration.Status == 'Enabled'
+}
+
+rule kms_keys_enable_rotation when %kms_keys !empty {
+  %kms_keys.Properties.EnableKeyRotation == true
+}
+
+rule sns_topics_are_encrypted when %sns_topics !empty {
+  %sns_topics.Properties.KmsMasterKeyId exists
+}
+
+rule sqs_queues_are_encrypted when %sqs_queues !empty {
+  %sqs_queues.Properties.KmsMasterKeyId exists
+}
+
+rule log_groups_have_bounded_retention when %log_groups !empty {
+  %log_groups.Properties.RetentionInDays exists
+  %log_groups.Properties.RetentionInDays <= 90
+}
+
+rule cloudfront_redirects_default_viewers_to_https when %distributions !empty {
+  %distributions.Properties.DistributionConfig.DefaultCacheBehavior.ViewerProtocolPolicy == 'redirect-to-https'
+}
+
+rule http_apis_have_access_logs_and_throttling when %http_apis !empty {
+  %http_apis.Properties.AccessLogSettings.DestinationArn exists
+  %http_apis.Properties.DefaultRouteSettings.DetailedMetricsEnabled == true
+  %http_apis.Properties.DefaultRouteSettings.ThrottlingBurstLimit exists
+  %http_apis.Properties.DefaultRouteSettings.ThrottlingRateLimit exists
+}
+
+rule sam_function_defaults_are_bounded when Globals.Function exists {
+  Globals.Function.Runtime == 'nodejs22.x'
+  Globals.Function.Timeout <= 30
+  Globals.Function.Tracing == 'Active'
+}

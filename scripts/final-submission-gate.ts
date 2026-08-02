@@ -1,10 +1,11 @@
-// Read-only, hosted boundary for the final Devpost handoff. This script is
+// Hosted boundary for the final Devpost handoff. It is read-only against
+// canonical memory and exercises one TTL-scoped synthetic resolution action. It is
 // intentionally network-aware and must run only from the manually dispatched
 // Submission readiness workflow on the exact current main commit. It writes one
 // sanitized receipt under RUNNER_TEMP and never receives AWS credentials.
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,8 @@ const DEMO_VIDEO_WORKFLOW_PATH = ".github/workflows/demo-video.yml";
 const DEMO_VIDEO_MAXIMUM_AGE_MS = 24 * 60 * 60 * 1_000;
 const DEMO_VIDEO_MINIMUM_PACKAGE_BYTES = 5_000_000;
 const DEMO_VIDEO_MAXIMUM_PACKAGE_BYTES = 2_000_000_000;
+const HOSTED_DAST_CALLER_JOB_NAME =
+  "Run hosted DAST against exact production release";
 
 type GatePhase = "pre-submit" | "post-submit";
 type CheckStatus = "pass" | "fail";
@@ -757,7 +760,7 @@ export function parseWorkflowArtifacts(
 export function selectExactHostedDastArtifact(
   value: unknown,
   expectedName: string,
-  hostedDastRun: GitHubWorkflowRun,
+  deployRun: GitHubWorkflowRun,
   maximumSizeInBytes = 1_000_000
 ): GitHubArtifact {
   const root = asRecord(value);
@@ -783,13 +786,19 @@ export function selectExactHostedDastArtifact(
   ).filter(
     (artifact) =>
       artifact.name === expectedName &&
-      artifact.workflowRunId === hostedDastRun.id &&
-      artifact.workflowRunHeadSha === hostedDastRun.head_sha &&
+      artifact.workflowRunId === deployRun.id &&
+      artifact.workflowRunHeadSha === deployRun.head_sha &&
       artifact.expired === false
   );
-  if (matches.length !== 1 || !matches[0]) {
+  if (
+    deployRun.name !== "Deploy AWS" ||
+    deployRun.path !== ".github/workflows/deploy-aws.yml" ||
+    deployRun.event !== "push" ||
+    matches.length !== 1 ||
+    !matches[0]
+  ) {
     throw new Error(
-      "Exactly one unexpired operation-bound Hosted DAST artifact is required"
+      "Exactly one unexpired Deploy-run-bound Hosted DAST artifact is required"
     );
   }
   return matches[0];
@@ -1165,10 +1174,12 @@ export function extractSingleJsonArtifact(
 export function requireExactHostedDastReceipt(
   value: unknown,
   deployRun: GitHubWorkflowRun,
-  hostedDastRun: GitHubWorkflowRun,
+  scannerRun: GitHubWorkflowRun,
   sha: string,
   now = Date.now()
 ): void {
+  // Reusable-workflow jobs inherit the caller's run identity. A distinct
+  // scanner run is invalid for exact-release submission evidence.
   const receipt = asRecord(value);
   const expectedKeys = [
     "checks",
@@ -1194,21 +1205,30 @@ export function requireExactHostedDastReceipt(
     receipt,
     "sourceDeployRunAttempt"
   );
-  const hostedStartedAt = Date.parse(hostedDastRun.run_started_at);
-  const hostedCompletedAt = Date.parse(hostedDastRun.updated_at);
+  const hostedStartedAt = Date.parse(scannerRun.run_started_at);
+  const hostedCompletedAt = Date.parse(scannerRun.updated_at);
   if (
     !receipt ||
     actualKeys.length !== expectedKeys.length ||
     actualKeys.some((key, index) => key !== expectedKeys[index]) ||
     receipt.schema !== "archon.hosted-dast" ||
-    receipt.version !== 3 ||
+    receipt.version !== 4 ||
     receipt.profile !== "exact-release" ||
     receipt.targetOrigin !== DEMO_URL ||
     receipt.releaseSha !== sha ||
     receipt.scannerSha !== sha ||
     receipt.passed !== true ||
-    scannerRunId !== hostedDastRun.id ||
-    scannerRunAttempt !== hostedDastRun.run_attempt ||
+    deployRun.name !== "Deploy AWS" ||
+    deployRun.path !== ".github/workflows/deploy-aws.yml" ||
+    deployRun.event !== "push" ||
+    deployRun.head_sha !== sha ||
+    scannerRun.id !== deployRun.id ||
+    scannerRun.run_attempt !== deployRun.run_attempt ||
+    scannerRun.head_sha !== deployRun.head_sha ||
+    scannerRun.path !== deployRun.path ||
+    scannerRun.event !== deployRun.event ||
+    scannerRunId !== deployRun.id ||
+    scannerRunAttempt !== deployRun.run_attempt ||
     sourceDeployRunId !== deployRun.id ||
     sourceDeployRunAttempt !== deployRun.run_attempt ||
     !Number.isSafeInteger(scannerRunId) ||
@@ -1245,6 +1265,11 @@ export function requireExactHostedDastReceipt(
     ["limit-boundary", 400],
     ["write-route-absent", 404],
     ["audit-scope-injection", 400],
+    ["resolution-session-method-boundary", 405],
+    ["resolution-session-fixed-scope-boundary", 400],
+    ["resolution-session-auth-boundary", 401],
+    ["resolution-capability-shape-boundary", 401],
+    ["resolution-decision-auth-boundary", 401],
     ["unknown-route-boundary", 404],
   ] as const;
   const rawChecks = Array.isArray(receipt.checks)
@@ -1270,7 +1295,7 @@ export function requireExactHostedDastReceipt(
       );
     })
   ) {
-    throw new Error("Hosted DAST receipt does not prove all 16 checks");
+    throw new Error("Hosted DAST receipt does not prove all 21 checks");
   }
 }
 
@@ -1319,7 +1344,8 @@ export function parseWorkflowJobs(value: unknown): {
 export function requireSuccessfulDeployJobs(
   value: unknown,
   runId: number,
-  sha: string
+  sha: string,
+  runAttempt?: number
 ): void {
   const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const expected = [
@@ -1336,6 +1362,18 @@ export function requireSuccessfulDeployJobs(
         "Validate and build the SAM application",
         "Create sanitized build receipt",
         "Upload immutable candidate",
+      ],
+    },
+    {
+      job:
+        "Reconcile CockroachDB memory release / " +
+        "Schema, runtime RLS, C-SPANN, and resolution-loop execution proof",
+      steps: [
+        "Prove target is still current main",
+        "Prove CockroachDB Cloud provider, plan, state, and region",
+        "Gate real Titan and Claude quality on the golden judge question",
+        "Reconcile schema, canonical memory, and runtime credentials",
+        "Upload sanitized database release receipt",
       ],
     },
     {
@@ -1367,13 +1405,25 @@ export function requireSuccessfulDeployJobs(
       ],
     },
   ] as const;
+  const hostedDastNames = [
+    `${HOSTED_DAST_CALLER_JOB_NAME} / Validate Hosted DAST source deployment`,
+    `${HOSTED_DAST_CALLER_JOB_NAME} / Bounded active API and browser-boundary probes`,
+    `${HOSTED_DAST_CALLER_JOB_NAME} / OWASP ZAP passive and AJAX-spider baseline`,
+  ] as const;
+  const exactNames = [
+    ...expected.map((contract) => contract.job),
+    ...hostedDastNames,
+  ].sort();
   if (
     totalCount !== rawCount ||
     rawCount !== jobs.length ||
-    jobs.length < expected.length ||
-    jobs.length > 100
+    jobs.length !== exactNames.length ||
+    JSON.stringify(jobs.map((job) => job.name).sort()) !==
+      JSON.stringify(exactNames)
   ) {
-    throw new Error("Deploy AWS job inventory is incomplete or truncated");
+    throw new Error(
+      "Deploy AWS must contain the exact nine-job release contract"
+    );
   }
   for (const contract of expected) {
     const matches = jobs.filter((job) => job.name === contract.job);
@@ -1382,6 +1432,10 @@ export function requireSuccessfulDeployJobs(
       matches.length !== 1 ||
       !job ||
       job.run_id !== runId ||
+      (runAttempt !== undefined &&
+        (!Number.isSafeInteger(runAttempt) ||
+          runAttempt < 1 ||
+          job.run_attempt !== runAttempt)) ||
       job.head_sha !== sha ||
       job.status !== "completed" ||
       job.conclusion !== "success"
@@ -1455,32 +1509,42 @@ export function requireSuccessfulRecoveryAuditJobs(
 export function requireSuccessfulHostedDastJobs(
   value: unknown,
   runId: number,
-  sha: string
+  sha: string,
+  runAttempt?: number
 ): void {
   const { totalCount, rawCount, jobs } = parseWorkflowJobs(value);
   const expected = [
     {
-      job: "Validate Hosted DAST source deployment",
+      job:
+        `${HOSTED_DAST_CALLER_JOB_NAME} / ` +
+        "Validate Hosted DAST source deployment",
       steps: ["Require successful operation-bound Deploy AWS source"],
     },
     {
-      job: "Bounded active API and browser-boundary probes",
+      job:
+        `${HOSTED_DAST_CALLER_JOB_NAME} / ` +
+        "Bounded active API and browser-boundary probes",
       steps: [
         "Run fail-closed hosted adversarial probes",
         "Upload sanitized hosted DAST receipt",
       ],
     },
     {
-      job: "OWASP ZAP passive and AJAX-spider baseline",
+      job:
+        `${HOSTED_DAST_CALLER_JOB_NAME} / ` +
+        "OWASP ZAP passive and AJAX-spider baseline",
       steps: ["Scan the owned public production release"],
     },
   ] as const;
   if (
     totalCount !== rawCount ||
-    rawCount !== expected.length ||
-    jobs.length !== expected.length
+    rawCount !== jobs.length ||
+    jobs.length < expected.length ||
+    jobs.length > 100
   ) {
-    throw new Error("Hosted DAST must contain exactly three successful jobs");
+    throw new Error(
+      "Deploy AWS job inventory containing Hosted DAST is incomplete or truncated"
+    );
   }
   for (const contract of expected) {
     const matches = jobs.filter((job) => job.name === contract.job);
@@ -1489,6 +1553,10 @@ export function requireSuccessfulHostedDastJobs(
       matches.length !== 1 ||
       !job ||
       job.run_id !== runId ||
+      (runAttempt !== undefined &&
+        (!Number.isSafeInteger(runAttempt) ||
+          runAttempt < 1 ||
+          job.run_attempt !== runAttempt)) ||
       job.head_sha !== sha ||
       job.status !== "completed" ||
       job.conclusion !== "success"
@@ -1624,37 +1692,40 @@ export function requireSuccessfulDemoVideoJobs(
 
 export function requirePostDeployAuditTiming(
   deployRun: GitHubWorkflowRun,
-  hostedDastRun: GitHubWorkflowRun,
+  dastOwningRun: GitHubWorkflowRun,
   mcpRun: GitHubWorkflowRun,
   recoveryRun: GitHubWorkflowRun,
   now = Date.now()
 ): void {
+  // DAST is part of Deploy AWS; only Managed MCP and recovery are independent
+  // post-deploy audits.
   const deployedStartedAt = Date.parse(deployRun.run_started_at);
   const deployedAt = Date.parse(deployRun.updated_at);
-  const hostedDastStartedAt = Date.parse(hostedDastRun.run_started_at);
   const mcpStartedAt = Date.parse(mcpRun.run_started_at);
   const recoveryStartedAt = Date.parse(recoveryRun.run_started_at);
   if (
     ![
       deployedStartedAt,
       deployedAt,
-      hostedDastStartedAt,
       mcpStartedAt,
       recoveryStartedAt,
       now,
     ].every(Number.isFinite) ||
+    dastOwningRun.id !== deployRun.id ||
+    dastOwningRun.run_attempt !== deployRun.run_attempt ||
+    dastOwningRun.head_sha !== deployRun.head_sha ||
+    dastOwningRun.path !== deployRun.path ||
+    dastOwningRun.event !== deployRun.event ||
     deployedAt < deployedStartedAt ||
-    hostedDastStartedAt <= deployedAt ||
     mcpStartedAt <= deployedAt ||
     recoveryStartedAt <= deployedAt
   ) {
     throw new Error(
-      "Deploy timing must be valid and all independent audits must start after deploy completes"
+      "DAST must belong to Deploy AWS and all independent audits must start after deploy completes"
     );
   }
   const maximumAuditAgeMs = 24 * 60 * 60 * 1_000;
   for (const [label, run] of [
-    ["Hosted DAST", hostedDastRun],
     ["Managed MCP", mcpRun],
     ["recovery", recoveryRun],
   ] as const) {
@@ -2049,7 +2120,6 @@ async function main(): Promise<void> {
   });
 
   let deployRun: GitHubWorkflowRun | undefined;
-  let hostedDastRun: GitHubWorkflowRun | undefined;
   let hostedDastArtifact: GitHubArtifact | undefined;
   let hostedDastZapArtifact: GitHubArtifact | undefined;
   let mcpRun: GitHubWorkflowRun | undefined;
@@ -2067,7 +2137,6 @@ async function main(): Promise<void> {
       ciRuns,
       codeqlRuns,
       deployRuns,
-      hostedDastRuns,
       mcpRuns,
       recoveryRuns,
       demoVideoRuns,
@@ -2077,13 +2146,8 @@ async function main(): Promise<void> {
         exactShaWorkflowRuns("codeql.yml", "push", "Exact-SHA CodeQL runs"),
         exactShaWorkflowRuns(
           "deploy-aws.yml",
-          "workflow_run",
+          "push",
           "Exact-SHA deploy runs"
-        ),
-        exactShaWorkflowRuns(
-          "security-dast.yml",
-          "workflow_run",
-          "Exact-SHA Hosted DAST runs"
         ),
         exactShaWorkflowRuns(
           "managed-mcp-audit.yml",
@@ -2118,16 +2182,9 @@ async function main(): Promise<void> {
     deployRun = selectSuccessfulRun(
       deployRuns,
       "Deploy AWS",
-      "workflow_run",
+      "push",
       sha,
       ".github/workflows/deploy-aws.yml"
-    );
-    hostedDastRun = selectSuccessfulRun(
-      hostedDastRuns,
-      "Hosted DAST",
-      "workflow_run",
-      sha,
-      ".github/workflows/security-dast.yml"
     );
     mcpRun = selectSuccessfulRun(
       mcpRuns,
@@ -2152,24 +2209,28 @@ async function main(): Promise<void> {
     selectedRuns.ci = toSelectedRun(ciRun);
     selectedRuns.codeql = toSelectedRun(codeqlRun);
     selectedRuns.deploy = toSelectedRun(deployRun);
-    selectedRuns.hostedDast = toSelectedRun(hostedDastRun);
     selectedRuns.managedMcp = toSelectedRun(mcpRun);
     selectedRuns.recovery = toSelectedRun(recoveryRun);
     selectedRuns.demoVideo = toSelectedRun(demoVideoRun);
-    return "CI, CodeQL, deploy, exact-release Hosted DAST, standalone Managed MCP, recovery, and the bound demo-video run are green";
+    return "CI, CodeQL, the deploy-integrated exact-release Hosted DAST, standalone Managed MCP, recovery, and the bound demo-video run are green";
   });
 
   await check("hosted-dast-jobs", async () => {
-    if (!hostedDastRun) {
-      throw new Error("Exact-SHA Hosted DAST evidence is incomplete");
+    if (!deployRun) {
+      throw new Error("Exact-SHA Deploy AWS evidence is incomplete");
     }
     const jobs = await githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/attempts/${hostedDastRun.run_attempt}/jobs?per_page=100`,
+      `/repos/${REPOSITORY}/actions/runs/${deployRun.id}/attempts/${deployRun.run_attempt}/jobs?per_page=100`,
       token,
-      "Exact Hosted DAST jobs"
+      "Exact Deploy AWS jobs containing Hosted DAST"
     );
-    requireSuccessfulHostedDastJobs(jobs, hostedDastRun.id, sha);
-    return "Both exact-release active probes and ZAP baseline executed successfully";
+    requireSuccessfulHostedDastJobs(
+      jobs,
+      deployRun.id,
+      sha,
+      deployRun.run_attempt
+    );
+    return "Both exact-release active probes and ZAP baseline executed successfully inside the Deploy AWS run";
   });
 
   await check("deploy-operation", async () => {
@@ -2181,28 +2242,33 @@ async function main(): Promise<void> {
       token,
       "Exact Deploy AWS jobs"
     );
-    requireSuccessfulDeployJobs(jobs, deployRun.id, sha);
-    return "Exact-main source, build-once, staging, production, smoke, receipt, and Managed MCP deployment jobs passed";
+    requireSuccessfulDeployJobs(
+      jobs,
+      deployRun.id,
+      sha,
+      deployRun.run_attempt
+    );
+    return "Exact-main source, build-once, staging, production, smoke, receipt, Managed MCP, and deploy-integrated DAST jobs passed";
   });
 
   await check("hosted-dast-receipt", async () => {
-    if (!deployRun || !hostedDastRun) {
+    if (!deployRun) {
       throw new Error("Exact-SHA Hosted DAST evidence is incomplete");
     }
     const artifacts = await githubJson(
-      `/repos/${REPOSITORY}/actions/runs/${hostedDastRun.id}/artifacts?per_page=100`,
+      `/repos/${REPOSITORY}/actions/runs/${deployRun.id}/artifacts?per_page=100`,
       token,
-      "Exact Hosted DAST artifacts"
+      "Exact Deploy AWS artifacts containing Hosted DAST"
     );
     hostedDastArtifact = selectExactHostedDastArtifact(
       artifacts,
-      `hosted-dast-${sha}-${deployRun.id}-${deployRun.run_attempt}-${hostedDastRun.run_attempt}`,
-      hostedDastRun
+      `hosted-dast-${sha}-${deployRun.id}-${deployRun.run_attempt}`,
+      deployRun
     );
     hostedDastZapArtifact = selectExactHostedDastArtifact(
       artifacts,
-      `zap-baseline-${sha}-${hostedDastRun.run_attempt}`,
-      hostedDastRun,
+      `zap-baseline-${sha}-${deployRun.run_attempt}`,
+      deployRun,
       100_000_000
     );
     const receipt = await githubArtifactReceipt(
@@ -2213,7 +2279,7 @@ async function main(): Promise<void> {
     requireExactHostedDastReceipt(
       receipt,
       deployRun,
-      hostedDastRun,
+      deployRun,
       sha
     );
     await githubArtifactArchive(
@@ -2228,7 +2294,7 @@ async function main(): Promise<void> {
     selectedArtifacts.hostedDastZap = toSelectedArtifact(
       hostedDastZapArtifact
     );
-    return `Hosted DAST receipt ${hostedDastArtifact.id} and ZAP report ${hostedDastZapArtifact.id} are digest-bound to deploy ${deployRun.id}/${deployRun.run_attempt}`;
+    return `Hosted DAST receipt ${hostedDastArtifact.id} and ZAP report ${hostedDastZapArtifact.id} belong to deploy ${deployRun.id}/${deployRun.run_attempt}`;
   });
 
   await check("ci-demo-video-provenance", async () => {
@@ -2317,16 +2383,16 @@ async function main(): Promise<void> {
   });
 
   await check("post-deploy-independent-audits", () => {
-    if (!deployRun || !hostedDastRun || !mcpRun || !recoveryRun) {
+    if (!deployRun || !mcpRun || !recoveryRun) {
       throw new Error("Exact-SHA hosted evidence is incomplete");
     }
     requirePostDeployAuditTiming(
       deployRun,
-      hostedDastRun,
+      deployRun,
       mcpRun,
       recoveryRun
     );
-    return "Exact-release DAST, standalone Managed MCP, and operation-bound recovery audits post-date deployment and are under 24 hours old";
+    return "Standalone Managed MCP and operation-bound recovery audits post-date the DAST-gated deployment and are under 24 hours old";
   });
 
   await check("submission-copy", () => {
@@ -2396,17 +2462,24 @@ async function main(): Promise<void> {
       { headers: { accept: "application/json" } },
       "Live health"
     );
+    const resolutionSandbox = asRecord(health.resolutionSandbox);
     if (
       health.ok !== true ||
       health.status !== "reachable" ||
       health.service !== "archon-cockroach-memory" ||
-      health.access !== "public-read-only" ||
+      health.access !==
+        "canonical-read-only+isolated-synthetic-resolution-write" ||
+      resolutionSandbox?.state !== "available" ||
+      resolutionSandbox?.authority !==
+        "financial-controller-human-gate" ||
+      resolutionSandbox?.persistence !== "CockroachDB-row-level-TTL" ||
+      resolutionSandbox?.externalSideEffects !== "none" ||
       !exactPublicScope(health.scope)
     ) {
       throw new Error("Live health contract is not exact");
     }
     live.health = true;
-    return "Fixed synthetic public-read-only health contract passed";
+    return "Canonical read-only scope and isolated synthetic resolution contract passed";
   });
 
   await check("live-proof", async () => {
@@ -2418,8 +2491,13 @@ async function main(): Promise<void> {
     const database = asRecord(proof.database);
     const memory = asRecord(proof.memory);
     const vector = asRecord(proof.vectorIndex);
+    const resolution = asRecord(proof.resolutionLoop);
     const release = asRecord(proof.release);
     requireFreshGeneratedAt(proof, "Live proof");
+    const activeResolutionSessions = numberValue(
+      resolution,
+      "activeSandboxSessions"
+    );
     const prefixes = Array.isArray(vector?.prefixes)
       ? vector.prefixes
       : [];
@@ -2454,6 +2532,26 @@ async function main(): Promise<void> {
       !/^[0-9a-f]{64}$/u.test(
         stringValue(vector, "definitionFingerprint") ?? ""
       ) ||
+      resolution?.enabled !== true ||
+      numberValue(resolution, "schemaTables") !== 5 ||
+      activeResolutionSessions === undefined ||
+      !Number.isSafeInteger(activeResolutionSessions) ||
+      activeResolutionSessions < 0 ||
+      resolution?.transactionIsolation !== "SERIALIZABLE" ||
+      resolution?.authorityBoundary !==
+        "financial-controller-human-gate" ||
+      resolution?.identityAssurance !==
+        "fixed-demo-role-assertion-not-authenticated" ||
+      resolution?.idempotency !==
+        "decision-key+database-unique-constraint" ||
+      resolution?.receipt !== "SHA-256 immutable decision record" ||
+      resolution?.learning !== "conflict-observation+human-decision" ||
+      resolution?.consolidation !==
+        "versioned current/superseded state" ||
+      resolution?.forgetting !== "CockroachDB row-level TTL" ||
+      resolution?.canonicalMemoryMutable !== false ||
+      resolution?.externalSideEffects !== "none" ||
+      resolution?.evidence !== "live fixed-scope sandbox schema query" ||
       proof.embeddingModel !== "amazon.titan-embed-text-v2:0" ||
       proof.narrationModel !== "eu.anthropic.claude-sonnet-4-6" ||
       release?.commitSha !== sha ||
@@ -2465,7 +2563,127 @@ async function main(): Promise<void> {
       );
     }
     live.proof = true;
-    return "Exact live release SHA, CockroachDB, C-SPANN, eu-west-1, models, and 9/9/9 passed";
+    return "Exact live release SHA, CockroachDB, C-SPANN, resolution loop, eu-west-1, models, and 9/9/9 passed";
+  });
+
+  await check("live-resolution-loop", async () => {
+    const created = await fetchLiveJson(
+      "/api/resolution/session",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+      "Create isolated resolution session"
+    );
+    const token = stringValue(created, "sessionToken") ?? "";
+    const initial = asRecord(created.snapshot);
+    const initialProposal = asRecord(initial?.proposal);
+    const initialPolicy = asRecord(initial?.policy);
+    const initialLifecycle = asRecord(initial?.lifecycle);
+    const initialObservations = asRecords(initial?.observations);
+    const prior = initialObservations.find(
+      (observation) => observation.label === "prior"
+    );
+    const corrected = initialObservations.find(
+      (observation) => observation.label === "corrected"
+    );
+    if (
+      created.tokenType !== "Bearer" ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
+      initial?.scenarioId !==
+        "helios-payroll-2026-06-correction-v1" ||
+      initial?.company !== "Helios SA" ||
+      initial?.period !== "2026-06" ||
+      initial?.state !== "pending" ||
+      initial?.receipt !== null ||
+      initialObservations.length !== 2 ||
+      prior?.sourceRef !== "payroll-register-2026-06-v1" ||
+      prior?.sourceClass !== "payroll-register" ||
+      numberValue(prior, "authorityRank") !== 60 ||
+      numberValue(prior, "employerCostCents") !== 12_440_000 ||
+      prior?.status !== "current" ||
+      corrected?.sourceRef !==
+        "signed-payroll-register-2026-06-v2" ||
+      corrected?.sourceClass !== "signed-payroll-register" ||
+      numberValue(corrected, "authorityRank") !== 100 ||
+      numberValue(corrected, "employerCostCents") !== 12_890_000 ||
+      corrected?.status !== "candidate" ||
+      initialProposal?.action !== "resolve-conflicting-memory" ||
+      initialProposal?.status !== "pending" ||
+      initialProposal?.requiresHumanRole !== "financial-controller" ||
+      initialProposal?.proposedObservationId !== corrected?.id ||
+      initialProposal?.supersedesObservationId !== prior?.id ||
+      initialPolicy?.version !== "resolution-policy-v1" ||
+      initialPolicy?.authorityBoundary !== "human-approval-required" ||
+      initialPolicy?.retention !== "row-level-ttl" ||
+      initialPolicy?.canonicalMemoryMutable !== false ||
+      initialLifecycle?.externalSideEffects !== "none"
+    ) {
+      throw new Error(
+        "Initial resolution session violated the fixed synthetic authority contract"
+      );
+    }
+
+    const idempotencyKey = randomUUID();
+    const decide = () =>
+      fetchLiveJson(
+        "/api/resolution/decision",
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            decision: "approve",
+            idempotencyKey,
+          }),
+        },
+        "Approve isolated resolution"
+      );
+    const approved = await decide();
+    const replayed = await decide();
+    const approvedSnapshot = asRecord(approved.snapshot);
+    const replayedSnapshot = asRecord(replayed.snapshot);
+    const approvedReceipt = asRecord(approvedSnapshot?.receipt);
+    const replayedReceipt = asRecord(replayedSnapshot?.receipt);
+    const approvedObservations = asRecords(
+      approvedSnapshot?.observations
+    );
+    const approvedPrior = approvedObservations.find(
+      (observation) => observation.label === "prior"
+    );
+    const approvedCorrected = approvedObservations.find(
+      (observation) => observation.label === "corrected"
+    );
+    if (
+      approvedSnapshot?.sessionId !== initial?.sessionId ||
+      replayedSnapshot?.sessionId !== initial?.sessionId ||
+      approvedSnapshot?.state !== "approved" ||
+      replayedSnapshot?.state !== "approved" ||
+      approvedPrior?.status !== "superseded" ||
+      approvedCorrected?.status !== "current" ||
+      approvedReceipt?.algorithm !== "sha256" ||
+      approvedReceipt?.actorRole !== "financial-controller" ||
+      approvedReceipt?.policyVersion !== "resolution-policy-v1" ||
+      !/^[a-f0-9]{64}$/u.test(
+        stringValue(approvedReceipt, "digest") ?? ""
+      ) ||
+      approvedReceipt?.decisionId !== replayedReceipt?.decisionId ||
+      approvedReceipt?.digest !== replayedReceipt?.digest ||
+      approvedReceipt?.decidedAt !== replayedReceipt?.decidedAt
+    ) {
+      throw new Error(
+        "Resolution approval or idempotent replay proof failed"
+      );
+    }
+    live.resolution = true;
+    return "Human-gated synthetic approval, consolidation, receipt, and exact idempotent replay passed";
   });
 
   await check("live-recall", async () => {
@@ -2477,7 +2695,11 @@ async function main(): Promise<void> {
           accept: "application/json",
           "content-type": "application/json",
         },
-        body: JSON.stringify({ question: RECALL_QUESTION, limit: 5 }),
+        body: JSON.stringify({
+          question: RECALL_QUESTION,
+          kind: "payroll_event",
+          limit: 5,
+        }),
       },
       "Live recall",
       60_000
@@ -2515,6 +2737,7 @@ async function main(): Promise<void> {
       retrieval?.index !== "native C-SPANN vector index" ||
       retrieval?.metric !== "cosine" ||
       retrieval?.embeddingModel !== "amazon.titan-embed-text-v2:0" ||
+      retrieval?.requestedKind !== "payroll_event" ||
       numberValue(retrieval, "requestedTopK") !== 5 ||
       numberValue(retrieval, "recalled") !== recalled ||
       narration?.model !== "eu.anthropic.claude-sonnet-4-6" ||
@@ -2537,9 +2760,7 @@ async function main(): Promise<void> {
       citations.some((citation) => {
         const score = numberValue(citation, "score");
         return (
-          !["document", "payroll_event", "validation", "insight"].includes(
-            stringValue(citation, "kind") ?? ""
-          ) ||
+          citation.kind !== "payroll_event" ||
           citation.period !== "2026-04" ||
           score === undefined ||
           score < 0.15 ||
@@ -2809,7 +3030,6 @@ async function main(): Promise<void> {
       ciRuns,
       codeqlRuns,
       deployRuns,
-      hostedDastRuns,
       mcpRuns,
       recoveryRuns,
       demoVideoRuns,
@@ -2823,13 +3043,8 @@ async function main(): Promise<void> {
         ),
         exactShaWorkflowRuns(
           "deploy-aws.yml",
-          "workflow_run",
+          "push",
           "Terminal exact-SHA deploy runs"
-        ),
-        exactShaWorkflowRuns(
-          "security-dast.yml",
-          "workflow_run",
-          "Terminal exact-SHA Hosted DAST runs"
         ),
         exactShaWorkflowRuns(
           "managed-mcp-audit.yml",
@@ -2865,16 +3080,9 @@ async function main(): Promise<void> {
       deploy: selectSuccessfulRun(
         deployRuns,
         "Deploy AWS",
-        "workflow_run",
+        "push",
         sha,
         ".github/workflows/deploy-aws.yml"
-      ),
-      hostedDast: selectSuccessfulRun(
-        hostedDastRuns,
-        "Hosted DAST",
-        "workflow_run",
-        sha,
-        ".github/workflows/security-dast.yml"
       ),
       managedMcp: selectSuccessfulRun(
         mcpRuns,
@@ -2912,7 +3120,6 @@ async function main(): Promise<void> {
     }
     const [
       terminalDeployJobs,
-      terminalHostedDastJobs,
       terminalRecoveryJobs,
       terminalHostedDastArtifacts,
       terminalDemoVideoJobs,
@@ -2925,19 +3132,14 @@ async function main(): Promise<void> {
           "Terminal exact Deploy AWS jobs"
         ),
         githubJson(
-          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/attempts/${terminalRuns.hostedDast.run_attempt}/jobs?per_page=100`,
-          token,
-          "Terminal exact Hosted DAST jobs"
-        ),
-        githubJson(
           `/repos/${REPOSITORY}/actions/runs/${terminalRuns.recovery.id}/attempts/${terminalRuns.recovery.run_attempt}/jobs?per_page=100`,
           token,
           "Terminal exact recovery audit jobs"
         ),
         githubJson(
-          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.hostedDast.id}/artifacts?per_page=100`,
+          `/repos/${REPOSITORY}/actions/runs/${terminalRuns.deploy.id}/artifacts?per_page=100`,
           token,
-          "Terminal exact Hosted DAST artifacts"
+          "Terminal exact Deploy AWS artifacts containing Hosted DAST"
         ),
         githubJson(
           `/repos/${REPOSITORY}/actions/runs/${terminalRuns.demoVideo.id}/jobs?filter=all&per_page=100`,
@@ -2953,12 +3155,14 @@ async function main(): Promise<void> {
     requireSuccessfulDeployJobs(
       terminalDeployJobs,
       terminalRuns.deploy.id,
-      sha
+      sha,
+      terminalRuns.deploy.run_attempt
     );
     requireSuccessfulHostedDastJobs(
-      terminalHostedDastJobs,
-      terminalRuns.hostedDast.id,
-      sha
+      terminalDeployJobs,
+      terminalRuns.deploy.id,
+      sha,
+      terminalRuns.deploy.run_attempt
     );
     requireSuccessfulRecoveryAuditJobs(
       terminalRecoveryJobs,
@@ -2982,13 +3186,13 @@ async function main(): Promise<void> {
     }
     const terminalHostedDastArtifact = selectExactHostedDastArtifact(
       terminalHostedDastArtifacts,
-      `hosted-dast-${sha}-${terminalRuns.deploy.id}-${terminalRuns.deploy.run_attempt}-${terminalRuns.hostedDast.run_attempt}`,
-      terminalRuns.hostedDast
+      `hosted-dast-${sha}-${terminalRuns.deploy.id}-${terminalRuns.deploy.run_attempt}`,
+      terminalRuns.deploy
     );
     const terminalHostedDastZapArtifact = selectExactHostedDastArtifact(
       terminalHostedDastArtifacts,
-      `zap-baseline-${sha}-${terminalRuns.hostedDast.run_attempt}`,
-      terminalRuns.hostedDast,
+      `zap-baseline-${sha}-${terminalRuns.deploy.run_attempt}`,
+      terminalRuns.deploy,
       100_000_000
     );
     if (
@@ -3011,7 +3215,7 @@ async function main(): Promise<void> {
         "Terminal exact Hosted DAST receipt"
       ),
       terminalRuns.deploy,
-      terminalRuns.hostedDast,
+      terminalRuns.deploy,
       sha
     );
     await githubArtifactArchive(
@@ -3094,7 +3298,7 @@ async function main(): Promise<void> {
     }
     requirePostDeployAuditTiming(
       terminalRuns.deploy,
-      terminalRuns.hostedDast,
+      terminalRuns.deploy,
       terminalRuns.managedMcp,
       terminalRuns.recovery
     );

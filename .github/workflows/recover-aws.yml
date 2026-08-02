@@ -3,13 +3,6 @@ name: Recover AWS
 # Recovery code always comes from a trusted default-branch commit. The private
 # S3 archive is validated strictly as data and can never supply executable code.
 on:
-  workflow_run:
-    workflows:
-      - Deploy AWS
-    branches:
-      - main
-    types:
-      - completed
   schedule:
     - cron: "7,22,37,52 * * * *"
     - cron: "17 4 * * *"
@@ -25,7 +18,7 @@ on:
           - audit
 
 concurrency:
-  group: aws-production-delivery
+  group: aws-recovery-watchdog
   cancel-in-progress: false
   queue: max
 
@@ -38,13 +31,314 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
 jobs:
-  recover-staging:
-    name: Recover unresolved staging delivery
+  classify-recovery:
+    name: Classify recovery candidates without AWS access
     if: >-
       github.repository == 'upgradedev/archon-cockroach-memory' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      staging_action: ${{ steps.preflight.outputs.staging_action }}
+      staging_reason: ${{ steps.preflight.outputs.staging_reason }}
+      staging_source_run_id: ${{ steps.preflight.outputs.staging_source_run_id }}
+      staging_source_run_attempt: ${{ steps.preflight.outputs.staging_source_run_attempt }}
+      staging_candidate_sha: ${{ steps.preflight.outputs.staging_candidate_sha }}
+      production_action: ${{ steps.preflight.outputs.production_action }}
+      production_reason: ${{ steps.preflight.outputs.production_reason }}
+      production_source_run_id: ${{ steps.preflight.outputs.production_source_run_id }}
+      production_source_run_attempt: ${{ steps.preflight.outputs.production_source_run_attempt }}
+      production_candidate_sha: ${{ steps.preflight.outputs.production_candidate_sha }}
+    steps:
+      - name: Check out trusted preflight code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove trusted preflight source identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/recover-aws.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$AWS_REGION" = "eu-west-1"
+          test -n "$AWS_ACCOUNT_ID"
+
+      - name: Classify trusted GitHub recovery evidence
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          preflight="${RUNNER_TEMP:?}/github-recovery-preflight.json"
+          bash aws/classify-github-recovery-preflight.sh >"$preflight"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$preflight" >/dev/null
+          jq -e '
+            def valid_environment:
+              (.action == "noop" or .action == "recover")
+              and (.reason | type == "string" and length > 0)
+              and (
+                if .action == "recover" then
+                  (.sourceRunId | test("^[1-9][0-9]*$"))
+                  and (.sourceRunAttempt | test("^[1-9][0-9]*$"))
+                  and (.candidateSha | test("^[0-9a-f]{40}$"))
+                else
+                  .sourceRunId == null
+                  and .sourceRunAttempt == null
+                  and .candidateSha == null
+                end
+              );
+            .ok == true
+            and .schema == "archon.github-recovery-preflight"
+            and .version == 1
+            and .classificationSource == "github-actions-metadata-only"
+            and .awsCredentialsUsed == false
+            and (.environments | keys == ["production", "staging"])
+            and (.environments.staging | valid_environment)
+            and (.environments.production | valid_environment)
+          ' "$preflight" >/dev/null
+          {
+            echo "staging_action=$(jq -er '.environments.staging.action' "$preflight")"
+            echo "staging_reason=$(jq -er '.environments.staging.reason' "$preflight")"
+            echo "staging_source_run_id=$(jq -r '.environments.staging.sourceRunId // ""' "$preflight")"
+            echo "staging_source_run_attempt=$(jq -r '.environments.staging.sourceRunAttempt // ""' "$preflight")"
+            echo "staging_candidate_sha=$(jq -r '.environments.staging.candidateSha // ""' "$preflight")"
+            echo "production_action=$(jq -er '.environments.production.action' "$preflight")"
+            echo "production_reason=$(jq -er '.environments.production.reason' "$preflight")"
+            echo "production_source_run_id=$(jq -r '.environments.production.sourceRunId // ""' "$preflight")"
+            echo "production_source_run_attempt=$(jq -r '.environments.production.sourceRunAttempt // ""' "$preflight")"
+            echo "production_candidate_sha=$(jq -r '.environments.production.candidateSha // ""' "$preflight")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Upload candidate preflight evidence
+        if: >-
+          steps.preflight.outputs.staging_action == 'recover' ||
+          steps.preflight.outputs.production_action == 'recover'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-recovery-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/github-recovery-preflight.json
+          if-no-files-found: error
+          retention-days: 90
+
+  audit-environments:
+    name: Audit ${{ matrix.environment }} protection and drift
+    needs:
+      - classify-recovery
+    if: >-
+      always() &&
+      needs.classify-recovery.result == 'success' &&
+      needs.classify-recovery.outputs.staging_action == 'noop' &&
+      needs.classify-recovery.outputs.production_action == 'noop' &&
+      (
+        (
+          github.event_name == 'schedule' &&
+          github.event.schedule == '17 4 * * *'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'audit'
+        )
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: staging
+            stack_name: archon-memory-staging
+            terminal_job_name: Deploy and smoke staging
+          - environment: production
+            stack_name: archon-memory-production
+            terminal_job_name: Promote identical candidate to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: ${{ matrix.environment }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      ENVIRONMENT: ${{ matrix.environment }}
+      RECOVERY_ENVIRONMENT: ${{ matrix.environment }}
+      RECOVERY_LEASE_OWNER: audit-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.environment }}
+      STACK_NAME: ${{ vars.AWS_STACK_NAME || matrix.stack_name }}
+      TERMINAL_JOB_NAME: ${{ matrix.terminal_job_name }}
+    steps:
+      - name: Check out trusted audit code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove trusted audit source identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/recover-aws.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$AWS_REGION" = "eu-west-1"
+          test -n "$AWS_ACCOUNT_ID"
+
+      - name: Configure short-lived audit credentials
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: archon-${{ matrix.environment }}-audit-${{ github.run_id }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Reclassify the exact S3 intent before audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          classification="${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-audit-classification.json"
+          bash aws/classify-durable-recovery-source.sh >"$classification"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$classification" >/dev/null
+          jq -e \
+            --arg environment "$RECOVERY_ENVIRONMENT" '
+              .ok == true
+              and .schema == "archon.durable-recovery.classification"
+              and .version == 1
+              and .environment == $environment
+              and .action == "noop"
+            ' "$classification" >/dev/null
+
+      - name: Run the exact protection and drift audit
+        run: |
+          set -euo pipefail
+          stack="${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-audit-stack.json"
+          tags="${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-audit-tags.json"
+          proof="${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-controls-audit.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack"
+          jq -e \
+            --arg stack "$STACK_NAME" \
+            --arg prefix \
+              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg app "$APP_NAME" \
+            --arg environment "$RECOVERY_ENVIRONMENT" '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (.Stacks[0].StackId | startswith($prefix))
+              and .Stacks[0].RoleARN == $role
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Application")
+                 | .Value] == [$app]
+              )
+              and (
+                [.Stacks[0].Tags[]?
+                 | select(.Key == "Environment")
+                 | .Value] == [$environment]
+              )
+              and (
+                [.Stacks[0].Tags[]?.Key] as $keys
+                | ($keys | unique | length) == ($keys | length)
+              )
+            ' "$stack" >/dev/null
+          jq -eS \
+            '(.Stacks[0].Tags // [])
+             | map({Key, Value})
+             | sort_by(.Key)' \
+            "$stack" >"$tags"
+          EXPECTED_STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack")" \
+          EXPECTED_STACK_REVISION="$(
+            jq -er \
+              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              "$stack"
+          )" \
+          EXPECTED_TAGS_SHA256="$(
+            sha256sum "$tags" | awk '{print $1}'
+          )" \
+            bash aws/enforce-cloudformation-controls.sh audit |
+              tee "$proof"
+          jq -e -s \
+            'length == 1 and (.[0] | type == "object")' \
+            "$proof" >/dev/null
+          jq -e \
+            --arg environment "$RECOVERY_ENVIRONMENT" '
+              .ok == true
+              and .schema == "archon.cloudformation-controls.proof"
+              and .version == 1
+              and .mode == "audit"
+              and .identity.environment == $environment
+              and .identity.state == "existing"
+              and .protection == {
+                action: "verified",
+                enabled: true
+              }
+              and .drift.detectionStatus == "DETECTION_COMPLETE"
+              and .drift.stackDriftStatus == "IN_SYNC"
+              and .drift.driftedResourceCount == 0
+              and .drift.checkedResourceCount > 0
+            ' "$proof" >/dev/null
+
+      - name: Upload exact protection and drift audit
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.environment }}-cloudformation-controls-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ matrix.environment }}-cloudformation-controls-audit.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove audit runner material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f -- \
+            "${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-audit-classification.json" \
+            "${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-audit-stack.json" \
+            "${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-audit-tags.json" \
+            "${RUNNER_TEMP:?}/${RECOVERY_ENVIRONMENT}-cloudformation-controls-audit.json"
+
+  recover-staging:
+    name: Recover unresolved staging delivery
+    needs:
+      - classify-recovery
+    if: >-
+      needs.classify-recovery.result == 'success' &&
+      needs.classify-recovery.outputs.staging_action == 'recover' &&
+      github.repository == 'upgradedev/archon-cockroach-memory' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     timeout-minutes: 65
+    concurrency:
+      group: aws-production-delivery
+      cancel-in-progress: false
+      queue: max
     environment:
       name: staging
     permissions:
@@ -65,6 +359,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove trusted recovery source identity
         run: |
@@ -92,10 +387,13 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
-      - name: Classify the exact staging source run
+      - name: Reclassify the exact staging S3 intent before mutation
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_CANDIDATE_SHA: ${{ needs.classify-recovery.outputs.staging_candidate_sha }}
+          PREFLIGHT_SOURCE_RUN_ATTEMPT: ${{ needs.classify-recovery.outputs.staging_source_run_attempt }}
+          PREFLIGHT_SOURCE_RUN_ID: ${{ needs.classify-recovery.outputs.staging_source_run_id }}
         run: |
           set -euo pipefail
           classification="${RUNNER_TEMP:?}/staging-recovery-classification.json"
@@ -104,11 +402,18 @@ jobs:
             'length == 1 and (.[0] | type == "object")' \
             "$classification" >/dev/null
           jq -e \
-            '.ok == true
+            --arg candidate "$PREFLIGHT_CANDIDATE_SHA" \
+            --arg sourceRunAttempt "$PREFLIGHT_SOURCE_RUN_ATTEMPT" \
+            --arg sourceRunId "$PREFLIGHT_SOURCE_RUN_ID" '
+             .ok == true
              and .schema == "archon.durable-recovery.classification"
              and .version == 1
              and .environment == "staging"
-             and (.action == "noop" or .action == "recover")' \
+             and .action == "recover"
+             and .candidateSha == $candidate
+             and .sourceRunAttempt == $sourceRunAttempt
+             and .sourceRunId == $sourceRunId
+            ' \
             "$classification" >/dev/null
           {
             echo "action=$(jq -er '.action' "$classification")"
@@ -118,113 +423,6 @@ jobs:
             echo "source_run_id=$(jq -r '.sourceRunId // ""' "$classification")"
             echo "source_run_attempt=$(jq -r '.sourceRunAttempt // ""' "$classification")"
           } >>"$GITHUB_OUTPUT"
-
-      - name: Run the daily staging protection and drift audit
-        if: >-
-          steps.classify.outputs.action == 'noop' &&
-          (
-            (
-              github.event_name == 'schedule' &&
-              github.event.schedule == '17 4 * * *'
-            ) ||
-            (
-              github.event_name == 'workflow_dispatch' &&
-              inputs.operation == 'audit'
-            )
-          )
-        env:
-          ENVIRONMENT: staging
-        run: |
-          set -euo pipefail
-          stack="${RUNNER_TEMP:?}/staging-cloudformation-audit-stack.json"
-          tags="${RUNNER_TEMP:?}/staging-cloudformation-audit-tags.json"
-          proof="${RUNNER_TEMP:?}/staging-cloudformation-controls-audit.json"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" \
-            --output json >"$stack"
-          jq -e \
-            --arg stack "$STACK_NAME" \
-            --arg prefix \
-              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
-            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
-            --arg app "$APP_NAME" \
-            '
-              (.Stacks | length) == 1
-              and .Stacks[0].StackName == $stack
-              and (.Stacks[0].StackId | startswith($prefix))
-              and .Stacks[0].RoleARN == $role
-              and (
-                [.Stacks[0].Tags[]?
-                 | select(.Key == "Application")
-                 | .Value] == [$app]
-              )
-              and (
-                [.Stacks[0].Tags[]?
-                 | select(.Key == "Environment")
-                 | .Value] == ["staging"]
-              )
-              and (
-                [.Stacks[0].Tags[]?.Key] as $keys
-                | ($keys | unique | length) == ($keys | length)
-              )
-            ' "$stack" >/dev/null
-          jq -eS \
-            '(.Stacks[0].Tags // [])
-             | map({Key, Value})
-             | sort_by(.Key)' \
-            "$stack" >"$tags"
-          EXPECTED_STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack")" \
-          EXPECTED_STACK_REVISION="$(
-            jq -er \
-              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
-              "$stack"
-          )" \
-          EXPECTED_TAGS_SHA256="$(
-            sha256sum "$tags" | awk '{print $1}'
-          )" \
-            bash aws/enforce-cloudformation-controls.sh audit |
-              tee "$proof"
-          jq -e -s \
-            'length == 1 and (.[0] | type == "object")' \
-            "$proof" >/dev/null
-          jq -e \
-            '
-              .ok == true
-              and .schema == "archon.cloudformation-controls.proof"
-              and .version == 1
-              and .mode == "audit"
-              and .identity.environment == "staging"
-              and .identity.state == "existing"
-              and .protection == {
-                action: "verified",
-                enabled: true
-              }
-              and .drift.detectionStatus == "DETECTION_COMPLETE"
-              and .drift.stackDriftStatus == "IN_SYNC"
-              and .drift.driftedResourceCount == 0
-              and .drift.checkedResourceCount > 0
-            ' "$proof" >/dev/null
-
-      - name: Upload staging daily protection and drift audit
-        if: >-
-          steps.classify.outputs.action == 'noop' &&
-          (
-            (
-              github.event_name == 'schedule' &&
-              github.event.schedule == '17 4 * * *'
-            ) ||
-            (
-              github.event_name == 'workflow_dispatch' &&
-              inputs.operation == 'audit'
-            )
-          )
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: staging-cloudformation-controls-audit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/staging-cloudformation-controls-audit.json
-          if-no-files-found: error
-          retention-days: 90
 
       - name: Claim the staging recovery lease
         if: steps.classify.outputs.action == 'recover'
@@ -537,21 +735,25 @@ jobs:
             "${RUNNER_TEMP:?}/staging-recovery-download.json" \
             "${RUNNER_TEMP:?}/staging-recovery-execution.json" \
             "${RUNNER_TEMP:?}/staging-recovery-finalization.json" \
-            "${RUNNER_TEMP:?}/staging-cloudformation-audit-stack.json" \
-            "${RUNNER_TEMP:?}/staging-cloudformation-audit-tags.json" \
-            "${RUNNER_TEMP:?}/staging-cloudformation-controls-audit.json" \
             "${RUNNER_TEMP:?}/staging-cloudformation-controls-recovery.json"
 
   recover-production:
     name: Recover unresolved production delivery
     needs:
+      - classify-recovery
       - recover-staging
     if: >-
       always() &&
+      needs.classify-recovery.result == 'success' &&
+      needs.classify-recovery.outputs.production_action == 'recover' &&
       github.repository == 'upgradedev/archon-cockroach-memory' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 65
+    concurrency:
+      group: aws-production-delivery
+      cancel-in-progress: false
+      queue: max
     environment:
       name: production
     permissions:
@@ -572,6 +774,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove trusted recovery source identity
         run: |
@@ -599,10 +802,13 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
-      - name: Classify the exact production source run
+      - name: Reclassify the exact production S3 intent before mutation
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_CANDIDATE_SHA: ${{ needs.classify-recovery.outputs.production_candidate_sha }}
+          PREFLIGHT_SOURCE_RUN_ATTEMPT: ${{ needs.classify-recovery.outputs.production_source_run_attempt }}
+          PREFLIGHT_SOURCE_RUN_ID: ${{ needs.classify-recovery.outputs.production_source_run_id }}
         run: |
           set -euo pipefail
           classification="${RUNNER_TEMP:?}/production-recovery-classification.json"
@@ -611,11 +817,18 @@ jobs:
             'length == 1 and (.[0] | type == "object")' \
             "$classification" >/dev/null
           jq -e \
-            '.ok == true
+            --arg candidate "$PREFLIGHT_CANDIDATE_SHA" \
+            --arg sourceRunAttempt "$PREFLIGHT_SOURCE_RUN_ATTEMPT" \
+            --arg sourceRunId "$PREFLIGHT_SOURCE_RUN_ID" '
+             .ok == true
              and .schema == "archon.durable-recovery.classification"
              and .version == 1
              and .environment == "production"
-             and (.action == "noop" or .action == "recover")' \
+             and .action == "recover"
+             and .candidateSha == $candidate
+             and .sourceRunAttempt == $sourceRunAttempt
+             and .sourceRunId == $sourceRunId
+            ' \
             "$classification" >/dev/null
           {
             echo "action=$(jq -er '.action' "$classification")"
@@ -625,113 +838,6 @@ jobs:
             echo "source_run_id=$(jq -r '.sourceRunId // ""' "$classification")"
             echo "source_run_attempt=$(jq -r '.sourceRunAttempt // ""' "$classification")"
           } >>"$GITHUB_OUTPUT"
-
-      - name: Run the daily production protection and drift audit
-        if: >-
-          steps.classify.outputs.action == 'noop' &&
-          (
-            (
-              github.event_name == 'schedule' &&
-              github.event.schedule == '17 4 * * *'
-            ) ||
-            (
-              github.event_name == 'workflow_dispatch' &&
-              inputs.operation == 'audit'
-            )
-          )
-        env:
-          ENVIRONMENT: production
-        run: |
-          set -euo pipefail
-          stack="${RUNNER_TEMP:?}/production-cloudformation-audit-stack.json"
-          tags="${RUNNER_TEMP:?}/production-cloudformation-audit-tags.json"
-          proof="${RUNNER_TEMP:?}/production-cloudformation-controls-audit.json"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region "$AWS_REGION" \
-            --output json >"$stack"
-          jq -e \
-            --arg stack "$STACK_NAME" \
-            --arg prefix \
-              "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/${STACK_NAME}/" \
-            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
-            --arg app "$APP_NAME" \
-            '
-              (.Stacks | length) == 1
-              and .Stacks[0].StackName == $stack
-              and (.Stacks[0].StackId | startswith($prefix))
-              and .Stacks[0].RoleARN == $role
-              and (
-                [.Stacks[0].Tags[]?
-                 | select(.Key == "Application")
-                 | .Value] == [$app]
-              )
-              and (
-                [.Stacks[0].Tags[]?
-                 | select(.Key == "Environment")
-                 | .Value] == ["production"]
-              )
-              and (
-                [.Stacks[0].Tags[]?.Key] as $keys
-                | ($keys | unique | length) == ($keys | length)
-              )
-            ' "$stack" >/dev/null
-          jq -eS \
-            '(.Stacks[0].Tags // [])
-             | map({Key, Value})
-             | sort_by(.Key)' \
-            "$stack" >"$tags"
-          EXPECTED_STACK_ID="$(jq -er '.Stacks[0].StackId' "$stack")" \
-          EXPECTED_STACK_REVISION="$(
-            jq -er \
-              '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
-              "$stack"
-          )" \
-          EXPECTED_TAGS_SHA256="$(
-            sha256sum "$tags" | awk '{print $1}'
-          )" \
-            bash aws/enforce-cloudformation-controls.sh audit |
-              tee "$proof"
-          jq -e -s \
-            'length == 1 and (.[0] | type == "object")' \
-            "$proof" >/dev/null
-          jq -e \
-            '
-              .ok == true
-              and .schema == "archon.cloudformation-controls.proof"
-              and .version == 1
-              and .mode == "audit"
-              and .identity.environment == "production"
-              and .identity.state == "existing"
-              and .protection == {
-                action: "verified",
-                enabled: true
-              }
-              and .drift.detectionStatus == "DETECTION_COMPLETE"
-              and .drift.stackDriftStatus == "IN_SYNC"
-              and .drift.driftedResourceCount == 0
-              and .drift.checkedResourceCount > 0
-            ' "$proof" >/dev/null
-
-      - name: Upload production daily protection and drift audit
-        if: >-
-          steps.classify.outputs.action == 'noop' &&
-          (
-            (
-              github.event_name == 'schedule' &&
-              github.event.schedule == '17 4 * * *'
-            ) ||
-            (
-              github.event_name == 'workflow_dispatch' &&
-              inputs.operation == 'audit'
-            )
-          )
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: production-cloudformation-controls-audit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/production-cloudformation-controls-audit.json
-          if-no-files-found: error
-          retention-days: 90
 
       - name: Claim the production recovery lease
         if: steps.classify.outputs.action == 'recover'
@@ -1046,7 +1152,4 @@ jobs:
             "${RUNNER_TEMP:?}/production-recovery-download.json" \
             "${RUNNER_TEMP:?}/production-recovery-execution.json" \
             "${RUNNER_TEMP:?}/production-recovery-finalization.json" \
-            "${RUNNER_TEMP:?}/production-cloudformation-audit-stack.json" \
-            "${RUNNER_TEMP:?}/production-cloudformation-audit-tags.json" \
-            "${RUNNER_TEMP:?}/production-cloudformation-controls-audit.json" \
             "${RUNNER_TEMP:?}/production-cloudformation-controls-recovery.json"

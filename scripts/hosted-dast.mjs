@@ -221,8 +221,17 @@ export async function runHostedDast(targetUrl) {
   invariant(
     healthJson?.scope?.tenantId === "public-demo" &&
       healthJson?.scope?.company === "Helios SA" &&
-      healthJson?.scope?.access === "read-only",
-    "health-boundary: fixed public scope was not enforced"
+      healthJson?.scope?.access === "read-only" &&
+      (!strictApiBoundary ||
+        (healthJson?.access ===
+          "canonical-read-only+isolated-synthetic-resolution-write" &&
+          healthJson?.resolutionSandbox?.state === "available" &&
+          healthJson?.resolutionSandbox?.authority ===
+            "financial-controller-human-gate" &&
+          healthJson?.resolutionSandbox?.persistence ===
+            "CockroachDB-row-level-TTL" &&
+          healthJson?.resolutionSandbox?.externalSideEffects === "none")),
+    "health-boundary: fixed public scope or isolated resolution contract was not enforced"
   );
   checks.push({
     id: "health-boundary",
@@ -438,6 +447,55 @@ export async function runHostedDast(targetUrl) {
       init: { method: "GET" },
     },
     {
+      id: "resolution-session-method-boundary",
+      path: "/api/resolution/session",
+      status: strictApiBoundary ? 405 : [404, 405],
+      allowGatewayFallback: !strictApiBoundary,
+      init: { method: "DELETE" },
+    },
+    {
+      id: "resolution-session-fixed-scope-boundary",
+      path: "/api/resolution/session",
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ company: "attacker-selected" }),
+      },
+    },
+    {
+      id: "resolution-session-auth-boundary",
+      path: "/api/resolution/session",
+      status: strictApiBoundary ? 401 : [404, 401],
+      allowGatewayFallback: !strictApiBoundary,
+      init: { method: "GET" },
+    },
+    {
+      id: "resolution-capability-shape-boundary",
+      path: "/api/resolution/session",
+      status: strictApiBoundary ? 401 : [404, 401],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "GET",
+        headers: { authorization: "Bearer attacker-controlled" },
+      },
+    },
+    {
+      id: "resolution-decision-auth-boundary",
+      path: "/api/resolution/decision",
+      status: strictApiBoundary ? 401 : [404, 401],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          decision: "approve",
+          idempotencyKey: "12345678-1234-4234-8234-123456789abc",
+        }),
+      },
+    },
+    {
       id: "unknown-route-boundary",
       path: "/api/not-a-route",
       status: 404,
@@ -452,7 +510,7 @@ export async function runHostedDast(targetUrl) {
 
   return {
     schema: "archon.hosted-dast",
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     profile,
     targetOrigin: EXPECTED_PRODUCTION_URL,
@@ -491,7 +549,7 @@ function scannerSha() {
 function failedReceipt() {
   return {
     schema: "archon.hosted-dast",
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     profile: dastProfile(),
     targetOrigin: EXPECTED_PRODUCTION_URL,

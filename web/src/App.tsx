@@ -4,6 +4,7 @@ import { AnswerBrief } from "./components/AnswerBrief";
 import { AuditLedger } from "./components/AuditLedger";
 import { Hero } from "./components/Hero";
 import { Masthead } from "./components/Masthead";
+import { MemoryResolutionLoop } from "./components/MemoryResolutionLoop";
 import { ProofLedger } from "./components/ProofLedger";
 import { QuestionComposer } from "./components/QuestionComposer";
 import { getAudit, getHealth, getProof, recallMemory } from "./lib/api";
@@ -103,12 +104,14 @@ export function App() {
           onRefresh={refreshAudit}
         />
 
+        <MemoryResolutionLoop />
+
         <section className="border-y border-line bg-carbon/[0.45]" aria-labelledby="path-title">
           <div className="mx-auto max-w-[1480px] px-5 py-14 sm:px-8 lg:px-12">
             <div className="grid gap-8 lg:grid-cols-12">
               <div className="lg:col-span-3">
                 <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-ember">
-                  03 / Request boundary
+                  04 / Request boundary
                 </p>
                 <h2 id="path-title" className="mt-3 font-editorial text-4xl tracking-editorial text-paper">
                   One question.
@@ -117,7 +120,7 @@ export function App() {
               </div>
               <ol className="grid gap-px border border-line bg-line sm:grid-cols-2 lg:col-span-9 lg:grid-cols-4">
                 {[
-                  ["01", "Control room", "A read-only question from the fixed public demo."],
+                  ["01", "Control room", "A bounded request from the fixed synthetic demo."],
                   ["02", "AWS boundary", "Same-origin API routes bound and shape the request."],
                   ["03", "CockroachDB", "Relational evidence and C-SPANN vector recall."],
                   ["04", "Bedrock", "Titan retrieval context; Claude narration when live."],
@@ -137,7 +140,7 @@ export function App() {
       <footer className="mx-auto flex max-w-[1480px] flex-col gap-5 px-5 py-10 text-[10px] uppercase tracking-[0.16em] text-muted sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-12">
         <p>Archon Memory Control Room · Synthetic financial evidence only</p>
         <div className="flex items-center gap-5">
-          <span>Public read-only demo</span>
+          <span>Canonical memory read-only · isolated action sandbox</span>
           <a
             className="text-paper underline decoration-paper/30 underline-offset-4 hover:text-mint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint"
             href="#top"

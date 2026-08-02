@@ -9,13 +9,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   allCockroachImagesPinned,
+  allCheckoutStepsDisableCredentialPersistence,
   allComposeImagesPinned,
   allDockerfileBasesPinned,
   allSetupNodeStepsPinned,
+  allWorkflowActionCommitsInventoryLocked,
   allWorkflowActionsPinned,
   evaluate,
   EXPECTED_COCKROACH_IMAGE_REFS,
@@ -29,6 +31,7 @@ import {
   generatedArtifactPaths,
   GENERATED_ARTIFACT_BASENAMES,
   hasExactAwsDeliveryConcurrency,
+  hasExactAwsDeployTrigger,
   hasExactAwsRecoveryTrigger,
   hasExactBenchmarkTrigger,
   hasExactCiTrigger,
@@ -86,14 +89,23 @@ test("readiness: centralized S3 access logging is a first-class product gate", (
   assert.equal(check.status, "pass", check.detail);
 });
 
-test("readiness: dormant encrypted alarm routing is a first-class product gate", () => {
+test("readiness: protected encrypted alarm routing control loop is a first-class product gate", () => {
   const check = evaluate().checks.find(
     (candidate) =>
-      candidate.id === "product.dormant-encrypted-alarm-routing"
+      candidate.id ===
+      "product.protected-encrypted-alarm-routing-control-loop"
   );
   assert.ok(check);
   assert.equal(check.criterion, "Production Readiness");
   assert.equal(check.status, "pass", check.detail);
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(audit, /wa02-alarm-routing-control-loop-source/u);
 });
 
 test("readiness: judge-facing concurrency has bounded in-flight headroom", () => {
@@ -106,7 +118,7 @@ test("readiness: judge-facing concurrency has bounded in-flight headroom", () =>
   assert.equal(check.status, "pass", check.detail);
 });
 
-test("readiness: hosted DAST is release-bound and required by CI", () => {
+test("readiness: candidate DAST blocks CI and live DAST is exact-release bound", () => {
   const check = evaluate().checks.find(
     (candidate) =>
       candidate.id === "product.hosted-dast-release-gate"
@@ -123,6 +135,18 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     new URL("../.github/workflows/security-dast.yml", import.meta.url),
     "utf8"
   );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const packageSource = readFileSync(
+    new URL("../package.json", import.meta.url),
+    "utf8"
+  );
+  const predeployZapServer = readFileSync(
+    new URL("../scripts/predeploy-zap-server.mjs", import.meta.url),
+    "utf8"
+  );
   const hostedDastScript = readFileSync(
     new URL("../scripts/hosted-dast.mjs", import.meta.url),
     "utf8"
@@ -131,10 +155,11 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     ci,
     /needs:\s*\[secret-scan,\s*dep-audit,\s*build-test,\s*cluster-survival,\s*pen-test,\s*load,\s*frontend-iac,\s*hosted-dast,\s*video-gate\]/u
   );
-  assert.match(hostedDast, /workflows:\s*\["Deploy AWS"\]/u);
+  assert.match(hostedDast, /workflow_call:/u);
+  assert.doesNotMatch(hostedDast, /workflow_run:/u);
   assert.match(
     hostedDast,
-    /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u
+    /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*needs\.source-gate\.outputs\.expected_release_sha\s*\}\}/u
   );
   assert.match(
     hostedDast,
@@ -142,19 +167,19 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   );
   assert.match(
     hostedDast,
-    /\[\[ "\$SOURCE_RUN_ID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
+    /\[\[ "\$REQUESTED_RUN_ID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
   );
   assert.match(
     hostedDast,
-    /\[\[ "\$SOURCE_RUN_ATTEMPT" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
+    /\[\[ "\$REQUESTED_RUN_ATTEMPT" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/u
   );
   assert.match(
     hostedDast,
-    /\[\[ "\$SOURCE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u
+    /\[\[ "\$REQUESTED_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u
   );
   assert.match(
     hostedDast,
-    /actions\/runs\/\$\{SOURCE_RUN_ID\}\/attempts\/\$\{SOURCE_RUN_ATTEMPT\}\/jobs\?per_page=100/u
+    /actions\/runs\/\$\{REQUESTED_RUN_ID\}\/attempts\/\$\{REQUESTED_RUN_ATTEMPT\}\/jobs\?per_page=100/u
   );
   assert.match(
     hostedDast,
@@ -165,6 +190,10 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
     /"Smoke production through CloudFront"/u
   );
   assert.match(hostedDast, /"Upload production receipt"/u);
+  assert.match(
+    deploy,
+    /hosted-dast-production:[\s\S]*?needs:\s*\r?\n\s+- deploy-production\r?\n\s+- managed-mcp-production-audit[\s\S]*?uses:\s*\.\/\.github\/workflows\/security-dast\.yml[\s\S]*?exact_sha:\s*\$\{\{\s*github\.sha\s*\}\}[\s\S]*?deploy_run_id:\s*\$\{\{\s*fromJSON\(github\.run_id\)\s*\}\}[\s\S]*?deploy_run_attempt:\s*\$\{\{\s*fromJSON\(github\.run_attempt\)\s*\}\}/u
+  );
   assert.match(
     hostedDastScript,
     /function allowlistedStatus\(actual, expectedStatuses, id\)/u
@@ -186,13 +215,43 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   );
   assert.match(
     hostedDast,
-    /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.id \|\| github\.run_id\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| github\.run_attempt\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+    /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_id\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_attempt\s*\}\}/u
   );
   assert.match(ci, /rules_file_name:\s*\.zap\/predeploy\.tsv/u);
   assert.match(hostedDast, /rules_file_name:\s*\.zap\/release\.tsv/u);
   assert.match(
     ci,
-    /name:\s*hosted-dast-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+    /name:\s*dast-contract-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(ci, /DAST_CANDIDATE_URL:\s*http:\/\/127\.0\.0\.1:4173/u);
+  assert.match(
+    ci,
+    /node --import tsx --test --test-concurrency=1[\s\S]*?tests\/hosted-dast\.test\.ts \| tee "\$DAST_CONTRACT_TAP"/u
+  );
+  assert.match(ci, /npm run build --prefix web/u);
+  assert.match(ci, /node scripts\/predeploy-zap-server\.mjs/u);
+  assert.match(predeployZapServer, /const LOOPBACK_HOST = "127\.0\.0\.1"/u);
+  assert.match(predeployZapServer, /server\.listen\(port, LOOPBACK_HOST/u);
+  assert.match(packageSource, /tests\/predeploy-zap-server\.test\.ts/u);
+  assert.match(
+    ci,
+    /target:\s*\$\{\{\s*env\.DAST_CANDIDATE_URL\s*\}\}/u
+  );
+  assert.match(ci, /test "\$alive" = "true"/u);
+  assert.match(ci, /test "\$healthy" = "true"/u);
+  assert.match(ci, /test "\$candidate_identity" = "true"/u);
+  assert.match(ci, /test "\$shutdown_clean" = "true"/u);
+  assert.match(ci, /test "\$forced_cleanup" = "false"/u);
+  assert.match(ci, /test "\$process_absent" = "true"/u);
+  assert.match(ci, /trap cleanup_candidate_metadata EXIT/u);
+  assert.match(
+    ci,
+    /forced_cmdline[\s\S]*?\/proc\/\$server_pid\/cmdline[\s\S]*?kill -KILL "\$server_pid"/u
+  );
+  assert.doesNotMatch(ci, /wait "\$server_pid"/u);
+  assert.doesNotMatch(
+    ci.match(/(?:^|\r?\n)  hosted-dast:\r?\n[\s\S]*?(?=\r?\n  video-gate:\r?\n|$)/u)?.[0] ?? "",
+    /d2s5v0o0eg2aaw\.cloudfront\.net|DAST_EXPECTED_RELEASE_SHA/u
   );
   assert.match(
     ci,
@@ -200,7 +259,7 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   );
   assert.match(
     hostedDast,
-    /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+    /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_attempt\s*\}\}/u
   );
   assert.match(
     readFileSync(
@@ -223,10 +282,8 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
       "10036",
       "10049",
       "10050",
-      "10055",
       "10094",
       "10109",
-      "90004",
       "90005",
     ]),
     true
@@ -283,9 +340,21 @@ test("readiness: Deploy AWS cannot succeed as an all-skipped no-op", () => {
     deploy,
     /name:\s*Require successful exact-main push CI source/u
   );
-  assert.match(deploy, /test "\$SOURCE_CONCLUSION" = "success"/u);
-  assert.match(deploy, /test "\$SOURCE_EVENT" = "push"/u);
-  assert.match(deploy, /test "\$SOURCE_BRANCH" = "main"/u);
+  assert.match(deploy, /case "\$GITHUB_EVENT_NAME" in/u);
+  assert.match(
+    deploy,
+    /push\)[\s\S]*?test "\$DEPLOY_OPERATION" = "release"[\s\S]*?workflow_dispatch\)[\s\S]*?test "\$DEPLOY_OPERATION" = "staging-recovery-drill"/u
+  );
+  assert.match(deploy, /test "\$GITHUB_REF" = "refs\/heads\/main"/u);
+  assert.match(
+    deploy,
+    /actions\/workflows\/ci\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    deploy,
+    /ci_run_id:\s*\$\{\{\s*steps\.source_ci\.outputs\.run_id\s*\}\}/u
+  );
+  assert.doesNotMatch(deploy, /github\.event\.workflow_run/u);
   assert.match(
     deploy,
     /build-once:\r?\n\s+name:\s*Verify CI SHA and build once\r?\n\s+needs:\r?\n\s+- source-gate/u
@@ -330,7 +399,9 @@ test("readiness: coverage evidence is CI-only and thresholded", () => {
   assert.match(runner, /\.\.\.testFiles/u);
   for (const testPath of [
     "tests/durable-recovery.test.ts",
+    "tests/staging-recovery-drill.test.ts",
     "tests/recovery-watchdog.test.ts",
+    "tests/github-recovery-preflight.test.ts",
     "tests/cloudformation-controls.test.ts",
   ]) {
     assert.equal(packageSource.split(testPath).length - 1, 1, testPath);
@@ -372,6 +443,17 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
     new URL("../aws/recovery-intent-ledger.sh", import.meta.url),
     "utf8"
   );
+  const githubPreflight = readFileSync(
+    new URL(
+      "../aws/classify-github-recovery-preflight.sh",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const classifier = readFileSync(
+    new URL("../aws/classify-durable-recovery-source.sh", import.meta.url),
+    "utf8"
+  );
   const cloudFormationControls = readFileSync(
     new URL("../aws/enforce-cloudformation-controls.sh", import.meta.url),
     "utf8"
@@ -393,9 +475,83 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   );
 
   assert.equal(hasExactAwsRecoveryTrigger(recovery), true);
+  assert.doesNotMatch(recovery, /workflow_run:/u);
+  assert.match(
+    classifier,
+    /\.event == "push"[\s\S]*?\.event == "workflow_dispatch" and \$environment == "staging"/u
+  );
   assert.equal(hasExactAwsDeliveryConcurrency(foundationWorkflow), true);
   assert.equal(hasExactAwsDeliveryConcurrency(deploy), true);
-  assert.equal(hasExactAwsDeliveryConcurrency(recovery), true);
+  assert.equal(hasExactAwsDeliveryConcurrency(recovery), false);
+  assert.match(
+    recovery,
+    /(?:^|\r?\n)concurrency:\r?\n  group: aws-recovery-watchdog\r?\n  cancel-in-progress: false\r?\n  queue: max/u
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /^    concurrency:\r?\n      group: aws-production-delivery\r?\n      cancel-in-progress: false\r?\n      queue: max$/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  const preflightJob =
+    recovery.match(
+      /(?:^|\r?\n)  classify-recovery:\r?\n[\s\S]*?(?=\r?\n  audit-environments:)/u
+    )?.[0] ?? "";
+  const auditJob =
+    recovery.match(
+      /(?:^|\r?\n)  audit-environments:\r?\n[\s\S]*?(?=\r?\n  recover-staging:)/u
+    )?.[0] ?? "";
+  assert.ok(preflightJob.length > 0);
+  assert.match(
+    preflightJob,
+    /name: Classify recovery candidates without AWS access/u
+  );
+  assert.match(
+    preflightJob,
+    /bash aws\/classify-github-recovery-preflight\.sh/u
+  );
+  assert.match(
+    preflightJob,
+    /classificationSource == "github-actions-metadata-only"/u
+  );
+  assert.match(preflightJob, /awsCredentialsUsed == false/u);
+  assert.doesNotMatch(preflightJob, /^    environment:/mu);
+  assert.doesNotMatch(
+    preflightJob,
+    /configure-aws-credentials|id-token:\s*write/u
+  );
+  assert.doesNotMatch(
+    githubPreflight,
+    /\baws\s+(?:cloudformation|s3|s3api|sts)\b/u
+  );
+  assert.match(githubPreflight, /source-deploy-active/u);
+  assert.match(githubPreflight, /terminal-commit-proved/u);
+  assert.match(githubPreflight, /successful-recovery-receipt-proved/u);
+  assert.match(githubPreflight, /die "Recovery artifact history exceeded/u);
+  assert.ok(auditJob.length > 0);
+  assert.equal(
+    (
+      auditJob.match(
+        /bash aws\/enforce-cloudformation-controls\.sh audit/gu
+      ) ?? []
+    ).length,
+    1
+  );
+  assert.match(
+    auditJob,
+    /strategy:\r?\n\s+fail-fast: false\r?\n\s+matrix:\r?\n\s+include:\r?\n\s+- environment: staging\r?\n\s+stack_name: archon-memory-staging\r?\n\s+terminal_job_name: Deploy and smoke staging\r?\n\s+- environment: production\r?\n\s+stack_name: archon-memory-production\r?\n\s+terminal_job_name: Promote identical candidate to production/u
+  );
+  assert.match(
+    auditJob,
+    /needs\.classify-recovery\.outputs\.staging_action == 'noop'/u
+  );
+  assert.match(
+    auditJob,
+    /needs\.classify-recovery\.outputs\.production_action == 'noop'/u
+  );
+  assert.doesNotMatch(auditJob, /aws-production-delivery/u);
   assert.match(deploy, /name: Deploy and smoke staging/u);
   assert.match(
     deploy,
@@ -415,7 +571,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   );
   assert.equal(
     (recovery.match(/role-duration-seconds:\s+3600/gu) ?? []).length,
-    6
+    7
   );
   assert.match(ledger, /--argjson leaseUntil "\$\(\(now \+ 7200\)\)"/u);
   assert.equal(
@@ -424,7 +580,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /uses: actions\/checkout@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          ref: \$\{\{ github\.sha \}\}\r?\n          fetch-depth: 0/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -432,7 +588,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'/gu
       ) ?? []
     ).length,
-    2
+    3
   );
   assert.equal(
     (
@@ -440,7 +596,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /test "\$GITHUB_REF" = "refs\/heads\/main"/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -448,7 +604,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /test "\$GITHUB_REF_TYPE" = "branch"/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -456,7 +612,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /test "\$GITHUB_WORKFLOW_REF" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory\/\.github\/workflows\/recover-aws\.yml@refs\/heads\/main"/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -464,7 +620,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -472,7 +628,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /git fetch --no-tags origin \\\r?\n\s+\+refs\/heads\/main:refs\/remotes\/origin\/main/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.equal(
     (
@@ -480,15 +636,15 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /test "\$\(git rev-parse origin\/main\)" = "\$GITHUB_SHA"/gu
       ) ?? []
     ).length,
-    2
+    4
   );
   assert.match(
     recovery,
-    /recover-staging:[\s\S]*?if: >-\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
+    /recover-staging:[\s\S]*?needs:\r?\n\s+- classify-recovery\r?\n\s+if: >-\r?\n\s+needs\.classify-recovery\.result == 'success' &&\r?\n\s+needs\.classify-recovery\.outputs\.staging_action == 'recover' &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
   );
   assert.match(
     recovery,
-    /recover-production:[\s\S]*?needs:\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
+    /recover-production:[\s\S]*?needs:\r?\n\s+- classify-recovery\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+needs\.classify-recovery\.result == 'success' &&\r?\n\s+needs\.classify-recovery\.outputs\.production_action == 'recover' &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u
   );
   assert.doesNotMatch(recovery, /needs\.recover-staging\.result/u);
   assert.doesNotMatch(recovery, /github\.event\.workflow_run\.head_sha/u);
@@ -578,19 +734,43 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.equal(samPositions.length, 2);
   for (const [index, armPosition] of armPositions.entries()) {
     assert.ok(armPosition < samPositions[index]);
+    assert.equal(
+      (
+        deploy
+          .slice(armPosition, samPositions[index])
+          .match(/\.state == "ARMED"/gu) ?? []
+      ).length,
+      1
+    );
   }
   const samCredentialRefreshPositions = [
     ...deploy.matchAll(
       /name: Refresh short-lived AWS credentials for (?:staging|production) SAM deployment/gu
     ),
   ].map((match) => match.index ?? -1);
+  const edgeStackHandoffPositions = [
+    ...deploy.matchAll(
+      /name: Resolve the exact (?:staging|production) edge-stack handoff/gu
+    ),
+  ].map((match) => match.index ?? -1);
   assert.equal(samCredentialRefreshPositions.length, 2);
+  assert.equal(edgeStackHandoffPositions.length, 2);
   for (const [index, refreshPosition] of samCredentialRefreshPositions.entries()) {
-    assert.ok(refreshPosition < samPositions[index]);
+    const handoffPosition = edgeStackHandoffPositions[index];
+    assert.ok(refreshPosition < handoffPosition);
+    assert.ok(handoffPosition < samPositions[index]);
     assert.equal(
       (
         deploy
-          .slice(refreshPosition, samPositions[index])
+          .slice(refreshPosition, handoffPosition)
+          .match(/\r?\n      - name:/gu) ?? []
+      ).length,
+      0
+    );
+    assert.equal(
+      (
+        deploy
+          .slice(handoffPosition, samPositions[index])
           .match(/\r?\n      - name:/gu) ?? []
       ).length,
       0
@@ -622,10 +802,6 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.equal(
     (deploy.match(/bash aws\/recovery-intent-ledger\.sh arm/gu) ?? [])
       .length,
-    2
-  );
-  assert.equal(
-    (deploy.match(/\.state == "ARMED"/gu) ?? []).length,
     2
   );
   assert.equal(
@@ -667,12 +843,28 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /length == 1 and \(\.\[0\] \| type == "object"\)/gu
       ) ?? []
     ).length,
-    16
+    17
   );
   assert.equal(
     (
       recovery.match(
         /bash aws\/classify-durable-recovery-source\.sh >"\$classification"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length,
+    3
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /PREFLIGHT_CANDIDATE_SHA: \$\{\{ needs\.classify-recovery\.outputs\.(?:staging|production)_candidate_sha \}\}/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      recovery.match(
+        /and \.action == "recover"\r?\n\s+and \.candidateSha == \$candidate\r?\n\s+and \.sourceRunAttempt == \$sourceRunAttempt\r?\n\s+and \.sourceRunId == \$sourceRunId/gu
       ) ?? []
     ).length,
     2
@@ -707,15 +899,15 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /bash aws\/enforce-cloudformation-controls\.sh audit/gu
       ) ?? []
     ).length,
-    2
+    1
   );
   assert.equal(
     (
       recovery.match(
-        /name: Upload (?:staging|production) daily protection and drift audit/gu
+        /name: Upload exact protection and drift audit/gu
       ) ?? []
     ).length,
-    2
+    1
   );
   assert.equal(
     (
@@ -723,7 +915,7 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /github\.event_name == 'schedule' &&\r?\n\s+github\.event\.schedule == '17 4 \* \* \*'/gu
       ) ?? []
     ).length,
-    4
+    1
   );
   assert.equal(
     (
@@ -731,15 +923,15 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
         /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.operation == 'audit'/gu
       ) ?? []
     ).length,
-    4
+    1
   );
   assert.equal(
     (
       recovery.match(
-        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
+        /path: \$\{\{ runner\.temp \}\}\/\$\{\{ matrix\.environment \}\}-cloudformation-controls-audit\.json/gu
       ) ?? []
     ).length,
-    2
+    1
   );
   assert.equal(
     (
@@ -849,7 +1041,12 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   );
   assert.match(ledger, /put_args\+=\(--if-match "\$prior_etag"\)/u);
   assert.match(ledger, /put_args\+=\(--if-none-match '\*'\)/u);
-  assert.match(ledger, /--server-side-encryption AES256/u);
+  assert.match(ledger, /--server-side-encryption aws:kms/u);
+  assert.match(ledger, /--ssekms-key-id "\$storage_key_alias"/u);
+  assert.match(
+    ledger,
+    /storage_key_alias="arn:aws:kms:\$\{AWS_REGION\}:\$\{AWS_ACCOUNT_ID\}:alias\/\$\{APP_NAME\}-storage"/u
+  );
   assert.match(ledger, /--checksum-algorithm SHA256/u);
   assert.match(ledger, /\.schema == "archon\.recovery-intent\.ledger"/u);
   assert.match(ledger, /validate_previous_ledger_provenance\(\)/u);
@@ -1204,7 +1401,7 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
-  assert.equal(EXPECTED_SETUP_NODE_STEPS, 22);
+  assert.equal(EXPECTED_SETUP_NODE_STEPS, 31);
   assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
   assert.deepEqual(
     [...new Set(versions)],
@@ -1212,7 +1409,34 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
   );
   assert.equal(allSetupNodeStepsPinned(workflows), true);
   assert.equal(allWorkflowActionsPinned(workflows), true);
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 112);
+  const actionLock = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      ".github",
+      "toolchain-lock.json"
+    ),
+    "utf8"
+  );
+  assert.equal(
+    allWorkflowActionCommitsInventoryLocked(workflows, actionLock),
+    true
+  );
+  assert.equal(
+    allWorkflowActionCommitsInventoryLocked(
+      workflows,
+      actionLock.replace(
+        "db07bd9765aac508ef18982e52ab937fe633a065",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      )
+    ),
+    false
+  );
+  assert.equal(
+    allCheckoutStepsDisableCredentialPersistence(workflows),
+    true
+  );
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 213);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -1375,10 +1599,10 @@ test("readiness: every CockroachDB and Docker base image is digest-pinned", () =
   const compose = repositoryDockerComposeSources();
   const dockerfiles = repositoryDockerfileSources();
   assert.equal(compose.length, 2);
-  assert.equal(dockerfiles.length, 1);
-  assert.equal(EXPECTED_COCKROACH_IMAGE_REFS, 8);
+  assert.equal(dockerfiles.length, 0);
+  assert.equal(EXPECTED_COCKROACH_IMAGE_REFS, 9);
   assert.equal(EXPECTED_COMPOSE_IMAGE_REFS, 4);
-  assert.equal(EXPECTED_DOCKERFILE_BASE_REFS, 1);
+  assert.equal(EXPECTED_DOCKERFILE_BASE_REFS, 0);
   assert.equal(allComposeImagesPinned(compose), true);
   assert.equal(
     allCockroachImagesPinned({
@@ -1571,6 +1795,28 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   );
 
   assert.equal(hasExactCodeqlActionPins(codeql), true);
+  assert.match(codeql, /queries:\s*security-and-quality/u);
+  assert.match(
+    codeql,
+    /output:\s*\$\{\{\s*env\.CODEQL_RAW_SARIF_DIR\s*\}\}/u
+  );
+  assert.match(
+    codeql,
+    /post-processed-sarif-path:\s*\$\{\{\s*env\.CODEQL_SARIF_DIR\s*\}\}/u
+  );
+  assert.match(codeql, /upload:\s*always/u);
+  assert.match(
+    codeql,
+    /name: Enforce the CodeQL high-severity policy/u
+  );
+  assert.match(codeql, /properties\?\.\["security-severity"\]/u);
+  assert.match(
+    codeql,
+    /securitySeverity >= 7 \|\| rawLevel === "error"/u
+  );
+  assert.match(codeql, /blockingFindings\.length > 0/u);
+  assert.match(codeql, /policy: "codeql-high-critical-or-error"/u);
+  assert.match(codeql, /acceptedWaivers: 0/u);
   assert.equal(
     (
       codeql.match(
@@ -1622,7 +1868,13 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   assert.equal(hasExactDependabotReleaseFreeze(dependabot), true);
   assert.equal(
     EXPECTED_DEPENDABOT_RELEASE_FREEZE.length,
-    5
+    4
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace("default-days: 7", "default-days: 0")
+    ),
+    false
   );
   assert.equal(
     hasExactDependabotReleaseFreeze(
@@ -1701,6 +1953,9 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   const recoveryWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "recover-aws.yml"
   );
+  const deployWorkflow = repositoryWorkflows.find(
+    (entry) => entry.name === "deploy-aws.yml"
+  );
   const benchmarkWorkflow = repositoryWorkflows.find(
     (entry) => entry.name === "benchmark.yml"
   );
@@ -1714,11 +1969,13 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
     (entry) => entry.name === "security-dast.yml"
   );
   assert.ok(recoveryWorkflow);
+  assert.ok(deployWorkflow);
   assert.ok(benchmarkWorkflow);
   assert.ok(submissionWorkflow);
   assert.ok(demoVideoWorkflow);
   assert.ok(hostedDastWorkflow);
   assert.equal(hasExactAwsRecoveryTrigger(recoveryWorkflow.source), true);
+  assert.equal(hasExactAwsDeployTrigger(deployWorkflow.source), true);
   assert.equal(hasExactBenchmarkTrigger(benchmarkWorkflow.source), true);
   assert.equal(hasExactHostedDastTrigger(hostedDastWorkflow.source), true);
   assert.equal(
@@ -1730,6 +1987,31 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
     true
   );
   assert.equal(hasExactDemoVideoTrigger(demoVideoWorkflow.source), true);
+  for (const mutation of [
+    deployWorkflow.source.replace(
+      "    branches:\n      - main",
+      "    branches:\n      - release"
+    ),
+    deployWorkflow.source.replace("  push:", "  workflow_dispatch:"),
+    deployWorkflow.source.replace(
+      "      - main",
+      "      - main\n      - release"
+    ),
+    deployWorkflow.source.replace(
+      "          - staging-recovery-drill",
+      "          - production-recovery-drill"
+    ),
+    deployWorkflow.source.replace(
+      "The only manual mode is the protected staging recovery drill.",
+      "Any manual deployment mode."
+    ),
+    deployWorkflow.source.replace(
+      "      confirmation:",
+      "      bypass:\n        required: false\n        type: boolean\n      confirmation:"
+    ),
+  ]) {
+    assert.equal(hasExactAwsDeployTrigger(mutation), false);
+  }
   for (const mutation of [
     demoVideoWorkflow.source.replace(
       /(exact_sha:[\s\S]*?\n\s+required:) true/u,
@@ -1761,16 +2043,16 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   );
   for (const mutation of [
     hostedDastWorkflow.source.replace(
-      "    workflows: [\"Deploy AWS\"]",
-      "    workflows: [\"CI\"]"
+      "        description: Exact deployed main commit to scan",
+      "        description: Arbitrary commit to scan"
     ),
     hostedDastWorkflow.source.replace(
-      "    branches: [main]",
-      "    branches: [release]"
+      /(exact_sha:[\s\S]*?\n\s+required:) true/u,
+      "$1 false"
     ),
     hostedDastWorkflow.source.replace(
-      "    types: [completed]",
-      "    types: [requested]"
+      /(deploy_run_id:[\s\S]*?\n\s+type:) number/u,
+      "$1 string"
     ),
     hostedDastWorkflow.source.replace(
       '    - cron: "43 4 * * 1"',
@@ -1925,7 +2207,7 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 11);
+  assert.equal(repositoryWorkflows.length, 24);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -1944,8 +2226,8 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
           ? {
               ...entry,
               source: entry.source.replace(
-                /    branches:\r?\n      - main\r?\n/u,
-                '    branches:\n      - release\n'
+                '    - cron: "7,22,37,52 * * * *"',
+                '    - cron: "0 * * * *"'
               ),
             }
           : entry
@@ -1983,6 +2265,9 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
 });
 
 test("readiness: generated receipts and nested build directories fail closed", () => {
+  assert.ok(
+    GENERATED_ARTIFACT_BASENAMES.includes("hosted-load-contract.sha256")
+  );
   const sandbox = mkdtempSync(
     join(tmpdir(), "archon-readiness-artifacts-")
   );
@@ -2111,7 +2396,7 @@ test("readiness: required tool story is Vector + hardened Managed MCP", () => {
   );
   assert.equal(
     report.checks.find(
-      (check) => check.id === "tech.managed-mcp-receipt-v2-gate"
+      (check) => check.id === "tech.managed-mcp-receipt-v3-gate"
     )?.status,
     "pass"
   );
@@ -2135,13 +2420,13 @@ test("readiness: required tool story is Vector + hardened Managed MCP", () => {
   );
 });
 
-test("readiness: Managed MCP source and both protected workflows pin receipt v2 exactly", () => {
+test("readiness: Managed MCP source and both protected workflows pin causal receipt v3 exactly", () => {
   const audit = readFileSync(
     new URL("../scripts/cloud-mcp-audit.ts", import.meta.url),
     "utf8"
   );
   for (const pattern of [
-    /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*2/u,
+    /MANAGED_MCP_RECEIPT_SCHEMA_VERSION\s*=\s*3/u,
     /tenantId:\s*"public-demo"/u,
     /company:\s*"Helios SA"/u,
     /status:\s*"active"/u,
@@ -2149,6 +2434,11 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     /FORCE_INDEX=idx_agent_memory_active_scope/u,
     /LIMIT 10[\s\S]*LIMIT 1/u,
     /parseManagedMcpAggregateResult/u,
+    /parseManagedMcpCspannExplainResult/u,
+    /runMemoryIntegrityAgent/u,
+    /MANAGED_MCP_RELEASE_SHA/u,
+    /MANAGED_MCP_CSPANN_RECEIPT_SHA256/u,
+    /idx_agent_memory_company_scope_embedding/u,
     /assertExactKeys/u,
     /Number\.isSafeInteger/u,
     /invokedDirectly/u,
@@ -2168,10 +2458,15 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
   )?.[0];
   assert.ok(deployJob);
+  assert.match(
+    standalone,
+    /actions\/workflows\/deploy-aws\.yml\/runs\?branch=main&event=push&status=success/u
+  );
+  assert.doesNotMatch(standalone, /event=workflow_run/u);
 
   const exactGateFragments = [
-    'keys == ["aggregate","bound","calledTools","checkedAt","database","endpoint","mode","ok","proofs","redactions","schemaVersion","scope","toolsAdvertised"]',
-    ".schemaVersion == 2",
+    'keys == ["aggregate","bound","calledTools","checkedAt","cspannLinkage","database","endpoint","mode","ok","proofs","redactions","release","schemaVersion","scope","toolsAdvertised"]',
+    ".schemaVersion == 3",
     '"tenantId":"public-demo"',
     '"company":"Helios SA"',
     '"status":"active"',
@@ -2182,17 +2477,23 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
     '"persisted":9',
     '"idempotencyKeys":9',
     '"contentDigests":9',
-    '.calledTools == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    ".proofs == [",
-    '"detail":"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
-    '"detail":"`agent_memory` is present in the configured application database."',
-    '"detail":"Live schema exposes VECTOR(1024) and a native vector index."',
-    '"detail":"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
-    "length == 4",
-    'map(.name) == ["get_cluster","list_tables","get_table_schema","select_query"]',
-    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings"]',
+    '"commitSha":$release',
+    '"cspannReceiptSha256":$cspann',
+    '"idx_agent_memory_company_scope_embedding"',
+    '"status":"not-advertised"',
+    '.cspannLinkage.explainQuery.status == "verified"',
+    '["get_cluster","list_tables","get_table_schema","select_query"]',
+    '["get_cluster","list_tables","get_table_schema","explain_query","select_query"]',
+    '"Live cluster metadata returned through CockroachDB Cloud Managed MCP."',
+    '"`agent_memory` is present in the configured application database."',
+    '"Live schema exposes VECTOR(1024) and a native vector index."',
+    '"Managed MCP EXPLAIN verified the exact fixed-scope C-SPANN serving index."',
+    '"The fixed-scope, index-forced, ten-row-sentinel aggregate is exactly 9/9/9."',
+    "map(.name) == $called",
+    '.redactions == ["API key","cluster identifier","SQL credentials","memory content","embeddings","raw query plan"]',
     'grep -Fq -- "$CCLOUD_API_KEY"',
     'grep -Fq -- "$COCKROACH_CLUSTER_ID"',
+    "sha256sum managed-mcp-",
   ];
   for (const workflow of [standalone, deployJob]) {
     for (const fragment of exactGateFragments) {
@@ -2206,7 +2507,7 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
       'grep -Fq -- "$COCKROACH_CLUSTER_ID"'
     );
     const exactJqGate = workflow.indexOf(
-      'jq -e --arg database "$COCKROACH_DATABASE"'
+      '--arg database "$COCKROACH_DATABASE"'
     );
     assert.ok(receipt >= 0);
     assert.ok(receipt < apiKeyCheck);
@@ -2229,11 +2530,41 @@ test("readiness: Managed MCP source and both protected workflows pin receipt v2 
       1
     );
     assert.match(workflow, /persist-credentials: false/u);
+    assert.match(
+      workflow,
+      /\.schemaVersion == 6[\s\S]*?\(\.runtimes \| length\) == 2[\s\S]*?\(\[\.runtimes\[\]\.environment\] \| sort\) ==[\s\S]*?\["production", "staging"\][\s\S]*?databaseMatrixSha256\] \|[\s\S]*?unique \| length\) == 2[\s\S]*?all\(\.runtimes\[\];[\s\S]*?archon_staging_[a-z0-9{}\[\],^-]+[\s\S]*?archon_production_[a-z0-9{}\[\],^-]+[\s\S]*?\.clusterGrantProof\.routineGrantCount == 2[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u
+    );
+    assert.match(
+      workflow,
+      /for runtime_environment in staging production; do[\s\S]*?expected_matrix_sha="\$\(jq -er[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256[\s\S]*?matrix_json="\$\(jq -cer[\s\S]*?\.clusterGrantProof\.databaseGrantMatrix[\s\S]*?actual_matrix_sha="\$\(printf '%s' "\$matrix_json"[\s\S]*?sha256sum[\s\S]*?test "\$actual_matrix_sha" = "\$expected_matrix_sha"/u
+    );
   }
   assert.match(
     standalone,
     /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error[\s\S]*?retention-days: 90/u
   );
+  assert.match(
+    deployJob,
+    /needs:\s*\r?\n      - database-release/u
+  );
+  assert.match(
+    deployJob,
+    /database-release-\$\{\{\s*github\.sha\s*\}\}/u
+  );
+  assert.match(
+    deployJob,
+    /receipt_sha256:\s*\$\{\{\s*steps\.receipt\.outputs\.receipt_sha256\s*\}\}/u
+  );
+  const stagingJob = deploy.match(
+    /(?:^|\r?\n)  deploy-staging:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const productionJob = deploy.match(
+    /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(stagingJob);
+  assert.ok(productionJob);
+  assert.match(stagingJob, /- managed-mcp-production-audit/u);
+  assert.match(productionJob, /- managed-mcp-production-audit/u);
   for (const evidencePath of [
     "../README.md",
     "../docs/TOOLS.md",
@@ -2288,11 +2619,22 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../.github/workflows/database-release.yml", import.meta.url),
     "utf8"
   );
-  assert.match(workflow, /\.schemaVersion == 5/u);
+  assert.match(workflow, /\.schemaVersion == 6/u);
   assert.match(workflow, /\.proofs\.durableStoreIntegrity == true/u);
   assert.match(workflow, /\.proofs\.canonicalActiveMemories == 9/u);
   assert.match(workflow, /\.proofs\.distinctIdempotencyKeys == 9/u);
   assert.match(workflow, /\.proofs\.distinctContentDigests == 9/u);
+  assert.match(workflow, /COCKROACH_SQL_DNS/u);
+  assert.match(workflow, /regions\[\]/u);
+  assert.match(workflow, /sql_dns/u);
+  assert.ok(
+    workflow.indexOf("db:endpoint:verify") <
+      workflow.indexOf("npm run db:schema"),
+  );
+  assert.match(
+    workflow,
+    /\.cockroachCloud\.sqlEndpointBinding\.boundUrlCount == 3/u,
+  );
   assert.match(
     workflow,
     /\.proofs\.runtimePrincipalCspannPlanAndExecute == true/u
@@ -2333,7 +2675,8 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     new URL("../scripts/verify-database-release.ts", import.meta.url),
     "utf8"
   );
-  assert.match(verifier, /schemaVersion: 5/u);
+  assert.match(verifier, /schemaVersion: 6/u);
+  assert.match(verifier, /assertCockroachEndpointBinding/u);
   assert.match(verifier, /scopedServingQueriesRejectCanaries: true/u);
   const scopedVerifier = verifier.match(
     /async function verifyScopedServingQueryCanaries[\s\S]*?(?=\r?\nasync function verifyRuntimeCspannPath)/u
@@ -2369,6 +2712,321 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(scopedVerifier, /SET vector_search_beam_size = 600/u);
   assert.match(verifier, /class ReleaseGateError extends Error/u);
   assert.match(verifier, /error instanceof ReleaseGateError/u);
+  assert.equal(
+    evaluate().checks.find(
+      (check) => check.id === "tech.runtime-resolution-release-gate"
+    )?.status,
+    "pass"
+  );
+  assert.match(workflow, /\.proofs\.memoryResolutionLoop == true/u);
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeResolutionEnvironmentCount == 2/u
+  );
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.tables == 5/u);
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.rlsPolicies == 15/u);
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlSchedule ==\s*\n?\s*"0 \*\/4 \* \* \*"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlClusterEnabled == true/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.ttlScheduleStatus == "ACTIVE"/u
+  );
+  assert.match(workflow, /\.proofs\.resolutionSandbox\.ttlPaused == false/u);
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.writerRelationGrantCount == 5/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.transitionOwnerRelationGrantCount == 13/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.transitionFunctionCount == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.writerFunctionExecuteCount == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.resolutionSandbox\.directRuntimeDml == "none"/u
+  );
+  for (const resolutionProof of [
+    ".resolutionLoop.databaseEnforcedTransitions == true",
+    ".resolutionLoop.exactTransitionFunctionExecute == true",
+    ".resolutionLoop.directResolutionDmlDenied == true",
+    ".resolutionLoop.approvePath == true",
+    ".resolutionLoop.rejectPath == true",
+    ".resolutionLoop.idempotentReplay == true",
+    ".resolutionLoop.conflictingFinalDecisionRejected == true",
+    ".resolutionLoop.receiptVerified == true",
+    ".resolutionLoop.receiptDatabaseDerived == true",
+    ".resolutionLoop.consolidationVerified == true",
+    ".resolutionLoop.canonicalMemoryUnchanged == true",
+    ".resolutionLoop.immutableDecisionTables == true",
+    ".resolutionLoop.deletePrivilegeAbsent == true",
+  ]) {
+    assert.ok(workflow.includes(resolutionProof), resolutionProof);
+  }
+  assert.match(
+    verifier,
+    /SHOW SYSTEM GRANTS FOR archon_resolution_writer/u
+  );
+  assert.match(
+    verifier,
+    /verifyExactResolutionRelationGrants\(\s*client,\s*"archon_resolution_writer",\s*RESOLUTION_WRITER_GRANTS/u
+  );
+  assert.match(verifier, /SHOW GRANTS ON FUNCTION \$\{routine\.signature\}/u);
+  const clusterGrantProof = readFileSync(
+    new URL("../src/db/cluster-grant-proof.ts", import.meta.url),
+    "utf8"
+  );
+  const systemGrantContract = readFileSync(
+    new URL("../src/db/system-grants.ts", import.meta.url),
+    "utf8"
+  );
+  const ci = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const applySchemaVerifier = readFileSync(
+    new URL("../scripts/apply-schema.ts", import.meta.url),
+    "utf8"
+  );
+  const migrationRehearsalVerifier = readFileSync(
+    new URL("../scripts/schema-migration-rehearsal.ts", import.meta.url),
+    "utf8"
+  );
+  const runtimeRotationVerifier = readFileSync(
+    new URL("../scripts/rotate-runtime-secret.ts", import.meta.url),
+    "utf8"
+  );
+  const runtimeProvisioningVerifier = readFileSync(
+    new URL("../scripts/provision-runtime-secret.ts", import.meta.url),
+    "utf8"
+  );
+  for (const [principalGrantVerifier, expectedProofCalls] of [
+    [verifier, 2],
+    [applySchemaVerifier, 1],
+    [migrationRehearsalVerifier, 1],
+    [runtimeRotationVerifier, 1],
+    [runtimeProvisioningVerifier, 1],
+  ] as const) {
+    assert.equal(
+      (
+        principalGrantVerifier.match(
+          /verifyClusterWideResolutionGrants\(\{/gu
+        ) ?? []
+      ).length,
+      expectedProofCalls
+    );
+  }
+  assert.match(clusterGrantProof, /const proofClient = new Client\(\{/u);
+  assert.doesNotMatch(clusterGrantProof, /SET database = ''/u);
+  assert.match(
+    clusterGrantProof,
+    /const databaseNames = await enumerateDatabases\(proofClient\)[\s\S]*?for \(const databaseName of databaseNames\)[\s\S]*?SET DATABASE = \$\{databaseSql\}/u
+  );
+  assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
+  assert.match(
+    clusterGrantProof,
+    /selectedDatabase\.rows\[0\]\?\.database_name !== databaseName/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?scopedGrants\.rows\.filter\([\s\S]*?grant\.object_type === "routine"[\s\S]*?routineGrants\.push/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /archon_resolution_decide\(text, text, uuid, uuid, uuid, timestamptz\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /routineRows\.length !== expectedRoutineKeys\.size/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /\}>\("SHOW DATABASES"\)[\s\S]*?\.map\(\(row\) => row\.database_name\)[\s\S]*?\.sort\(\)/u
+  );
+  assert.doesNotMatch(clusterGrantProof, /FROM \[SHOW (?:GRANTS|DATABASES)/u);
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /JSON\.stringify\(finalDatabaseInventory\)[\s\S]*?JSON\.stringify\(databaseNames\)/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /JSON\.stringify\(actualDatabaseInventory\)[\s\S]*?JSON\.stringify\(requiredDatabaseInventory\)/u
+  );
+  assert.match(clusterGrantProof, /databaseMatrixSha256: createHash\("sha256"\)/u);
+  assert.match(
+    clusterGrantProof,
+    /Supplied runtime database privilege matrix is not canonical/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /finally \{[\s\S]*?proofClient\.end\(\)\.catch/u
+  );
+  assert.match(
+    ci,
+    /CREATE DATABASE IF NOT EXISTS archon_migration[\s\S]*?db:migration:rehearsal[\s\S]*?DROP DATABASE archon_migration CASCADE[\s\S]*?DROP USER archon_migration_ci[\s\S]*?CREATE DATABASE archon_reconciliation[\s\S]*?db:memory:reconciliation:rehearsal[\s\S]*?DROP DATABASE archon_reconciliation CASCADE[\s\S]*?local:bootstrap/u
+  );
+  assert.equal(
+    (ci.match(/CREATE DATABASE (?:IF NOT EXISTS )?archon_reconciliation/gu) ?? [])
+      .length,
+    1
+  );
+  assert.doesNotMatch(clusterGrantProof, /object_type = 'function'/u);
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*databaseName,\s*"archon_migration_ci"\s*\)/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT TEMPORARY ON DATABASE "\$\{databaseName\}" TO archon_migration_ci[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE TEMPORARY ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci WITH GRANT OPTION[\s\S]*?expectClusterGrantProofRejected[\s\S]*?REVOKE CONNECT ON DATABASE "\$\{databaseName\}" FROM archon_migration_ci[\s\S]*?GRANT CONNECT ON DATABASE "\$\{databaseName\}" TO archon_migration_ci/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /CREATE DATABASE archon_unexpected_grants_ci[\s\S]*?REVOKE CONNECT, TEMPORARY ON DATABASE archon_unexpected_grants_ci FROM public[\s\S]*?expectClusterGrantProofRejected[\s\S]*?Cluster-wide grant proof could not bind the exact database inventory\.[\s\S]*?DROP DATABASE archon_unexpected_grants_ci CASCADE/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /appTemporaryGrantDriftRejected:\s*true/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /databaseGrantOptionDriftRejected:\s*true/u
+  );
+  assert.match(
+    migrationRehearsalVerifier,
+    /extraDatabaseGrantDriftRejected:\s*true/u
+  );
+  for (const runtimeVerifier of [
+    verifier,
+    runtimeRotationVerifier,
+    runtimeProvisioningVerifier,
+  ]) {
+    assert.match(
+      runtimeVerifier,
+      /expectedDatabaseGrants: expectedRuntimeDatabaseGrants\(\s*database(?:Name|Raw),\s*(?:principal|appUserRaw)\s*\)/u
+    );
+    assert.match(runtimeVerifier, /privilegedRuntimeRoleOptions/u);
+    assert.match(runtimeVerifier, /runtimeLoginIsDisabled/u);
+    assert.match(runtimeVerifier, /runtimeRoleOptionsAreCanonical/u);
+    assert.match(runtimeVerifier, /affirmativeSystemGrants/u);
+  }
+  for (const option of [
+    "ADMIN",
+    "BYPASSRLS",
+    "CANCELQUERY",
+    "CONTROLCHANGEFEED",
+    "CONTROLJOB",
+    "CREATEDB",
+    "CREATELOGIN",
+    "CREATEROLE",
+    "MODIFYCLUSTERSETTING",
+    "PROVISIONSRC",
+    "REPLICATION",
+    "SUBJECT",
+    "VIEWACTIVITY",
+    "VIEWACTIVITYREDACTED",
+    "VIEWCLUSTERSETTING",
+  ]) {
+    assert.ok(systemGrantContract.includes(`"${option}"`), option);
+  }
+  assert.match(systemGrantContract, /export function privilegedRuntimeRoleOptions/u);
+  assert.match(systemGrantContract, /export function runtimeLoginIsDisabled/u);
+  assert.match(
+    systemGrantContract,
+    /export function runtimeRoleOptionsAreCanonical/u
+  );
+  assert.match(
+    runtimeProvisioningVerifier,
+    /SHOW SYSTEM GRANTS FOR \$\{appUser\}/u
+  );
+  for (const runtimeVerifier of [verifier, runtimeRotationVerifier]) {
+    assert.match(
+      runtimeVerifier,
+      /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}[\s\S]*?databaseGrants\.rows\.length !== 1[\s\S]*?grant\.database_name !== databaseName[\s\S]*?grant\.grantee !== principal/u
+    );
+  }
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeFunctionPrivilegeMatrix ==\s*\n?\s*"cluster-wide EXECUTE only on the two canonical resolution routine signatures"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeDatabasePrivilegeMatrix ==\s*\n?\s*"cluster-wide exact five-row non-grantable matrix: public CONNECT\+TEMPORARY on defaultdb\/postgres; runtime principal CONNECT on archon; zero system rows"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.runtimeSystemPrivileges ==\s*\n?\s*"exact-empty runtime role options; no affirmative system grants"/u
+  );
+  assert.match(workflow, /\.clusterGrantProof\.routineGrantCount == 2/u);
+  assert.match(workflow, /\.clusterGrantProof\.databaseGrantCount == 5/u);
+  assert.match(
+    workflow,
+    /\.clusterGrantProof\.databaseInventory ==\s*\n?\s*\["archon", "defaultdb", "postgres", "system"\]/u
+  );
+  assert.match(workflow, /\.clusterGrantProof\.databaseMatrixSha256/u);
+  assert.match(
+    workflow,
+    /\[\.runtimes\[\]\.clusterGrantProof\.databaseMatrixSha256\][\s\S]*?unique \| length\) == 2/u
+  );
+  assert.match(
+    workflow,
+    /\.clusterGrantProof\.databaseGrantMatrix == \[[\s\S]*?"databaseName":"archon","grantee":\.principal,"privilegeType":"CONNECT","isGrantable":false[\s\S]*?"databaseName":"defaultdb","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false[\s\S]*?"databaseName":"postgres","grantee":"public","privilegeType":"TEMPORARY","isGrantable":false/u
+  );
+  assert.match(
+    workflow,
+    /for runtime_environment in staging production; do[\s\S]*?expected_matrix_sha="\$\(jq -er[\s\S]*?\.clusterGrantProof\.databaseMatrixSha256[\s\S]*?matrix_json="\$\(jq -cer[\s\S]*?\.clusterGrantProof\.databaseGrantMatrix[\s\S]*?actual_matrix_sha="\$\(printf '%s' "\$matrix_json"[\s\S]*?sha256sum[\s\S]*?test "\$actual_matrix_sha" = "\$expected_matrix_sha"/u
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    deploy,
+    /\.schemaVersion == 6[\s\S]*?all\(\.runtimes\[\];[\s\S]*?\.clusterGrantProof\.databaseGrantCount == 5[\s\S]*?\.clusterGrantProof\.databaseInventory ==[\s\S]*?\["archon", "defaultdb", "postgres", "system"\][\s\S]*?\.clusterGrantProof\.databaseMatrixSha256/u
+  );
+  assert.match(verifier, /sql\.ttl\.job\.enabled/u);
+  assert.match(verifier, /SHOW SCHEDULES/u);
+});
+
+test("readiness: the staging fault-injection recovery path is independently gated", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.staging-fault-injected-recovery"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
 });
 
 test("readiness: both AWS release gates accept only fully grounded safe-answer states", () => {
@@ -2399,12 +3057,34 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
       ".memory.contentDigests == 9",
       ".memory.storeVerified == true",
       '.memory.evidence == "live bounded fixed-scope payload-digest verification"',
+      ".resolutionLoop.enabled == true",
+      ".resolutionLoop.schemaTables == 5",
+      ".resolutionLoop.activeSandboxSessions |",
+      '.resolutionLoop.transactionIsolation == "SERIALIZABLE"',
+      '.resolutionLoop.authorityBoundary ==',
+      '"financial-controller-human-gate"',
+      '.resolutionLoop.identityAssurance ==',
+      '"fixed-demo-role-assertion-not-authenticated"',
+      '.resolutionLoop.idempotency ==',
+      '"decision-key+database-unique-constraint"',
+      '.resolutionLoop.receipt ==',
+      '"SHA-256 immutable decision record"',
+      '.resolutionLoop.learning ==',
+      '"conflict-observation+human-decision"',
+      '.resolutionLoop.consolidation ==',
+      '"versioned current/superseded state"',
+      '.resolutionLoop.forgetting == "CockroachDB row-level TTL"',
+      ".resolutionLoop.canonicalMemoryMutable == false",
+      '.resolutionLoop.externalSideEffects == "none"',
+      '.resolutionLoop.evidence ==',
+      '"live fixed-scope sandbox schema query"',
       "(.citations | length) >= 2",
       "(.citations | length) <= 5",
       ".recalled == (.citations | length)",
       '(.answer | contains("€15,375"))',
       '(.answer | contains("€6,775"))',
       ".modelId == $narrator",
+      '.trace.retrieval.requestedKind == "payroll_event"',
       ".trace.retrieval.requestedTopK == 5",
       ".answer as $answer |",
       "all(.citations[].marker;",
@@ -2434,7 +3114,7 @@ test("readiness: both AWS release gates accept only fully grounded safe-answer s
   }
 
   for (const mutation of [
-    workflow.replace(
+    workflow.replaceAll(
       '.status == "reachable"',
       '.status == "degraded"'
     ),
@@ -2488,15 +3168,23 @@ test("readiness: AWS canary isolates and exercises the exact candidate version",
 
   for (const [index, block] of canaryBlocks.entries()) {
     assert.ok(block, `AWS canary block ${index + 1} must exist`);
-    assert.match(block, /trap stop_canary_probe EXIT/u);
+    assert.match(
+      block,
+      /trap (?:stop_canary_probe|cleanup_deploy_background) EXIT/u
+    );
     assert.match(block, /while true; do/u);
     assert.match(block, /\$CANARY_URL\/api\/proof/u);
     assert.match(block, /\$CANARY_URL\/api\/recall/u);
     assert.match(
       block,
-      /sam deploy[\s\S]*?--no-progressbar\s+stop_canary_probe\s+trap - EXIT/u
+      /sam deploy[\s\S]*?--no-progressbar[\s\S]*?stop_canary_probe[\s\S]*?trap - EXIT/u
     );
   }
+  assert.match(
+    canaryBlocks[0]!,
+    /cleanup_deploy_background\(\)[\s\S]*?stop_canary_probe[\s\S]*?stop_drill_observer/u
+  );
+  assert.match(canaryBlocks[1]!, /trap stop_canary_probe EXIT/u);
   assert.ok(deploymentPreference);
   assert.match(
     deploymentPreference,
@@ -2567,6 +3255,574 @@ test("readiness: AWS promotion is gated by exact-SHA CodeQL and a fresh main-hea
   );
 });
 
+test("readiness: exact-SHA supply-chain evidence and candidate provenance gate promotion", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "tech.pipeline-owned-supply-chain-evidence"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Technical Implementation");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const supplyChain = readFileSync(
+    new URL("../.github/workflows/supply-chain.yml", import.meta.url),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const waivers = readFileSync(
+    new URL("../security/waivers.yml", import.meta.url),
+    "utf8"
+  );
+  const trivyIacCompatibilityValidator = readFileSync(
+    new URL(
+      "../.github/scripts/validate-trivy-iac-compatibility.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const trivySbomPolicyValidator = readFileSync(
+    new URL(
+      "../.github/scripts/validate-trivy-sbom-policy.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const policyEffectiveTrivy = supplyChain.match(
+    /(?:^|\r?\n)      - name: Materialize policy-effective Trivy IaC SARIF\r?\n[\s\S]*?(?=\r?\n      - name: Upload policy-effective Trivy IaC SARIF\r?\n)/u
+  )?.[0];
+  const sourceGate = deploy.match(
+    /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const buildOnce = deploy.match(
+    /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const databaseRelease = deploy.match(
+    /(?:^|\r?\n)  database-release:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const managedMcp = deploy.match(
+    /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const staging = deploy.match(
+    /(?:^|\r?\n)  deploy-staging:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const production = deploy.match(
+    /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  for (const job of [
+    sourceGate,
+    buildOnce,
+    databaseRelease,
+    managedMcp,
+    staging,
+    production,
+  ]) {
+    assert.ok(job);
+  }
+
+  assert.match(
+    sourceGate!,
+    /name: Require successful exact-SHA Supply Chain evidence/u
+  );
+  assert.match(
+    sourceGate!,
+    /actions\/workflows\/supply-chain\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    sourceGate!,
+    /\.head_sha == \$sha[\s\S]*?\.head_branch == "main"[\s\S]*?\.event == "push"[\s\S]*?\.path == "\.github\/workflows\/supply-chain\.yml"/u
+  );
+  assert.match(
+    buildOnce!,
+    /run-id:\s*\$\{\{\s*needs\.source-gate\.outputs\.supply_chain_run_id\s*\}\}/u
+  );
+  assert.match(
+    buildOnce!,
+    /gh attestation verify "\$receipt"\s+\\\r?\n\s+--repo "\$GITHUB_REPOSITORY"/u
+  );
+  assert.match(
+    buildOnce!,
+    /blocking-zero-unwaived-findings/u
+  );
+  assert.match(buildOnce!, /waiverLedgerSha256/u);
+  assert.match(
+    buildOnce!,
+    /name: Create exact-SHA candidate evidence binding[\s\S]*?schema: "archon\.aws-candidate\.evidence-binding"[\s\S]*?name: Attest immutable candidate tree and evidence binding[\s\S]*?subject-path: candidate-evidence-binding\.json/u
+  );
+  assert.match(
+    databaseRelease!,
+    /needs:\r?\n\s+- build-once/u
+  );
+  assert.match(managedMcp!, /needs:\r?\n\s+- database-release/u);
+  assert.match(staging!, /- managed-mcp-production-audit/u);
+  assert.match(production!, /- deploy-staging/u);
+  assert.equal(
+    (
+      deploy.match(
+        /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /gh attestation verify candidate-evidence-binding\.json/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /gh attestation verify supply-chain-release-receipt\.json/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    supplyChain,
+    /name: Bind exact-SHA supply-chain release evidence/u
+  );
+  assert.match(supplyChain, /^name: Supply Chain \(enforced\)$/mu);
+  assert.doesNotMatch(supplyChain, /audit-first/u);
+  assert.match(
+    supplyChain,
+    /schema: "archon\.supply-chain\.release-evidence"/u
+  );
+  assert.match(
+    supplyChain,
+    /mode: "blocking-zero-unwaived-findings"/u
+  );
+  assert.match(supplyChain, /acceptedWaivers: 0/u);
+  assert.match(supplyChain, /unwaivedFindings: 0/u);
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived static findings/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived infrastructure findings/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Enforce zero-unwaived vulnerability and license findings/u
+  );
+  assert.match(supplyChain, /cfn-lint==1\.53\.1/u);
+  assert.match(supplyChain, /sam validate[\s\S]*?--lint/u);
+  assert.match(
+    supplyChain,
+    /for scope in backend frontend lambda-content/u
+  );
+  assert.match(supplyChain, /"lambdaContent":0/u);
+  assert.match(supplyChain, /"lambdaContent":\s*"omitted-root-only"/u);
+  assert.match(supplyChain, /"catalogedDependencyPackages":\s*0/u);
+  assert.equal((supplyChain.match(/--exit-code 1/gu) ?? []).length, 1);
+  assert.equal((supplyChain.match(/--exit-code 0/gu) ?? []).length >= 2, true);
+  assert.match(
+    supplyChain,
+    /validate-trivy-iac-compatibility\.mjs[\s\S]*?--self-test/u
+  );
+  assert.match(
+    supplyChain,
+    /trivy-iac-compatibility-findings\.json/u
+  );
+  assert.match(
+    supplyChain,
+    /trivy-iac-blocking-findings\.json/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Materialize policy-effective Trivy IaC SARIF/u
+  );
+  assert.ok(policyEffectiveTrivy);
+  for (const contract of [
+    '.rawFindings == 3',
+    '.compatibilityFindings == 3',
+    '.blockingFindings == 0',
+    '.acceptedWaivers == 0',
+    'map(.namespace) == [',
+    '.logicalResource == $contract.logicalResource',
+    '.scannerResource == $contract.scannerResource',
+    '.startLine == $contract.sourceRange.startLine',
+    '.endLine == $contract.sourceRange.endLine',
+    '.sourceProperty == $contract.sourceProperty',
+    '.reason == $contract.reason',
+    '.controls == $contract.controls',
+    'WebACLId: !Ref CloudFrontWebAclArn',
+    'CloudFrontDefaultCertificate: true',
+    'KMSMasterKeyID: Fn::ImportValue \\"${AppName}-storage-kms-key-arn\\"',
+    '"mandatoryWebAclParameter":true',
+    '"customDomainAliases":false',
+    '"foundationCustomerManagedKey":true',
+    '"denyUnexpectedKeyWrites":true',
+    '$location.artifactLocation.uri == $finding.target',
+    '$location.region.startLine == $finding.startLine',
+    '$location.region.endLine == $finding.endLine',
+    '$location.region.startColumn == 1',
+    '$location.region.endColumn == 1',
+    '.results = [] |',
+    '$run.results == []',
+    '"rawFindings":3',
+    '"compatibilityFindings":3',
+    '"blockingFindings":0',
+    '"acceptedWaivers":0',
+    '"rawEvidence":"trivy-iac.sarif"',
+  ]) {
+    assert.ok(
+      policyEffectiveTrivy.includes(contract),
+      `policy-effective Trivy gate must retain ${contract}`
+    );
+  }
+  assert.ok(
+    policyEffectiveTrivy.includes(
+      'raw_sha_before="$(sha256sum "$raw" | awk \'{print $1}\')"'
+    )
+  );
+  assert.ok(
+    policyEffectiveTrivy.includes(
+      'test "$raw_sha_before" = "$(sha256sum "$raw" | awk \'{print $1}\')"'
+    )
+  );
+  assert.match(
+    policyEffectiveTrivy,
+    /\(\$run\.results \| length\) == 3[\s\S]*?\$location\.artifactLocation\.uri ==\s+\$contract\.target[\s\S]*?\$location\.region\.startLine ==\s+\$contract\.sourceRange\.startLine[\s\S]*?\$location\.region\.endLine ==\s+\$contract\.sourceRange\.endLine/u
+  );
+  assert.match(
+    policyEffectiveTrivy,
+    /jq -e 'length == 0' "\$blocking" >\/dev\/null/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Upload policy-effective Trivy IaC SARIF[\s\S]*?sarif_file: retrieved\/iac\/trivy-iac-policy\.sarif[\s\S]*?category: trivy\/iac/u
+  );
+  assert.doesNotMatch(
+    supplyChain,
+    /sarif_file: retrieved\/iac\/trivy-iac\.sarif/u
+  );
+  assert.match(supplyChain, /validate-trivy-sbom-policy\.mjs --self-test/u);
+  assert.match(supplyChain, /trivy-sbom-compatibility-findings\.json/u);
+  assert.match(supplyChain, /trivy-sbom-blocking-findings\.json/u);
+  assert.match(
+    supplyChain,
+    /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u
+  );
+  assert.match(supplyChain, /rawFindings == 3/u);
+  assert.match(supplyChain, /compatibilityFindings == 3/u);
+  assert.match(supplyChain, /rawFindings == 4/u);
+  assert.match(supplyChain, /approvedBuildLicenseFindings == 4/u);
+  assert.match(supplyChain, /blockingFindings == 0/u);
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /EXPECTED_SCANNER_VERSION = "0\.72\.0"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /ruleId: "AWS-0011"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /ruleId: "AWS-0013"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /ruleId: "AWS-0132"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /EXPECTED_TARGET = "aws\/template\.yaml"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /mandatoryWebAcl: true/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /dynamicOriginSecret: true/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /accessLogging: true/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /foundationCustomerManagedKey: true/u
+  );
+  assert.match(trivyIacCompatibilityValidator, /keyRotation: true/u);
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /captured Trivy version must be/u
+  );
+  assert.match(trivySbomPolicyValidator, /@csstools\/color-helpers/u);
+  assert.match(trivySbomPolicyValidator, /lightningcss-linux-x64-musl/u);
+  assert.match(trivySbomPolicyValidator, /license: "MIT-0"/u);
+  assert.match(trivySbomPolicyValidator, /license: "MPL-2\.0"/u);
+  assert.match(
+    trivySbomPolicyValidator,
+    /resolve\/test\/resolver\/invalid_main/u
+  );
+  assert.match(
+    supplyChain,
+    /name: Attest exact-SHA supply-chain release receipt[\s\S]*?actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u
+  );
+  assert.match(
+    supplyChain,
+    /name: supply-chain-release-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    supplyChain,
+    /audit_template edge-waf aws\/edge-waf\.yaml/u
+  );
+  assert.match(
+    supplyChain,
+    /audit_template finops aws\/finops\.yaml/u
+  );
+  assert.match(
+    supplyChain,
+    /lint_template finops aws\/finops\.yaml/u
+  );
+  assert.match(supplyChain, /iac\/guard-finops\.txt/u);
+  assert.match(
+    supplyChain,
+    /"aws\/finops\.yaml"/u
+  );
+  assert.deepEqual(JSON.parse(waivers), {
+    schema_version: 1,
+    policy: "docs/SUPPLY_CHAIN_SECURITY.md",
+    waivers: [],
+  });
+});
+
+test("readiness: exact-SHA memory evaluation is a required candidate-bound check context", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "tech.exact-sha-memory-evaluation-gate"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Technical Implementation");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const evaluation = readFileSync(
+    new URL("../.github/workflows/memory-evaluation.yml", import.meta.url),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const sourceGate = deploy.match(
+    /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const buildOnce = deploy.match(
+    /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(sourceGate);
+  assert.ok(buildOnce);
+  assert.match(evaluation, /^name: Memory architecture evaluation$/mu);
+  assert.match(
+    evaluation,
+    /^    name: Longitudinal, scale, and C-SPANN evidence$/mu
+  );
+  assert.match(
+    evaluation,
+    /memory-evaluation-\$\{\{\s*env\.SOURCE_SHA\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(
+    sourceGate!,
+    /actions\/workflows\/memory-evaluation\.yml\/runs\?branch=main&event=push/u
+  );
+  assert.match(
+    sourceGate!,
+    /\.name ==\s*\r?\n\s+"Longitudinal, scale, and C-SPANN evidence"/u
+  );
+  assert.match(
+    sourceGate!,
+    /gh run download "\$run_id"[\s\S]*?memory-evaluation-receipt\.json/u
+  );
+  assert.match(sourceGate!, /actual_receipt_digest/u);
+  assert.match(sourceGate!, /receipt_base64=/u);
+  assert.match(
+    buildOnce!,
+    /name: Bind exact-SHA Memory architecture evaluation receipt/u
+  );
+  assert.match(
+    buildOnce!,
+    /memoryEvaluation:\s*\{[\s\S]*?memoryEvaluationReceiptSha256[\s\S]*?candidate-evidence-binding\.json/u
+  );
+  assert.equal(
+    (deploy.match(/memory-evaluation-receipt\.json/gu) ?? []).length >= 8,
+    true
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /name: Verify candidate, Supply Chain, and memory-evaluation provenance/gu
+      ) ?? []
+    ).length,
+    2
+  );
+});
+
+test("readiness: Well-Architected audit is repository-first and live-read-only approval gated", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.well-architected-evidence-contract"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Production Readiness");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const workflow = readFileSync(
+    new URL(
+      "../.github/workflows/well-architected-audit.yml",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const deploy = readFileSync(
+    new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const repositoryJob = workflow.match(
+    /(?:^|\r?\n)  repository-contract:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  const liveJob = workflow.match(
+    /(?:^|\r?\n)  live-read-only:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(repositoryJob);
+  assert.ok(liveJob);
+  assert.doesNotMatch(repositoryJob!, /id-token:\s*write/u);
+  assert.doesNotMatch(repositoryJob!, /configure-aws-credentials/u);
+  assert.match(
+    liveJob!,
+    /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.mode == 'live-read-only'/u
+  );
+  assert.match(liveJob!, /environment:\r?\n\s+name: production-audit/u);
+  assert.match(liveJob!, /test "\$AWS_REGION" = "eu-west-1"/u);
+  assert.match(liveJob!, /test "\$FORBIDDEN_REGION" = "us-west-2"/u);
+  assert.match(audit, /edge-waf-control-plane-boundary/u);
+  assert.match(audit, /finops-control-plane-boundary/u);
+  assert.match(audit, /wa04-edge-protection-control-plane-source/u);
+  assert.match(audit, /wa05-database-credential-rotation-source/u);
+  assert.match(audit, /wa06-fault-injected-recovery-source/u);
+  assert.match(audit, /wa07-managed-backup-restore-source/u);
+  assert.match(audit, /wa08-hosted-performance-evidence-source/u);
+  assert.match(audit, /wa09-finops-controls-source/u);
+  assert.match(audit, /AWS::Budgets::Budget/u);
+  assert.match(audit, /AWS::CE::AnomalyMonitor/u);
+  assert.match(audit, /AWS::CE::AnomalySubscription/u);
+  assert.match(audit, /explicit-live-activation-required/u);
+  assert.match(audit, /not an application workload region/u);
+  assert.equal(
+    (workflow.match(/- "aws\/edge-waf\.yaml"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (workflow.match(/- "aws\/finops\.yaml"/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /- "\.github\/workflows\/edge-controls\.yml"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(/- "tests\/staging-recovery-drill\.test\.ts"/gu) ??
+      []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /- "aws\/fetch-codedeploy-appspec-revision\.sh"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /- "aws\/select-staging-codedeploy-rollback\.mjs"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.doesNotMatch(
+    deploy,
+    /cloudformation deploy[\s\S]*?--template-file aws\/edge-waf\.yaml/u
+  );
+  assert.doesNotMatch(
+    deploy,
+    /cloudformation deploy[\s\S]*?--template-file aws\/finops\.yaml/u
+  );
+});
+
+test("readiness: WA-10 sustainability intensity evidence is pipeline-owned and claim-safe", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.sustainability-intensity-evidence"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Production Readiness");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const workflow = readFileSync(
+    new URL(
+      "../.github/workflows/sustainability-intensity-evidence.yml",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const script = readFileSync(
+    new URL(
+      "../aws/measure-sustainability-intensity.sh",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(workflow, /environment:\s+sustainability-audit/u);
+  assert.match(workflow, /hosted_load_receipt_sha256/u);
+  assert.match(workflow, /comparison_mode == 'compare'/u);
+  assert.match(script, /successful_recalls/u);
+  assert.match(script, /equivalence_digest/u);
+  assert.match(script, /rawResponsesUploaded:\s+false/u);
+  assert.match(script, /emissionsMeasured:\s+false/u);
+  assert.doesNotMatch(script, /--region us-west-2/u);
+});
+
+test("readiness: WA-05 rotation is behaviorally proved and failure-actionable", () => {
+  const reportCheck = evaluate().checks.find(
+    (candidate) => candidate.id === "product.database-credential-rotation"
+  );
+  assert.ok(reportCheck);
+  assert.equal(reportCheck.criterion, "Production Readiness");
+  assert.equal(reportCheck.status, "pass", reportCheck.detail);
+
+  const source = readFileSync(
+    new URL("../scripts/readiness.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /ROTATION_INTERRUPTED_STATE_UNKNOWN/u);
+  assert.match(source, /lost Put response reconciles/u);
+  assert.match(source, /lost Update response requires exact current observation/u);
+  assert.match(source, /concurrent fake-pg refresh coalesces/u);
+  assert.match(source, /failed fake-pg candidate never replaces/u);
+});
+
 test("readiness: both CloudFormation roles have scoped transform, HTTP API tag, and drift-discovery permissions", () => {
   const bootstrap = readFileSync(
     new URL("../aws/bootstrap-oidc.yaml", import.meta.url),
@@ -2601,6 +3857,30 @@ test("readiness: both CloudFormation roles have scoped transform, HTTP API tag, 
     /- Sid: ApiGatewayV2ApiTags\s+Effect: Allow\s+Action:\s+- apigateway:DELETE\s+- apigateway:GET\s+- apigateway:POST\s+Resource: !Sub "arn:\$\{AWS::Partition\}:apigateway:\$\{AWS::Region\}::\/tags\/\*"/u
   );
   assert.match(commonPolicy, /- codedeploy:ListDeployments$/mu);
+  const stagingCodeDeployInspection = bootstrap.match(
+    /  StagingCodeDeployInspectionPolicy:[\s\S]*?\n  StagingAlarmRoutingInspectionPolicy:/u
+  )?.[0];
+  assert.ok(stagingCodeDeployInspection);
+  const stagingInspectionActions = [
+    ...stagingCodeDeployInspection.matchAll(
+      /(?:Action:\s+|- )(codedeploy:[A-Za-z]+)$/gmu
+    ),
+  ].map((match) => match[1]).sort();
+  assert.deepEqual(stagingInspectionActions, [
+    "codedeploy:GetApplicationRevision",
+    "codedeploy:GetDeployment",
+    "codedeploy:GetDeploymentGroup",
+    "codedeploy:ListDeployments",
+  ]);
+  assert.match(
+    stagingCodeDeployInspection,
+    /application:\$\{AppName\}-staging-\*/u
+  );
+  assert.match(
+    stagingCodeDeployInspection,
+    /deploymentgroup:\$\{AppName\}-staging-\*\/\*/u
+  );
+  assert.doesNotMatch(stagingCodeDeployInspection, /Resource: "\*"/u);
   assert.match(commonPolicy, /- logs:DescribeIndexPolicies$/mu);
   assert.ok(stagingResourcePolicy);
   assert.match(
@@ -2753,6 +4033,15 @@ test("readiness: named HTTP API stage controls are proved from transform to live
     '.database.database == "archon"',
     '.vectorIndex.engine == "native CockroachDB C-SPANN"',
     '.vectorIndex.prefixes == ["tenant_id","embed_model","status","company"]',
+    ".resolutionLoop.enabled == true",
+    ".resolutionLoop.schemaTables == 5",
+    '.resolutionLoop.transactionIsolation == "SERIALIZABLE"',
+    '.resolutionLoop.authorityBoundary ==',
+    '"financial-controller-human-gate"',
+    '.resolutionLoop.identityAssurance ==',
+    '"fixed-demo-role-assertion-not-authenticated"',
+    '.resolutionLoop.canonicalMemoryMutable == false',
+    '.resolutionLoop.externalSideEffects == "none"',
     '.embeddingModel == "amazon.titan-embed-text-v2:0"',
     '.narrationModel == "eu.anthropic.claude-sonnet-4-6"',
     'keys == ["access","company","dataClassification","mode","source","tenantId"]',
@@ -2872,7 +4161,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (workflow.match(/--template-stage Original/gu) ?? []).length,
-    4
+    5
   );
   assert.equal(
     (workflow.match(/bash aws\/restore-cloudformation-stack\.sh/gu) ?? [])
@@ -3167,7 +4456,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
-    3
+    6
   );
   assert.equal(
     (bootstrap.match(/- cloudfront:GetDistribution$/gmu) ?? []).length,
@@ -3195,12 +4484,21 @@ test("readiness: named HTTP API stage controls are proved from transform to live
       action === "logs:DescribeLogStreams" ||
       action === "logs:FilterLogEvents"
         ? 3
-        : 1;
+        : action === "logs:CreateLogDelivery" ||
+            action === "logs:DeleteLogDelivery" ||
+            action === "logs:DescribeResourcePolicies" ||
+            action === "logs:PutResourcePolicy"
+          ? 2
+          : 1;
     assert.equal(
       (bootstrap.match(new RegExp(`- ${action}$`, "gmu")) ?? []).length,
       expectedCount
     );
   }
+  assert.match(
+    bootstrap,
+    /Sid: ConfigureOnlyCloudFormationWafLogDelivery[\s\S]*?- logs:CreateLogDelivery\s+- logs:DeleteLogDelivery\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+- logs:PutResourcePolicy[\s\S]*?Resource: "\*"[\s\S]*?aws:RequestedRegion: us-east-1[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
   assert.equal(
     (
       bootstrap.match(
@@ -3272,7 +4570,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   }
   assert.equal(
     (bootstrap.match(/- codedeploy:ListDeployments$/gmu) ?? []).length,
-    1
+    2
   );
   for (const fragment of [
     "read_bounded_poll_setting",

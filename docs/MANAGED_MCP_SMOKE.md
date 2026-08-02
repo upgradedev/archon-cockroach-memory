@@ -1,10 +1,12 @@
-# CockroachDB Cloud Managed MCP — receipt schema v2
+# CockroachDB Cloud Managed MCP — receipt schema v3
 
 Archon Memory uses CockroachDB Cloud's hosted **Managed MCP Server** as an
 independent production-readiness control plane. This is distinct from the
 application-owned memory MCP server.
 
-The protected audit is read-only and calls exactly four advertised tools, once
+## Current causal v3 contract
+
+The protected audit is read-only and calls four required advertised tools, once
 each and in this order:
 
 1. `get_cluster`;
@@ -12,9 +14,32 @@ each and in this order:
 3. `get_table_schema`; and
 4. `select_query`.
 
-No create, insert, update, or administrative Managed MCP tool is called.
+If the server advertises a compatible `explain_query`, it is called immediately
+before `select_query` and must prove a native `vector search` plan using
+`idx_agent_memory_company_scope_embedding`. If it is not advertised, the
+receipt records `not-advertised` and binds the SHA-256 of the exact database
+release receipt that already proved the runtime-principal C-SPANN plan and
+execution. An advertised but incompatible or unprovable capability fails
+closed; it is never silently downgraded. No create, insert, update, or
+administrative Managed MCP tool is called.
 
-## Exact bounded Store proof
+Receipt schema v3 additionally binds the exact 40-character release commit,
+database release receipt digest, actual four- or five-entry tool sequence,
+EXPLAIN status, and optional sanitized plan fingerprint. Raw SQL plans, cluster
+identifiers, credentials, memory text, and embeddings remain excluded.
+
+The source implementation is a causal promotion gate:
+
+```text
+database release → Managed MCP v3 → staging → production
+```
+
+Schema v3 is not yet claimed as live evidence. It becomes live only after the
+new exact source SHA passes main CI, protected database release, the
+pre-promotion Managed MCP job, staging, production, and the independent
+post-production Managed MCP audit.
+
+## Required bounded Store proof
 
 `select_query` receives SQL fixed in
 [`scripts/cloud-mcp-audit.ts`](../scripts/cloud-mcp-audit.ts). It cannot be
@@ -49,9 +74,9 @@ Additional/missing keys, additional/missing rows, numeric strings, negative or
 fractional counts, unsafe integers, invalid JSON, ambiguous structured/text
 payloads, and any value other than `9 / 9 / 9` fail closed.
 
-## Sanitized v2 receipt contract
+## Historical sanitized v2 receipt contract
 
-The receipt contains only:
+The predecessor receipt contained only:
 
 - `schemaVersion: 2`, `ok`, and a UTC `checkedAt`;
 - the public Managed MCP endpoint and a validated database identifier;

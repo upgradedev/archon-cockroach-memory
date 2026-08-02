@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAudit, getHealth, getProof, PublicApiError, recallMemory } from "./api";
+import {
+  createResolutionSession,
+  decideResolution,
+  getAudit,
+  getHealth,
+  getProof,
+  PublicApiError,
+  recallMemory,
+} from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -30,6 +38,22 @@ function finalizedProofBody() {
       definitionFingerprint:
         "b7cc3c41bf7ba74c53ce75f7a8937132ef5facb5f4c78b5bfd52ad8667244d70",
     },
+    resolutionLoop: {
+      enabled: true,
+      schemaTables: 5,
+      activeSandboxSessions: 0,
+      transactionIsolation: "SERIALIZABLE",
+      authorityBoundary: "financial-controller-human-gate",
+      identityAssurance: "fixed-demo-role-assertion-not-authenticated",
+      idempotency: "decision-key+database-unique-constraint",
+      receipt: "SHA-256 immutable decision record",
+      learning: "conflict-observation+human-decision",
+      consolidation: "versioned current/superseded state",
+      forgetting: "CockroachDB row-level TTL",
+      canonicalMemoryMutable: false,
+      externalSideEffects: "none",
+      evidence: "live fixed-scope sandbox schema query",
+    },
     embeddingModel: "amazon.titan-embed-text-v2:0",
     narrationModel: "eu.anthropic.claude-sonnet-4-6",
     memory: {
@@ -50,6 +74,98 @@ function finalizedProofBody() {
     },
     features: ["C-SPANN vector search", { name: "RF=3 survivability" }],
     generatedAt: new Date().toISOString(),
+  };
+}
+
+function resolutionBody(
+  state: "pending" | "approved" | "rejected" = "pending",
+) {
+  const priorId = "11111111-1111-4111-8111-111111111111";
+  const correctedId = "22222222-2222-4222-8222-222222222222";
+  return {
+    sessionId: "33333333-3333-4333-8333-333333333333",
+    scenarioId: "helios-payroll-2026-06-correction-v1",
+    company: "Helios SA",
+    period: "2026-06",
+    state,
+    expiresAt: "2026-08-01T12:00:00.000Z",
+    observations: [
+      {
+        id: priorId,
+        label: "prior",
+        sourceRef: "payroll-register-2026-06-v1",
+        sourceClass: "payroll-register",
+        observedAt: "2026-07-01T08:00:00.000Z",
+        authorityRank: 60,
+        employerCostCents: 12_440_000,
+        employerCostDisplay: "€124,400.00",
+        status: state === "approved" ? "superseded" : "current",
+      },
+      {
+        id: correctedId,
+        label: "corrected",
+        sourceRef: "signed-payroll-register-2026-06-v2",
+        sourceClass: "signed-payroll-register",
+        observedAt: "2026-07-08T10:30:00.000Z",
+        authorityRank: 100,
+        employerCostCents: 12_890_000,
+        employerCostDisplay: "€128,900.00",
+        status:
+          state === "approved"
+            ? "current"
+            : state === "rejected"
+              ? "rejected"
+              : "candidate",
+      },
+    ],
+    proposal: {
+      id: "44444444-4444-4444-8444-444444444444",
+      action: "resolve-conflicting-memory",
+      status: state,
+      proposedObservationId: correctedId,
+      supersedesObservationId: priorId,
+      rationale:
+        "Prefer the newer signed payroll register, but preserve both sources and require a financial controller decision.",
+      requiresHumanRole: "financial-controller",
+    },
+    receipt:
+      state !== "pending"
+        ? {
+            algorithm: "sha256",
+            digest: "a".repeat(64),
+            decisionId: "55555555-5555-4555-8555-555555555555",
+            decidedAt: "2026-07-31T09:00:00.000Z",
+            actorRole: "financial-controller",
+            policyVersion: "resolution-policy-v1",
+          }
+        : null,
+    lifecycle: {
+      learning:
+        state === "approved"
+          ? "human-approved-correction"
+          : state === "rejected"
+            ? "human-rejected-correction"
+            : "two-source-conflict-observed",
+      consolidation:
+        state === "approved"
+          ? "approved-observation-is-current"
+          : state === "rejected"
+            ? "prior-observation-remains-current"
+            : "awaiting-human-decision",
+      forgetting:
+        state === "pending"
+          ? "session-scoped-ttl-pending"
+          : "session-scoped-ttl-after-decision",
+      externalSideEffects: "none",
+    },
+    policy: {
+      version: "resolution-policy-v1",
+      conflictRule: "newer-higher-authority-evidence-is-proposed",
+      authorityBoundary: "human-approval-required",
+      mutationScope: "ephemeral-synthetic-session-only",
+      retention: "row-level-ttl",
+      canonicalMemoryMutable: false,
+    },
   };
 }
 
@@ -587,6 +703,173 @@ describe("public API client", () => {
       expect.objectContaining<Partial<PublicApiError>>({
         message:
           "Recall extractive answer did not match the exact cited evidence rendering.",
+      }),
+    );
+  });
+
+  it("opens a fixed isolated resolution session without caller-selected data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        sessionToken: "A".repeat(43),
+        tokenType: "Bearer",
+        snapshot: resolutionBody(),
+      }, 201),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const session = await createResolutionSession();
+
+    expect(session.token).toBe("A".repeat(43));
+    expect(session.snapshot.state).toBe("pending");
+    expect(session.snapshot.policy.canonicalMemoryMutable).toBe(false);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/resolution/session");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe("{}");
+  });
+
+  it("submits an exact idempotent human decision with the bearer capability", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ snapshot: resolutionBody("approved"), idempotent: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const token = "B".repeat(43);
+    const idempotencyKey = "12345678-1234-4234-8234-123456789abc";
+
+    const snapshot = await decideResolution(
+      token,
+      "approve",
+      idempotencyKey,
+    );
+
+    expect(snapshot.state).toBe("approved");
+    expect(snapshot.receipt?.digest).toHaveLength(64);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/resolution/decision");
+    expect(init.headers).toEqual(
+      expect.objectContaining({ authorization: `Bearer ${token}` }),
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      decision: "approve",
+      idempotencyKey,
+    });
+  });
+
+  it("accepts only the exact rejected state graph and lifecycle", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({
+            snapshot: resolutionBody("rejected"),
+            idempotent: true,
+          }),
+        ),
+    );
+
+    const snapshot = await decideResolution(
+      "R".repeat(43),
+      "reject",
+      "12345678-1234-4234-8234-123456789abc",
+    );
+
+    expect(snapshot.state).toBe("rejected");
+    expect(
+      snapshot.observations.map(({ label, status }) => [label, status]),
+    ).toEqual([
+      ["prior", "current"],
+      ["corrected", "rejected"],
+    ]);
+    expect(snapshot.lifecycle).toEqual({
+      learning: "human-rejected-correction",
+      consolidation: "prior-observation-remains-current",
+      forgetting: "session-scoped-ttl-after-decision",
+      externalSideEffects: "none",
+    });
+  });
+
+  it("fails closed on state graph, lifecycle, evidence, display, or rationale drift", async () => {
+    const driftCases: Array<{
+      mutate: (body: ReturnType<typeof resolutionBody>) => void;
+    }> = [
+      {
+        mutate: (body) => {
+          body.observations[1]!.status = "current";
+        },
+      },
+      {
+        mutate: (body) => {
+          body.lifecycle.learning = "human-approved-correction";
+        },
+      },
+      {
+        mutate: (body) => {
+          body.observations[0]!.observedAt =
+            "2026-07-01T08:00:01.000Z";
+        },
+      },
+      {
+        mutate: (body) => {
+          body.observations[1]!.employerCostDisplay = "€128,900";
+        },
+      },
+      {
+        mutate: (body) => {
+          body.proposal.rationale = "Trust the corrected source.";
+        },
+      },
+      {
+        mutate: (body) => {
+          body.observations.reverse();
+        },
+      },
+    ];
+
+    for (const drift of driftCases) {
+      const forged = resolutionBody();
+      drift.mutate(forged);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse(
+            {
+              sessionToken: "D".repeat(43),
+              tokenType: "Bearer",
+              snapshot: forged,
+            },
+            201,
+          ),
+        ),
+      );
+
+      await expect(createResolutionSession()).rejects.toEqual(
+        expect.objectContaining<Partial<PublicApiError>>({
+          name: "PublicApiError",
+          endpoint: "/api/resolution",
+        }),
+      );
+    }
+  });
+
+  it("fails closed when the resolution graph or authority contract is forged", async () => {
+    const forged = resolutionBody();
+    forged.policy.canonicalMemoryMutable = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          sessionToken: "C".repeat(43),
+          tokenType: "Bearer",
+          snapshot: forged,
+        }, 201),
+      ),
+    );
+
+    await expect(createResolutionSession()).rejects.toEqual(
+      expect.objectContaining<Partial<PublicApiError>>({
+        message:
+          "Resolution response violated the fixed evidence and authority contract.",
       }),
     );
   });

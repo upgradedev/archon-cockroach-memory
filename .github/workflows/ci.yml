@@ -16,7 +16,10 @@ permissions:
   contents: read
 
 jobs:
-  # Stage 1 — fail fast on any committed secret (ADR-005).
+  # Stage 1 — fail fast on any secret in the exact candidate tree (ADR-005).
+  # Protected-main pushes additionally scan the full reachable history. Pull
+  # requests scan the merge candidate tree so a removed synthetic fixture in an
+  # unmerged intermediate commit cannot permanently block a clean squash merge.
   secret-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -24,15 +27,69 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - name: gitleaks detect (verified v8.30.1, redacted)
+          persist-credentials: false
+      - name: gitleaks exact-tree and protected-main history (verified v8.30.1, redacted)
         run: |
           set -euo pipefail
-          curl -sSLo /tmp/gitleaks.tar.gz \
+          GITLEAKS_DIR="$RUNNER_TEMP/archon-gitleaks"
+          GITLEAKS_ARCHIVE="$GITLEAKS_DIR/gitleaks.tar.gz"
+          GITLEAKS_TREE_REPORT="$GITLEAKS_DIR/raw-tree-report.json"
+          GITLEAKS_HISTORY_REPORT="$GITLEAKS_DIR/raw-history-report.json"
+          mkdir -p "$GITLEAKS_DIR"
+          trap 'rm -f "$GITLEAKS_TREE_REPORT" "$GITLEAKS_HISTORY_REPORT"' EXIT
+          curl -sSLo "$GITLEAKS_ARCHIVE" \
             https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" |
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $GITLEAKS_ARCHIVE" |
             sha256sum --check
-          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          /tmp/gitleaks detect --source . --redact --no-banner
+          tar -xzf "$GITLEAKS_ARCHIVE" -C "$GITLEAKS_DIR" gitleaks
+
+          report_sanitized_findings() {
+            local scope="$1"
+            local report="$2"
+            if [[ ! -s "$report" ]]; then
+              return
+            fi
+            echo "Sanitized gitleaks $scope findings (secret and match omitted):"
+            jq -c \
+              --arg scope "$scope" \
+              'map({
+                scope: $scope,
+                ruleId: .RuleID,
+                file: .File,
+                startLine: .StartLine,
+                endLine: .EndLine,
+                commit: (.Commit // "")
+              })' \
+              "$report"
+          }
+
+          set +e
+          "$GITLEAKS_DIR/gitleaks" dir . \
+            --redact \
+            --no-banner \
+            --report-format json \
+            --report-path "$GITLEAKS_TREE_REPORT"
+          GITLEAKS_TREE_STATUS="$?"
+          set -e
+          report_sanitized_findings exact-tree "$GITLEAKS_TREE_REPORT"
+
+          GITLEAKS_HISTORY_STATUS=0
+          if [[ "$GITHUB_EVENT_NAME" = "push" &&
+                "$GITHUB_REF" = "refs/heads/main" ]]; then
+            set +e
+            "$GITLEAKS_DIR/gitleaks" git . \
+              --redact \
+              --no-banner \
+              --report-format json \
+              --report-path "$GITLEAKS_HISTORY_REPORT"
+            GITLEAKS_HISTORY_STATUS="$?"
+            set -e
+            report_sanitized_findings protected-main-history \
+              "$GITLEAKS_HISTORY_REPORT"
+          fi
+
+          test "$GITLEAKS_TREE_STATUS" -eq 0
+          test "$GITLEAKS_HISTORY_STATUS" -eq 0
       - name: Verify generated artifacts stay ignored
         shell: bash
         run: |
@@ -74,6 +131,26 @@ jobs:
             bench-uniform.txt
             distribution.txt
             submission-readiness-receipt.json
+            supply-chain-release-receipt.json
+            well-architected-repository-receipt.json
+            well-architected-live-receipt.json
+            aws-account-security-baseline-receipt.json
+            database-credential-rotation-receipt.json
+            hosted-load-receipt.json
+            hosted-k6-summary.json
+            hosted-load-contract.sha256
+            k6-machine-readable-schema.json
+            sustainability-intensity-receipt.json
+            human-impact-receipt.json
+            evidence-manifest.sha256
+            lambda-zip-content.sha256
+            sbom-inputs-and-documents.sha256
+            memory-evaluation-receipt.json
+            policy-results.json
+            scale-manifest.json
+            vector-results.json
+            vector-benchmark.log
+            candidate-evidence-binding.json
             production-capture.webm
             capture-receipt.json
             narration-receipt.json
@@ -109,6 +186,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
@@ -126,6 +205,8 @@ jobs:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -143,14 +224,13 @@ jobs:
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
           echo "Waiting for CockroachDB to accept SQL..."
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
               echo "ready"; break
             fi
             sleep 2
           done
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_migration"
-          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_reconciliation"
           # Fail loudly if it never came up.
           docker exec crdb cockroach sql --insecure -e "SELECT 1"
 
@@ -159,10 +239,28 @@ jobs:
           DATABASE_URL: postgresql://root@localhost:26257/archon_migration?sslmode=disable
         run: npm run db:migration:rehearsal
 
+      - name: Replace the isolated migration database with reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec crdb cockroach sql --insecure \
+            -e "DROP DATABASE archon_migration CASCADE"
+          docker exec crdb cockroach sql --insecure \
+            -e "DROP USER archon_migration_ci"
+          docker exec crdb cockroach sql --insecure \
+            -e "CREATE DATABASE archon_reconciliation"
+
       - name: Rehearse exact legacy-memory rejection, post-mutation rollback, and rerun
         env:
           DATABASE_URL: postgresql://root@localhost:26257/archon_reconciliation?sslmode=disable
         run: npm run db:memory:reconciliation:rehearsal
+
+      - name: Remove the isolated reconciliation database
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec crdb cockroach sql --insecure \
+            -e "DROP DATABASE archon_reconciliation CASCADE"
 
       - name: Bootstrap the safe local demo twice and prove exact idempotency
         shell: bash
@@ -221,6 +319,8 @@ jobs:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -278,6 +378,8 @@ jobs:
       DATABASE_URL: postgresql://root@localhost:26257/archon_memory?sslmode=disable
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
@@ -288,7 +390,7 @@ jobs:
         run: |
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
             sleep 2
           done
@@ -303,7 +405,10 @@ jobs:
           set -euo pipefail
           docker exec crdb cockroach sql --insecure --database archon_memory --execute "
             CREATE USER IF NOT EXISTS archon_runtime_ci;
+            GRANT CONNECT ON DATABASE archon_memory TO archon_runtime_ci;
+            GRANT USAGE ON SCHEMA public TO archon_runtime_ci;
             GRANT archon_public_reader TO archon_runtime_ci;
+            GRANT archon_resolution_writer TO archon_runtime_ci;
             UPDATE agent_memory
                SET tenant_id = 'public-demo', company = 'Helios SA', status = 'active'
              WHERE id = (SELECT id FROM agent_memory LIMIT 1);
@@ -327,6 +432,12 @@ jobs:
           SCOPED="${RESULT##*,}"
           test "$VISIBLE" -ge 1
           test "$VISIBLE" = "$SCOPED"
+      - name: Exercise resolution loop through the least-privilege runtime login
+        env:
+          DATABASE_URL: postgresql://archon_runtime_ci@localhost:26257/archon_memory?sslmode=disable
+        run: >-
+          node --import tsx --test --test-concurrency=1
+          tests/resolution.test.ts
       - name: Dump CockroachDB logs on failure
         if: failure()
         run: docker logs crdb || true
@@ -345,6 +456,8 @@ jobs:
       PUBLIC_DEMO_COMPANY: LoadCorp
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
@@ -355,11 +468,65 @@ jobs:
         uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
         with:
           k6-version: "2.0.0"
+      - name: Inspect hosted-load module without network
+        env:
+          BASE_URL: https://d111111abcdef8.cloudfront.net
+          RELEASE_SHA: "0000000000000000000000000000000000000000"
+          TOTAL_ITERATIONS: "20"
+          VUS: "2"
+          MAX_DURATION_SECONDS: "60"
+          P95_LATENCY_MS: "5000"
+          MAX_ERROR_RATE: "0.01"
+          K6_NO_USAGE_REPORT: "true"
+        run: |
+          set -euo pipefail
+          # `inspect` evaluates imports, init code, and options. It never runs
+          # setup/default, so the dummy CloudFront origin receives no request.
+          # k6 deliberately excludes system env from `inspect`; explicit `-e`
+          # flags make this validation independent of that secure default.
+          k6 inspect \
+            -e BASE_URL="$BASE_URL" \
+            -e RELEASE_SHA="$RELEASE_SHA" \
+            -e TOTAL_ITERATIONS="$TOTAL_ITERATIONS" \
+            -e VUS="$VUS" \
+            -e MAX_DURATION_SECONDS="$MAX_DURATION_SECONDS" \
+            -e P95_LATENCY_MS="$P95_LATENCY_MS" \
+            -e MAX_ERROR_RATE="$MAX_ERROR_RATE" \
+            load/hosted-recall.js >/dev/null
+      - name: Prove pinned k6 machine-readable summary schema without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="${RUNNER_TEMP:?}/k6-machine-readable-schema.json"
+          k6 run \
+            --new-machine-readable-summary \
+            --summary-export="$summary" \
+            load/k6-summary-schema-smoke.js
+          jq -e '
+            (
+              .results.metrics
+              | map({key: .name, value: .})
+              | from_entries
+            ) as $metrics
+            | .version == "1.0.0"
+              and (.results.metrics | type) == "array"
+              and ([.results.metrics[].name] | length)
+                == ([.results.metrics[].name] | unique | length)
+              and $metrics.iterations.type == "counter"
+              and $metrics.iterations.values.count == 1
+              and $metrics.archon_schema_counter.type == "counter"
+              and $metrics.archon_schema_counter.values.count == 1
+              and $metrics.archon_schema_rate.type == "rate"
+              and $metrics.archon_schema_rate.values.rate == 1
+              and $metrics.archon_schema_trend_ms.type == "trend"
+              and $metrics.archon_schema_trend_ms.values.p95 == 42
+          ' "$summary" >/dev/null
+          rm -f -- "$summary"
       - name: Start CockroachDB
         run: |
           docker run -d --name crdb -p 26257:26257 -p 8080:8080 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 start-single-node --insecure
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then echo ready; break; fi
             sleep 2
           done
@@ -372,7 +539,7 @@ jobs:
         run: |
           PORT=8787 npm run serve &
           echo $! > server.pid
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -fsS http://localhost:8787/health >/dev/null 2>&1; then echo "server up"; break; fi
             sleep 1
           done
@@ -407,6 +574,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
@@ -455,7 +624,9 @@ jobs:
           bash -n aws/prove-recovery-snapshot.sh
           bash -n aws/merge-canonical-stack-tags.sh
           bash -n aws/serialize-sam-stack-tags.sh
+          bash -n aws/classify-github-recovery-preflight.sh
           bash -n aws/classify-durable-recovery-source.sh
+          bash -n aws/fetch-codedeploy-appspec-revision.sh
           bash -n aws/create-durable-recovery-bundle.sh
           bash -n aws/delete-greenfield-stack.sh
           bash -n aws/download-durable-recovery-bundle.sh
@@ -506,45 +677,192 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Stage 2g — independent hosted-surface evidence. The bounded active probes
-  # bind their receipt to the release SHA reported by production itself; ZAP
-  # independently spiders the same owned HTTPS origin and fails on findings.
-  # A second exact-release scan runs automatically after every AWS deployment.
+  # Stage 2g — deterministic pre-deploy DAST. The complete 21-check adversarial
+  # contract runs against controlled responses, while digest-pinned ZAP spiders
+  # the exact candidate SPA built by this SHA. Live active probes and release-
+  # policy ZAP remain a blocking causal tail of every production deployment.
   hosted-dast:
+    name: Pre-deploy DAST contract and candidate SPA
     needs: secret-scan
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net
-      DAST_SCANNER_SHA: ${{ github.sha }}
+      DAST_CANDIDATE_URL: http://127.0.0.1:4173
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
-      - name: Run bounded active production probes
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Install locked DAST and candidate dependencies
+        run: |
+          npm ci
+          npm ci --prefix web
+      - name: Prove the complete 21-check adversarial DAST contract
+        shell: bash
         env:
-          DAST_RECEIPT_PATH: ${{ runner.temp }}/hosted-dast.json
-        run: node scripts/hosted-dast.mjs
-      - name: Upload sanitized hosted DAST receipt
+          DAST_CONTRACT_TAP: ${{ runner.temp }}/hosted-dast-contract.tap
+        run: |
+          set -euo pipefail
+          node --import tsx --test --test-concurrency=1 \
+            tests/hosted-dast.test.ts | tee "$DAST_CONTRACT_TAP"
+      - name: Upload SHA-bound pre-deploy DAST contract evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hosted-dast-ci-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/hosted-dast.json
+          name: dast-contract-ci-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hosted-dast-contract.tap
           if-no-files-found: error
           retention-days: 90
-      - name: OWASP ZAP passive and AJAX-spider baseline
-        if: always()
+      - name: Build the exact candidate SPA
+        run: npm run build --prefix web
+      - name: Start the loopback-only transport-aware candidate server
+        shell: bash
+        env:
+          PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
+          PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
+        run: |
+          set -euo pipefail
+          PREDEPLOY_WEB_ROOT="$GITHUB_WORKSPACE/web/dist" \
+          PREDEPLOY_ZAP_PORT=4173 \
+            node scripts/predeploy-zap-server.mjs \
+              >"$PREDEPLOY_ZAP_LOG_FILE" 2>&1 &
+          server_pid=$!
+          printf '%s\n' "$server_pid" >"$PREDEPLOY_ZAP_PID_FILE"
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              sed -n '1,80p' -- "$PREDEPLOY_ZAP_LOG_FILE" >&2
+              exit 1
+            fi
+            candidate_body="$(
+              curl --fail --silent --show-error --max-time 2 \
+                "$DAST_CANDIDATE_URL/"
+            )" || true
+            if grep -Fq '<div id="root"></div>' <<<"$candidate_body"; then
+              kill -0 "$server_pid"
+              exit 0
+            fi
+            sleep 1
+          done
+          sed -n '1,80p' -- "$PREDEPLOY_ZAP_LOG_FILE" >&2
+          exit 1
+      - name: OWASP ZAP passive and AJAX-spider candidate baseline
         uses: zaproxy/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874 # v0.15.0
         with:
-          target: https://d2s5v0o0eg2aaw.cloudfront.net
+          target: ${{ env.DAST_CANDIDATE_URL }}
           rules_file_name: .zap/predeploy.tsv
           docker_name: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
           cmd_options: "-a -j -m 2"
           fail_action: true
           allow_issue_writing: false
           artifact_name: zap-baseline-ci-${{ github.sha }}-${{ github.run_attempt }}
+      - name: Require the candidate server to remain healthy and clean up
+        if: always()
+        shell: bash
+        env:
+          PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
+          PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
+        run: |
+          set -euo pipefail
+          cleanup_candidate_metadata() {
+            rm -f -- \
+              "$PREDEPLOY_ZAP_PID_FILE" "$PREDEPLOY_ZAP_LOG_FILE" || true
+          }
+          trap cleanup_candidate_metadata EXIT
+          if [ ! -f "$PREDEPLOY_ZAP_PID_FILE" ]; then
+            exit 0
+          fi
+          server_pid="$(cat "$PREDEPLOY_ZAP_PID_FILE")"
+          [[ "$server_pid" =~ ^[1-9][0-9]*$ ]]
+          alive=false
+          healthy=false
+          candidate_identity=false
+          shutdown_clean=false
+          forced_cleanup=false
+          process_absent=false
+          if kill -0 "$server_pid" 2>/dev/null; then
+            alive=true
+            candidate_cmdline=""
+            if candidate_cmdline="$(
+                tr '\0' ' ' 2>/dev/null \
+                  <"/proc/$server_pid/cmdline"
+              )" && [[ "$candidate_cmdline" == \
+                *"node scripts/predeploy-zap-server.mjs"* ]]; then
+              candidate_identity=true
+            fi
+            if curl --fail --silent --show-error --max-time 2 \
+                "$DAST_CANDIDATE_URL/" >/dev/null; then
+              healthy=true
+            fi
+            if [ "$candidate_identity" = "true" ]; then
+              if kill -TERM "$server_pid"; then
+                for _ in $(seq 1 40); do
+                  if ! kill -0 "$server_pid" 2>/dev/null; then
+                    shutdown_clean=true
+                    process_absent=true
+                    break
+                  fi
+                  poll_cmdline=""
+                  if poll_cmdline="$(
+                      tr '\0' ' ' 2>/dev/null \
+                        <"/proc/$server_pid/cmdline"
+                    )" && [[ "$poll_cmdline" != \
+                      *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                    shutdown_clean=true
+                    process_absent=true
+                    break
+                  fi
+                  sleep 0.25
+                done
+              elif ! kill -0 "$server_pid" 2>/dev/null; then
+                shutdown_clean=true
+                process_absent=true
+              fi
+              if kill -0 "$server_pid" 2>/dev/null; then
+                forced_cmdline=""
+                if forced_cmdline="$(
+                    tr '\0' ' ' 2>/dev/null \
+                      <"/proc/$server_pid/cmdline"
+                  )" && [[ "$forced_cmdline" == \
+                    *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                  forced_cleanup=true
+                  kill -KILL "$server_pid" || true
+                  for _ in $(seq 1 20); do
+                    if ! kill -0 "$server_pid" 2>/dev/null; then
+                      process_absent=true
+                      break
+                    fi
+                    post_kill_cmdline=""
+                    if post_kill_cmdline="$(
+                        tr '\0' ' ' 2>/dev/null \
+                          <"/proc/$server_pid/cmdline"
+                      )" && [[ "$post_kill_cmdline" != \
+                        *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                      process_absent=true
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                elif ! kill -0 "$server_pid" 2>/dev/null ||
+                    [ -n "$forced_cmdline" ]; then
+                  shutdown_clean=true
+                  process_absent=true
+                fi
+              fi
+            fi
+          fi
+          cleanup_candidate_metadata
+          test "$alive" = "true"
+          test "$healthy" = "true"
+          test "$candidate_identity" = "true"
+          test "$shutdown_clean" = "true"
+          test "$forced_cleanup" = "false"
+          test "$process_absent" = "true"
 
   # Stage 2h — guard the media guard. Tiny runner-temp fixtures prove that the
   # final-video verifier accepts a correct package and rejects scene, A/V,
@@ -605,6 +923,8 @@ jobs:
           set -euo pipefail
           jq -e 'length == 9 and all(.[]; .result == "success")' <<<"$PREREQUISITE_RESULTS"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1

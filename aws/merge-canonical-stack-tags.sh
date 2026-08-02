@@ -15,7 +15,7 @@ for name in APP_NAME ENVIRONMENT; do
   fi
 done
 
-if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,24}$ ]]; then
+if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]]; then
   echo "APP_NAME is invalid for canonical stack tags." >&2
   exit 1
 fi

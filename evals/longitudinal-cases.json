@@ -1,0 +1,825 @@
+{
+  "schemaVersion": "1.0.0",
+  "dataset": {
+    "id": "archon-longitudinal-finance-v1",
+    "description": "Rights-safe synthetic financial-memory cases spanning multiple sessions, temporal corrections, conflicts, abstention, and human-gated actions.",
+    "provenance": "Independently authored synthetic data. It is not customer data and is not a production-scale corpus.",
+    "currency": "EUR",
+    "semanticScores": "Fixed retrieval scores are fixture inputs for policy comparison. They are not claimed to be measurements from an embedding model or C-SPANN."
+  },
+  "defaults": {
+    "semanticThreshold": 0.75,
+    "authorityMargin": 20
+  },
+  "cases": [
+    {
+      "id": "persistent-payroll-across-three-sessions",
+      "tags": ["longitudinal", "multi-session"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "june-payroll-cost",
+        "text": "What was the June employer payroll cost?"
+      },
+      "evidence": [
+        {
+          "id": "payroll-june-register",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "june-payroll-cost",
+          "text": "June employer payroll cost was EUR 124,400.",
+          "value": "12440000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-06-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 80,
+          "semanticScore": 0.96
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "payroll-june-register",
+        "evidenceIds": ["payroll-june-register"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "lexical-trap-paraphrased-correction",
+      "tags": ["longitudinal", "lexical-trap", "temporal"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-03-10T12:00:00.000Z",
+        "topic": "support-arr",
+        "text": "What is current support annual recurring revenue?"
+      },
+      "evidence": [
+        {
+          "id": "support-arr-old",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "support-arr",
+          "text": "Current support annual recurring revenue is EUR 4.2m.",
+          "value": "420000000",
+          "observedAt": "2026-01-15T09:00:00.000Z",
+          "validFrom": "2026-01-01T00:00:00.000Z",
+          "validTo": "2026-02-01T00:00:00.000Z",
+          "authorityRank": 70,
+          "semanticScore": 0.82
+        },
+        {
+          "id": "support-arr-current",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "support-arr",
+          "text": "The signed renewal ledger puts the run-rate for support contracts at EUR 4.7m.",
+          "value": "470000000",
+          "observedAt": "2026-02-02T09:00:00.000Z",
+          "validFrom": "2026-02-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 90,
+          "semanticScore": 0.94
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "support-arr-current",
+        "evidenceIds": ["support-arr-current"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "expired-balance-superseded",
+      "tags": ["longitudinal", "temporal", "correction"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-10T12:00:00.000Z",
+        "topic": "cash-balance",
+        "text": "What is the effective cash balance?"
+      },
+      "evidence": [
+        {
+          "id": "cash-before-close",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "cash-balance",
+          "text": "Cash balance is EUR 8.10m before the month-end close.",
+          "value": "810000000",
+          "observedAt": "2026-06-28T08:00:00.000Z",
+          "validFrom": "2026-06-01T00:00:00.000Z",
+          "validTo": "2026-07-01T00:00:00.000Z",
+          "authorityRank": 80,
+          "semanticScore": 0.99
+        },
+        {
+          "id": "cash-after-close",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "cash-balance",
+          "text": "Closed bank reconciliation reports EUR 7.84m cash.",
+          "value": "784000000",
+          "observedAt": "2026-06-30T18:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 95,
+          "semanticScore": 0.84
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "cash-after-close",
+        "evidenceIds": ["cash-after-close"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "future-effective-plan-is-not-current",
+      "tags": ["temporal", "as-of"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-15T12:00:00.000Z",
+        "topic": "credit-limit",
+        "text": "What credit limit is effective today?"
+      },
+      "evidence": [
+        {
+          "id": "credit-limit-current",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "credit-limit",
+          "text": "Current approved credit limit is EUR 1.5m.",
+          "value": "150000000",
+          "observedAt": "2026-06-01T10:00:00.000Z",
+          "validFrom": "2026-06-01T00:00:00.000Z",
+          "validTo": "2026-08-01T00:00:00.000Z",
+          "authorityRank": 90,
+          "semanticScore": 0.82
+        },
+        {
+          "id": "credit-limit-future",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "credit-limit",
+          "text": "The approved August plan raises the credit limit to EUR 2.0m.",
+          "value": "200000000",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-08-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 95,
+          "semanticScore": 0.99
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "credit-limit-current",
+        "evidenceIds": ["credit-limit-current"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "tenant-isolation-beats-nearest-neighbour",
+      "tags": ["scope", "tenant-isolation"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "runway",
+        "text": "How many months of runway remain?"
+      },
+      "evidence": [
+        {
+          "id": "aster-runway",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "runway",
+          "text": "Aster Labs has 14 months of runway.",
+          "value": "14",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 80,
+          "semanticScore": 0.81
+        },
+        {
+          "id": "foreign-tenant-runway",
+          "sessionId": "session-b",
+          "tenantId": "other-tenant",
+          "company": "Aster Labs",
+          "topic": "runway",
+          "text": "Aster Labs has 31 months of runway.",
+          "value": "31",
+          "observedAt": "2026-07-02T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.99
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "aster-runway",
+        "evidenceIds": ["aster-runway"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "company-isolation-beats-nearest-neighbour",
+      "tags": ["scope", "company-isolation"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "gross-margin",
+        "text": "What is the current gross margin?"
+      },
+      "evidence": [
+        {
+          "id": "aster-margin",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "gross-margin",
+          "text": "Aster Labs gross margin is 68 percent.",
+          "value": "68",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 80,
+          "semanticScore": 0.83
+        },
+        {
+          "id": "other-company-margin",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Boreal Systems",
+          "topic": "gross-margin",
+          "text": "Current gross margin is 82 percent.",
+          "value": "82",
+          "observedAt": "2026-07-02T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.99
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "aster-margin",
+        "evidenceIds": ["aster-margin"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "equal-authority-conflict-requires-abstention",
+      "tags": ["longitudinal", "conflict", "abstention"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "tax-liability",
+        "text": "What is the Q2 tax liability?"
+      },
+      "evidence": [
+        {
+          "id": "tax-ledger-a",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "tax-liability",
+          "text": "Signed tax ledger A reports EUR 410k.",
+          "value": "41000000",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 90,
+          "semanticScore": 0.93
+        },
+        {
+          "id": "tax-ledger-b",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "tax-liability",
+          "text": "Signed tax ledger B reports EUR 438k.",
+          "value": "43800000",
+          "observedAt": "2026-07-02T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 90,
+          "semanticScore": 0.97
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": null,
+        "evidenceIds": ["tax-ledger-a", "tax-ledger-b"],
+        "abstain": true,
+        "conflict": true,
+        "action": null
+      }
+    },
+    {
+      "id": "higher-authority-source-resolves-conflict",
+      "tags": ["longitudinal", "conflict", "authority"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "deferred-revenue",
+        "text": "What is deferred revenue?"
+      },
+      "evidence": [
+        {
+          "id": "signed-deferred-ledger",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "deferred-revenue",
+          "text": "Signed deferred revenue ledger reports EUR 2.31m.",
+          "value": "231000000",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.86
+        },
+        {
+          "id": "emailed-deferred-adjustment",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "deferred-revenue",
+          "text": "An unapproved email estimates deferred revenue at EUR 2.54m.",
+          "value": "254000000",
+          "observedAt": "2026-07-02T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 40,
+          "semanticScore": 0.99
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "signed-deferred-ledger",
+        "evidenceIds": ["emailed-deferred-adjustment", "signed-deferred-ledger"],
+        "abstain": false,
+        "conflict": true,
+        "action": null
+      }
+    },
+    {
+      "id": "retention-expired-memory-is-not-recalled",
+      "tags": ["longitudinal", "forgetting", "retention"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "temporary-covenant-waiver",
+        "text": "Which covenant waiver remains eligible for recall?"
+      },
+      "evidence": [
+        {
+          "id": "expired-temporary-waiver",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "temporary-covenant-waiver",
+          "text": "Temporary covenant waiver W-17 allowed a 4.0 ratio.",
+          "value": "4.0",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "memoryState": "retracted",
+          "retentionExpiresAt": "2026-07-10T00:00:00.000Z",
+          "authorityRank": 100,
+          "semanticScore": 0.99
+        },
+        {
+          "id": "current-covenant-policy",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "temporary-covenant-waiver",
+          "text": "Current covenant policy permits a 3.2 ratio and has no temporary waiver.",
+          "value": "3.2",
+          "observedAt": "2026-07-10T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "memoryState": "active",
+          "retentionExpiresAt": null,
+          "authorityRank": 90,
+          "semanticScore": 0.86
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": "current-covenant-policy",
+        "evidenceIds": ["current-covenant-policy"],
+        "abstain": false,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "insufficient-evidence-abstains",
+      "tags": ["abstention", "insufficient-evidence"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "uninsured-exposure",
+        "text": "What is the uninsured exposure?"
+      },
+      "evidence": [
+        {
+          "id": "unrelated-risk-note",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "uninsured-exposure",
+          "text": "A generic risk note mentions insurance review without an amount.",
+          "value": "unknown",
+          "observedAt": "2026-07-01T10:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 20,
+          "semanticScore": 0.22
+        }
+      ],
+      "expected": {
+        "answerEvidenceId": null,
+        "evidenceIds": [],
+        "abstain": true,
+        "conflict": false,
+        "action": null
+      }
+    },
+    {
+      "id": "approved-correction-consolidates-and-acts-once",
+      "tags": ["longitudinal", "conflict", "consolidation", "human-gate", "action"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "payroll-cost",
+        "text": "What is the approved June payroll cost?"
+      },
+      "evidence": [
+        {
+          "id": "payroll-prior",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "payroll-cost",
+          "text": "Payroll register v1 reports EUR 124,400.",
+          "value": "12440000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-06-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.95
+        },
+        {
+          "id": "payroll-corrected",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "payroll-cost",
+          "text": "Signed payroll register v2 reports EUR 128,900.",
+          "value": "12890000",
+          "observedAt": "2026-07-08T10:30:00.000Z",
+          "validFrom": "2026-06-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.94
+        }
+      ],
+      "action": {
+        "type": "resolve-conflicting-memory",
+        "target": "sandbox:payroll-cost",
+        "parameters": {
+          "currentEvidenceId": "payroll-corrected",
+          "supersededEvidenceId": "payroll-prior"
+        },
+        "proposedEvidenceId": "payroll-corrected",
+        "supersedesEvidenceId": "payroll-prior",
+        "requiredRole": "financial-controller",
+        "idempotencyId": "synthetic-payroll-correction-v1",
+        "decisionAttempts": 2,
+        "decision": {
+          "outcome": "approved",
+          "actorRole": "financial-controller"
+        }
+      },
+      "expected": {
+        "answerEvidenceId": "payroll-corrected",
+        "evidenceIds": ["payroll-corrected", "payroll-prior"],
+        "abstain": false,
+        "conflict": true,
+        "action": {
+          "type": "resolve-conflicting-memory",
+          "target": "sandbox:payroll-cost",
+          "parameters": {
+            "currentEvidenceId": "payroll-corrected",
+            "supersededEvidenceId": "payroll-prior"
+          },
+          "idempotencyId": "synthetic-payroll-correction-v1"
+        }
+      }
+    },
+    {
+      "id": "rejected-correction-retains-prior",
+      "tags": ["longitudinal", "conflict", "consolidation", "human-gate"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "forecast-ebitda",
+        "text": "What is the approved EBITDA forecast?"
+      },
+      "evidence": [
+        {
+          "id": "ebitda-approved",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "forecast-ebitda",
+          "text": "Approved forecast reports EUR 1.10m EBITDA.",
+          "value": "110000000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.93
+        },
+        {
+          "id": "ebitda-proposed",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "forecast-ebitda",
+          "text": "Proposed revision reports EUR 1.35m EBITDA.",
+          "value": "135000000",
+          "observedAt": "2026-07-08T10:30:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.97
+        }
+      ],
+      "action": {
+        "type": "resolve-conflicting-memory",
+        "target": "sandbox:forecast-ebitda",
+        "parameters": {
+          "currentEvidenceId": "ebitda-proposed",
+          "supersededEvidenceId": "ebitda-approved"
+        },
+        "proposedEvidenceId": "ebitda-proposed",
+        "supersedesEvidenceId": "ebitda-approved",
+        "requiredRole": "financial-controller",
+        "idempotencyId": "synthetic-ebitda-rejection-v1",
+        "decisionAttempts": 2,
+        "decision": {
+          "outcome": "rejected",
+          "actorRole": "financial-controller"
+        }
+      },
+      "expected": {
+        "answerEvidenceId": "ebitda-approved",
+        "evidenceIds": ["ebitda-approved", "ebitda-proposed"],
+        "abstain": false,
+        "conflict": true,
+        "action": null
+      }
+    },
+    {
+      "id": "pending-proposal-cannot-act",
+      "tags": ["longitudinal", "conflict", "abstention", "human-gate", "action-safety"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "vendor-payment",
+        "text": "Which vendor payment amount is approved?"
+      },
+      "evidence": [
+        {
+          "id": "vendor-payment-prior",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "vendor-payment",
+          "text": "Prior approved vendor payment amount is EUR 73,000.",
+          "value": "7300000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.92
+        },
+        {
+          "id": "vendor-payment-proposed",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "vendor-payment",
+          "text": "A pending correction proposes EUR 79,500.",
+          "value": "7950000",
+          "observedAt": "2026-07-08T10:30:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.97
+        }
+      ],
+      "action": {
+        "type": "resolve-conflicting-memory",
+        "target": "sandbox:vendor-payment",
+        "parameters": {
+          "currentEvidenceId": "vendor-payment-proposed",
+          "supersededEvidenceId": "vendor-payment-prior"
+        },
+        "proposedEvidenceId": "vendor-payment-proposed",
+        "supersedesEvidenceId": "vendor-payment-prior",
+        "requiredRole": "financial-controller",
+        "idempotencyId": "synthetic-vendor-payment-pending-v1",
+        "decisionAttempts": 0,
+        "decision": null
+      },
+      "expected": {
+        "answerEvidenceId": null,
+        "evidenceIds": ["vendor-payment-prior", "vendor-payment-proposed"],
+        "abstain": true,
+        "conflict": true,
+        "action": null
+      }
+    },
+    {
+      "id": "wrong-role-cannot-approve",
+      "tags": ["longitudinal", "conflict", "abstention", "human-gate", "authorization"],
+      "query": {
+        "sessionId": "session-c",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-12T12:00:00.000Z",
+        "topic": "expense-accrual",
+        "text": "Which expense accrual is approved?"
+      },
+      "evidence": [
+        {
+          "id": "accrual-prior",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "expense-accrual",
+          "text": "Approved accrual is EUR 58,000.",
+          "value": "5800000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.92
+        },
+        {
+          "id": "accrual-proposed",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "expense-accrual",
+          "text": "A proposed accrual revision is EUR 64,000.",
+          "value": "6400000",
+          "observedAt": "2026-07-08T10:30:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.97
+        }
+      ],
+      "action": {
+        "type": "resolve-conflicting-memory",
+        "target": "sandbox:expense-accrual",
+        "parameters": {
+          "currentEvidenceId": "accrual-proposed",
+          "supersededEvidenceId": "accrual-prior"
+        },
+        "proposedEvidenceId": "accrual-proposed",
+        "supersedesEvidenceId": "accrual-prior",
+        "requiredRole": "financial-controller",
+        "idempotencyId": "synthetic-accrual-approval-v1",
+        "decisionAttempts": 1,
+        "decision": {
+          "outcome": "approved",
+          "actorRole": "financial-analyst"
+        }
+      },
+      "expected": {
+        "answerEvidenceId": null,
+        "evidenceIds": ["accrual-prior", "accrual-proposed"],
+        "abstain": true,
+        "conflict": true,
+        "action": null
+      }
+    },
+    {
+      "id": "approved-rebate-consolidation-is-idempotent",
+      "tags": ["longitudinal", "consolidation", "human-gate", "action", "idempotency"],
+      "query": {
+        "sessionId": "session-d",
+        "tenantId": "demo-tenant",
+        "company": "Aster Labs",
+        "asOf": "2026-07-20T12:00:00.000Z",
+        "topic": "rebate-accrual",
+        "text": "What is the consolidated rebate accrual?"
+      },
+      "evidence": [
+        {
+          "id": "rebate-prior",
+          "sessionId": "session-a",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "rebate-accrual",
+          "text": "Rebate accrual v1 is EUR 91,000.",
+          "value": "9100000",
+          "observedAt": "2026-07-01T08:00:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.96
+        },
+        {
+          "id": "rebate-corrected",
+          "sessionId": "session-b",
+          "tenantId": "demo-tenant",
+          "company": "Aster Labs",
+          "topic": "rebate-accrual",
+          "text": "Signed rebate accrual v2 is EUR 95,500.",
+          "value": "9550000",
+          "observedAt": "2026-07-10T10:30:00.000Z",
+          "validFrom": "2026-07-01T00:00:00.000Z",
+          "validTo": null,
+          "authorityRank": 100,
+          "semanticScore": 0.95
+        }
+      ],
+      "action": {
+        "type": "resolve-conflicting-memory",
+        "target": "sandbox:rebate-accrual",
+        "parameters": {
+          "currentEvidenceId": "rebate-corrected",
+          "supersededEvidenceId": "rebate-prior"
+        },
+        "proposedEvidenceId": "rebate-corrected",
+        "supersedesEvidenceId": "rebate-prior",
+        "requiredRole": "financial-controller",
+        "idempotencyId": "synthetic-rebate-correction-v1",
+        "decisionAttempts": 3,
+        "decision": {
+          "outcome": "approved",
+          "actorRole": "financial-controller"
+        }
+      },
+      "expected": {
+        "answerEvidenceId": "rebate-corrected",
+        "evidenceIds": ["rebate-corrected", "rebate-prior"],
+        "abstain": false,
+        "conflict": true,
+        "action": {
+          "type": "resolve-conflicting-memory",
+          "target": "sandbox:rebate-accrual",
+          "parameters": {
+            "currentEvidenceId": "rebate-corrected",
+            "supersededEvidenceId": "rebate-prior"
+          },
+          "idempotencyId": "synthetic-rebate-correction-v1"
+        }
+      }
+    }
+  ]
+}
