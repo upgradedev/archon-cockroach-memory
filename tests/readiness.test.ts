@@ -734,6 +734,14 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.equal(samPositions.length, 2);
   for (const [index, armPosition] of armPositions.entries()) {
     assert.ok(armPosition < samPositions[index]);
+    assert.equal(
+      (
+        deploy
+          .slice(armPosition, samPositions[index])
+          .match(/\.state == "ARMED"/gu) ?? []
+      ).length,
+      1
+    );
   }
   const samCredentialRefreshPositions = [
     ...deploy.matchAll(
@@ -794,10 +802,6 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.equal(
     (deploy.match(/bash aws\/recovery-intent-ledger\.sh arm/gu) ?? [])
       .length,
-    2
-  );
-  assert.equal(
-    (deploy.match(/\.state == "ARMED"/gu) ?? []).length,
     2
   );
   assert.equal(
