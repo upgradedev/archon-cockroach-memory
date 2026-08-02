@@ -183,21 +183,30 @@ authenticated ccloud receipt is produced.
   and recall while a fresh alarm isolates the candidate `ExecutedVersion`
   behind the weighted alias. Mandatory full-recall and hosted-browser gates
   follow, with explicit prior-release restoration.
-- Amazon SNS, Amazon SQS, and AWS KMS: a source-controlled but currently
-  dormant alarm-routing contract. Explicit foundation activation creates
+- Amazon SNS, Amazon SQS, AWS KMS, and CloudWatch: a source-controlled but
+  currently dormant alarm-routing contract with a manual protected
+  `plan|apply|verify|drill` workflow. Explicit foundation activation creates
   environment-isolated encrypted topics and 14-day audit queues; deploy
   auto-discovery and terminal proof refuse partial outputs or cross-environment
   alarm actions, and inactive proof rejects stale actions. The queues deny
   non-topic producers and are finite delivery/evidence buffers, not immutable
-  records or human-notification endpoints. Activation first requires an
-  authorized administrator to apply the exact stack policy and foundation
-  template. Until that synchronization, discovery emits the distinct
+  records or human-notification endpoints. Activation requires an exact green
+  main SHA, an `alarm-routing-controls` environment approval, and a dedicated
+  OIDC role that can pass only the dedicated CloudFormation execution role.
+  The accepted plan changes only `AlarmRoutingEnabled=false -> true`, adds the
+  exact 15 conditional resources, and permits no replacement or existing
+  resource mutation. Until that synchronization, discovery emits the distinct
   `legacy-inactive-not-provisioned` state, sends the complete SAM parameter map
   through a temporary runner-local `file://` YAML document, explicitly clears
   `AlarmTopicArn`, and relies on the existing CloudFormation drift gates;
-  afterward an unconditional read-only alarm policy enables direct
-  four-alarm verification even while routing is disabled. No live activation,
-  queue consumer, or human paging endpoint is claimed.
+  afterward an unconditional read-only alarm policy enables direct four-alarm
+  deployment verification even while routing is disabled. A separate
+  staging-only probe supports a bounded `ALARM -> OK` delivery drill through a
+  dedicated KMS-encrypted five-minute queue with an exact `AlarmName` payload
+  filter; its role cannot read the operational archive, mutate production alarm
+  state, or delete the observed queue message. Receipts hash AWS identifiers and human approval/ack references
+  and store no contact details. No live activation, live drill, queue consumer,
+  or human paging endpoint is claimed without hosted evidence.
 - GitHub Actions OIDC to AWS STS: short-lived staging/production delivery
   credentials.
 
@@ -241,10 +250,11 @@ and foundation `IN_SYNC` drift state were verified.
   immutable bundle identity, archive/manifest digests, lease owner and expiry,
   and—only for `RECOVERED`—the immutable receipt and post-recovery
   CloudFormation-control object identities and digests.
-- The checked-in watchdog classifies the exact source run and terminal
-  environment job after `Deploy AWS` completion, every 15 minutes, or on
-  manual dispatch. It claims a two-hour lease bound to its exact run, attempt,
-  and environment. An active owner blocks competing work; an expired lease or
+- The checked-in watchdog runs every 15 minutes, on a daily audit schedule, or
+  by manual dispatch. It classifies only the exact `Deploy AWS` push
+  run/attempt and terminal environment job bound by the ledger. It claims a
+  two-hour lease bound to its exact run, attempt, and environment. An active
+  owner blocks competing work; an expired lease or
   an exactly proved completed non-success owner can be reclaimed through CAS.
 - Recovery emits a strict schema-v2
   `archon.durable-recovery.receipt`. Its validator cross-checks the sanitized
@@ -294,6 +304,7 @@ claimed by these successful no-failure runs.
 
 The source components are:
 
+- `aws/classify-github-recovery-preflight.sh`
 - `aws/classify-durable-recovery-source.sh`
 - `aws/create-durable-recovery-bundle.sh`
 - `aws/delete-greenfield-stack.sh`
@@ -301,11 +312,13 @@ The source components are:
 - `aws/enforce-cloudformation-controls.sh`
 - `aws/extract-durable-recovery-bundle.sh`
 - `aws/finalize-durable-recovery-receipt.sh`
+- `aws/fetch-codedeploy-appspec-revision.sh`
 - `aws/put-durable-recovery-object.sh`
 - `aws/recover-durable-environment.sh`
 - `aws/verify-durable-recovery-bundle.sh`
 - `aws/verify-durable-recovery-receipt.sh`
 - `aws/recovery-intent-ledger.sh`
+- `aws/select-staging-codedeploy-rollback.mjs`
 - `.github/workflows/deploy-aws.yml`
 - `.github/workflows/recover-aws.yml`
 
@@ -323,6 +336,13 @@ material. The independent manual
 [Recover AWS audit 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552)
 then passed fresh staging and production termination-protection and drift
 checks, uploading only sanitized audit receipts with GitHub-bound digests.
+
+For new releases, `Deploy AWS` is a direct `main` push workflow whose source
+gate waits for the successful same-SHA `CI` push run and records its exact
+run/attempt. The exact-release `Hosted DAST` workflow is then called from that
+same deploy run only after production promotion and Managed MCP proof; its
+receipt and ZAP artifacts are SHA/run/attempt-bound deployment evidence.
+Scheduled and manual DAST executions remain standalone production audits.
 
 Infrastructure and delivery proof live in:
 

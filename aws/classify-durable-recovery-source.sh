@@ -95,7 +95,8 @@ if [ "$state" = "RECOVERING" ]; then
         )
         and (
           .event == "workflow_run"
-          or .event == "schedule"
+          or
+          .event == "schedule"
           or .event == "workflow_dispatch"
         )
         and .head_branch == "main"
@@ -157,6 +158,7 @@ gh api \
   "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}/attempts/${source_run_attempt}" \
   >"$run_file"
 jq -e \
+  --arg environment "$RECOVERY_ENVIRONMENT" \
   --arg candidate "$candidate_sha" \
   --arg repository "$GITHUB_REPOSITORY" \
   --argjson attempt "$source_run_attempt" \
@@ -174,7 +176,11 @@ jq -e \
       or .path == ".github/workflows/deploy-aws.yml@main"
       or .path == ".github/workflows/deploy-aws.yml@refs/heads/main"
     )
-    and .event == "workflow_run"
+    and (
+      .event == "push"
+      or .event == "workflow_run"
+      or (.event == "workflow_dispatch" and $environment == "staging")
+    )
     and .head_branch == "main"
     and .head_sha == $candidate
     and .head_repository.full_name == $repository
@@ -183,6 +189,13 @@ jq -e \
 
 run_status="$(jq -er '.status' "$run_file")"
 if [ "$run_status" != "completed" ]; then
+  case "$run_status" in
+    queued|in_progress|pending|waiting|requested) ;;
+    *)
+      echo "The Deploy AWS run status is invalid." >&2
+      exit 1
+      ;;
+  esac
   jq -n \
     --arg environment "$RECOVERY_ENVIRONMENT" \
     --arg intentId "$intent_id" \
@@ -213,6 +226,15 @@ esac
 gh api \
   "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}/attempts/${source_run_attempt}/jobs?per_page=100" \
   >"$jobs_file"
+if ! jq -e '
+    (.total_count | type == "number" and . >= 0 and floor == .)
+    and (.jobs | type == "array")
+    and .total_count == (.jobs | length)
+    and .total_count <= 100
+  ' "$jobs_file" >/dev/null; then
+  echo "The Deploy AWS jobs response is incomplete or ambiguous." >&2
+  exit 1
+fi
 job_count="$(
   jq -r \
     --arg name "$TERMINAL_JOB_NAME" \

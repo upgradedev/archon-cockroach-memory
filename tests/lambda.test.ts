@@ -152,3 +152,43 @@ test("Lambda can fail closed against direct origin bypass without exposing the c
     }
   }
 });
+
+test("deployed environments reject missing, blank, or malformed origin capability", async () => {
+  const previousToken = process.env.ORIGIN_VERIFY_TOKEN;
+  const previousEnvironment = process.env.APP_ENV;
+  try {
+    for (const environment of ["staging", "production"] as const) {
+      process.env.APP_ENV = environment;
+      delete process.env.ORIGIN_VERIFY_TOKEN;
+      assert.equal((await handler(event("GET", "/api/health"))).statusCode, 403);
+
+      process.env.ORIGIN_VERIFY_TOKEN = "   ";
+      assert.equal((await handler(event("GET", "/api/health"))).statusCode, 403);
+
+      process.env.ORIGIN_VERIFY_TOKEN = "too-short";
+      const malformed = {
+        ...event("GET", "/api/health"),
+        headers: {
+          "content-type": "application/json",
+          "x-archon-origin-verify": "too-short",
+        },
+      };
+      assert.equal((await handler(malformed)).statusCode, 403);
+    }
+
+    process.env.APP_ENV = "local";
+    delete process.env.ORIGIN_VERIFY_TOKEN;
+    assert.equal((await handler(event("GET", "/api/health"))).statusCode, 200);
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.ORIGIN_VERIFY_TOKEN;
+    } else {
+      process.env.ORIGIN_VERIFY_TOKEN = previousToken;
+    }
+    if (previousEnvironment === undefined) {
+      delete process.env.APP_ENV;
+    } else {
+      process.env.APP_ENV = previousEnvironment;
+    }
+  }
+});

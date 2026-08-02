@@ -26,7 +26,36 @@ test("managed restore drill is manual, exact-main, and protected", () => {
   assert.doesNotMatch(workflow, /\b(?:push|schedule|pull_request):/u);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/u);
   assert.match(workflow, /test "\$GITHUB_SHA" = "\$TARGET_SHA"/u);
+  assert.match(workflow, /environment:\s*\n\s*name: operations-drill/u);
   assert.match(workflow, /environment:\s*\n\s*name: production-db/u);
+  assert.match(
+    workflow,
+    /OPERATIONS_AUTHORIZATION_SHA256: \$\{\{ needs\.authorize\.outputs\.authorization_sha256 \}\}/u
+  );
+  assert.match(
+    implementation,
+    /protectedEnvironments: \["operations-drill", "production-db"\]/u
+  );
+  assert.match(
+    implementation,
+    /operationsAuthorizationSha256:\s*state\.operationsAuthorizationSha256/u
+  );
+  assert.match(
+    implementation,
+    /schema: "archon\.cockroach\.managed-backup-restore-drill",\s*\n\s*version: 2/u
+  );
+  assert.equal(
+    (
+      workflow.match(
+        /schema: "archon\.operations-drill\.authorization"/gu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.match(
+    workflow,
+    /test "\$OPERATIONS_AUTHORIZATION_SHA256" = \\\s*\n\s*"\$expected_authorization_sha256"/u
+  );
   assert.match(workflow, /persist-credentials: false/u);
   assert.match(
     workflow,
@@ -141,6 +170,12 @@ test("receipt and documentation are honest about RTO, RPO, PITR, and side effect
     assert.ok(implementation.includes(fragment), fragment);
   }
   assert.match(workflow, /actions\/attest-build-provenance@508db95/u);
+  assert.match(
+    workflow,
+    /tsx scripts\/cockroach-managed-restore-drill\.ts \\\s*\n\s*>"\$RECEIPT_PATH"/u
+  );
+  assert.doesNotMatch(implementation, /writeFileSync|RECEIPT_PATH/u);
+  assert.match(implementation, /process\.stdout\.write/u);
   assert.match(workflow, /actions\/upload-artifact@043fb46/u);
   assert.match(workflow, /if-no-files-found: error/u);
   assert.match(runbook, /not PITR/iu);

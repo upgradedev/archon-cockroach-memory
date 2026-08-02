@@ -1,0 +1,33 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "Update:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "Update:Delete",
+        "Update:Replace"
+      ],
+      "Resource": [
+        "LogicalResourceId/ApiAggregateRateAlarm",
+        "LogicalResourceId/ArchonCloudFrontWebAcl",
+        "LogicalResourceId/EdgeAlarmArchiveQueue",
+        "LogicalResourceId/EdgeAlarmArchiveQueuePolicy",
+        "LogicalResourceId/EdgeAlarmArchiveSubscription",
+        "LogicalResourceId/EdgeAlarmTopic",
+        "LogicalResourceId/EdgeAlarmTopicPolicy",
+        "LogicalResourceId/EdgeEvidenceKey",
+        "LogicalResourceId/EdgeEvidenceKeyAlias",
+        "LogicalResourceId/ResolutionCreateRateAlarm",
+        "LogicalResourceId/WafBlockLogGroup",
+        "LogicalResourceId/WafBlockLoggingConfiguration",
+        "LogicalResourceId/WebAclBlockedRequestsAlarm"
+      ]
+    }
+  ]
+}

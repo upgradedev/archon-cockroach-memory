@@ -41,9 +41,12 @@ import {
 import {
   DEMO_VIDEO_CHECK_IDS,
   readInitialReceipt,
+  requireDemoVideoDeployContract,
+  requireFreshPostDeployTiming,
   requireStoredReleaseBinding,
   requireTrustedWorkflowInvocation,
   requireUnchangedSelections,
+  selectDeployHostedDastArtifacts,
   selectExactArtifactInventory,
   selectReleaseEvidenceRuns,
 } from "../scripts/demo-video-release-gate.js";
@@ -165,6 +168,12 @@ function releaseBindingFixture(): {
     headSha: sha,
     completedAt,
   });
+  const deployRun = run(
+    103,
+    "push",
+    ".github/workflows/deploy-aws.yml",
+    "2026-07-30T13:10:00.000Z"
+  );
   const selectedRuns = {
     ci: run(101, "push", ".github/workflows/ci.yml", "2026-07-30T12:40:00.000Z"),
     codeql: run(
@@ -173,18 +182,8 @@ function releaseBindingFixture(): {
       ".github/workflows/codeql.yml",
       "2026-07-30T12:45:00.000Z"
     ),
-    deploy: run(
-      103,
-      "workflow_run",
-      ".github/workflows/deploy-aws.yml",
-      "2026-07-30T13:00:00.000Z"
-    ),
-    hostedDast: run(
-      104,
-      "workflow_run",
-      ".github/workflows/security-dast.yml",
-      "2026-07-30T13:10:00.000Z"
-    ),
+    deploy: deployRun,
+    hostedDast: { ...deployRun },
     managedMcp: run(
       105,
       "workflow_dispatch",
@@ -217,15 +216,15 @@ function releaseBindingFixture(): {
   const selectedArtifacts = {
     hostedDast: artifact(
       201,
-      `hosted-dast-${sha}-103-1-1`,
-      104,
+      `hosted-dast-${sha}-103-1`,
+      103,
       "2026-07-30T13:08:00.000Z",
       "2026-07-30T13:09:00.000Z"
     ),
     hostedDastZap: artifact(
       202,
       `zap-baseline-${sha}-1`,
-      104,
+      103,
       "2026-07-30T13:08:10.000Z",
       "2026-07-30T13:09:10.000Z"
     ),
@@ -492,7 +491,7 @@ test("capture receipt binds exactly eight screenshots retained in the final pack
     const release = {
       selectedRuns: {
         deploy: { id: 101 },
-        hostedDast: { id: 102 },
+        hostedDast: { id: 101 },
         managedMcp: { id: 103 },
         recovery: { id: 104 },
       },
@@ -520,7 +519,7 @@ test("capture receipt binds exactly eight screenshots retained in the final pack
       pageErrors: 0,
       evidenceRuns: {
         deploy: 101,
-        dast: 102,
+        dast: 101,
         managedMcp: 103,
         recovery: 104,
       },
@@ -1098,6 +1097,19 @@ test("release receipt is exact and terminal selection validation is immutable", 
     /malformed/u
   );
 
+  const standaloneDastRun = structuredClone(receipt);
+  standaloneDastRun.selectedRuns.hostedDast.id += 1;
+  assert.throws(
+    () =>
+      requireStoredReleaseBinding(standaloneDastRun, {
+        sha: receipt.releaseSha,
+        runId: receipt.sourceGateRunId,
+        runAttempt: receipt.sourceGateRunAttempt,
+        now,
+      }),
+    /artifact bindings/u
+  );
+
   const artifactDrift = structuredClone(receipt.selectedArtifacts);
   artifactDrift.managedMcp.digest = `sha256:${"f".repeat(64)}`;
   assert.throws(
@@ -1196,21 +1208,10 @@ test("release run selector rejects wrong-event or wrong-SHA evidence", () => {
         303,
         "Deploy AWS",
         ".github/workflows/deploy-aws.yml",
-        "workflow_run",
+        "push",
         sha,
         "2026-07-30T12:12:00.000Z",
         "2026-07-30T12:40:00.000Z"
-      ),
-    ],
-    dast: [
-      workflowRunFixture(
-        304,
-        "Hosted DAST",
-        ".github/workflows/security-dast.yml",
-        "workflow_run",
-        sha,
-        "2026-07-30T12:41:00.000Z",
-        "2026-07-30T12:50:00.000Z"
       ),
     ],
     mcp: [
@@ -1242,18 +1243,24 @@ test("release run selector rejects wrong-event or wrong-SHA evidence", () => {
       selected.ci.id,
       selected.codeql.id,
       selected.deploy.id,
-      selected.dast.id,
       selected.mcp.id,
       selected.recovery.id,
     ],
-    [301, 302, 303, 304, 305, 306]
+    [301, 302, 303, 305, 306]
   );
+  assert.deepEqual(Object.keys(selected).sort(), [
+    "ci",
+    "codeql",
+    "deploy",
+    "mcp",
+    "recovery",
+  ]);
   assert.throws(
     () =>
       selectReleaseEvidenceRuns(
         {
           ...runs,
-          dast: [{ ...runs.dast[0], event: "workflow_dispatch" }],
+          deploy: [{ ...runs.deploy[0], event: "workflow_run" }],
         },
         sha
       ),
@@ -1272,13 +1279,249 @@ test("release run selector rejects wrong-event or wrong-SHA evidence", () => {
   );
 });
 
+test("demo-video Deploy contract includes exact reusable Hosted DAST jobs", () => {
+  const sha = "8".repeat(40);
+  const runId = 350;
+  const runAttempt = 2;
+  const job = (id: number, name: string, steps: string[]) => ({
+    id,
+    run_id: runId,
+    run_attempt: runAttempt,
+    head_sha: sha,
+    name,
+    status: "completed",
+    conclusion: "success",
+    steps: steps.map((step) => ({
+      name: step,
+      status: "completed",
+      conclusion: "success",
+    })),
+  });
+  const dastPrefix =
+    "Run hosted DAST against exact production release / ";
+  const databaseJob =
+    "Reconcile CockroachDB memory release / Schema, runtime RLS, C-SPANN, and resolution-loop execution proof";
+  const baseline = {
+    total_count: 9,
+    jobs: [
+      job(351, "Validate Deploy AWS source CI", [
+        "Require successful exact-main push CI source",
+      ]),
+      job(352, "Verify CI SHA and build once", [
+        "Prove the CI SHA is still the main branch head",
+        "Prove CodeQL succeeded for the exact release SHA",
+        "Test and build the frontend",
+        "Validate and build the SAM application",
+        "Create sanitized build receipt",
+        "Upload immutable candidate",
+      ]),
+      job(353, "Deploy and smoke staging", [
+        "Deploy staging with recovery-safe SAM canary",
+        "Smoke the same-origin application and real recall path",
+        "Hosted Chromium judge journey on staging",
+        "Build and validate sanitized staging deployment receipt",
+        "Upload staging receipt",
+      ]),
+      job(354, "Promote identical candidate to production", [
+        "Deploy production with recovery-safe SAM canary",
+        "Smoke production through CloudFront",
+        "Hosted Chromium judge journey on production",
+        "Build and validate sanitized production deployment receipt",
+        "Commit the receipt-bound production recovery intent",
+        "Upload production receipt",
+      ]),
+      job(
+        355,
+        "Prove production memory through CockroachDB Managed MCP",
+        [
+          "Run bounded read-only Managed MCP proof",
+          "Upload sanitized Managed MCP receipt",
+        ]
+      ),
+      job(356, databaseJob, [
+        "Prove target is still current main",
+        "Prove CockroachDB Cloud provider, plan, state, and region",
+        "Gate real Titan and Claude quality on the golden judge question",
+        "Reconcile schema, canonical memory, and runtime credentials",
+        "Upload sanitized database release receipt",
+      ]),
+      job(357, `${dastPrefix}Validate Hosted DAST source deployment`, [
+        "Require successful operation-bound Deploy AWS source",
+      ]),
+      job(
+        358,
+        `${dastPrefix}Bounded active API and browser-boundary probes`,
+        [
+          "Run fail-closed hosted adversarial probes",
+          "Upload sanitized hosted DAST receipt",
+        ]
+      ),
+      job(
+        359,
+        `${dastPrefix}OWASP ZAP passive and AJAX-spider baseline`,
+        ["Scan the owned public production release"]
+      ),
+    ],
+  };
+  assert.doesNotThrow(() =>
+    requireDemoVideoDeployContract(
+      baseline,
+      runId,
+      sha,
+      runAttempt
+    )
+  );
+
+  const unprefixed = structuredClone(baseline);
+  (unprefixed.jobs as Array<Record<string, unknown>>)[6]!.name =
+    "Validate Hosted DAST source deployment";
+  const wrongAttempt = structuredClone(baseline);
+  (wrongAttempt.jobs as Array<Record<string, unknown>>)[7]!.run_attempt =
+    runAttempt - 1;
+  for (const invalid of [unprefixed, wrongAttempt]) {
+    assert.throws(() =>
+      requireDemoVideoDeployContract(
+        invalid,
+        runId,
+        sha,
+        runAttempt
+      )
+    );
+  }
+});
+
+test("post-deploy timing treats DAST as part of Deploy AWS", () => {
+  const sha = "7".repeat(40);
+  const deploy = workflowRunFixture(
+    361,
+    "Deploy AWS",
+    ".github/workflows/deploy-aws.yml",
+    "push",
+    sha,
+    "2026-07-30T12:00:00.000Z",
+    "2026-07-30T12:30:00.000Z"
+  );
+  const mcp = workflowRunFixture(
+    362,
+    "Cockroach Cloud Managed MCP Audit",
+    ".github/workflows/managed-mcp-audit.yml",
+    "workflow_dispatch",
+    sha,
+    "2026-07-30T12:31:00.000Z",
+    "2026-07-30T12:35:00.000Z"
+  );
+  const recovery = workflowRunFixture(
+    363,
+    "Recover AWS",
+    ".github/workflows/recover-aws.yml",
+    "workflow_dispatch",
+    sha,
+    "2026-07-30T12:36:00.000Z",
+    "2026-07-30T12:40:00.000Z"
+  );
+  const now = Date.parse("2026-07-30T13:00:00.000Z");
+  assert.doesNotThrow(() =>
+    requireFreshPostDeployTiming({ deploy, mcp, recovery }, now)
+  );
+  assert.throws(() =>
+    requireFreshPostDeployTiming(
+      {
+        deploy,
+        mcp: { ...mcp, run_started_at: deploy.updated_at },
+        recovery,
+      },
+      now
+    )
+  );
+});
+
+test("Deploy-owned Hosted DAST artifacts pin current run and attempt", () => {
+  const sha = "6".repeat(40);
+  const deploy = {
+    ...workflowRunFixture(
+      370,
+      "Deploy AWS",
+      ".github/workflows/deploy-aws.yml",
+      "push",
+      sha,
+      "2026-07-30T13:00:00.000Z",
+      "2026-07-30T13:10:00.000Z"
+    ),
+    run_attempt: 2,
+  };
+  const receiptName = `hosted-dast-${sha}-${deploy.id}-2`;
+  const zapName = `zap-baseline-${sha}-2`;
+  const receipt = artifactApiFixture(371, receiptName, deploy, "a");
+  const zap = artifactApiFixture(372, zapName, deploy, "b");
+  const priorReceipt = artifactApiFixture(
+    373,
+    `hosted-dast-${sha}-${deploy.id}-1`,
+    deploy,
+    "c"
+  );
+  const priorZap = artifactApiFixture(
+    374,
+    `zap-baseline-${sha}-1`,
+    deploy,
+    "d"
+  );
+  const unrelated = artifactApiFixture(
+    375,
+    `production-deployment-${sha}`,
+    deploy,
+    "e"
+  );
+  const inventory = {
+    total_count: 5,
+    artifacts: [priorReceipt, unrelated, receipt, priorZap, zap],
+  };
+  const selected = selectDeployHostedDastArtifacts(
+    inventory,
+    deploy,
+    sha,
+    Date.parse("2026-07-30T13:20:00.000Z")
+  );
+  assert.equal(selected.dastReceipt.id, receipt.id);
+  assert.equal(selected.dastZap.id, zap.id);
+
+  const duplicate = structuredClone(inventory);
+  duplicate.total_count = 6;
+  duplicate.artifacts.push({
+    ...structuredClone(receipt),
+    id: 376,
+    archive_download_url:
+      "https://api.github.com/repos/upgradedev/archon-cockroach-memory/actions/artifacts/376/zip",
+  });
+  assert.throws(() =>
+    selectDeployHostedDastArtifacts(
+      duplicate,
+      deploy,
+      sha,
+      Date.parse("2026-07-30T13:20:00.000Z")
+    )
+  );
+  assert.throws(() =>
+    selectDeployHostedDastArtifacts(
+      inventory,
+      {
+        ...deploy,
+        name: "Hosted DAST",
+        path: ".github/workflows/security-dast.yml",
+        event: "workflow_run",
+      },
+      sha,
+      Date.parse("2026-07-30T13:20:00.000Z")
+    )
+  );
+});
+
 test("artifact selector rejects duplicates, extras, and digest drift", () => {
   const sha = "f".repeat(40);
   const run = workflowRunFixture(
     401,
-    "Hosted DAST",
-    ".github/workflows/security-dast.yml",
-    "workflow_run",
+    "Cockroach Cloud Managed MCP Audit",
+    ".github/workflows/managed-mcp-audit.yml",
+    "workflow_dispatch",
     sha,
     "2026-07-30T13:00:00.000Z",
     "2026-07-30T13:10:00.000Z"

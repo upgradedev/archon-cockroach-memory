@@ -31,7 +31,7 @@ if ! [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
   echo "AWS_ACCOUNT_ID must be an exact 12-digit account id." >&2
   exit 1
 fi
-if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,24}$ ]]; then
+if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]]; then
   echo "APP_NAME is not a valid deterministic bucket-name prefix." >&2
   exit 1
 fi

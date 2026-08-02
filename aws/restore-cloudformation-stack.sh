@@ -57,6 +57,13 @@ assert_poll_phase_budget() {
 # at least ten minutes of the one-hour OIDC session for API calls, verification,
 # and a later durable watchdog handoff. Phase products are capped independently
 # so an override cannot turn a single poll loop into a service-waiter equivalent.
+recovery_total_budget_seconds=""
+recovery_stabilize_poll_attempts=""
+recovery_stabilize_poll_interval_seconds=""
+recovery_change_set_poll_attempts=""
+recovery_change_set_poll_interval_seconds=""
+recovery_final_poll_attempts=""
+recovery_final_poll_interval_seconds=""
 read_bounded_poll_setting \
   ARCHON_RECOVERY_TOTAL_BUDGET_SECONDS 2400 60 3000 \
   recovery_total_budget_seconds

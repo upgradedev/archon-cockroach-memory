@@ -46,8 +46,27 @@ Exit criteria:
   identical corpus/query/top-k/seed budget. A broader vendor benchmark is not a
   release prerequisite because unlike-for-like data, hardware, model, warm-up,
   and cost controls are not currently available.
-- [x] CloudFront WAF/origin restriction and AWS Budget/Cost Anomaly resources
-  are repository-prepared, dormant, and separately approval-gated.
+- [x] The protected foundation migration plus CloudFront WAF and AWS
+  Budget/Cost Anomaly plan/apply/verify workflows are source-controlled,
+  exact-SHA-bound, and separately approval-gated. No live execution or receipt
+  is claimed.
+- [x] The WA-03 account-security baseline has a manual protected read-only
+  exact-green-main workflow, exact action-only reference policy, sanitized
+  ten-control receipt, static contract test, and activation runbook. The role,
+  account controls, and first live receipt remain approval-gated and unclaimed.
+- [x] WA-02 has a manual protected exact-green-main alarm-routing
+  `plan|apply|verify|drill` workflow, dedicated OIDC and CloudFormation roles,
+  a zero-replacement/additive-only activation contract, a staging-only probe,
+  encrypted SNS-to-SQS delivery evidence, and sanitized exact-SHA receipts.
+  Live activation, the first drill receipt, and actual human paging/receipt
+  evidence remain separately approval-gated and unclaimed.
+- [x] WA-10 has a manual protected exact-green-main read-only intensity
+  workflow, least-privilege reference policy, version-2 hosted-load window and
+  successful-recall denominator, exact request-count isolation, equivalent
+  baseline/after comparison, and sanitized non-emissions receipt contract.
+  Owner assignment, role/environment activation, hosted cost, live baseline,
+  target-meeting comparison, and human disposition remain approval-gated and
+  unclaimed.
 - [x] A manual, protected, fail-closed Cockroach Cloud managed-backup restore
   drill is repository-prepared. It must restore an exact backup into a
   separately approved empty Basic cluster in the same organization, prove the
@@ -120,18 +139,26 @@ The following requires explicit approval and accountable human decisions:
 
 1. assign workload, operations, security, FinOps, and sustainability owners;
 2. approve availability, API p95, error-rate, RTO, and RPO objectives;
-3. activate CloudFront WAF and the origin capability, then prove:
+3. provision the separate least-privilege `security-audit` OIDC role and
+   protected environment through an approved infrastructure change, then run
+   the exact-green-main read-only WA-03 workflow and retain its sanitized
+   all-pass `10/10` account-baseline receipt;
+4. run and retire the one-time protected foundation migration, verify it with
+   permanent authority, activate both CloudFront WAF stacks and the
+   secret-backed origin capability, then prove:
    CloudFront health succeeds, direct execute-api access fails, managed/rate
    rules block the intended abuse cases, alarms fire, and rollback succeeds;
-4. connect production alarms to a confirmed human destination and execute a
+5. run alarm-routing `plan`, inspect its exact 15 additions, separately approve
+   `apply`, run the staging-only encrypted archive drill, then connect a
+   production paging destination and execute a distinct human
    delivery/acknowledgement/escalation drill;
-5. activate AWS Budget and Cost Anomaly Detection with approved thresholds,
+6. activate AWS Budget and Cost Anomaly Detection with approved thresholds,
    an accountable recipient, a delivery drill, and a unit-cost receipt;
-6. run the protected Cockroach managed-backup restore drill, calculate observed
+7. run the protected Cockroach managed-backup restore drill, calculate observed
    restore time and backup-watermark loss, and compare them with the approved
    RTO/RPO;
-7. run a fault-injected staging rollback/recovery drill; and
-8. consider a second EU recovery region only under a separate architecture,
+8. run a fault-injected staging rollback/recovery drill; and
+9. consider a second EU recovery region only under a separate architecture,
    cost, data-residency, RTO/RPO, and teardown approval. It must not be
    `us-west-2`.
 

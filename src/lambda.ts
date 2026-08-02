@@ -45,7 +45,13 @@ interface HttpApiResult {
 
 function originCapabilityMatches(provided: string | undefined): boolean {
   const expected = process.env.ORIGIN_VERIFY_TOKEN?.trim() ?? "";
-  if (!expected) return true;
+  const environment = process.env.APP_ENV?.trim();
+  if (!expected) {
+    // A missing deployment secret is configuration drift, not permission to
+    // expose the execute-api origin. Only explicit local/test runtimes may run
+    // without the CloudFront-to-origin capability.
+    return environment !== "staging" && environment !== "production";
+  }
   if (!/^[A-Za-z0-9_-]{43,128}$/u.test(expected) || !provided) {
     return false;
   }

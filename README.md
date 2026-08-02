@@ -209,22 +209,29 @@ The deployment follows the AWS serverless web application reference pattern:
   `ExecutedVersion` behind the weighted alias; separate function/API/throttle
   alarms and an operations dashboard retain broad operational coverage.
 
-### Alarm routing — dormant protected contract
+### Alarm routing — protected activation and staging drill path
 
 The delivery foundation now source-controls a fail-closed alarm-routing
-contract, but it is deliberately **not claimed as live**. Its
+contract plus a manual `plan|apply|verify|drill` control workflow, but it is
+deliberately **not claimed as live** until hosted receipts exist. Its
 `AlarmRoutingEnabled` parameter defaults to `false`; no SNS topic ARN is guessed
 or prewired, and the deploy workflow no longer accepts an
 `ALARM_TOPIC_ARN` GitHub secret. A separately authorized administrator must
-first approve the billable AWS resources, apply the exact checked-in stack
-policy, and execute the exact foundation-template change. The existing
-foundation-promotion role cannot set that stack policy or provision these new
-KMS, SNS, SQS, and IAM resources, so it cannot silently self-activate the
+first approve the billable AWS resources and cross the protected
+`alarm-routing-controls` environment. The dedicated repository-bound OIDC role
+can submit only an immutable exact-SHA template to the existing foundation
+stack, pass only the dedicated CloudFormation execution role, and execute only
+an inspected `AlarmRoutingEnabled=false -> true` change set. Both plan and
+apply reject any replacement, deletion, or mutation of an existing resource;
+the only accepted plan adds the 15 conditional alarm resources. The existing
+foundation-promotion and deploy roles cannot silently self-activate the
 contract.
 
 When activated, the foundation creates one rotating customer-managed KMS key,
-separate encrypted staging/production SNS topics, and separate encrypted
-14-day SQS archives. CloudWatch publishing, SNS queue delivery, deploy-role
+separate encrypted staging/production SNS topics, separate encrypted 14-day
+SQS operational archives, and a five-minute KMS-encrypted staging drill queue
+whose SNS payload filter accepts only the synthetic probe's exact `AlarmName`.
+The probe is not attached to CodeDeploy. CloudWatch publishing, SNS queue delivery, deploy-role
 inspection, non-SNS producer denial, TLS enforcement, resource tags, retention,
 and archive subscriptions are all exact-resource policies protected against
 replacement or deletion. Each deployment discovers only complete foundation
@@ -236,14 +243,21 @@ retain a stale destination. It remains guarded by the existing pre/post
 CloudFormation drift gates. After the exact foundation template has been
 synchronized, its
 unconditional read-only alarm-inspection policy lets every deployment prove
-that exactly four environment alarms either route exclusively to the discovered
-topic or, while the contract is disabled, retain no actions at all. Any partial,
+that exactly four deployment alarms either route exclusively to the discovered
+topic or, while the contract is disabled, retain no actions at all. In the
+active staging state it additionally verifies the isolated routing probe. Any partial,
 inconsistent, cross-environment, or stale-action contract fails closed. The SQS
 archives are finite 14-day
 delivery/evidence buffers, not immutable records or human-notification
-endpoints; without a separately approved consumer, messages expire. Human
-paging endpoints and a live delivery drill remain intentionally outside this
-dormant phase and must not be represented as completed.
+endpoints; without a separately approved consumer, messages expire. The drill
+can force only the synthetic staging probe from `ALARM` to `OK`, observe the
+matching encrypted SNS-to-SQS envelope in the dedicated filtered queue without
+reading the operational archive or deleting the message, and bind hashed
+human approval/acknowledgement references without contact details. Its IAM
+authority cannot set production alarm state. This proves the encrypted probe route,
+not delivery to or acknowledgement by a paging destination. Human paging and
+all live activation/drill claims remain pending until separately approved
+hosted receipts exist.
 
 ### Durable AWS delivery recovery — live protected rollout
 
@@ -309,8 +323,9 @@ The checked-in control plane is AWS-native and fixed to `eu-west-1`:
    `COMMITTED`. A completely proved restoration may advance it to `RECOVERED`;
    cancellation and incomplete recovery leave it unresolved.
 5. The checked-in watchdog handles failed, cancelled, and timed-out delivery
-   runs after the exact `Deploy AWS` completion event, on a 15-minute schedule,
-   or by manual dispatch. A two-hour lease is bound to the exact watchdog
+   runs from a 15-minute schedule, a daily audit schedule, or manual dispatch.
+   It classifies only the exact `Deploy AWS` push run/attempt bound by the
+   durable ledger. A two-hour lease is bound to the exact watchdog
    run/attempt/environment. An active owner blocks competing work; an expired
    lease or an exactly proved completed non-success owner can be reclaimed
    through another CAS revision.
@@ -520,10 +535,27 @@ manufacture a `RECOVERED` receipt.
 - Memory text is escaped and treated as untrusted evidence, never as instructions.
 - The public database is a dedicated synthetic demonstration scope; no customer
   records are used.
-- [`aws/edge-waf.yaml`](./aws/edge-waf.yaml) and optional origin verification
-  are repository-prepared but dormant. Live WebACL association, direct-origin
-  rejection, alarm routing, and abuse drills require explicit approval and
+- [`aws/edge-waf.yaml`](./aws/edge-waf.yaml) has a protected, manual
+  plan/apply/verify workflow. The application template has no unprotected
+  mode: it requires the exact protected edge-stack WebACL output and the
+  bootstrap-generated Secrets Manager origin capability. No live activation
+  is claimed; foundation migration, both edge-stack receipts, deployment,
+  alarm routing, and abuse drills still require explicit approval and
   exact-SHA pipeline evidence.
+- WA-03 has a separate manual, protected, exact-green-main
+  [read-only AWS account security baseline workflow](./.github/workflows/aws-security-baseline.yml).
+  Its reference IAM policy cannot mutate AWS, raw service responses remain
+  runner-temporary, and only a sanitized exact-SHA receipt is uploaded;
+  acceptance requires `10/10`. The audit role, protected environment,
+  account-control activation, and first live receipt still require explicit
+  approval; none is claimed here.
+- WA-10 has a separate manual, protected, exact-green-main
+  [sustainability intensity workflow](./.github/workflows/sustainability-intensity-evidence.yml).
+  It reads only the exact deployed stack and bounded hosted-load CloudWatch
+  telemetry, normalizes engineering proxies by successful recall, enforces
+  equivalent baseline/after workloads, and uploads only a sanitized receipt.
+  It does not claim emissions, carbon reduction, billed Lambda duration,
+  production scale, or a live improvement before the protected evidence exists.
 
 Implementation and evidence contracts:
 
@@ -532,6 +564,9 @@ Implementation and evidence contracts:
 - [Memory architecture evaluation](./docs/EVALUATION.md)
 - [Pipeline-only supply-chain security](./docs/SUPPLY_CHAIN_SECURITY.md)
 - [AWS Well-Architected evidence](./docs/operations/WELL_ARCHITECTED_EVIDENCE.md)
+- [AWS account security baseline audit](./docs/runbooks/aws-account-security-baseline.md)
+- [Sustainability intensity evidence](./docs/runbooks/sustainability-intensity.md)
+- [Protected foundation storage migration](./docs/operations/FOUNDATION_STORAGE_MIGRATION.md)
 - [Managed-backup restore drill](./docs/runbooks/database-restore.md)
 
 ## Why CockroachDB instead of DynamoDB or Cosmos DB?
@@ -593,6 +628,14 @@ Open `http://127.0.0.1:5173`; the CockroachDB console is
 verification in hosted CI. Do not commit
 `node_modules`, `dist`, `.aws-sam`, Playwright output, readiness output, or
 generated video assets.
+
+Current release orchestration starts `Deploy AWS` only from a trusted `main`
+push. Its source gate waits for the successful same-SHA `CI` push run and
+exports that exact run/attempt into the deployment receipts. After production
+promotion and the Managed MCP proof pass, the deployment calls `Hosted DAST`
+as a reusable workflow with the same SHA and deploy run/attempt; active probes,
+ZAP, and their artifacts therefore remain part of the causal release run.
+Weekly scheduled and manual DAST runs remain independent production audits.
 
 ## Pinned release evidence
 

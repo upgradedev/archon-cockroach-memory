@@ -8,7 +8,9 @@ Parameters:
   AppName:
     Type: String
     Default: archon-memory
-    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
+    MinLength: 3
+    MaxLength: 17
+    AllowedPattern: "^[a-z][a-z0-9-]{2,16}$"
   GitHubOrganization:
     Type: String
     Default: upgradedev
@@ -78,6 +80,168 @@ Resources:
       Tags:
         - Key: Application
           Value: !Ref AppName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ApplicationStorageKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub >-
+        Customer-managed key for ${AppName} release artifacts, private SPA
+        objects, and origin-verification secrets
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: AllowCloudFrontPrivateOriginRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+              ArnLike:
+                AWS:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*
+              StringLike:
+                kms:EncryptionContext:aws:s3:arn:
+                  - !Sub >-
+                    arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}
+                  - !Sub >-
+                    arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: application-storage-and-secrets
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ApplicationStorageKeyAlias:
+    Type: AWS::KMS::Alias
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: !Sub "alias/${AppName}-storage"
+      TargetKeyId: !Ref ApplicationStorageKey
+
+  CloudFrontAccessLogKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub >-
+        Dedicated customer-managed key for ${AppName} CloudFront standard
+        access logs; isolated from application data and secrets
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          # AWS documents this service principal without SourceAccount or
+          # SourceArn conditions for SSE-KMS CloudFront standard logging.
+          # Isolating it on this log-only key bounds that service grant.
+          - Sid: AllowCloudFrontAccessLogEncryption
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: cloudfront-access-logs-only
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  CloudFrontAccessLogKeyAlias:
+    Type: AWS::KMS::Alias
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: !Sub "alias/${AppName}-cloudfront-logs"
+      TargetKeyId: !Ref CloudFrontAccessLogKey
+
+  StagingOriginVerifySecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn: ApplicationStorageKeyAlias
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${AppName}/staging/origin-verification"
+      Description: CloudFront-to-origin capability for the protected staging stack.
+      KmsKeyId: !GetAtt ApplicationStorageKey.Arn
+      GenerateSecretString:
+        ExcludePunctuation: true
+        ExcludeUppercase: false
+        ExcludeLowercase: false
+        ExcludeNumbers: false
+        IncludeSpace: false
+        PasswordLength: 64
+        GenerateStringKey: ORIGIN_VERIFY_TOKEN
+        SecretStringTemplate: "{}"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: origin-verification-capability
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ProductionOriginVerifySecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn: ApplicationStorageKeyAlias
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${AppName}/production/origin-verification"
+      Description: CloudFront-to-origin capability for the protected production stack.
+      KmsKeyId: !GetAtt ApplicationStorageKey.Arn
+      GenerateSecretString:
+        ExcludePunctuation: true
+        ExcludeUppercase: false
+        ExcludeLowercase: false
+        ExcludeNumbers: false
+        IncludeSpace: false
+        PasswordLength: 64
+        GenerateStringKey: ORIGIN_VERIFY_TOKEN
+        SecretStringTemplate: "{}"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: origin-verification-capability
+        - Key: Environment
+          Value: production
         - Key: ManagedBy
           Value: CloudFormation
 
@@ -228,7 +392,89 @@ Resources:
                   arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowCloudFrontLogBucketServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${S3AccessLogArchive.Arn}/cloudfront-log-bucket/*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:s3:::${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
 
+  CloudFrontAccessLogBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogArchivePolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}"
+      # CloudFront standard logging (legacy) still requires bucket ACLs.
+      # BucketOwnerPreferred retains owner control without weakening either
+      # public-access blocking or the dedicated-bucket boundary.
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !GetAtt CloudFrontAccessLogKey.Arn
+              SSEAlgorithm: aws:kms
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogArchive
+        LogFilePrefix: cloudfront-log-bucket/
+        TargetObjectKeyFormat:
+          PartitionedPrefix:
+            PartitionDateSource: EventTime
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetireCloudFrontAccessLogs
+            Status: Enabled
+            Prefix: ""
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: cloudfront-access-logs
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  CloudFrontAccessLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref CloudFrontAccessLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudFrontAccessLogBucket.Arn
+              - !Sub "${CloudFrontAccessLogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
   ArtifactBucket:
     Type: AWS::S3::Bucket
     DependsOn: S3AccessLogArchivePolicy
@@ -238,8 +484,10 @@ Resources:
       BucketName: !Sub "${AppName}-artifacts-${AWS::AccountId}-${AWS::Region}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !GetAtt ApplicationStorageKey.Arn
+              SSEAlgorithm: aws:kms
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
@@ -252,12 +500,19 @@ Resources:
         Status: Enabled
       LifecycleConfiguration:
         Rules:
-          - Id: RetireOldCandidateVersions
+          - Id: RetireCandidateAndRecoveryEvidence
             Status: Enabled
             Prefix: candidates/
+            # Current immutable candidates, recovery bundles, ledgers, and
+            # receipts are bounded to the seven-year evidence horizon. Active
+            # environments must create and drill a newer recovery point before
+            # that horizon; noncurrent ledger versions retire much sooner.
+            ExpirationInDays: 2555
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
               NewerNoncurrentVersions: 5
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
           - Id: RetireFoundationTemplates
             Status: Enabled
             Prefix: foundation/
@@ -298,6 +553,23 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
+          - Sid: DenyArtifactWritesWithoutKms
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenyArtifactWritesWithUnexpectedKmsKey
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !Sub >-
+                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage
 
   AlarmNotificationsKey:
     Type: AWS::KMS::Key
@@ -490,6 +762,28 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
+  StagingAlarmRoutingDrillQueue:
+    Type: AWS::SQS::Queue
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${AppName}-staging-alarm-routing-drill"
+      KmsMasterKeyId: !GetAtt AlarmNotificationsKey.Arn
+      KmsDataKeyReusePeriodSeconds: 300
+      MessageRetentionPeriod: 300
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 60
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: synthetic-operational-evidence
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
+
   ProductionAlarmArchiveQueue:
     Type: AWS::SQS::Queue
     Condition: EnableAlarmRouting
@@ -520,6 +814,7 @@ Resources:
     Properties:
       Queues:
         - !Ref StagingAlarmArchiveQueue
+        - !Ref StagingAlarmRoutingDrillQueue
         - !Ref ProductionAlarmArchiveQueue
       PolicyDocument:
         Version: "2012-10-17"
@@ -546,6 +841,17 @@ Resources:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnEquals:
                 aws:SourceArn: !Ref ProductionAlarmTopic
+          - Sid: AllowStagingAlarmRoutingDrillDelivery
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt StagingAlarmRoutingDrillQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Ref StagingAlarmTopic
           - Sid: DenyStagingAlarmArchiveInjection
             Effect: Deny
             Principal: "*"
@@ -562,12 +868,21 @@ Resources:
             Condition:
               ArnNotLike:
                 aws:SourceArn: !Ref ProductionAlarmTopic
+          - Sid: DenyStagingAlarmRoutingDrillInjection
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt StagingAlarmRoutingDrillQueue.Arn
+            Condition:
+              ArnNotLike:
+                aws:SourceArn: !Ref StagingAlarmTopic
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: "*"
             Action: sqs:*
             Resource:
               - !GetAtt StagingAlarmArchiveQueue.Arn
+              - !GetAtt StagingAlarmRoutingDrillQueue.Arn
               - !GetAtt ProductionAlarmArchiveQueue.Arn
             Condition:
               Bool:
@@ -585,6 +900,22 @@ Resources:
       Endpoint: !GetAtt StagingAlarmArchiveQueue.Arn
       RawMessageDelivery: false
 
+  StagingAlarmRoutingDrillSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableAlarmRouting
+    DependsOn: AlarmArchiveQueuePolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TopicArn: !Ref StagingAlarmTopic
+      Protocol: sqs
+      Endpoint: !GetAtt StagingAlarmRoutingDrillQueue.Arn
+      RawMessageDelivery: false
+      FilterPolicyScope: MessageBody
+      FilterPolicy:
+        AlarmName:
+          - !Sub "${AppName}-staging-routing-drill"
+
   ProductionAlarmArchiveSubscription:
     Type: AWS::SNS::Subscription
     Condition: EnableAlarmRouting
@@ -596,6 +927,37 @@ Resources:
       Protocol: sqs
       Endpoint: !GetAtt ProductionAlarmArchiveQueue.Arn
       RawMessageDelivery: false
+
+  StagingAlarmRoutingDrillAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      AlarmName: !Sub "${AppName}-staging-routing-drill"
+      AlarmDescription: >-
+        Dedicated staging-only delivery probe. It is never attached to
+        CodeDeploy and may be forced only by the protected alarm-routing drill.
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref StagingAlarmTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: DeliveryProbe
+      Namespace: !Sub "${AppName}/AlarmRoutingDrill"
+      Period: 86400
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: DataClassification
+          Value: synthetic-operational-evidence
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
 
   StagingLambdaRuntimeRole:
     Type: AWS::IAM::Role
@@ -635,7 +997,7 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-*
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-??????
                 Condition:
                   ArnEquals:
                     lambda:SourceFunctionArn: !Sub >-
@@ -713,7 +1075,7 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-*
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-??????
                 Condition:
                   ArnEquals:
                     lambda:SourceFunctionArn: !Sub >-
@@ -883,6 +1245,17 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
                 token.actions.githubusercontent.com:sub: !Sub >-
                   repo:${GitHubOrganization}/${GitHubRepository}:environment:production-db
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: production-db
+                token.actions.githubusercontent.com:workflow:
+                  - Deploy AWS
+                  - Database release
+                  - CockroachDB managed-backup restore drill
+                  - Rotate CockroachDB Runtime Credential
       Policies:
         - PolicyName: reconcile-cockroach-release
           PolicyDocument:
@@ -894,19 +1267,22 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/operator/cockroach-admin-*
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/operator/cockroach-admin-??????
               - Sid: ManageOnlyRuntimeDatabaseCredentials
                 Effect: Allow
                 Action:
                   - secretsmanager:CreateSecret
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
+                  - secretsmanager:ListSecretVersionIds
+                  - secretsmanager:PutSecretValue
                   - secretsmanager:TagResource
+                  - secretsmanager:UpdateSecretVersionStage
                 Resource:
                   - !Sub >-
-                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-*
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/staging/database-??????
                   - !Sub >-
-                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-*
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/production/database-??????
               - Sid: CreateRealTitanEmbeddings
                 Effect: Allow
                 Action: bedrock:InvokeModel
@@ -975,6 +1351,24 @@ Resources:
               - s3:GetObjectVersion
               - s3:PutObject
             Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-staging-web-${AWS::AccountId}-${AWS::Region}/*"
+          - Sid: ManageStagingCloudFrontLoggingAcl
+            Effect: Allow
+            Action:
+              - s3:GetBucketAcl
+              - s3:PutBucketAcl
+            Resource: !GetAtt CloudFrontAccessLogBucket.Arn
+          - Sid: ResolveStagingOriginVerificationSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+            Resource: !Ref StagingOriginVerifySecret
+          - Sid: UseStorageKeyForStagingResources
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !GetAtt ApplicationStorageKey.Arn
           - Sid: ReadImmutableCandidate
             Effect: Allow
             Action:
@@ -1061,6 +1455,24 @@ Resources:
               - s3:GetObjectVersion
               - s3:PutObject
             Resource: !Sub "arn:${AWS::Partition}:s3:::${AppName}-production-web-${AWS::AccountId}-${AWS::Region}/*"
+          - Sid: ManageProductionCloudFrontLoggingAcl
+            Effect: Allow
+            Action:
+              - s3:GetBucketAcl
+              - s3:PutBucketAcl
+            Resource: !GetAtt CloudFrontAccessLogBucket.Arn
+          - Sid: ResolveProductionOriginVerificationSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+            Resource: !Ref ProductionOriginVerifySecret
+          - Sid: UseStorageKeyForProductionResources
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !GetAtt ApplicationStorageKey.Arn
           - Sid: ReadImmutableCandidate
             Effect: Allow
             Action:
@@ -1310,6 +1722,901 @@ Resources:
         - Key: Environment
           Value: production
 
+  AlarmRoutingCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-alarm-routing-cloudformation-execution"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: activate-exact-alarm-routing-resources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadPinnedAlarmRoutingFoundationTemplate
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/foundation/alarm-routing/*
+              - Sid: DecryptPinnedAlarmRoutingFoundationTemplate
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt ApplicationStorageKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+              - Sid: CreateOnlyTaggedAlarmNotificationKey
+                Effect: Allow
+                Action: kms:CreateKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: !Ref AppName
+                    aws:RequestTag/DataClassification: alarm-notifications
+                    aws:RequestTag/ManagedBy: CloudFormation
+                    kms:KeySpec: SYMMETRIC_DEFAULT
+                    kms:KeyUsage: ENCRYPT_DECRYPT
+                  Bool:
+                    kms:MultiRegion: "false"
+              - Sid: ManageOnlyTaggedAlarmNotificationKey
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:EnableKeyRotation
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ListResourceTags
+                  - kms:PutKeyPolicy
+                  - kms:ScheduleKeyDeletion
+                  - kms:TagResource
+                  - kms:UntagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/DataClassification: alarm-notifications
+                    aws:ResourceTag/ManagedBy: CloudFormation
+              - Sid: ManageExactAlarmNotificationAlias
+                Effect: Allow
+                Action:
+                  - kms:CreateAlias
+                  - kms:DeleteAlias
+                  - kms:UpdateAlias
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-alarm-notifications
+                  - !Sub >-
+                    arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+              - Sid: ManageExactAlarmTopics
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTagsForResource
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarms
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarms
+              - Sid: ManageExactAlarmSubscriptions
+                Effect: Allow
+                Action:
+                  - sns:GetSubscriptionAttributes
+                  - sns:SetSubscriptionAttributes
+                  - sns:Unsubscribe
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarms:*
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarms:*
+              - Sid: ManageExactAlarmArchiveQueues
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ListQueueTags
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarm-archive
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarm-routing-drill
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarm-archive
+              - Sid: AttachOnlyAlarmInspectionPolicies
+                Effect: Allow
+                Action:
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:PutRolePolicy
+                Resource:
+                  - !GetAtt StagingDeployRole.Arn
+                  - !GetAtt ProductionDeployRole.Arn
+              - Sid: ManageOnlyStagingRoutingDrillAlarm
+                Effect: Allow
+                Action:
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-routing-drill
+              - Sid: InspectStagingRoutingDrillAlarmDuringMutation
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: alarm-routing-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlarmRoutingControlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-alarm-routing-controls"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:alarm-routing-controls
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: alarm-routing-controls
+                token.actions.githubusercontent.com:workflow: Manage AWS Alarm Routing
+      Policies:
+        - PolicyName: manage-exact-alarm-routing-control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreatePinnedAlarmRoutingChangeSet
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/alarm-routing-*/*
+                Condition:
+                  StringEquals:
+                    cloudformation:RoleArn: !GetAtt AlarmRoutingCloudFormationExecutionRole.Arn
+                  StringLike:
+                    cloudformation:ChangeSetName:
+                      - alarm-routing-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/alarm-routing-*/*
+                    cloudformation:TemplateUrl: !Sub >-
+                      https://${ArtifactBucket}.s3.${AWS::Region}.amazonaws.com/foundation/alarm-routing/*
+              - Sid: InspectAndExecutePinnedAlarmRoutingChangeSet
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStackResources
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/alarm-routing-*/*
+                Condition:
+                  StringLikeIfExists:
+                    cloudformation:ChangeSetName:
+                      - alarm-routing-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/alarm-routing-*/*
+              - Sid: PassOnlyAlarmRoutingCloudFormationExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt AlarmRoutingCloudFormationExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: PublishPinnedAlarmRoutingFoundationTemplate
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub >-
+                  ${ArtifactBucket.Arn}/foundation/alarm-routing/*
+              - Sid: EncryptPinnedAlarmRoutingFoundationTemplate
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                Resource: !GetAtt ApplicationStorageKey.Arn
+              - Sid: DiscoverExactAlarmConfiguration
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Sid: ProveTaggedAlarmNotificationKey
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ListResourceTags
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/DataClassification: alarm-notifications
+                    aws:ResourceTag/ManagedBy: CloudFormation
+              - Sid: InspectExactAlarmTopics
+                Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTagsForResource
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarms
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarms
+              - Sid: InspectExactAlarmSubscriptions
+                Effect: Allow
+                Action: sns:GetSubscriptionAttributes
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarms:*
+                  - !Sub >-
+                    arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarms:*
+              - Sid: InspectExactAlarmArchives
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ListQueueTags
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarm-archive
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarm-routing-drill
+                  - !Sub >-
+                    arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-production-alarm-archive
+              - Sid: RunOnlyBoundedStagingAlarmDeliveryDrill
+                Effect: Allow
+                Action: cloudwatch:SetAlarmState
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-routing-drill
+              - Sid: ReadOnlyStagingAlarmDrillDelivery
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppName}-staging-alarm-routing-drill
+              - Sid: DecryptOnlyStagingAlarmDrillDelivery
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "sqs.${AWS::Region}.amazonaws.com"
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/DataClassification: alarm-notifications
+                    aws:ResourceTag/ManagedBy: CloudFormation
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: alarm-routing-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  EdgeControlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-edge-controls"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:edge-controls
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: edge-controls
+                token.actions.githubusercontent.com:workflow: Manage AWS Edge Controls
+      Policies:
+        - PolicyName: manage-exact-cloudfront-waf-stacks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PlanAndApplyExactEdgeStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStackResources
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:UpdateTerminationProtection
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-staging-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-production-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/edge-controls-*/*
+                Condition:
+                  StringLikeIfExists:
+                    cloudformation:ChangeSetName:
+                      - edge-controls-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/edge-controls-*/*
+              - Sid: ManageExactCloudFrontWebAcls
+                Effect: Allow
+                Action:
+                  - wafv2:CreateWebACL
+                  - wafv2:DeleteWebACL
+                  - wafv2:DeleteLoggingConfiguration
+                  - wafv2:PutLoggingConfiguration
+                  - wafv2:TagResource
+                  - wafv2:UntagResource
+                  - wafv2:UpdateWebACL
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-*/*
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectExactCloudFrontWebAcls
+                Effect: Allow
+                Action:
+                  - wafv2:GetLoggingConfiguration
+                  - wafv2:GetWebACL
+                  - wafv2:ListTagsForResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-*/*
+              # AWS WAF documents these account-scoped CloudWatch Logs
+              # permissions as mandatory for PutLoggingConfiguration. They
+              # cannot be resource-scoped, so they remain CloudFormation-only
+              # and region-bound.
+              - Sid: ConfigureOnlyCloudFormationWafLogDelivery
+                Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:DescribeLogGroups
+                  - logs:DescribeResourcePolicies
+                  - logs:PutResourcePolicy
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: CreateOnlyTaggedEdgeEvidenceKeys
+                Effect: Allow
+                Action: kms:CreateKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: !Ref AppName
+                    aws:RequestTag/DataClassification: security-evidence
+                    aws:RequestTag/Environment:
+                      - staging
+                      - production
+                    aws:RequestedRegion: us-east-1
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ManageOnlyTaggedEdgeEvidenceKeys
+                Effect: Allow
+                Action:
+                  - kms:CancelKeyDeletion
+                  - kms:DisableKeyRotation
+                  - kms:EnableKeyRotation
+                  - kms:PutKeyPolicy
+                  - kms:ScheduleKeyDeletion
+                  - kms:TagResource
+                  - kms:UntagResource
+                  - kms:UpdateKeyDescription
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/DataClassification: security-evidence
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ManageOnlyNamedEdgeEvidenceAliases
+                Effect: Allow
+                Action:
+                  - kms:CreateAlias
+                  - kms:DeleteAlias
+                  - kms:UpdateAlias
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:alias/${AppName}-staging-edge-evidence
+                  - !Sub >-
+                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:alias/${AppName}-production-edge-evidence
+                  - !Sub >-
+                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyTaggedEdgeEvidenceKeys
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ListResourceTags
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/DataClassification: security-evidence
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+              - Sid: ManageOnlyNamedWafLogGroups
+                Effect: Allow
+                Action:
+                  - logs:AssociateKmsKey
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DeleteRetentionPolicy
+                  - logs:DisassociateKmsKey
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-*-blocked*
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyNamedWafLogGroups
+                Effect: Allow
+                Action: logs:ListTagsForResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-*-blocked
+              - Sid: DescribeOnlyUsEastOneWafLogGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+              - Sid: CreateOnlyTaggedEdgeAlarmTopics
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:TagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: !Ref AppName
+                    aws:RequestTag/EvidenceRoute: waf-alarm-archive
+                    aws:RequestTag/Environment:
+                      - staging
+                      - production
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ManageOnlyTaggedEdgeAlarmTopics
+                Effect: Allow
+                Action:
+                  - sns:DeleteTopic
+                  - sns:SetSubscriptionAttributes
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:TagResource
+                  - sns:Unsubscribe
+                  - sns:UntagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyTaggedEdgeAlarmTopics
+                Effect: Allow
+                Action:
+                  - sns:GetSubscriptionAttributes
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTagsForResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+              - Sid: CreateOnlyTaggedEdgeAlarmArchives
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:TagQueue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: !Ref AppName
+                    aws:RequestTag/EvidenceRoute: waf-alarm-archive
+                    aws:RequestTag/Environment:
+                      - staging
+                      - production
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: ManageOnlyTaggedEdgeAlarmArchives
+                Effect: Allow
+                Action:
+                  - sqs:DeleteQueue
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyTaggedEdgeAlarmArchives
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ListQueueTags
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
+                    aws:ResourceTag/Environment:
+                      - staging
+                      - production
+              - Sid: ManageOnlyNamedEdgeWafAlarms
+                Effect: Allow
+                Action:
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-*-waf-*
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyNamedEdgeWafAlarms
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:ListTagsForResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-*-waf-*
+              - Sid: CheckCloudFrontWebAclCapacity
+                Effect: Allow
+                Action: wafv2:CheckCapacity
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: edge-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  FinOpsCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-finops-cloudformation-execution"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: finops-cloudformation-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageOnlyNamedWorkloadBudgets
+                Effect: Allow
+                Action:
+                  - budgets:ListTagsForResource
+                  - budgets:ModifyBudget
+                  - budgets:TagResource
+                  - budgets:UntagResource
+                  - budgets:ViewBudget
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/${AppName}-workload-monthly-total
+              - Sid: CreateOnlyTaggedCostAnomalyControls
+                Effect: Allow
+                Action:
+                  - ce:CreateAnomalyMonitor
+                  - ce:CreateAnomalySubscription
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: !Ref AppName
+                    aws:RequestTag/ApprovalBoundary: explicit-live-activation-required
+                    aws:RequestTag/FinOpsScope: workload
+              - Sid: ManageOnlyTaggedCostAnomalyControls
+                Effect: Allow
+                Action:
+                  - ce:DeleteAnomalyMonitor
+                  - ce:DeleteAnomalySubscription
+                  - ce:GetAnomalyMonitors
+                  - ce:GetAnomalySubscriptions
+                  - ce:ListTagsForResource
+                  - ce:TagResource
+                  - ce:UntagResource
+                  - ce:UpdateAnomalyMonitor
+                  - ce:UpdateAnomalySubscription
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:ce::${AWS::AccountId}:anomalymonitor/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:ce::${AWS::AccountId}:anomalysubscription/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: !Ref AppName
+                    aws:ResourceTag/ApprovalBoundary: explicit-live-activation-required
+                    aws:ResourceTag/FinOpsScope: workload
+              - Sid: InspectAccountBoundEncryptedNotificationRoutes
+                Effect: Allow
+                Action: sns:GetTopicAttributes
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:*
+              - Sid: CreateOnlyBudgetsServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/budgets.amazonaws.com/*
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: budgets.amazonaws.com
+              - Sid: RequiredFineGrainedBillingPermissions
+                Effect: Allow
+                Action:
+                  - aws-portal:ModifyBilling
+                  - aws-portal:ViewBilling
+                  - billing:GetBillingViewData
+                Resource: "*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: finops-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  FinOpsControlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-finops-controls"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:finops-controls
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: finops-controls
+                token.actions.githubusercontent.com:workflow: Manage AWS FinOps Controls
+      Policies:
+        - PolicyName: manage-exact-finops-control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateExactFinOpsChangeSets
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-finops/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/finops-*/*
+                Condition:
+                  StringEquals:
+                    cloudformation:RoleArn: !GetAtt FinOpsCloudFormationExecutionRole.Arn
+                  StringLike:
+                    cloudformation:ChangeSetName:
+                      - finops-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/finops-*/*
+              - Sid: PlanAndApplyExactFinOpsStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStackResources
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:UpdateTerminationProtection
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-finops/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/finops-*/*
+                Condition:
+                  StringLikeIfExists:
+                    cloudformation:ChangeSetName:
+                      - finops-*
+                      - !Sub >-
+                        arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/finops-*/*
+              - Sid: PassOnlyFinOpsCloudFormationExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt FinOpsCloudFormationExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: ProveOnlyNamedWorkloadBudgets
+                Effect: Allow
+                Action:
+                  - budgets:ListTagsForResource
+                  - budgets:ViewBudget
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/${AppName}-workload-monthly-total
+              - Sid: ProveActiveApplicationCostAllocationTag
+                Effect: Allow
+                Action: ce:ListCostAllocationTags
+                Resource: "*"
+              - Sid: ProveOnlyAccountCostAnomalyControls
+                Effect: Allow
+                Action:
+                  - ce:GetAnomalyMonitors
+                  - ce:GetAnomalySubscriptions
+                  - ce:ListTagsForResource
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:ce::${AWS::AccountId}:anomalymonitor/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:ce::${AWS::AccountId}:anomalysubscription/*
+              - Sid: InspectAndTestAccountBoundNotificationRoutes
+                Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:Publish
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:*
+              - Sid: InspectAccountBoundNotificationKeys
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+              - Sid: PublishOnlyThroughAccountBoundEncryptedSns
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    kms:ViaService: sns.us-east-1.amazonaws.com
+                  StringLike:
+                    kms:EncryptionContext:aws:sns:topicArn: !Sub >-
+                      arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:*
+              - Sid: RequiredFineGrainedBillingReadPermissions
+                Effect: Allow
+                Action:
+                  - aws-portal:ViewBilling
+                  - billing:GetBillingViewData
+                Resource: "*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: finops-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
   FoundationPromotionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1336,7 +2643,9 @@ Resources:
                 token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
                 token.actions.githubusercontent.com:ref: refs/heads/main
                 token.actions.githubusercontent.com:environment: bootstrap
-                token.actions.githubusercontent.com:workflow: Bootstrap AWS Foundation
+                token.actions.githubusercontent.com:workflow:
+                  - Bootstrap AWS Foundation
+                  - Foundation Storage Migration
       Policies:
         - PolicyName: promote-foundation-logging
           PolicyDocument:
@@ -1376,8 +2685,12 @@ Resources:
                   - cloudformation:DescribeStacks
                   - cloudformation:GetStackPolicy
                   - cloudformation:GetTemplate
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - cloudformation:ListStackResources
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - !Sub >-
+                      arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-foundation-migration-authority/*
               - Sid: PublishImmutableFoundationTemplate
                 Effect: Allow
                 Action:
@@ -1385,6 +2698,30 @@ Resources:
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Resource: !Sub "${ArtifactBucket.Arn}/foundation/*"
+              - Sid: EncryptImmutableFoundationTemplate
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ReEncrypt*
+                Resource: !GetAtt ApplicationStorageKey.Arn
+              - Sid: InspectCloudFrontAccessLogKey
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                Resource: !GetAtt CloudFrontAccessLogKey.Arn
+              - Sid: InspectOriginVerificationSecretMetadata
+                Effect: Allow
+                Action: secretsmanager:DescribeSecret
+                Resource:
+                  - !Ref StagingOriginVerifySecret
+                  - !Ref ProductionOriginVerifySecret
               - Sid: InspectArtifactAndArchiveBuckets
                 Effect: Allow
                 Action:
@@ -1400,6 +2737,7 @@ Resources:
                   - s3:GetLifecycleConfiguration
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
+                  - !GetAtt CloudFrontAccessLogBucket.Arn
                   - !GetAtt S3AccessLogArchive.Arn
               - Sid: ActivateArtifactBucketLoggingWithoutReplacement
                 Effect: Allow
@@ -1438,7 +2776,19 @@ Resources:
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-database-operator
                   - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-finops-cloudformation-execution
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-alarm-routing-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-alarm-routing-cloudformation-execution
+                  - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-promotion
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-migration
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-staging-deploy
                   - !Sub >-
@@ -1446,6 +2796,22 @@ Resources:
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectPermanentControlRoleContracts
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-finops-cloudformation-execution
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-alarm-routing-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-alarm-routing-cloudformation-execution
               - Sid: ResolveExactFoundationAutomationRule
                 Effect: Allow
                 Action: securityhub:ListTagsForResource
@@ -1515,6 +2881,14 @@ Resources:
                   - cloudformation:RollbackStack
                   - cloudformation:UpdateTerminationProtection
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-staging/*"
+              - Sid: InspectStagingControlPlaneOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-staging-edge/*
               - Sid: InspectStagingDriftDetection
                 Effect: Allow
                 Action:
@@ -1583,6 +2957,15 @@ Resources:
                 Effect: Allow
                 Resource: !Sub >-
                   ${ArtifactBucket.Arn}/candidates/deployments/staging/*
+              - Sid: UseStagingApplicationStorageKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                Resource: !GetAtt ApplicationStorageKey.Arn
               - Sid: ManageStagingRecoveryArtifacts
                 Action:
                   - s3:GetObject
@@ -1712,6 +3095,14 @@ Resources:
                   - cloudformation:RollbackStack
                   - cloudformation:UpdateTerminationProtection
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-production/*"
+              - Sid: InspectProductionControlPlaneOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-production-edge/*
               - Sid: InspectProductionDriftDetection
                 Effect: Allow
                 Action:
@@ -1780,6 +3171,15 @@ Resources:
                 Effect: Allow
                 Resource: !Sub >-
                   ${ArtifactBucket.Arn}/candidates/deployments/production/*
+              - Sid: UseProductionApplicationStorageKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                Resource: !GetAtt ApplicationStorageKey.Arn
               - Sid: ManageProductionRecoveryArtifacts
                 Action:
                   - s3:GetObject
@@ -1870,6 +3270,35 @@ Resources:
             Action: cloudwatch:DescribeAlarms
             Resource: "*"
 
+  StagingCodeDeployInspectionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${AppName}-staging-codedeploy-inspection"
+      Roles:
+        - !Ref StagingDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadOnlyStagingCanaryApplicationRevision
+            Effect: Allow
+            Action: codedeploy:GetApplicationRevision
+            Resource: !Sub >-
+              arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${AppName}-staging-*
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref AWS::Region
+          - Sid: InspectOnlyStagingCanaryDeploymentGroup
+            Effect: Allow
+            Action:
+              - codedeploy:GetDeployment
+              - codedeploy:GetDeploymentGroup
+              - codedeploy:ListDeployments
+            Resource: !Sub >-
+              arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${AppName}-staging-*/*
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref AWS::Region
+
   StagingAlarmRoutingInspectionPolicy:
     Type: AWS::IAM::Policy
     Condition: EnableAlarmRouting
@@ -1937,14 +3366,42 @@ Resources:
               - kms:ListResourceTags
             Resource: !GetAtt AlarmNotificationsKey.Arn
 Outputs:
+  ApplicationStorageKeyArn:
+    Value: !GetAtt ApplicationStorageKey.Arn
+    Export:
+      Name: !Sub "${AppName}-storage-kms-key-arn"
+  ApplicationStorageKeyAliasArn:
+    Value: !Sub >-
+      arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage
+  CloudFrontAccessLogKeyArn:
+    Value: !GetAtt CloudFrontAccessLogKey.Arn
+  CloudFrontAccessLogKeyAliasArn:
+    Value: !Sub >-
+      arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-cloudfront-logs
   ArtifactBucketName:
     Value: !Ref ArtifactBucket
+  CloudFrontAccessLogBucketName:
+    Value: !Ref CloudFrontAccessLogBucket
+  StagingOriginVerifySecretArn:
+    Value: !Ref StagingOriginVerifySecret
+  ProductionOriginVerifySecretArn:
+    Value: !Ref ProductionOriginVerifySecret
   S3AccessLogArchiveName:
     Value: !Ref S3AccessLogArchive
   S3AccessLogArchiveArn:
     Value: !GetAtt S3AccessLogArchive.Arn
   S3AccessLogArchiveSuppressionRuleArn:
     Value: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
+  EdgeControlRoleArn:
+    Value: !GetAtt EdgeControlRole.Arn
+  FinOpsControlRoleArn:
+    Value: !GetAtt FinOpsControlRole.Arn
+  FinOpsCloudFormationExecutionRoleArn:
+    Value: !GetAtt FinOpsCloudFormationExecutionRole.Arn
+  AlarmRoutingControlRoleArn:
+    Value: !GetAtt AlarmRoutingControlRole.Arn
+  AlarmRoutingCloudFormationExecutionRoleArn:
+    Value: !GetAtt AlarmRoutingCloudFormationExecutionRole.Arn
   FoundationPromotionRoleArn:
     Value: !GetAtt FoundationPromotionRole.Arn
   StagingDeployRoleArn:
@@ -1980,6 +3437,9 @@ Outputs:
   StagingAlarmArchiveQueueArn:
     Condition: EnableAlarmRouting
     Value: !GetAtt StagingAlarmArchiveQueue.Arn
+  StagingAlarmRoutingDrillQueueArn:
+    Condition: EnableAlarmRouting
+    Value: !GetAtt StagingAlarmRoutingDrillQueue.Arn
   ProductionAlarmArchiveQueueArn:
     Condition: EnableAlarmRouting
     Value: !GetAtt ProductionAlarmArchiveQueue.Arn

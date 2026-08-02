@@ -21,6 +21,10 @@ const WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "bootstrap-aws.yml"),
   "utf8"
 );
+const FOUNDATION_MIGRATION_WORKFLOW = readFileSync(
+  join(ROOT, ".github", "workflows", "foundation-migration.yml"),
+  "utf8"
+);
 const DEPLOY_WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "deploy-aws.yml"),
   "utf8"
@@ -129,6 +133,111 @@ test("S3 logging IaC retains and hardens the non-recursive archive", () => {
   assert.doesNotMatch(archive, /NewerNoncurrentVersions:/u);
   assert.doesNotMatch(archive, /LoggingConfiguration:/u);
   assert.doesNotMatch(archive, /aws:kms|ObjectLock|AccessControl|TargetGrants/u);
+});
+
+test("candidate and recovery objects have a bounded evidence lifecycle", () => {
+  const artifactBucket = resourceBlock("ArtifactBucket");
+  assert.match(
+    artifactBucket,
+    /Id: RetireCandidateAndRecoveryEvidence[\s\S]*?Prefix: candidates\/[\s\S]*?ExpirationInDays: 2555[\s\S]*?NoncurrentDays: 30[\s\S]*?NewerNoncurrentVersions: 5[\s\S]*?DaysAfterInitiation: 7/u
+  );
+});
+
+test("foundation updates preserve the exact legacy and alarm-routing parameter contracts", () => {
+  for (const workflow of [WORKFLOW, FOUNDATION_MIGRATION_WORKFLOW]) {
+    assert.match(
+      workflow,
+      /\(\[\.Stacks\[0\]\.Parameters\[\]\.ParameterKey\] \| sort\) as \$keys[\s\S]*?\$keys == \[\s+"AppName",[\s\S]*?"GitHubRepositoryOwnerId"\s+\]\s+or \$keys == \[\s+"AlarmRoutingEnabled",[\s\S]*?"GitHubRepositoryOwnerId"\s+\]/u
+    );
+    assert.match(
+      workflow,
+      /\+ if \$keys \| index\("AlarmRoutingEnabled"\)[\s\S]*?then \[\][\s\S]*?ParameterKey: "AlarmRoutingEnabled",\s+ParameterValue: "false"/u
+    );
+    assert.match(
+      workflow,
+      /\.AlarmRoutingEnabled = \(\s+\.AlarmRoutingEnabled \/\/ "false"\s+\)/u
+    );
+    assert.equal(
+      (workflow.match(/ParameterKey: "AlarmRoutingEnabled"/gu) ?? []).length,
+      1
+    );
+  }
+  assert.match(WORKFLOW, /and \$after == \$expected/u);
+  assert.match(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    /and \(\.Parameters \| parameter_map\) == \$expectedParameters/u
+  );
+});
+
+test("AWS application names cannot overflow the longest generated S3 bucket", () => {
+  const constrainedTemplates = [
+    BOOTSTRAP,
+    readFileSync(join(ROOT, "aws", "template.yaml"), "utf8"),
+    readFileSync(join(ROOT, "aws", "edge-waf.yaml"), "utf8"),
+  ];
+  for (const source of constrainedTemplates) {
+    assert.match(
+      source,
+      /AppName:\r?\n\s+Type: String\r?\n\s+Default: archon-memory\r?\n\s+MinLength: 3\r?\n\s+MaxLength: 17\r?\n\s+AllowedPattern: "\^\[a-z\]\[a-z0-9-\]\{2,16\}\$"/u
+    );
+  }
+
+  const constrainedValidators = [
+    PROOF_SOURCE,
+    APPLICATION_PROOF_SOURCE,
+    readFileSync(
+      join(ROOT, "aws", "prove-foundation-storage-controls.sh"),
+      "utf8"
+    ),
+    readFileSync(join(ROOT, "aws", "prove-alarm-routing.sh"), "utf8"),
+    readFileSync(
+      join(ROOT, "aws", "merge-canonical-stack-tags.sh"),
+      "utf8"
+    ),
+    readFileSync(
+      join(ROOT, "aws", "enforce-cloudformation-controls.sh"),
+      "utf8"
+    ),
+    readFileSync(
+      join(ROOT, "scripts", "provision-runtime-secret.ts"),
+      "utf8"
+    ),
+  ];
+  for (const source of constrainedValidators) {
+    assert.ok(source.includes("^[a-z][a-z0-9-]{2,16}$"));
+    assert.ok(!source.includes("^[a-z][a-z0-9-]{2,24}$"));
+  }
+
+  const longestValidBucket =
+    `${"a".repeat(17)}-cloudfront-access-logs-` +
+    `${"1".repeat(12)}-eu-west-1`;
+  const firstInvalidBucket =
+    `${"a".repeat(18)}-cloudfront-access-logs-` +
+    `${"1".repeat(12)}-eu-west-1`;
+  assert.equal(longestValidBucket.length, 63);
+  assert.equal(firstInvalidBucket.length, 64);
+});
+
+test("frontend rollback copies remain writable under the mandatory KMS policy", () => {
+  const rollbackCopies = [
+    ...DEPLOY_WORKFLOW.matchAll(
+      /if ! aws s3api copy-object \\\r?\n[\s\S]*?--region "\$AWS_REGION" >\/dev\/null; then/gu
+    ),
+  ].map((match) => match[0]);
+  assert.equal(rollbackCopies.length, 2);
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /^\s+storage_key_alias="arn:aws:kms:\$\{AWS_REGION\}:\$\{AWS_ACCOUNT_ID\}:alias\/\$\{APP_NAME\}-storage"$/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  for (const copy of rollbackCopies) {
+    assert.match(copy, /--server-side-encryption aws:kms/u);
+    assert.match(copy, /--ssekms-key-id "\$storage_key_alias"/u);
+    assert.match(copy, /--metadata-directive REPLACE/u);
+  }
 });
 
 test("S3 log delivery policy binds each source to only its own prefix", () => {
@@ -331,23 +440,40 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/AlarmArchiveQueuePolicy",
       "LogicalResourceId/AlarmNotificationsKey",
       "LogicalResourceId/AlarmNotificationsKeyAlias",
+      "LogicalResourceId/AlarmRoutingCloudFormationExecutionRole",
+      "LogicalResourceId/AlarmRoutingControlRole",
       "LogicalResourceId/AlarmStateInspectionPolicy",
       "LogicalResourceId/AlarmTopicPolicy",
+      "LogicalResourceId/ApplicationStorageKey",
+      "LogicalResourceId/ApplicationStorageKeyAlias",
       "LogicalResourceId/ArtifactBucket",
       "LogicalResourceId/ArtifactBucketPolicy",
+      "LogicalResourceId/CloudFrontAccessLogBucket",
+      "LogicalResourceId/CloudFrontAccessLogBucketPolicy",
+      "LogicalResourceId/CloudFrontAccessLogKey",
+      "LogicalResourceId/CloudFrontAccessLogKeyAlias",
+      "LogicalResourceId/EdgeControlRole",
+      "LogicalResourceId/FinOpsCloudFormationExecutionRole",
+      "LogicalResourceId/FinOpsControlRole",
       "LogicalResourceId/FoundationPromotionRole",
       "LogicalResourceId/GitHubOidcProvider",
       "LogicalResourceId/ProductionAlarmArchiveQueue",
       "LogicalResourceId/ProductionAlarmArchiveSubscription",
       "LogicalResourceId/ProductionAlarmRoutingInspectionPolicy",
       "LogicalResourceId/ProductionAlarmTopic",
+      "LogicalResourceId/ProductionOriginVerifySecret",
       "LogicalResourceId/S3AccessLogArchive",
       "LogicalResourceId/S3AccessLogArchivePolicy",
       "LogicalResourceId/S3AccessLogArchiveS39Suppression",
       "LogicalResourceId/StagingAlarmArchiveQueue",
       "LogicalResourceId/StagingAlarmArchiveSubscription",
+      "LogicalResourceId/StagingAlarmRoutingDrillQueue",
       "LogicalResourceId/StagingAlarmRoutingInspectionPolicy",
+      "LogicalResourceId/StagingAlarmRoutingDrillAlarm",
+      "LogicalResourceId/StagingAlarmRoutingDrillSubscription",
       "LogicalResourceId/StagingAlarmTopic",
+      "LogicalResourceId/StagingCodeDeployInspectionPolicy",
+      "LogicalResourceId/StagingOriginVerifySecret",
     ].sort()
   );
   assert.deepEqual(STACK_POLICY.Statement[1].Action, [

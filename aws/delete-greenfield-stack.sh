@@ -69,6 +69,11 @@ assert_poll_phase_budget() {
 # Preserve ten minutes of the one-hour OIDC session even at the hard cap. The
 # stabilization phase is intentionally short: a timed-out AWS-side transition
 # remains durable and a later watchdog invocation resumes from its exact state.
+greenfield_total_budget_seconds=""
+greenfield_stabilize_poll_attempts=""
+greenfield_stabilize_poll_interval_seconds=""
+greenfield_delete_poll_attempts=""
+greenfield_delete_poll_interval_seconds=""
 read_bounded_poll_setting \
   ARCHON_GREENFIELD_TOTAL_BUDGET_SECONDS 2400 60 3000 \
   greenfield_total_budget_seconds

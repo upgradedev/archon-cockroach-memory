@@ -1,0 +1,1661 @@
+name: Manage AWS FinOps Controls
+
+# This workflow never runs on push. Every operation is bound to an exact,
+# currently-green main SHA and crosses the protected finops-controls
+# environment. Plan creates an inert CloudFormation change set, apply executes
+# only that exact inspected change set and sends one explicitly approved
+# harmless routing test, and verify is read-only.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Create an inspected plan, apply that exact plan, or verify live controls.
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - verify
+      target_sha:
+        description: Exact 40-character current main SHA proven by CI, CodeQL, and Supply Chain.
+        required: true
+        type: string
+      monthly_budget_usd:
+        description: Human-approved monthly AWS budget in USD; no repository default exists.
+        required: true
+        type: string
+      anomaly_impact_usd:
+        description: Human-approved minimum absolute anomaly impact in USD.
+        required: true
+        type: string
+      anomaly_impact_percentage:
+        description: Human-approved minimum anomaly impact percentage.
+        required: true
+        type: string
+      notification_topic_arn:
+        description: Existing encrypted, human-routed us-east-1 SNS topic ARN.
+        required: true
+        type: string
+      finops_owner_reference:
+        description: Non-secret accountable FinOps owner reference.
+        required: true
+        type: string
+      activation_approval_reference:
+        description: Non-secret approval record for these exact billable controls.
+        required: true
+        type: string
+      confirmation:
+        description: For apply, enter APPLY-WORKLOAD-FINOPS-CONTROLS-AND-ROUTING-TEST.
+        required: false
+        type: string
+
+concurrency:
+  group: aws-finops-controls
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  APP_NAME: ${{ vars.AWS_APP_NAME }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN: >-
+    arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ vars.AWS_APP_NAME }}-finops-cloudformation-execution
+  AWS_FINOPS_CONTROL_ROLE_ARN: >-
+    arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ vars.AWS_APP_NAME }}-github-finops-controls
+  AWS_REGION: us-east-1
+  ACTIVATION_APPROVAL_REFERENCE: ${{ inputs.activation_approval_reference }}
+  ANOMALY_IMPACT_PERCENTAGE: ${{ inputs.anomaly_impact_percentage }}
+  ANOMALY_IMPACT_USD: ${{ inputs.anomaly_impact_usd }}
+  FINOPS_SCOPE: workload
+  FINOPS_NOTIFICATION_TOPIC_ARN: ${{ inputs.notification_topic_arn }}
+  FINOPS_OWNER_REFERENCE: ${{ inputs.finops_owner_reference }}
+  MONTHLY_BUDGET_USD: ${{ inputs.monthly_budget_usd }}
+  OPERATION: ${{ inputs.operation }}
+  TARGET_SHA: ${{ inputs.target_sha }}
+
+jobs:
+  authorize:
+    name: Authorize exact green main SHA and human inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail closed unless dispatch is exact, current, green, and explicit
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          validate_number() {
+            local maximum value
+            value="$1"
+            maximum="$2"
+            [[ "$value" =~ ^[1-9][0-9]*(\.[0-9]{1,2})?$ ]]
+            jq -en \
+              --arg value "$value" \
+              --argjson maximum "$maximum" \
+              '($value | tonumber) >= 1 and
+               ($value | tonumber) <= $maximum' >/dev/null
+          }
+
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]]
+          test "$AWS_REGION" = "us-east-1"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          test "$AWS_FINOPS_CONTROL_ROLE_ARN" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-finops-controls"
+          test "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-finops-cloudformation-execution"
+          test "$FINOPS_SCOPE" = "workload"
+
+          validate_number "$MONTHLY_BUDGET_USD" 1000000
+          validate_number "$ANOMALY_IMPACT_USD" 1000000
+          validate_number "$ANOMALY_IMPACT_PERCENTAGE" 10000
+          [[ "$FINOPS_NOTIFICATION_TOPIC_ARN" =~ ^arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:[A-Za-z0-9_-]+$ ]]
+          [[ "$FINOPS_OWNER_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]{2,127}$ ]]
+          [[ "$ACTIVATION_APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]
+
+          if [ "$OPERATION" = "apply" ]; then
+            expected_confirmation="APPLY-WORKLOAD-FINOPS-CONTROLS-AND-ROUTING-TEST"
+            test "$CONFIRMATION" = "$expected_confirmation"
+          else
+            case "$OPERATION" in
+              plan|verify) ;;
+              *) exit 1 ;;
+            esac
+            test -z "$CONFIRMATION"
+          fi
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          prove_workflow() {
+            local expected_name expected_path state workflow
+            workflow="$1"
+            expected_name="$2"
+            expected_path="$3"
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er \
+                  --arg sha "$TARGET_SHA" \
+                  --arg name "$expected_name" \
+                  --arg path "$expected_path" \
+                  '
+                    [
+                      .workflow_runs[]
+                      | select(
+                          .head_sha == $sha
+                          and .head_branch == "main"
+                          and .event == "push"
+                          and .name == $name
+                          and .path == $path
+                        )
+                    ]
+                    | sort_by(.run_number, .run_attempt)
+                    | last
+                    | select(.conclusion == "success")
+                    | .conclusion
+                  '
+            )"
+            test "$state" = "success"
+          }
+          prove_workflow ci.yml CI .github/workflows/ci.yml
+          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml
+          prove_workflow \
+            supply-chain.yml "Supply Chain (enforced)" \
+            .github/workflows/supply-chain.yml
+
+  finops:
+    name: ${{ inputs.operation == 'plan' && 'Plan protected FinOps controls' || inputs.operation == 'apply' && 'Apply protected FinOps controls' || 'Verify protected FinOps controls' }}
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: finops-controls
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Initialize canonical inputs and fail-closed digest-only receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validate_number() {
+            local maximum value
+            value="$1"
+            maximum="$2"
+            [[ "$value" =~ ^[1-9][0-9]*(\.[0-9]{1,2})?$ ]]
+            jq -en \
+              --arg value "$value" \
+              --argjson maximum "$maximum" \
+              '($value | tonumber) >= 1 and
+               ($value | tonumber) <= $maximum' >/dev/null
+          }
+          digest_text() {
+            printf '%s' "$1" | sha256sum | awk '{print $1}'
+          }
+
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]]
+          test "$AWS_REGION" = "us-east-1"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$AWS_FINOPS_CONTROL_ROLE_ARN" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-finops-controls"
+          test "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-finops-cloudformation-execution"
+          test "$FINOPS_SCOPE" = "workload"
+          case "$OPERATION" in
+            plan|apply|verify) ;;
+            *) exit 1 ;;
+          esac
+          validate_number "$MONTHLY_BUDGET_USD" 1000000
+          validate_number "$ANOMALY_IMPACT_USD" 1000000
+          validate_number "$ANOMALY_IMPACT_PERCENTAGE" 10000
+          [[ "$FINOPS_NOTIFICATION_TOPIC_ARN" =~ ^arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:[A-Za-z0-9_-]+$ ]]
+          [[ "$FINOPS_OWNER_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]{2,127}$ ]]
+          [[ "$ACTIVATION_APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]
+
+          monthly_budget="$(
+            jq -nr --arg value "$MONTHLY_BUDGET_USD" \
+              '$value | tonumber | tostring'
+          )"
+          anomaly_usd="$(
+            jq -nr --arg value "$ANOMALY_IMPACT_USD" \
+              '$value | tonumber | tostring'
+          )"
+          anomaly_percentage="$(
+            jq -nr --arg value "$ANOMALY_IMPACT_PERCENTAGE" \
+              '$value | tonumber | tostring'
+          )"
+          parameters="${RUNNER_TEMP:?}/finops-parameters.json"
+          jq -n \
+            --arg app "$APP_NAME" \
+            --arg monthlyBudget "$monthly_budget" \
+            --arg anomalyUsd "$anomaly_usd" \
+            --arg anomalyPercentage "$anomaly_percentage" \
+            --arg topic "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --arg owner "$FINOPS_OWNER_REFERENCE" \
+            --arg approval "$ACTIVATION_APPROVAL_REFERENCE" \
+            '[
+              {ParameterKey:"ActivationApprovalReference", ParameterValue:$approval},
+              {ParameterKey:"AnomalyImpactPercentage", ParameterValue:$anomalyPercentage},
+              {ParameterKey:"AnomalyImpactUsd", ParameterValue:$anomalyUsd},
+              {ParameterKey:"AppName", ParameterValue:$app},
+              {ParameterKey:"FinOpsNotificationTopicArn", ParameterValue:$topic},
+              {ParameterKey:"FinOpsOwnerReference", ParameterValue:$owner},
+              {ParameterKey:"MonthlyBudgetUsd", ParameterValue:$monthlyBudget}
+            ] | sort_by(.ParameterKey)' >"$parameters"
+          jq -e '
+            length == 7
+            and ([.[].ParameterKey] | unique | length) == 7
+            and all(.[];
+              (.ParameterKey | type == "string" and length > 0)
+              and (.ParameterValue | type == "string" and length > 0)
+            )
+          ' "$parameters" >/dev/null
+
+          template_digest="$(
+            sha256sum aws/finops.yaml | awk '{print $1}'
+          )"
+          parameter_digest="$(
+            sha256sum "$parameters" | awk '{print $1}'
+          )"
+          execution_role_digest="$(
+            digest_text "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN"
+          )"
+          stack_name="${APP_NAME}-finops"
+          change_set="finops-workload-${TARGET_SHA:0:10}-${template_digest:0:10}-${parameter_digest:0:10}-${execution_role_digest:0:10}"
+          description="operation=finops-controls scope=workload commit=${TARGET_SHA} template_sha256=${template_digest} parameters_sha256=${parameter_digest} execution_role_sha256=${execution_role_digest}"
+          receipt="${RUNNER_TEMP:?}/finops-controls-receipt.json"
+          repository_digest="$(digest_text "$GITHUB_REPOSITORY")"
+          workflow_ref_digest="$(digest_text "$GITHUB_WORKFLOW_REF")"
+          stack_name_digest="$(digest_text "$stack_name")"
+
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg scope "$FINOPS_SCOPE" \
+            --arg commit "$TARGET_SHA" \
+            --arg templateSha256 "$template_digest" \
+            --arg parameterSetSha256 "$parameter_digest" \
+            --arg executionRoleArnSha256 "$execution_role_digest" \
+            --arg stackNameSha256 "$stack_name_digest" \
+            --arg repositorySha256 "$repository_digest" \
+            --arg workflowRefSha256 "$workflow_ref_digest" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: "archon.aws.finops-controls",
+              schemaVersion: 2,
+              ok: false,
+              operation: $operation,
+              result: ($operation + "-pending"),
+              scope: $scope,
+              commit: $commit,
+              controlPlaneRegion: "us-east-1",
+              templateSha256: $templateSha256,
+              parameterSetSha256: $parameterSetSha256,
+              authority: {
+                cloudFormationExecutionRoleArnSha256:
+                  $executionRoleArnSha256
+              },
+              stackNameSha256: $stackNameSha256,
+              source: {
+                repositorySha256: $repositorySha256,
+                workflowRefSha256: $workflowRefSha256,
+                runId: ($runId | tonumber),
+                runAttempt: ($runAttempt | tonumber)
+              },
+              disclosure: {
+                rawHumanInputsStored: false,
+                rawAwsIdentifiersStored: false,
+                secretValuesRead: false
+              }
+            }' >"$receipt"
+
+          {
+            echo "ANOMALY_PERCENTAGE_NORMALIZED=$anomaly_percentage"
+            echo "ANOMALY_USD_NORMALIZED=$anomaly_usd"
+            echo "CHANGE_SET_DESCRIPTION=$description"
+            echo "CHANGE_SET_NAME=$change_set"
+            echo "EXECUTION_CLIENT_TOKEN_SHA256="
+            echo "FINOPS_PARAMETERS_FILE=$parameters"
+            echo "FINOPS_EXECUTION_ROLE_DIGEST=$execution_role_digest"
+            echo "FINOPS_STACK_NAME=$stack_name"
+            echo "FINOPS_TEMPLATE_DIGEST=$template_digest"
+            echo "MONTHLY_BUDGET_NORMALIZED=$monthly_budget"
+            echo "PARAMETER_SET_DIGEST=$parameter_digest"
+            echo "RECEIPT_FILE=$receipt"
+            echo "ROUTING_TEST_MESSAGE_ID_SHA256="
+            echo "ROUTING_TEST_PUBLISHED=false"
+          } >>"$GITHUB_ENV"
+
+      - name: Configure the pre-existing least-privilege FinOps authority
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ env.AWS_FINOPS_CONTROL_ROLE_ARN }}
+          role-session-name: archon-finops-workload-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Prove exact identity, source, and encrypted notification route
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest_text() {
+            printf '%s' "$1" | sha256sum | awk '{print $1}'
+          }
+
+          test "$AWS_REGION" = "us-east-1"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          identity="${RUNNER_TEMP:?}/finops-identity.json"
+          aws sts get-caller-identity --output json >"$identity"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg role "${APP_NAME}-github-finops-controls" \
+            '
+              .Account == $account
+              and (.Arn | contains(":assumed-role/" + $role + "/"))
+            ' "$identity" >/dev/null
+
+          cost_allocation_tags="${RUNNER_TEMP:?}/finops-cost-allocation-tags.json"
+          aws ce list-cost-allocation-tags \
+            --status Active \
+            --tag-keys Application \
+            --type UserDefined \
+            --region "$AWS_REGION" \
+            --output json >"$cost_allocation_tags"
+          jq -e '
+            (.CostAllocationTags | length) == 1
+            and .CostAllocationTags[0].TagKey == "Application"
+            and .CostAllocationTags[0].Type == "UserDefined"
+            and .CostAllocationTags[0].Status == "Active"
+          ' "$cost_allocation_tags" >/dev/null
+          cost_allocation_status_digest="$(
+            jq -cS '{CostAllocationTags}' "$cost_allocation_tags" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          [[ "$cost_allocation_status_digest" =~ ^[a-f0-9]{64}$ ]]
+
+          topic="${RUNNER_TEMP:?}/finops-topic.json"
+          topic_policy="${RUNNER_TEMP:?}/finops-topic-policy.json"
+          key_metadata="${RUNNER_TEMP:?}/finops-topic-key-metadata.json"
+          key_policy="${RUNNER_TEMP:?}/finops-topic-key-policy.json"
+          aws sns get-topic-attributes \
+            --topic-arn "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --region "$AWS_REGION" \
+            --output json >"$topic"
+          jq -e \
+            --arg arn "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --arg account "$AWS_ACCOUNT_ID" \
+            '
+              .Attributes.TopicArn == $arn
+              and .Attributes.Owner == $account
+              and (
+                .Attributes.KmsMasterKeyId
+                | type == "string" and length > 0
+              )
+            ' "$topic" >/dev/null
+          topic_key="$(jq -er '.Attributes.KmsMasterKeyId' "$topic")"
+          jq -er '
+            .Attributes.Policy
+            | select(type == "string" and length > 0)
+            | fromjson
+          ' "$topic" >"$topic_policy"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg topic "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --arg budgetSource \
+              "arn:aws:budgets::${AWS_ACCOUNT_ID}:*" \
+            --arg anomalySource \
+              "arn:aws:ce::${AWS_ACCOUNT_ID}:anomalysubscription/*" \
+            '
+              def as_array:
+                if type == "array" then . else [.] end;
+              def exact_value($actual; $expected):
+                (($actual // []) | as_array) as $values
+                | ($values | length) == 1
+                and $values[0] == $expected;
+              def principal_service($statement):
+                ($statement.Principal // null)
+                | if type == "object" then .Service else null end;
+              def exact_service_allow(
+                $statement;
+                $service;
+                $action;
+                $resource;
+                $sourceAccount;
+                $sourceArn
+              ):
+                $statement.Effect == "Allow"
+                and exact_value(
+                  principal_service($statement);
+                  $service
+                )
+                and (
+                  (($statement.Action // []) | as_array
+                    | map(ascii_downcase) | sort | unique)
+                  == [$action]
+                )
+                and exact_value($statement.Resource; $resource)
+                and exact_value(
+                  $statement.Condition.StringEquals[
+                    "aws:SourceAccount"
+                  ];
+                  $sourceAccount
+                )
+                and exact_value(
+                  $statement.Condition.ArnLike["aws:SourceArn"];
+                  $sourceArn
+                );
+              . as $policy
+              | ($policy.Statement | as_array) as $statements
+              | ($policy.Version == "2012-10-17")
+              and any(
+                  $statements[];
+                  exact_service_allow(
+                    .;
+                    "budgets.amazonaws.com";
+                    "sns:publish";
+                    $topic;
+                    $account;
+                    $budgetSource
+                  )
+                )
+              and any(
+                  $statements[];
+                  exact_service_allow(
+                    .;
+                    "costalerts.amazonaws.com";
+                    "sns:publish";
+                    $topic;
+                    $account;
+                    $anomalySource
+                  )
+                )
+            ' "$topic_policy" >/dev/null
+
+          aws kms describe-key \
+            --key-id "$topic_key" \
+            --region "$AWS_REGION" \
+            --output json >"$key_metadata"
+          key_arn="$(jq -er '.KeyMetadata.Arn' "$key_metadata")"
+          [[ "$key_arn" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]{32,64}$ ]]
+          jq -e \
+            --arg arn "$key_arn" \
+            '
+              .KeyMetadata.Arn == $arn
+              and .KeyMetadata.Enabled == true
+              and .KeyMetadata.KeyState == "Enabled"
+              and .KeyMetadata.KeyManager == "CUSTOMER"
+              and .KeyMetadata.KeyUsage == "ENCRYPT_DECRYPT"
+              and .KeyMetadata.KeySpec == "SYMMETRIC_DEFAULT"
+            ' "$key_metadata" >/dev/null
+          aws kms get-key-policy \
+            --key-id "$key_arn" \
+            --policy-name default \
+            --region "$AWS_REGION" \
+            --output json |
+            jq -er '
+              .Policy
+              | select(type == "string" and length > 0)
+              | fromjson
+            ' >"$key_policy"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg budgetSource \
+              "arn:aws:budgets::${AWS_ACCOUNT_ID}:*" \
+            --arg anomalySource \
+              "arn:aws:ce::${AWS_ACCOUNT_ID}:anomalysubscription/*" \
+            '
+              def as_array:
+                if type == "array" then . else [.] end;
+              def exact_value($actual; $expected):
+                (($actual // []) | as_array) as $values
+                | ($values | length) == 1
+                and $values[0] == $expected;
+              def principal_service($statement):
+                ($statement.Principal // null)
+                | if type == "object" then .Service else null end;
+              def exact_kms_allow(
+                $statement;
+                $service;
+                $sourceAccount;
+                $sourceArn
+              ):
+                $statement.Effect == "Allow"
+                and exact_value(
+                  principal_service($statement);
+                  $service
+                )
+                and (
+                  (($statement.Action // []) | as_array
+                    | map(ascii_downcase) | sort | unique)
+                  == ["kms:decrypt", "kms:generatedatakey*"]
+                )
+                and exact_value($statement.Resource; "*")
+                and exact_value(
+                  $statement.Condition.StringEquals[
+                    "aws:SourceAccount"
+                  ];
+                  $sourceAccount
+                )
+                and exact_value(
+                  $statement.Condition.ArnLike["aws:SourceArn"];
+                  $sourceArn
+                );
+              . as $policy
+              | ($policy.Statement | as_array) as $statements
+              | ($policy.Version == "2012-10-17")
+              and any(
+                  $statements[];
+                  exact_kms_allow(
+                    .;
+                    "budgets.amazonaws.com";
+                    $account;
+                    $budgetSource
+                  )
+                )
+              and any(
+                  $statements[];
+                  exact_kms_allow(
+                    .;
+                    "costalerts.amazonaws.com";
+                    $account;
+                    $anomalySource
+                  )
+                )
+            ' "$key_policy" >/dev/null
+          caller_arn_digest="$(
+            digest_text "$(jq -er '.Arn' "$identity")"
+          )"
+          topic_arn_digest="$(
+            digest_text "$FINOPS_NOTIFICATION_TOPIC_ARN"
+          )"
+          topic_key_arn_digest="$(digest_text "$key_arn")"
+          topic_key_digest="$(digest_text "$topic_key")"
+          topic_key_policy_digest="$(
+            sha256sum "$key_policy" | awk '{print $1}'
+          )"
+          topic_policy_digest="$(
+            sha256sum "$topic_policy" | awk '{print $1}'
+          )"
+          receipt_next="${RUNNER_TEMP:?}/finops-route-receipt.json"
+          jq \
+            --arg callerArnSha256 "$caller_arn_digest" \
+            --arg costAllocationStatusSha256 \
+              "$cost_allocation_status_digest" \
+            --arg topicArnSha256 "$topic_arn_digest" \
+            --arg topicKeyArnSha256 "$topic_key_arn_digest" \
+            --arg topicKeyIdSha256 "$topic_key_digest" \
+            --arg topicKeyPolicySha256 "$topic_key_policy_digest" \
+            --arg topicPolicySha256 "$topic_policy_digest" \
+            '
+              .authority += {
+                controllerCallerArnSha256: $callerArnSha256
+              }
+              | .costAllocation = {
+                  tagKey: "Application",
+                  type: "UserDefined",
+                  active: true,
+                  statusSha256: $costAllocationStatusSha256
+                }
+              | .notificationRoute = {
+                  topicArnSha256: $topicArnSha256,
+                  customerManagedKeyArnSha256: $topicKeyArnSha256,
+                  keyIdSha256: $topicKeyIdSha256,
+                  topicPolicySha256: $topicPolicySha256,
+                  keyPolicySha256: $topicKeyPolicySha256,
+                  budgetsPublishPolicyProved: true,
+                  anomalyPublishPolicyProved: true
+                }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+          {
+            echo "CALLER_ARN_SHA256=$caller_arn_digest"
+            echo "COST_ALLOCATION_STATUS_SHA256=$cost_allocation_status_digest"
+            echo "TOPIC_ARN_SHA256=$topic_arn_digest"
+            echo "TOPIC_KEY_ARN_SHA256=$topic_key_arn_digest"
+            echo "TOPIC_KEY_SHA256=$topic_key_digest"
+            echo "TOPIC_KEY_METADATA_FILE=$key_metadata"
+            echo "TOPIC_KEY_POLICY_SHA256=$topic_key_policy_digest"
+            echo "TOPIC_POLICY_SHA256=$topic_policy_digest"
+            echo "TOPIC_PROOF_FILE=$topic"
+          } >>"$GITHUB_ENV"
+
+      - name: Inspect the exact current FinOps stack state
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="${RUNNER_TEMP:?}/finops-current-stack.json"
+          error="${RUNNER_TEMP:?}/finops-current-stack.err"
+          if aws cloudformation describe-stacks \
+              --stack-name "$FINOPS_STACK_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$current" 2>"$error"; then
+            status="$(jq -er '.Stacks[0].StackStatus' "$current")"
+            case "$status" in
+              REVIEW_IN_PROGRESS)
+                test "$OPERATION" != "verify"
+                jq -e \
+                  --arg stack "$FINOPS_STACK_NAME" \
+                  --arg role \
+                    "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+                  '
+                    (.Stacks | length) == 1
+                    and .Stacks[0].StackName == $stack
+                    and .Stacks[0].StackStatus == "REVIEW_IN_PROGRESS"
+                    and .Stacks[0].RoleARN == $role
+                    and .Stacks[0].EnableTerminationProtection == false
+                  ' "$current" >/dev/null
+                echo "CHANGE_SET_TYPE=CREATE" >>"$GITHUB_ENV"
+                echo "FINOPS_STACK_STATE=review" >>"$GITHUB_ENV"
+                ;;
+              CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+                jq -e \
+                  --arg stack "$FINOPS_STACK_NAME" \
+                  --arg role \
+                    "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+                  '
+                    (.Stacks | length) == 1
+                    and .Stacks[0].StackName == $stack
+                    and (
+                      .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                      or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                      or .Stacks[0].StackStatus
+                        == "UPDATE_ROLLBACK_COMPLETE"
+                    )
+                    and .Stacks[0].RoleARN == $role
+                    and .Stacks[0].EnableTerminationProtection == true
+                  ' "$current" >/dev/null
+                echo "CHANGE_SET_TYPE=UPDATE" >>"$GITHUB_ENV"
+                echo "FINOPS_STACK_STATE=stable" >>"$GITHUB_ENV"
+                ;;
+              *)
+                echo "FinOps stack is not in an approved stable state." >&2
+                exit 1
+                ;;
+            esac
+          else
+            grep -Fq "ValidationError" "$error"
+            grep -Fq "does not exist" "$error"
+            test "$OPERATION" != "verify"
+            echo "CHANGE_SET_TYPE=CREATE" >>"$GITHUB_ENV"
+            echo "FINOPS_STACK_STATE=absent" >>"$GITHUB_ENV"
+          fi
+          echo "CURRENT_STACK_FILE=$current" >>"$GITHUB_ENV"
+
+      - name: Create or reuse the exact inert FinOps plan
+        if: inputs.operation == 'plan'
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="${RUNNER_TEMP:?}/finops-existing-change-set.json"
+          if aws cloudformation describe-change-set \
+              --stack-name "$FINOPS_STACK_NAME" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --include-property-values \
+              --region "$AWS_REGION" \
+              --output json >"$existing" 2>/dev/null; then
+            test "$(jq -er '.Description' "$existing")" = \
+              "$CHANGE_SET_DESCRIPTION"
+            jq -e '
+              .Status == "CREATE_COMPLETE"
+              and .ExecutionStatus == "AVAILABLE"
+            ' "$existing" >/dev/null
+            change_set_id="$(jq -er '.ChangeSetId' "$existing")"
+          else
+            test "$FINOPS_STACK_STATE" != "review"
+            created="${RUNNER_TEMP:?}/finops-change-set-created.json"
+            change_set_args=(
+              --stack-name "$FINOPS_STACK_NAME"
+              --change-set-name "$CHANGE_SET_NAME"
+              --change-set-type "$CHANGE_SET_TYPE"
+              --description "$CHANGE_SET_DESCRIPTION"
+              --template-body file://aws/finops.yaml
+              --parameters "file://$FINOPS_PARAMETERS_FILE"
+              --role-arn "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN"
+              --region "$AWS_REGION"
+              --output json
+            )
+            if [ "$CHANGE_SET_TYPE" = "CREATE" ]; then
+              change_set_args+=(--on-stack-failure DELETE)
+            else
+              test "$CHANGE_SET_TYPE" = "UPDATE"
+            fi
+            aws cloudformation create-change-set \
+              "${change_set_args[@]}" >"$created"
+            change_set_id="$(jq -er '.Id' "$created")"
+            ready=false
+            for attempt in $(seq 1 90); do
+              probe="${RUNNER_TEMP:?}/finops-change-set-probe.json"
+              if aws cloudformation describe-change-set \
+                  --stack-name "$FINOPS_STACK_NAME" \
+                  --change-set-name "$change_set_id" \
+                  --include-property-values \
+                  --region "$AWS_REGION" \
+                  --output json >"$probe" 2>/dev/null; then
+                state="$(
+                  jq -r '.Status + ":" + .ExecutionStatus' "$probe"
+                )"
+                case "$state" in
+                  CREATE_COMPLETE:AVAILABLE)
+                    ready=true
+                    break
+                    ;;
+                  CREATE_PENDING:*|CREATE_IN_PROGRESS:*) ;;
+                  *)
+                    echo "FinOps plan was not created successfully." >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              test "$attempt" -lt 90
+              sleep 5
+            done
+            test "$ready" = "true"
+          fi
+          [[ "$change_set_id" == \
+            arn:aws:cloudformation:us-east-1:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/* ]]
+          echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
+
+      - name: Load the exact existing FinOps plan
+        if: inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          change_set="${RUNNER_TEMP:?}/finops-change-set-for-apply.json"
+          aws cloudformation describe-change-set \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$change_set"
+          test "$(jq -er '.Description' "$change_set")" = \
+            "$CHANGE_SET_DESCRIPTION"
+          jq -e '
+            .Status == "CREATE_COMPLETE"
+            and .ExecutionStatus == "AVAILABLE"
+          ' "$change_set" >/dev/null
+          change_set_id="$(jq -er '.ChangeSetId' "$change_set")"
+          [[ "$change_set_id" == \
+            arn:aws:cloudformation:us-east-1:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/* ]]
+          echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
+
+      - name: Require the exact non-replacement FinOps plan
+        if: inputs.operation == 'plan' || inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest_text() {
+            printf '%s' "$1" | sha256sum | awk '{print $1}'
+          }
+
+          change_set="${RUNNER_TEMP:?}/finops-inspected-change-set.json"
+          template_response="${RUNNER_TEMP:?}/finops-change-set-template.json"
+          template="${RUNNER_TEMP:?}/finops-change-set-template.yaml"
+          canonical_changes="${RUNNER_TEMP:?}/finops-canonical-changes.json"
+          aws cloudformation describe-change-set \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$change_set"
+          aws cloudformation get-template \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$template_response" |
+            base64 --decode >"$template"
+          test "$(sha256sum "$template" | awk '{print $1}')" = \
+            "$FINOPS_TEMPLATE_DIGEST"
+
+          jq -e \
+            --arg id "$CHANGE_SET_ID" \
+            --arg name "$CHANGE_SET_NAME" \
+            --arg description "$CHANGE_SET_DESCRIPTION" \
+            --arg type "$CHANGE_SET_TYPE" \
+            --arg stack "$FINOPS_STACK_NAME" \
+            --arg role "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --slurpfile expected "$FINOPS_PARAMETERS_FILE" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              def expected_type($id):
+                if $id == "MonthlyWorkloadBudget"
+                then "AWS::Budgets::Budget"
+                elif $id == "WorkloadCostAnomalyMonitor"
+                then "AWS::CE::AnomalyMonitor"
+                elif $id == "ImmediateCostAnomalySubscription"
+                then "AWS::CE::AnomalySubscription"
+                else null
+                end;
+              .ChangeSetId == $id
+              and .ChangeSetName == $name
+              and .Description == $description
+              and .ChangeSetType == $type
+              and .StackName == $stack
+              and .Status == "CREATE_COMPLETE"
+              and .ExecutionStatus == "AVAILABLE"
+              and ((.IncludeNestedStacks // false) == false)
+              and .RoleARN == $role
+              and ((.Capabilities // []) == [])
+              and ((.NotificationARNs // []) == [])
+              and (
+                (.RollbackConfiguration // {}) as $rollback
+                | (($rollback.RollbackTriggers // []) == [])
+                and (($rollback.MonitoringTimeInMinutes // 0) == 0)
+                and (
+                  $rollback
+                  | keys
+                  | all(.[];
+                      IN("RollbackTriggers", "MonitoringTimeInMinutes"))
+                )
+              )
+              and ((.Tags // []) == [])
+              and (
+                if $type == "CREATE"
+                then (.OnStackFailure // "DELETE") == "DELETE"
+                else true
+                end
+              )
+              and (.Parameters | parameter_map)
+                == ($expected[0] | parameter_map)
+              and (
+                [.Changes[].ResourceChange.LogicalResourceId]
+                | unique | length
+              ) == (.Changes | length)
+              and all(
+                .Changes[];
+                .ResourceChange as $change
+                | expected_type($change.LogicalResourceId)
+                  == $change.ResourceType
+                and ($change.Replacement // "False") == "False"
+                and all(
+                  ($change.Details // [])[];
+                  .Target.RequiresRecreation == "Never"
+                )
+                and (
+                  if $type == "CREATE"
+                  then $change.Action == "Add"
+                  else $change.Action == "Modify"
+                  end
+                )
+              )
+              and (
+                if $type == "CREATE"
+                then (
+                  [
+                    .Changes[]
+                    | {
+                        id: .ResourceChange.LogicalResourceId,
+                        type: .ResourceChange.ResourceType
+                      }
+                  ]
+                  | sort_by(.id)
+                ) == (
+                  [
+                    {
+                      id: "ImmediateCostAnomalySubscription",
+                      type: "AWS::CE::AnomalySubscription"
+                    },
+                    {
+                      id: "MonthlyWorkloadBudget",
+                      type: "AWS::Budgets::Budget"
+                    },
+                    {
+                      id: "WorkloadCostAnomalyMonitor",
+                      type: "AWS::CE::AnomalyMonitor"
+                    }
+                  ]
+                  | sort_by(.id)
+                )
+                else (
+                  (.Changes | length) >= 1
+                  and (.Changes | length) <= 3
+                )
+                end
+              )
+            ' "$change_set" >/dev/null
+
+          jq '
+            [
+              .Changes[]
+              | {
+                  action: .ResourceChange.Action,
+                  logicalResourceId:
+                    .ResourceChange.LogicalResourceId,
+                  replacement:
+                    ((.ResourceChange.Replacement // "False") == "True"),
+                  resourceType: .ResourceChange.ResourceType
+                }
+            ]
+            | sort_by(.logicalResourceId, .action)
+          ' "$change_set" >"$canonical_changes"
+          change_manifest_digest="$(
+            sha256sum "$canonical_changes" | awk '{print $1}'
+          )"
+          change_set_id_digest="$(digest_text "$CHANGE_SET_ID")"
+          change_set_name_digest="$(digest_text "$CHANGE_SET_NAME")"
+          change_count="$(jq -er 'length' "$canonical_changes")"
+
+          receipt_next="${RUNNER_TEMP:?}/finops-plan-receipt.json"
+          jq \
+            --arg result \
+              "$([ "$OPERATION" = "plan" ] && printf inspected-plan || printf apply-pending)" \
+            --arg type "$CHANGE_SET_TYPE" \
+            --arg idSha256 "$change_set_id_digest" \
+            --arg nameSha256 "$change_set_name_digest" \
+            --arg manifestSha256 "$change_manifest_digest" \
+            --argjson changeCount "$change_count" \
+            '
+              . + {
+                ok: (.operation == "plan"),
+                result: $result,
+                changeSet: {
+                  type: $type,
+                  idSha256: $idSha256,
+                  nameSha256: $nameSha256,
+                  changeManifestSha256: $manifestSha256,
+                  changeCount: $changeCount,
+                  replacementAllowed: false,
+                  status: "CREATE_COMPLETE",
+                  executionStatus: "AVAILABLE"
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+          jq -e '
+            .schema == "archon.aws.finops-controls"
+            and .schemaVersion == 2
+            and (.templateSha256 | test("^[a-f0-9]{64}$"))
+            and (.parameterSetSha256 | test("^[a-f0-9]{64}$"))
+            and (
+              .authority.cloudFormationExecutionRoleArnSha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and .notificationRoute.budgetsPublishPolicyProved == true
+            and .notificationRoute.anomalyPublishPolicyProved == true
+            and (
+              .notificationRoute.topicPolicySha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and (
+              .notificationRoute.keyPolicySha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and (.changeSet.replacementAllowed == false)
+          ' "$RECEIPT_FILE" >/dev/null
+
+      - name: Execute the exact inspected FinOps plan
+        if: inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+          client_token="finops-workload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PARAMETER_SET_DIGEST:0:12}"
+          aws cloudformation execute-change-set \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --client-request-token "$client_token" \
+            --region "$AWS_REGION"
+
+          terminal=false
+          saw_progress=false
+          for attempt in $(seq 1 120); do
+            state="${RUNNER_TEMP:?}/finops-apply-state.json"
+            aws cloudformation describe-stacks \
+              --stack-name "$FINOPS_STACK_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$state"
+            stack_status="$(jq -er '.Stacks[0].StackStatus' "$state")"
+            case "$stack_status" in
+              CREATE_COMPLETE|UPDATE_COMPLETE)
+                execution_status="$(
+                  aws cloudformation describe-change-set \
+                    --stack-name "$FINOPS_STACK_NAME" \
+                    --change-set-name "$CHANGE_SET_ID" \
+                    --region "$AWS_REGION" \
+                    --query ExecutionStatus \
+                    --output text
+                )"
+                if [ "$saw_progress" = "true" ] ||
+                    [ "$execution_status" = "EXECUTE_COMPLETE" ]; then
+                  terminal=true
+                  break
+                fi
+                test "$attempt" -lt 12
+                ;;
+              REVIEW_IN_PROGRESS)
+                test "$CHANGE_SET_TYPE" = "CREATE"
+                test "$attempt" -lt 12
+                ;;
+              CREATE_IN_PROGRESS|UPDATE_IN_PROGRESS|\
+              UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+              UPDATE_ROLLBACK_IN_PROGRESS|\
+              UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS|\
+              ROLLBACK_IN_PROGRESS|DELETE_IN_PROGRESS)
+                saw_progress=true
+                ;;
+              CREATE_FAILED|ROLLBACK_COMPLETE|ROLLBACK_FAILED|\
+              UPDATE_FAILED|UPDATE_ROLLBACK_COMPLETE|\
+              UPDATE_ROLLBACK_FAILED|DELETE_COMPLETE|DELETE_FAILED)
+                echo "FinOps apply reached a non-success terminal state." >&2
+                exit 1
+                ;;
+              *)
+                echo "Unexpected FinOps stack state." >&2
+                exit 1
+                ;;
+            esac
+            test "$attempt" -lt 120
+            sleep 10
+          done
+          test "$terminal" = "true"
+
+          aws cloudformation update-termination-protection \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --enable-termination-protection \
+            --region "$AWS_REGION"
+          protected="${RUNNER_TEMP:?}/finops-protected-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$protected"
+          jq -e '
+            (.Stacks | length) == 1
+            and (
+              .Stacks[0].StackStatus == "CREATE_COMPLETE"
+              or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+            )
+            and .Stacks[0].EnableTerminationProtection == true
+          ' "$protected" >/dev/null
+          client_token_digest="$(
+            printf '%s' "$client_token" | sha256sum | awk '{print $1}'
+          )"
+          echo "EXECUTION_CLIENT_TOKEN_SHA256=$client_token_digest" \
+            >>"$GITHUB_ENV"
+
+      - name: Prove the exact live budget, anomaly controls, and route
+        if: inputs.operation == 'apply' || inputs.operation == 'verify'
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest_text() {
+            printf '%s' "$1" | sha256sum | awk '{print $1}'
+          }
+          required_tags() {
+            local source_file="$1"
+            jq -e \
+              --arg app "$APP_NAME" \
+              --arg scope "$FINOPS_SCOPE" \
+              --arg owner "$FINOPS_OWNER_REFERENCE" \
+              --arg approval "$ACTIVATION_APPROVAL_REFERENCE" \
+              '
+                def exact_tag($key; $value):
+                  [
+                    .ResourceTags[]?
+                    | select(.Key == $key and .Value == $value)
+                  ] | length == 1;
+                exact_tag("Application"; $app)
+                and exact_tag("FinOpsScope"; $scope)
+                and exact_tag("FinOpsOwner"; $owner)
+                and exact_tag("ActivationApproval"; $approval)
+                and exact_tag(
+                  "ApprovalBoundary";
+                  "explicit-live-activation-required"
+                )
+              ' "$source_file" >/dev/null
+          }
+
+          stack="${RUNNER_TEMP:?}/finops-live-stack.json"
+          template_response="${RUNNER_TEMP:?}/finops-live-template-response.json"
+          template="${RUNNER_TEMP:?}/finops-live-template.yaml"
+          outputs="${RUNNER_TEMP:?}/finops-live-outputs.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack"
+          jq -e \
+            --arg stack "$FINOPS_STACK_NAME" \
+            --arg role "$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --slurpfile expected "$FINOPS_PARAMETERS_FILE" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+              )
+              and .Stacks[0].RoleARN == $role
+              and .Stacks[0].EnableTerminationProtection == true
+              and (.Stacks[0].Parameters | parameter_map)
+                == ($expected[0] | parameter_map)
+            ' "$stack" >/dev/null
+          aws cloudformation get-template \
+            --stack-name "$FINOPS_STACK_NAME" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$template_response" |
+            base64 --decode >"$template"
+          test "$(sha256sum "$template" | awk '{print $1}')" = \
+            "$FINOPS_TEMPLATE_DIGEST"
+          jq -e '
+            .Stacks[0].Outputs
+            | map({key:.OutputKey, value:.OutputValue})
+            | from_entries
+          ' "$stack" >"$outputs"
+
+          budget_name="$(jq -er '.BudgetName | strings' "$outputs")"
+          monitor_arn="$(jq -er '.AnomalyMonitorArn | strings' "$outputs")"
+          subscription_arn="$(
+            jq -er '.AnomalySubscriptionArn | strings' "$outputs"
+          )"
+          test "$budget_name" = \
+            "${APP_NAME}-workload-monthly-total"
+          [[ "$monitor_arn" =~ ^arn:aws:ce::${AWS_ACCOUNT_ID}:anomalymonitor/[A-Za-z0-9-]+$ ]]
+          [[ "$subscription_arn" =~ ^arn:aws:ce::${AWS_ACCOUNT_ID}:anomalysubscription/[A-Za-z0-9-]+$ ]]
+
+          budget="${RUNNER_TEMP:?}/finops-budget.json"
+          budget_tags="${RUNNER_TEMP:?}/finops-budget-tags.json"
+          notifications="${RUNNER_TEMP:?}/finops-budget-notifications.json"
+          subscribers="${RUNNER_TEMP:?}/finops-budget-subscribers.json"
+          budget_arn="arn:aws:budgets::${AWS_ACCOUNT_ID}:budget/${budget_name}"
+          aws budgets describe-budget \
+            --account-id "$AWS_ACCOUNT_ID" \
+            --budget-name "$budget_name" \
+            --show-filter-expression \
+            --region "$AWS_REGION" \
+            --output json >"$budget"
+          jq -e \
+            --arg name "$budget_name" \
+            --arg app "$APP_NAME" \
+            --arg amount "$MONTHLY_BUDGET_NORMALIZED" \
+            '
+              .Budget.BudgetName == $name
+              and (.Budget.BudgetLimit.Amount | tonumber)
+                == ($amount | tonumber)
+              and .Budget.BudgetLimit.Unit == "USD"
+              and .Budget.BudgetType == "COST"
+              and .Budget.TimeUnit == "MONTHLY"
+              and .Budget.FilterExpression.Tags == {
+                Key: "Application",
+                Values: [$app],
+                MatchOptions: ["EQUALS"]
+              }
+              and (.Budget.CostFilters == null)
+            ' "$budget" >/dev/null
+          aws budgets list-tags-for-resource \
+            --resource-arn "$budget_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$budget_tags"
+          required_tags "$budget_tags"
+          aws budgets describe-notifications-for-budget \
+            --account-id "$AWS_ACCOUNT_ID" \
+            --budget-name "$budget_name" \
+            --region "$AWS_REGION" \
+            --output json >"$notifications"
+          jq -e '
+            [
+              .Notifications[]
+              | {
+                  comparison: .ComparisonOperator,
+                  threshold: (.Threshold | tonumber),
+                  thresholdType: .ThresholdType,
+                  type: .NotificationType
+                }
+            ]
+            | sort_by(.type, .threshold)
+            | . == (
+              [
+                {
+                  comparison: "GREATER_THAN",
+                  threshold: 50,
+                  thresholdType: "PERCENTAGE",
+                  type: "ACTUAL"
+                },
+                {
+                  comparison: "GREATER_THAN",
+                  threshold: 80,
+                  thresholdType: "PERCENTAGE",
+                  type: "ACTUAL"
+                },
+                {
+                  comparison: "GREATER_THAN",
+                  threshold: 100,
+                  thresholdType: "PERCENTAGE",
+                  type: "ACTUAL"
+                },
+                {
+                  comparison: "GREATER_THAN",
+                  threshold: 100,
+                  thresholdType: "PERCENTAGE",
+                  type: "FORECASTED"
+                }
+              ]
+              | sort_by(.type, .threshold)
+            )
+          ' "$notifications" >/dev/null
+
+          subscribers_jsonl="${RUNNER_TEMP:?}/finops-budget-subscribers.jsonl"
+          : >"$subscribers_jsonl"
+          while IFS= read -r notification; do
+            response="${RUNNER_TEMP:?}/finops-budget-subscriber-$(
+              printf '%s' "$notification" |
+                sha256sum |
+                cut -c1-12
+            ).json"
+            aws budgets describe-subscribers-for-notification \
+              --account-id "$AWS_ACCOUNT_ID" \
+              --budget-name "$budget_name" \
+              --notification "$notification" \
+              --region "$AWS_REGION" \
+              --output json >"$response"
+            jq -c \
+              --argjson notification "$notification" \
+              '{
+                notification: $notification,
+                subscribers: .Subscribers
+              }' "$response" >>"$subscribers_jsonl"
+          done < <(
+            jq -c '
+              .Notifications[]
+              | {
+                  ComparisonOperator,
+                  NotificationType,
+                  Threshold,
+                  ThresholdType
+                }
+            ' "$notifications"
+          )
+          jq -s '.' "$subscribers_jsonl" >"$subscribers"
+          jq -e \
+            --arg topic "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            '
+              length == 4
+              and all(.[];
+                (.subscribers | length) == 1
+                and .subscribers[0] == {
+                  Address: $topic,
+                  SubscriptionType: "SNS"
+                }
+              )
+            ' "$subscribers" >/dev/null
+
+          monitor="${RUNNER_TEMP:?}/finops-anomaly-monitor.json"
+          monitor_tags="${RUNNER_TEMP:?}/finops-anomaly-monitor-tags.json"
+          subscription="${RUNNER_TEMP:?}/finops-anomaly-subscription.json"
+          subscription_tags="${RUNNER_TEMP:?}/finops-anomaly-subscription-tags.json"
+          aws ce get-anomaly-monitors \
+            --monitor-arn-list "$monitor_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$monitor"
+          jq -e \
+            --arg arn "$monitor_arn" \
+            --arg name "${APP_NAME}-workload-cost" \
+            --arg app "$APP_NAME" \
+            '
+              (.AnomalyMonitors | length) == 1
+              and .AnomalyMonitors[0].MonitorArn == $arn
+              and .AnomalyMonitors[0].MonitorName == $name
+              and .AnomalyMonitors[0].MonitorType == "CUSTOM"
+              and .AnomalyMonitors[0].MonitorSpecification.Tags == {
+                Key: "Application",
+                Values: [$app],
+                MatchOptions: ["EQUALS"]
+              }
+              and (.AnomalyMonitors[0].MonitorDimension == null)
+            ' "$monitor" >/dev/null
+          aws ce list-tags-for-resource \
+            --resource-arn "$monitor_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$monitor_tags"
+          required_tags "$monitor_tags"
+
+          aws ce get-anomaly-subscriptions \
+            --subscription-arn-list "$subscription_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$subscription"
+          jq -e \
+            --arg arn "$subscription_arn" \
+            --arg name "${APP_NAME}-workload-immediate" \
+            --arg monitor "$monitor_arn" \
+            --arg topic "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --arg usd "$ANOMALY_USD_NORMALIZED" \
+            --arg percentage "$ANOMALY_PERCENTAGE_NORMALIZED" \
+            '
+              (.AnomalySubscriptions | length) == 1
+              and .AnomalySubscriptions[0].SubscriptionArn == $arn
+              and .AnomalySubscriptions[0].SubscriptionName == $name
+              and .AnomalySubscriptions[0].Frequency == "IMMEDIATE"
+              and .AnomalySubscriptions[0].MonitorArnList == [$monitor]
+              and (
+                [
+                  .AnomalySubscriptions[0].Subscribers[]
+                  | {Address, Type}
+                ]
+              ) == [{Address:$topic, Type:"SNS"}]
+              and (
+                .AnomalySubscriptions[0].ThresholdExpression.And
+                | map(.Dimensions)
+                | sort_by(.Key)
+              ) == (
+                [
+                  {
+                    Key: "ANOMALY_TOTAL_IMPACT_ABSOLUTE",
+                    MatchOptions: ["GREATER_THAN_OR_EQUAL"],
+                    Values: [$usd]
+                  },
+                  {
+                    Key: "ANOMALY_TOTAL_IMPACT_PERCENTAGE",
+                    MatchOptions: ["GREATER_THAN_OR_EQUAL"],
+                    Values: [$percentage]
+                  }
+                ]
+                | sort_by(.Key)
+              )
+            ' "$subscription" >/dev/null
+          aws ce list-tags-for-resource \
+            --resource-arn "$subscription_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$subscription_tags"
+          required_tags "$subscription_tags"
+
+          live_proof="${RUNNER_TEMP:?}/finops-live-proof.json"
+          jq -n \
+            --arg stackId "$(jq -er '.Stacks[0].StackId' "$stack")" \
+            --arg templateSha256 "$FINOPS_TEMPLATE_DIGEST" \
+            --arg parameterSetSha256 "$PARAMETER_SET_DIGEST" \
+            --arg budgetName "$budget_name" \
+            --arg monitorArn "$monitor_arn" \
+            --arg subscriptionArn "$subscription_arn" \
+            --arg topicArn "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --arg topicKeyArn \
+              "$(jq -er '.KeyMetadata.Arn' "$TOPIC_KEY_METADATA_FILE")" \
+            --arg topicPolicySha256 "$TOPIC_POLICY_SHA256" \
+            --arg topicKeyPolicySha256 "$TOPIC_KEY_POLICY_SHA256" \
+            --arg monthlyBudget "$MONTHLY_BUDGET_NORMALIZED" \
+            --arg anomalyUsd "$ANOMALY_USD_NORMALIZED" \
+            --arg anomalyPercentage "$ANOMALY_PERCENTAGE_NORMALIZED" \
+            --arg owner "$FINOPS_OWNER_REFERENCE" \
+            --arg approval "$ACTIVATION_APPROVAL_REFERENCE" \
+            '{
+              stackId: $stackId,
+              templateSha256: $templateSha256,
+              parameterSetSha256: $parameterSetSha256,
+              budget: {
+                name: $budgetName,
+                monthlyUsd: $monthlyBudget,
+                notifications: [
+                  "actual-50-percent",
+                  "actual-80-percent",
+                  "actual-100-percent",
+                  "forecasted-100-percent"
+                ]
+              },
+              anomaly: {
+                monitorArn: $monitorArn,
+                subscriptionArn: $subscriptionArn,
+                absoluteUsd: $anomalyUsd,
+                percentage: $anomalyPercentage,
+                frequency: "IMMEDIATE"
+              },
+              route: {
+                topicArn: $topicArn,
+                customerManagedKeyArn: $topicKeyArn,
+                topicPolicySha256: $topicPolicySha256,
+                keyPolicySha256: $topicKeyPolicySha256
+              },
+              governance: {
+                owner: $owner,
+                approval: $approval,
+                terminationProtection: true
+              }
+            }' >"$live_proof"
+          jq -e '
+            .templateSha256 | test("^[a-f0-9]{64}$")
+          ' "$live_proof" >/dev/null
+
+          output_manifest="${RUNNER_TEMP:?}/finops-output-manifest.json"
+          jq -S '.' "$outputs" >"$output_manifest"
+          {
+            echo "ANOMALY_MONITOR_ARN_SHA256=$(digest_text "$monitor_arn")"
+            echo "ANOMALY_SUBSCRIPTION_ARN_SHA256=$(digest_text "$subscription_arn")"
+            echo "BUDGET_NAME_SHA256=$(digest_text "$budget_name")"
+            echo "LIVE_PROOF_SHA256=$(sha256sum "$live_proof" | awk '{print $1}')"
+            echo "OUTPUT_MANIFEST_SHA256=$(sha256sum "$output_manifest" | awk '{print $1}')"
+            echo "STACK_ID_SHA256=$(digest_text "$(jq -er '.Stacks[0].StackId' "$stack")")"
+          } >>"$GITHUB_ENV"
+
+      - name: Publish one explicitly approved harmless routing test
+        if: inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$OPERATION" = "apply"
+          message="$(
+            printf \
+              'Approval-gated Archon Memory FinOps routing test for %s at release %s. No incident or spend threshold was triggered.' \
+              "$FINOPS_SCOPE" "$TARGET_SHA"
+          )"
+          response="${RUNNER_TEMP:?}/finops-routing-test.json"
+          aws sns publish \
+            --topic-arn "$FINOPS_NOTIFICATION_TOPIC_ARN" \
+            --subject "Archon Memory FinOps routing test" \
+            --message "$message" \
+            --region "$AWS_REGION" \
+            --output json >"$response"
+          message_id="$(jq -er '.MessageId' "$response")"
+          [[ "$message_id" =~ ^[0-9a-fA-F-]{36}$ ]]
+          message_id_digest="$(
+            printf '%s' "$message_id" | sha256sum | awk '{print $1}'
+          )"
+          {
+            echo "ROUTING_TEST_MESSAGE_ID_SHA256=$message_id_digest"
+            echo "ROUTING_TEST_PUBLISHED=true"
+          } >>"$GITHUB_ENV"
+
+      - name: Finalize the sanitized digest-only live receipt
+        if: inputs.operation == 'apply' || inputs.operation == 'verify'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for digest in \
+            "$ANOMALY_MONITOR_ARN_SHA256" \
+            "$ANOMALY_SUBSCRIPTION_ARN_SHA256" \
+            "$BUDGET_NAME_SHA256" \
+            "$CALLER_ARN_SHA256" \
+            "$COST_ALLOCATION_STATUS_SHA256" \
+            "$FINOPS_EXECUTION_ROLE_DIGEST" \
+            "$LIVE_PROOF_SHA256" \
+            "$OUTPUT_MANIFEST_SHA256" \
+            "$STACK_ID_SHA256" \
+            "$TOPIC_ARN_SHA256" \
+            "$TOPIC_KEY_ARN_SHA256" \
+            "$TOPIC_KEY_POLICY_SHA256" \
+            "$TOPIC_KEY_SHA256" \
+            "$TOPIC_POLICY_SHA256"; do
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          done
+          if [ "$OPERATION" = "apply" ]; then
+            test "$ROUTING_TEST_PUBLISHED" = "true"
+            [[ "$ROUTING_TEST_MESSAGE_ID_SHA256" =~ ^[a-f0-9]{64}$ ]]
+            [[ "$EXECUTION_CLIENT_TOKEN_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          else
+            test "$OPERATION" = "verify"
+            test "$ROUTING_TEST_PUBLISHED" = "false"
+            test -z "$ROUTING_TEST_MESSAGE_ID_SHA256"
+            test -z "$EXECUTION_CLIENT_TOKEN_SHA256"
+          fi
+
+          result="verified"
+          if [ "$OPERATION" = "apply" ]; then
+            result="applied-and-proved"
+          fi
+          receipt_next="${RUNNER_TEMP:?}/finops-final-receipt.json"
+          jq \
+            --arg result "$result" \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg callerArnSha256 "$CALLER_ARN_SHA256" \
+            --arg costAllocationStatusSha256 \
+              "$COST_ALLOCATION_STATUS_SHA256" \
+            --arg executionRoleArnSha256 \
+              "$FINOPS_EXECUTION_ROLE_DIGEST" \
+            --arg stackIdSha256 "$STACK_ID_SHA256" \
+            --arg outputManifestSha256 "$OUTPUT_MANIFEST_SHA256" \
+            --arg budgetNameSha256 "$BUDGET_NAME_SHA256" \
+            --arg monitorArnSha256 "$ANOMALY_MONITOR_ARN_SHA256" \
+            --arg subscriptionArnSha256 \
+              "$ANOMALY_SUBSCRIPTION_ARN_SHA256" \
+            --arg topicArnSha256 "$TOPIC_ARN_SHA256" \
+            --arg topicKeyArnSha256 "$TOPIC_KEY_ARN_SHA256" \
+            --arg topicKeySha256 "$TOPIC_KEY_SHA256" \
+            --arg topicKeyPolicySha256 "$TOPIC_KEY_POLICY_SHA256" \
+            --arg topicPolicySha256 "$TOPIC_POLICY_SHA256" \
+            --arg liveProofSha256 "$LIVE_PROOF_SHA256" \
+            --arg clientTokenSha256 "$EXECUTION_CLIENT_TOKEN_SHA256" \
+            --arg routingMessageSha256 \
+              "$ROUTING_TEST_MESSAGE_ID_SHA256" \
+            --argjson routingPublished "$ROUTING_TEST_PUBLISHED" \
+            '
+              . + {
+                ok: true,
+                result: $result,
+                generatedAt: $generatedAt,
+                execution: {
+                  callerArnSha256: $callerArnSha256,
+                  cloudFormationExecutionRoleArnSha256:
+                    $executionRoleArnSha256,
+                  clientRequestTokenSha256: (
+                    if $clientTokenSha256 == ""
+                    then null
+                    else $clientTokenSha256
+                    end
+                  )
+                },
+                proof: {
+                  costAllocationTagStatusSha256:
+                    $costAllocationStatusSha256,
+                  liveProofSha256: $liveProofSha256,
+                  stackIdSha256: $stackIdSha256,
+                  outputManifestSha256: $outputManifestSha256,
+                  budgetNameSha256: $budgetNameSha256,
+                  anomalyMonitorArnSha256: $monitorArnSha256,
+                  anomalySubscriptionArnSha256:
+                    $subscriptionArnSha256,
+                  notificationTopicArnSha256: $topicArnSha256,
+                  notificationCustomerManagedKeyArnSha256:
+                    $topicKeyArnSha256,
+                  notificationKeyIdSha256: $topicKeySha256,
+                  notificationTopicPolicySha256:
+                    $topicPolicySha256,
+                  notificationKeyPolicySha256:
+                    $topicKeyPolicySha256,
+                  terminationProtection: true,
+                  live: true
+                },
+                routingTest: {
+                  published: $routingPublished,
+                  messageIdSha256: (
+                    if $routingMessageSha256 == ""
+                    then null
+                    else $routingMessageSha256
+                    end
+                  )
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+          jq -e '
+            .schema == "archon.aws.finops-controls"
+            and .schemaVersion == 2
+            and .ok == true
+            and (.templateSha256 | test("^[a-f0-9]{64}$"))
+            and (.parameterSetSha256 | test("^[a-f0-9]{64}$"))
+            and .costAllocation.tagKey == "Application"
+            and .costAllocation.type == "UserDefined"
+            and .costAllocation.active == true
+            and (
+              .costAllocation.statusSha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and .costAllocation.statusSha256
+              == .proof.costAllocationTagStatusSha256
+            and (
+              .authority.cloudFormationExecutionRoleArnSha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and (.proof.liveProofSha256 | test("^[a-f0-9]{64}$"))
+            and .notificationRoute.budgetsPublishPolicyProved == true
+            and .notificationRoute.anomalyPublishPolicyProved == true
+            and (
+              .notificationRoute.topicPolicySha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and (
+              .notificationRoute.keyPolicySha256
+              | test("^[a-f0-9]{64}$")
+            )
+            and .disclosure == {
+              rawHumanInputsStored: false,
+              rawAwsIdentifiersStored: false,
+              secretValuesRead: false
+            }
+          ' "$RECEIPT_FILE" >/dev/null
+
+      - name: Upload the sanitized FinOps receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: finops-controls-workload-${{ inputs.operation }}-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/finops-controls-receipt.json
+          if-no-files-found: error
+          retention-days: 90

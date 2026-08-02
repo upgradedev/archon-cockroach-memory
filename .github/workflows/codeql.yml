@@ -159,40 +159,216 @@ jobs:
                 !isObject(run) ||
                 !isObject(run.tool) ||
                 !isObject(run.tool.driver) ||
-                !Array.isArray(run.tool.driver.rules) ||
                 !Array.isArray(run.results)
               ) {
                 fail(`CodeQL SARIF run ${runCount} is malformed.`);
               }
-              const rulesById = new Map();
-              run.tool.driver.rules.forEach((rule, ruleIndex) => {
-                if (!isObject(rule) || typeof rule.id !== "string" || !rule.id) {
-                  fail(`CodeQL SARIF run ${runCount} has a malformed rule.`);
+              if (
+                run.tool.extensions !== undefined &&
+                !Array.isArray(run.tool.extensions)
+              ) {
+                fail(`CodeQL SARIF run ${runCount} has malformed extensions.`);
+              }
+
+              const parseToolComponent = (component, componentLabel) => {
+                if (
+                  !isObject(component) ||
+                  typeof component.name !== "string" ||
+                  component.name.trim().length === 0 ||
+                  (component.guid !== undefined &&
+                    (typeof component.guid !== "string" ||
+                      component.guid.trim().length === 0)) ||
+                  (component.rules !== undefined &&
+                    !Array.isArray(component.rules))
+                ) {
+                  fail(
+                    `CodeQL SARIF run ${runCount} has a malformed ${componentLabel} component.`
+                  );
                 }
-                rulesById.set(rule.id, { rule, ruleIndex });
-              });
+                const rules = component.rules ?? [];
+                rules.forEach((rule) => {
+                  if (
+                    !isObject(rule) ||
+                    typeof rule.id !== "string" ||
+                    rule.id.trim().length === 0 ||
+                    (rule.guid !== undefined &&
+                      (typeof rule.guid !== "string" ||
+                        rule.guid.trim().length === 0))
+                  ) {
+                    fail(
+                      `CodeQL SARIF run ${runCount} has a malformed rule.`
+                    );
+                  }
+                });
+                return { component, rules };
+              };
+
+              const driverEntry = parseToolComponent(
+                run.tool.driver,
+                "driver"
+              );
+              const extensionEntries = (run.tool.extensions ?? []).map(
+                (component, extensionIndex) =>
+                  parseToolComponent(
+                    component,
+                    `extension ${extensionIndex}`
+                  )
+              );
+              const componentEntries = [driverEntry, ...extensionEntries];
 
               for (const result of run.results) {
                 resultCount += 1;
-                if (!isObject(result) || typeof result.ruleId !== "string") {
+                if (
+                  !isObject(result) ||
+                  (result.ruleId !== undefined &&
+                    (typeof result.ruleId !== "string" ||
+                      result.ruleId.trim().length === 0)) ||
+                  (result.ruleIndex !== undefined &&
+                    (!Number.isSafeInteger(result.ruleIndex) ||
+                      result.ruleIndex < 0)) ||
+                  (result.rule !== undefined && !isObject(result.rule))
+                ) {
                   fail(`CodeQL SARIF result ${resultCount} is malformed.`);
                 }
-                let ruleEntry;
-                if (Number.isInteger(result.ruleIndex)) {
-                  ruleEntry = {
-                    rule: run.tool.driver.rules[result.ruleIndex],
-                    ruleIndex: result.ruleIndex,
-                  };
-                } else {
-                  ruleEntry = rulesById.get(result.ruleId);
-                }
+
+                const ruleReference = result.rule ?? {};
                 if (
-                  !ruleEntry ||
-                  !isObject(ruleEntry.rule) ||
-                  ruleEntry.rule.id !== result.ruleId
+                  (ruleReference.id !== undefined &&
+                    (typeof ruleReference.id !== "string" ||
+                      ruleReference.id.trim().length === 0)) ||
+                  (ruleReference.index !== undefined &&
+                    (!Number.isSafeInteger(ruleReference.index) ||
+                      ruleReference.index < 0)) ||
+                  (ruleReference.guid !== undefined &&
+                    (typeof ruleReference.guid !== "string" ||
+                      ruleReference.guid.trim().length === 0)) ||
+                  (ruleReference.toolComponent !== undefined &&
+                    !isObject(ruleReference.toolComponent)) ||
+                  (ruleReference.id !== undefined &&
+                    result.ruleId !== undefined &&
+                    ruleReference.id !== result.ruleId) ||
+                  (ruleReference.index !== undefined &&
+                    result.ruleIndex !== undefined &&
+                    ruleReference.index !== result.ruleIndex)
                 ) {
                   fail(
+                    `CodeQL SARIF result ${resultCount} has a malformed rule reference.`
+                  );
+                }
+
+                const componentReference = ruleReference.toolComponent;
+                let componentEntry = driverEntry;
+                if (componentReference !== undefined) {
+                  if (
+                    (componentReference.index !== undefined &&
+                      (!Number.isSafeInteger(componentReference.index) ||
+                        componentReference.index < 0)) ||
+                    (componentReference.guid !== undefined &&
+                      (typeof componentReference.guid !== "string" ||
+                        componentReference.guid.trim().length === 0)) ||
+                    (componentReference.name !== undefined &&
+                      (typeof componentReference.name !== "string" ||
+                        componentReference.name.trim().length === 0))
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} has a malformed tool-component reference.`
+                    );
+                  }
+
+                  if (componentReference.index !== undefined) {
+                    componentEntry =
+                      extensionEntries[componentReference.index];
+                    if (!componentEntry) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                      );
+                    }
+                  } else if (componentReference.guid !== undefined) {
+                    const matchingComponents = componentEntries.filter(
+                      ({ component }) =>
+                        component.guid === componentReference.guid
+                    );
+                    if (matchingComponents.length === 0) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                      );
+                    }
+                    if (matchingComponents.length > 1) {
+                      fail(
+                        `CodeQL SARIF result ${resultCount} references an ambiguous tool component.`
+                      );
+                    }
+                    [componentEntry] = matchingComponents;
+                  }
+
+                  if (
+                    (componentReference.guid !== undefined &&
+                      componentEntry.component.guid !==
+                        componentReference.guid) ||
+                    (componentReference.name !== undefined &&
+                      componentEntry.component.name !== componentReference.name)
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} references an unknown tool component.`
+                    );
+                  }
+                }
+
+                const effectiveRuleId =
+                  ruleReference.id ?? result.ruleId;
+                const effectiveRuleIndex =
+                  ruleReference.index ?? result.ruleIndex;
+                const effectiveRuleGuid = ruleReference.guid;
+                let matchingRules;
+                if (effectiveRuleIndex !== undefined) {
+                  const indexedRule =
+                    componentEntry.rules[effectiveRuleIndex];
+                  matchingRules =
+                    indexedRule &&
+                    (effectiveRuleId === undefined ||
+                      indexedRule.id === effectiveRuleId) &&
+                    (effectiveRuleGuid === undefined ||
+                      indexedRule.guid === effectiveRuleGuid)
+                      ? [indexedRule]
+                      : [];
+                } else {
+                  if (
+                    effectiveRuleId === undefined &&
+                    effectiveRuleGuid === undefined
+                  ) {
+                    fail(
+                      `CodeQL SARIF result ${resultCount} references an unknown rule.`
+                    );
+                  }
+                  matchingRules = componentEntry.rules.filter(
+                    (rule) =>
+                      (effectiveRuleId === undefined ||
+                        rule.id === effectiveRuleId) &&
+                      (effectiveRuleGuid === undefined ||
+                        rule.guid === effectiveRuleGuid)
+                  );
+                }
+                if (matchingRules.length === 0) {
+                  fail(
                     `CodeQL SARIF result ${resultCount} references an unknown rule.`
+                  );
+                }
+                if (matchingRules.length > 1) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} references an ambiguous rule.`
+                  );
+                }
+                const ruleEntry = { rule: matchingRules[0] };
+                if (
+                  (result.properties !== undefined &&
+                    !isObject(result.properties)) ||
+                  (ruleEntry.rule.properties !== undefined &&
+                    !isObject(ruleEntry.rule.properties)) ||
+                  (ruleEntry.rule.defaultConfiguration !== undefined &&
+                    !isObject(ruleEntry.rule.defaultConfiguration))
+                ) {
+                  fail(
+                    `CodeQL SARIF result ${resultCount} has malformed rule metadata.`
                   );
                 }
 
@@ -234,7 +410,7 @@ jobs:
                 }
                 if (securitySeverity >= 7 || rawLevel === "error") {
                   blockingFindings.push({
-                    ruleId: result.ruleId,
+                    ruleId: ruleEntry.rule.id,
                     securitySeverity,
                     level: rawLevel,
                   });

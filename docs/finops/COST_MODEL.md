@@ -1,7 +1,8 @@
 # Cost model and FinOps evidence
 
-Status: repository model and approval-gated control plane defined; billing
-controls and a FinOps owner are not activated.
+Status: repository model, approval-gated template, and source-only control
+workflow are defined. No hosted workflow receipt proves that a FinOps owner,
+notification route, budget, or anomaly control is activated.
 
 This model avoids a false precision claim. No monthly amount, budget, forecast,
 or unit cost is committed until a billing-authorized read-only pipeline
@@ -45,28 +46,82 @@ reported separately so they do not make the underlying run rate appear zero.
 | CockroachDB cost | External provider | Approval and invoice/plan evidence required |
 | Budget threshold and recipient | Billing account + human | Pending human decision |
 | Cost anomaly monitor | Billing account | Not activated |
-| Candidate/recovery/log storage age | Application account | Read-only inventory not yet activated |
+| Candidate/recovery/log storage age | Application account | Candidate and recovery current objects expire at the seven-year evidence horizon; noncurrent ledger versions expire after 30 days while preserving five recent versions |
 
 The repository-only Well-Architected audit never requests billing credentials.
 
 ## Repository-prepared budget and anomaly controls
 
-[`aws/finops.yaml`](../../aws/finops.yaml) defines, but cannot deploy:
+[`aws/finops.yaml`](../../aws/finops.yaml) defines:
 
-- a human-selected monthly AWS cost budget;
+- one human-selected monthly AWS workload cost budget filtered by the active
+  `Application` cost-allocation tag;
 - actual-spend notifications at 50%, 80%, and 100%;
 - a forecast notification at 100%;
-- a service-dimensional Cost Anomaly Detection monitor;
+- one customer-managed Cost Anomaly Detection monitor scoped to the same
+  `Application` tag, avoiding AWS's one-managed-service-monitor-per-account
+  quota and duplicate staging/production alerts;
 - an immediate SNS subscription whose alert condition combines human-selected
   absolute and percentage impact thresholds.
 
-It has no deployment workflow, provides no defaults for amounts, owner,
-recipient, or approval reference, and is hard-bound to the `us-east-1` AWS
-billing control plane. That control-plane placement is not an application
-workload and does not change the `eu-west-1` workload-region policy. The SNS
-topic must already exist, be encrypted, and route to an approved human. Static
-pipeline validation is not evidence that any budget, monitor, subscription, or
+No default exists for an amount, recipient, owner, or approval reference.
+[`finops-controls.yml`](../../.github/workflows/finops-controls.yml) is a manual,
+fail-closed `plan|apply|verify` workflow. It is hard-bound to the `us-east-1`
+AWS billing control plane. That placement is not an application workload and
+does not change the `eu-west-1` workload-region policy. Static pipeline
+validation is not evidence that any budget, monitor, subscription, or
 notification is live.
+
+## Activation contract
+
+Every operation requires an exact current `main` SHA with successful `CI`,
+`CodeQL`, and `Supply Chain (enforced)` push runs. The job crosses the protected
+`finops-controls` environment and accepts explicit human-supplied budget,
+absolute-anomaly, percentage-anomaly, SNS topic, owner, and approval values.
+Every operation also fails closed unless the user-defined `Application` cost
+allocation tag is active. The `apply` operation additionally requires the exact
+workload-scoped confirmation phrase that includes the routing test.
+
+The workflow derives, rather than accepts, two deterministic authorities from
+the validated `AWS_ACCOUNT_ID` and `AWS_APP_NAME` repository variables:
+
+- `arn:aws:iam::<account>:role/<app>-github-finops-controls`;
+- `arn:aws:iam::<account>:role/<app>-finops-cloudformation-execution`.
+
+Both roles must already exist. The controller trust must be limited to this
+repository, `main`, the workflow, and the `finops-controls` environment. Its
+permissions must be limited to the single workload stack/change-set boundary,
+read-only live proof, the active cost-allocation-tag check, the approved notification route, and
+`iam:PassRole` only for the deterministic CloudFormation execution role. The
+execution role must be limited to the three resources in `aws/finops.yaml`.
+There is no broad-credential or role-ARN-variable fallback.
+
+The human-supplied SNS topic must be in the same account in `us-east-1`, use an
+enabled customer-managed symmetric KMS key, and have exact publish-policy
+statements for AWS Budgets and Cost Anomaly Detection. Their KMS key-policy
+statements must grant only `kms:Decrypt` and `kms:GenerateDataKey*`, bounded by
+the account and respective budget/anomaly source ARN patterns. A missing exact
+grant or mismatched key fails before a change set is created.
+
+`plan` creates or reuses one inert, deterministic CloudFormation change set
+whose identity binds the current SHA, template digest, normalized parameter
+digest, and execution-role digest. It rejects unexpected resources, actions,
+capabilities, service roles, notification ARNs, rollback hooks, or replacement.
+`apply` can execute only that available inspected change set, uses a bounded
+poll, enables termination protection, proves the exact live stack and AWS
+Budget/Cost Explorer/SNS state, and publishes one harmless routing message.
+`verify` is read-only and performs the same live-state proof without publishing.
+
+Only sanitized receipts under the runner temporary directory are uploaded.
+Thresholds, owner/approval values, topic/key ARNs, stack/change-set IDs, and
+other raw AWS identifiers are never copied into the artifact; their SHA-256
+digests and boolean proof results are retained. A routing-test publish receipt
+proves SNS accepted the message, not that a human read it.
+
+CloudFormation automatically rolls back a failed create/update according to
+the inspected change-set contract. Deactivation, deletion, or threshold
+reversal is intentionally not automatic: it requires a new exact-SHA plan,
+protected approval, and documented human decision.
 
 The minimum live control set is:
 
@@ -86,28 +141,30 @@ coverage can differ from native-service anomaly coverage, Budgets must remain
 the primary bounded-spend control rather than assuming every model charge will
 produce an anomaly.
 
-Activation requires the FinOps owner, threshold values, confirmed SNS
-recipient, IAM/billing scope, estimated control cost, rollback, and a protected
-workflow. The activation pipeline must validate the exact template SHA, obtain
-protected-environment approval, deploy without widening application regions,
-publish a harmless test notification to the same route, and record a sanitized
-receipt. This repository batch activates none of them.
+Activation still requires a human-confirmed recipient and acknowledged routing
+test, FinOps owner, threshold values, approved IAM/billing scope, estimated
+control cost, and rollback decision. The source workflow prepares those gates;
+this repository state contains no hosted activation receipt.
 
 ## Storage lifecycle decision
 
-Current and noncurrent S3 objects must not be assigned an arbitrary expiry.
-Before a lifecycle change, the workload and FinOps owners must approve:
+The source template proposes a conservative seven-year (2,555-day) upper bound
+for current candidate and recovery evidence, while noncurrent versions retire
+after 30 days with five recent versions preserved. This is a prepared control,
+not evidence that the live bucket has changed. Before activation, the workload
+and FinOps owners must approve:
 
-- minimum rollback window;
-- minimum immutable receipt/audit-retention window;
+- the seven-year rollback and immutable receipt/audit-retention horizon;
 - treatment of current and last-known-good candidates;
 - transition class and retrieval requirement;
 - deletion boundary for superseded candidates and raw access logs;
 - recovery test proving lifecycle does not remove required state.
 
-The acceptance evidence is a pipeline receipt plus S3 Inventory after the
-configured lifecycle interval. Merely checking a CloudFormation property is not
-proof that accumulated current objects were reclaimed.
+The runbook requires at least annual recovery-point renewal so an active
+environment never approaches the current-object horizon. Acceptance evidence
+is a protected pipeline receipt plus S3 Inventory after the configured
+lifecycle interval. Merely checking a CloudFormation property is not proof
+that accumulated current objects were reclaimed.
 
 ## Review
 

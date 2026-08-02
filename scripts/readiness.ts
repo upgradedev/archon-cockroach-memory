@@ -33,30 +33,38 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 152;
-export const EXPECTED_SETUP_NODE_STEPS = 27;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 213;
+export const EXPECTED_SETUP_NODE_STEPS = 31;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 8;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
-export const EXPECTED_DOCKERFILE_BASE_REFS = 1;
+export const EXPECTED_DOCKERFILE_BASE_REFS = 0;
 export const EXPECTED_WORKFLOW_FILES = [
+  "alarm-routing-controls.yml",
+  "aws-security-baseline.yml",
   "benchmark.yml",
   "bootstrap-aws.yml",
   "ci.yml",
   "cockroach-restore-drill.yml",
   "codeql.yml",
+  "database-credential-rotation.yml",
   "database-release.yml",
   "demo-video.yml",
   "deploy-aws.yml",
+  "edge-controls.yml",
+  "finops-controls.yml",
+  "foundation-migration.yml",
+  "hosted-load-evidence.yml",
+  "human-impact-evaluation.yml",
   "managed-mcp-audit.yml",
   "memory-evaluation.yml",
   "recover-aws.yml",
   "security-dast.yml",
   "submission-readiness.yml",
   "supply-chain.yml",
+  "sustainability-intensity-evidence.yml",
   "well-architected-audit.yml",
 ] as const;
 export const EXPECTED_DEPENDABOT_RELEASE_FREEZE = [
-  ["docker", "/aws"],
   ["docker-compose", "/"],
   ["github-actions", "/"],
   ["npm", "/"],
@@ -64,6 +72,7 @@ export const EXPECTED_DEPENDABOT_RELEASE_FREEZE = [
 ] as const;
 const ALLOWED_LOCAL_ACTION_REFS = new Set([
   "./.github/workflows/database-release.yml",
+  "./.github/workflows/security-dast.yml",
 ]);
 export const GENERATED_ARTIFACT_BASENAMES = [
   "legacy-reconciliation-receipt.json",
@@ -83,6 +92,14 @@ export const GENERATED_ARTIFACT_BASENAMES = [
   "supply-chain-release-receipt.json",
   "well-architected-repository-receipt.json",
   "well-architected-live-receipt.json",
+  "aws-account-security-baseline-receipt.json",
+  "database-credential-rotation-receipt.json",
+  "hosted-load-receipt.json",
+  "hosted-k6-summary.json",
+  "hosted-load-contract.sha256",
+  "k6-machine-readable-schema.json",
+  "sustainability-intensity-receipt.json",
+  "human-impact-receipt.json",
   "evidence-manifest.sha256",
   "lambda-zip-content.sha256",
   "sbom-inputs-and-documents.sha256",
@@ -137,12 +154,14 @@ export const DURABLE_RECOVERY_LOCAL_BASENAMES = [
   "production-cloudformation-controls-audit.json",
 ] as const;
 export const DURABLE_RECOVERY_SCRIPT_PATHS = [
+  "aws/classify-github-recovery-preflight.sh",
   "aws/classify-durable-recovery-source.sh",
   "aws/create-durable-recovery-bundle.sh",
   "aws/download-durable-recovery-bundle.sh",
   "aws/enforce-cloudformation-controls.sh",
   "aws/extract-durable-recovery-bundle.sh",
   "aws/finalize-durable-recovery-receipt.sh",
+  "aws/fetch-codedeploy-appspec-revision.sh",
   "aws/put-durable-recovery-object.sh",
   "aws/recover-durable-environment.sh",
   "aws/recovery-intent-ledger.sh",
@@ -876,6 +895,9 @@ export function allDockerfileBasesPinned(
   expectedRefs = EXPECTED_DOCKERFILE_BASE_REFS
 ): boolean {
   const refs = sources.flatMap(dockerfileBaseRefs);
+  if (expectedRefs === 0) {
+    return sources.length === 0 && refs.length === 0;
+  }
   return (
     sources.length > 0 &&
     sources.every((source) => dockerfileBaseRefs(source).length > 0) &&
@@ -982,11 +1004,11 @@ export function hasExactHostedDastTrigger(source: string): boolean {
   const trigger = parsed?.root.get("on");
   if (!(trigger instanceof Map) || trigger.size !== 3) return false;
 
-  const workflowRun = trigger.get("workflow_run");
+  const workflowCall = trigger.get("workflow_call");
   const schedule = trigger.get("schedule");
   if (
-    !(workflowRun instanceof Map) ||
-    workflowRun.size !== 3 ||
+    !(workflowCall instanceof Map) ||
+    workflowCall.size !== 1 ||
     trigger.get("workflow_dispatch") !== null ||
     !Array.isArray(schedule) ||
     schedule.length !== 1
@@ -994,37 +1016,89 @@ export function hasExactHostedDastTrigger(source: string): boolean {
     return false;
   }
 
-  const workflows = workflowRun.get("workflows");
-  const branches = workflowRun.get("branches");
-  const types = workflowRun.get("types");
+  const inputs = workflowCall.get("inputs");
   const scheduleEntry = schedule[0];
   return (
-    Array.isArray(workflows) &&
-    workflows.length === 1 &&
-    workflows[0] === "Deploy AWS" &&
-    Array.isArray(branches) &&
-    branches.length === 1 &&
-    branches[0] === "main" &&
-    Array.isArray(types) &&
-    types.length === 1 &&
-    types[0] === "completed" &&
+    inputs instanceof Map &&
+    inputs.size === 3 &&
+    exactWorkflowInput(inputs, "exact_sha", {
+      description: "Exact deployed main commit to scan",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "deploy_run_id", {
+      description: "Deploy AWS run that promoted the release",
+      required: true,
+      type: "number",
+    }) &&
+    exactWorkflowInput(inputs, "deploy_run_attempt", {
+      description: "Exact Deploy AWS run attempt",
+      required: true,
+      type: "number",
+    }) &&
     scheduleEntry instanceof Map &&
     scheduleEntry.size === 1 &&
     scheduleEntry.get("cron") === "43 4 * * 1"
   );
 }
 
+export function hasExactAwsDeployTrigger(source: string): boolean {
+  const parsed = parseWorkflow(source);
+  const trigger = parsed?.root.get("on");
+  if (!(trigger instanceof Map) || trigger.size !== 2) return false;
+  const push = trigger.get("push");
+  const workflowDispatch = trigger.get("workflow_dispatch");
+  if (
+    !(push instanceof Map) ||
+    push.size !== 1 ||
+    !(workflowDispatch instanceof Map) ||
+    workflowDispatch.size !== 1
+  ) {
+    return false;
+  }
+  const branches = push.get("branches");
+  const inputs = workflowDispatch.get("inputs");
+  return (
+    Array.isArray(branches) &&
+    branches.length === 1 &&
+    branches[0] === "main" &&
+    inputs instanceof Map &&
+    inputs.size === 4 &&
+    exactWorkflowInput(inputs, "operation", {
+      description:
+        "The only manual mode is the protected staging recovery drill.",
+      required: true,
+      type: "choice",
+      options: ["staging-recovery-drill"],
+    }) &&
+    exactWorkflowInput(inputs, "target_sha", {
+      description: "Exact current main SHA already green in required pipelines.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "approval_reference", {
+      description:
+        "Non-secret approved drill/change reference; retained only as SHA-256.",
+      required: true,
+      type: "string",
+    }) &&
+    exactWorkflowInput(inputs, "confirmation", {
+      description:
+        "Enter FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG.",
+      required: true,
+      type: "string",
+    })
+  );
+}
+
 export function hasExactAwsRecoveryTrigger(source: string): boolean {
   const parsed = parseWorkflow(source);
   const trigger = parsed?.root.get("on");
-  if (!(trigger instanceof Map) || trigger.size !== 3) return false;
+  if (!(trigger instanceof Map) || trigger.size !== 2) return false;
 
-  const workflowRun = trigger.get("workflow_run");
   const schedule = trigger.get("schedule");
   const workflowDispatch = trigger.get("workflow_dispatch");
   if (
-    !(workflowRun instanceof Map) ||
-    workflowRun.size !== 3 ||
     !Array.isArray(schedule) ||
     schedule.length !== 2 ||
     !(workflowDispatch instanceof Map) ||
@@ -1037,9 +1111,6 @@ export function hasExactAwsRecoveryTrigger(source: string): boolean {
   const operation = inputs.get("operation");
   if (!(operation instanceof Map) || operation.size !== 5) return false;
   const operationOptions = operation.get("options");
-  const workflows = workflowRun.get("workflows");
-  const branches = workflowRun.get("branches");
-  const types = workflowRun.get("types");
   const scheduleCrons = schedule
     .map((entry) =>
       entry instanceof Map && entry.size === 1
@@ -1049,15 +1120,6 @@ export function hasExactAwsRecoveryTrigger(source: string): boolean {
     .filter((cron): cron is string => typeof cron === "string")
     .sort();
   return (
-    Array.isArray(workflows) &&
-    workflows.length === 1 &&
-    workflows[0] === "Deploy AWS" &&
-    Array.isArray(branches) &&
-    branches.length === 1 &&
-    branches[0] === "main" &&
-    Array.isArray(types) &&
-    types.length === 1 &&
-    types[0] === "completed" &&
     scheduleCrons.length === 2 &&
     scheduleCrons[0] === "17 4 * * *" &&
     scheduleCrons[1] === "7,22,37,52 * * * *" &&
@@ -1487,7 +1549,7 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
   ] as const;
   const proof = [
     '$APPLICATION_URL/api/proof',
-    'RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"',
+    'RELEASE_COMMIT_SHA="${{ github.sha }}"',
     '[[ "$RELEASE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]',
     '--arg releaseCommitSha "$RELEASE_COMMIT_SHA"',
     '$embed == "amazon.titan-embed-text-v2:0"',
@@ -1565,6 +1627,7 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     '.trace.retrieval.index == "native C-SPANN vector index"',
     '.trace.retrieval.metric == "cosine"',
     ".trace.retrieval.embeddingModel == $embed",
+    '.trace.retrieval.requestedKind == "payroll_event"',
     ".trace.retrieval.requestedTopK == 5",
     ".trace.retrieval.recalled == .recalled",
     ".trace.narration.model == $narrator",
@@ -1576,10 +1639,7 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     '.memoryId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")',
     '.sourceRef | type == "string" and length > 0',
     '.company == "Helios SA"',
-    '.kind == "document"',
     '.kind == "payroll_event"',
-    '.kind == "validation"',
-    '.kind == "insight"',
     '.period == "2026-04"',
     '.score | type == "number" and . >= 0.15 and . <= 1',
     ".answer as $answer |",
@@ -1624,7 +1684,7 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     if (!block) return false;
     const healthStart = block.indexOf('HEALTH="$(');
     const proofBindingStart = block.indexOf(
-      'RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"'
+      'RELEASE_COMMIT_SHA="${{ github.sha }}"'
     );
     const proofRequestStart = block.indexOf('PROOF="$(');
     const recallStart = block.indexOf('RECALL="$(');
@@ -1685,6 +1745,8 @@ export function hasUniqueCiTriggerOwnership(
     return false;
   }
   const expectedEvents = new Map<string, string[]>([
+    ["alarm-routing-controls.yml", ["workflow_dispatch"]],
+    ["aws-security-baseline.yml", ["workflow_dispatch"]],
     ["benchmark.yml", ["schedule", "workflow_dispatch"]],
     ["bootstrap-aws.yml", ["workflow_dispatch"]],
     ["ci.yml", ["pull_request", "push", "workflow_dispatch"]],
@@ -1693,12 +1755,21 @@ export function hasUniqueCiTriggerOwnership(
       "codeql.yml",
       ["pull_request", "push", "schedule", "workflow_dispatch"],
     ],
+    ["database-credential-rotation.yml", ["workflow_dispatch"]],
     [
       "database-release.yml",
       ["workflow_call", "workflow_dispatch"],
     ],
     ["demo-video.yml", ["workflow_dispatch"]],
-    ["deploy-aws.yml", ["workflow_run"]],
+    ["deploy-aws.yml", ["push", "workflow_dispatch"]],
+    ["edge-controls.yml", ["workflow_dispatch"]],
+    ["finops-controls.yml", ["workflow_dispatch"]],
+    ["foundation-migration.yml", ["workflow_dispatch"]],
+    ["hosted-load-evidence.yml", ["workflow_dispatch"]],
+    [
+      "human-impact-evaluation.yml",
+      ["pull_request", "push", "workflow_dispatch"],
+    ],
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
     [
       "memory-evaluation.yml",
@@ -1706,17 +1777,18 @@ export function hasUniqueCiTriggerOwnership(
     ],
     [
       "recover-aws.yml",
-      ["schedule", "workflow_dispatch", "workflow_run"],
+      ["schedule", "workflow_dispatch"],
     ],
     [
       "security-dast.yml",
-      ["schedule", "workflow_dispatch", "workflow_run"],
+      ["schedule", "workflow_call", "workflow_dispatch"],
     ],
     ["submission-readiness.yml", ["workflow_dispatch"]],
     [
       "supply-chain.yml",
       ["pull_request", "push", "schedule", "workflow_dispatch"],
     ],
+    ["sustainability-intensity-evidence.yml", ["workflow_dispatch"]],
     [
       "well-architected-audit.yml",
       ["pull_request", "push", "schedule", "workflow_dispatch"],
@@ -1750,6 +1822,9 @@ export function hasUniqueCiTriggerOwnership(
   const recovery = workflows.find(
     ({ name }) => name === "recover-aws.yml"
   );
+  const deploy = workflows.find(
+    ({ name }) => name === "deploy-aws.yml"
+  );
   const hostedDast = workflows.find(
     ({ name }) => name === "security-dast.yml"
   );
@@ -1761,6 +1836,7 @@ export function hasUniqueCiTriggerOwnership(
     benchmark !== undefined &&
     codeql !== undefined &&
     demoVideo !== undefined &&
+    deploy !== undefined &&
     recovery !== undefined &&
     hostedDast !== undefined &&
     submission !== undefined &&
@@ -1768,6 +1844,7 @@ export function hasUniqueCiTriggerOwnership(
     hasExactCiTrigger(ci.source) &&
     hasExactCodeqlTrigger(codeql.source) &&
     hasExactDemoVideoTrigger(demoVideo.source) &&
+    hasExactAwsDeployTrigger(deploy.source) &&
     hasExactAwsRecoveryTrigger(recovery.source) &&
     hasExactHostedDastTrigger(hostedDast.source) &&
     hasExactSubmissionReadinessTrigger(submission.source)
@@ -1815,6 +1892,9 @@ function sourceChecks(): SourceCheck[] {
   const supplyChainWorkflow = read(
     ".github/workflows/supply-chain.yml"
   );
+  const trivyIacCompatibilityValidator = read(
+    ".github/scripts/validate-trivy-iac-compatibility.mjs"
+  );
   const supplyChainWaivers = read("security/waivers.yml");
   const memoryEvaluationWorkflow = read(
     ".github/workflows/memory-evaluation.yml"
@@ -1832,6 +1912,43 @@ function sourceChecks(): SourceCheck[] {
   const wellArchitectedContract = read(
     "docs/operations/well-architected-contract.json"
   );
+  const awsSecurityBaselineWorkflow = read(
+    ".github/workflows/aws-security-baseline.yml"
+  );
+  const awsSecurityBaselineScript = read(
+    "aws/audit-account-security-baseline.sh"
+  );
+  const awsSecurityBaselinePolicy = read(
+    "aws/account-security-baseline-audit-policy.json"
+  );
+  const awsSecurityBaselineRunbook = read(
+    "docs/runbooks/aws-account-security-baseline.md"
+  );
+  const sustainabilityIntensityWorkflow = read(
+    ".github/workflows/sustainability-intensity-evidence.yml"
+  );
+  const sustainabilityIntensityScript = read(
+    "aws/measure-sustainability-intensity.sh"
+  );
+  const sustainabilityIntensityPolicy = read(
+    "aws/sustainability-intensity-audit-policy.json"
+  );
+  const sustainabilityIntensityRunbook = read(
+    "docs/runbooks/sustainability-intensity.md"
+  );
+  const databaseCredentialRotationWorkflow = read(
+    ".github/workflows/database-credential-rotation.yml"
+  );
+  const databaseCredentialRotationScript = read(
+    "scripts/rotate-runtime-secret.ts"
+  );
+  const databaseCredentialRotationTests = read(
+    "tests/database-credential-rotation.test.ts"
+  );
+  const databaseClient = read("src/db/client.ts");
+  const databaseClientRotationTests = read(
+    "tests/db-client-rotation.test.ts"
+  );
   const recoveryWorkflow = read(".github/workflows/recover-aws.yml");
   const securityDastWorkflow = read(
     ".github/workflows/security-dast.yml"
@@ -1845,8 +1962,32 @@ function sourceChecks(): SourceCheck[] {
   const foundationWorkflow = read(
     ".github/workflows/bootstrap-aws.yml"
   );
+  const foundationMigrationWorkflow = read(
+    ".github/workflows/foundation-migration.yml"
+  );
+  const edgeControlsWorkflow = read(
+    ".github/workflows/edge-controls.yml"
+  );
+  const finOpsControlsWorkflow = read(
+    ".github/workflows/finops-controls.yml"
+  );
   const lambdaTemplate = read("aws/template.yaml");
+  const lambdaRuntime = read("src/lambda.ts");
+  const lambdaRuntimeTests = read("tests/lambda.test.ts");
   const deliveryBootstrap = read("aws/bootstrap-oidc.yaml");
+  const edgeTemplate = read("aws/edge-waf.yaml");
+  const finOpsTemplate = read("aws/finops.yaml");
+  const foundationMigrationAuthority = read(
+    "aws/foundation-migration-authority.sh"
+  );
+  const foundationStorageProof = read(
+    "aws/prove-foundation-storage-controls.sh"
+  );
+  const foundationStorageMigrationPolicy = read(
+    "aws/foundation-storage-migration-policy.json"
+  );
+  const bootstrapStackPolicy = read("aws/bootstrap-stack-policy.json");
+  const edgeStackPolicy = read("aws/edge-stack-policy.json");
   const foundationPromotionRole =
     deliveryBootstrap.match(
       /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u
@@ -1875,8 +2016,8 @@ function sourceChecks(): SourceCheck[] {
     "aws/prove-application-s3-access-logging.sh"
   );
   const alarmRoutingProof = read("aws/prove-alarm-routing.sh");
-  const bootstrapStackPolicy = read(
-    "aws/bootstrap-stack-policy.json"
+  const alarmRoutingControls = read(
+    ".github/workflows/alarm-routing-controls.yml"
   );
   const s3AccessLoggingTests = read(
     "tests/s3-access-logging.test.ts"
@@ -1890,8 +2031,17 @@ function sourceChecks(): SourceCheck[] {
   );
   const samStackTagSerializer = read("aws/serialize-sam-stack-tags.sh");
   const awsRecoveryTests = read("tests/aws-recovery-scripts.test.ts");
+  const githubRecoveryPreflight = read(
+    "aws/classify-github-recovery-preflight.sh"
+  );
   const durableRecoveryClassifier = read(
     "aws/classify-durable-recovery-source.sh"
+  );
+  const stagingCodeDeploySelector = read(
+    "aws/select-staging-codedeploy-rollback.mjs"
+  );
+  const stagingCodeDeployAppSpecFetcher = read(
+    "aws/fetch-codedeploy-appspec-revision.sh"
   );
   const durableRecoveryBundleCreator = read(
     "aws/create-durable-recovery-bundle.sh"
@@ -1927,6 +2077,12 @@ function sourceChecks(): SourceCheck[] {
   const durableRecoveryTests = read("tests/durable-recovery.test.ts");
   const recoveryWatchdogTests = read(
     "tests/recovery-watchdog.test.ts"
+  );
+  const githubRecoveryPreflightTests = read(
+    "tests/github-recovery-preflight.test.ts"
+  );
+  const stagingRecoveryDrillTests = read(
+    "tests/staging-recovery-drill.test.ts"
   );
   const cloudFormationControlsTests = read(
     "tests/cloudformation-controls.test.ts"
@@ -2019,6 +2175,10 @@ function sourceChecks(): SourceCheck[] {
     deploy.match(
       /(?:^|\r?\n)  build-once:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
+  const deployDatabaseReleaseJob =
+    deploy.match(
+      /(?:^|\r?\n)  database-release:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
   const managedMcpDeployJob =
     deploy.match(
       /(?:^|\r?\n)  managed-mcp-production-audit:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
@@ -2046,6 +2206,10 @@ function sourceChecks(): SourceCheck[] {
   const deployProductionJob =
     deploy.match(
       /(?:^|\r?\n)  deploy-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+    )?.[0] ?? "";
+  const deployHostedDastJob =
+    deploy.match(
+      /(?:^|\r?\n)  hosted-dast-production:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
     )?.[0] ?? "";
   const databaseRelease = read("scripts/verify-database-release.ts");
   const databaseReleaseWorkflow = read(
@@ -2382,6 +2546,14 @@ function sourceChecks(): SourceCheck[] {
         finalizerCommand < finalizationGate
       );
     });
+  const githubRecoveryPreflightJob =
+    recoveryWorkflow.match(
+      /(?:^|\r?\n)  classify-recovery:\r?\n[\s\S]*?(?=\r?\n  audit-environments:)/u
+    )?.[0] ?? "";
+  const recoveryAuditJob =
+    recoveryWorkflow.match(
+      /(?:^|\r?\n)  audit-environments:\r?\n[\s\S]*?(?=\r?\n  recover-staging:)/u
+    )?.[0] ?? "";
   const cloudFormationPreflightPositions = [
     ...deploy.matchAll(
       /name: Enforce (?:staging|production) stack protection and fresh pre-deploy drift gate/gu
@@ -2655,7 +2827,79 @@ function sourceChecks(): SourceCheck[] {
     hasExactAwsRecoveryTrigger(recoveryWorkflow) &&
     hasExactAwsDeliveryConcurrency(foundationWorkflow) &&
     hasExactAwsDeliveryConcurrency(deploy) &&
-    hasExactAwsDeliveryConcurrency(recoveryWorkflow) &&
+    /(?:^|\r?\n)concurrency:\r?\n  group: aws-recovery-watchdog\r?\n  cancel-in-progress: false\r?\n  queue: max/u.test(
+      recoveryWorkflow
+    ) &&
+    (
+      recoveryWorkflow.match(
+        /^    concurrency:\r?\n      group: aws-production-delivery\r?\n      cancel-in-progress: false\r?\n      queue: max$/gmu
+      ) ?? []
+    ).length === 2 &&
+    githubRecoveryPreflightJob.length > 0 &&
+    /name: Classify recovery candidates without AWS access/u.test(
+      githubRecoveryPreflightJob
+    ) &&
+    /bash aws\/classify-github-recovery-preflight\.sh/u.test(
+      githubRecoveryPreflightJob
+    ) &&
+    /classificationSource == "github-actions-metadata-only"/u.test(
+      githubRecoveryPreflightJob
+    ) &&
+    /awsCredentialsUsed == false/u.test(githubRecoveryPreflightJob) &&
+    !/^    environment:/mu.test(githubRecoveryPreflightJob) &&
+    !/configure-aws-credentials|id-token:\s*write/u.test(
+      githubRecoveryPreflightJob
+    ) &&
+    !/\baws\s+(?:cloudformation|s3|s3api|sts)\b/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /source-deploy-active/u.test(githubRecoveryPreflight) &&
+    /terminal-commit-proved/u.test(githubRecoveryPreflight) &&
+    /successful-recovery-receipt-proved/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /active deploy/u.test(githubRecoveryPreflightTests) &&
+    /exact armed uncommitted candidate/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /receipt-bound successful watchdog/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /\.total_count == \(\.jobs \| length\)/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /test "\$run_count" -eq "\$expected_run_count"/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /test "\$artifact_count" -eq "\$expected_artifact_count"/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /GitHub preflight fails closed on an unknown listed deploy status/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated jobs response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated workflow-runs response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated recovery-artifact response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /never promotes dispatch metadata into a production recovery candidate/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /trusted legacy workflow-run deploy history/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    recoveryAuditJob.length > 0 &&
+    /needs\.classify-recovery\.outputs\.staging_action == 'noop'/u.test(
+      recoveryAuditJob
+    ) &&
+    /needs\.classify-recovery\.outputs\.production_action == 'noop'/u.test(
+      recoveryAuditJob
+    ) &&
+    !/aws-production-delivery/u.test(recoveryAuditJob) &&
     /name: Deploy and smoke staging/u.test(deploy) &&
     /name: Promote identical candidate to production/u.test(deploy) &&
     /TERMINAL_JOB_NAME: Deploy and smoke staging/u.test(recoveryWorkflow) &&
@@ -2668,7 +2912,7 @@ function sourceChecks(): SourceCheck[] {
     (recoveryWorkflow.match(/timeout-minutes:\s+65/gu) ?? []).length === 2 &&
     (
       recoveryWorkflow.match(/role-duration-seconds:\s+3600/gu) ?? []
-    ).length === 6 &&
+    ).length === 7 &&
     /--argjson leaseUntil "\$\(\(now \+ 7200\)\)"/u.test(
       durableRecoveryLedger
     ) &&
@@ -2678,52 +2922,52 @@ function sourceChecks(): SourceCheck[] {
       recoveryWorkflow.match(
         /uses: actions\/checkout@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          ref: \$\{\{ github\.sha \}\}\r?\n          fetch-depth: 0/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 3 &&
     (
       recoveryWorkflow.match(
         /test "\$GITHUB_REPOSITORY" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /test "\$GITHUB_REF" = "refs\/heads\/main"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /test "\$GITHUB_REF_TYPE" = "branch"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /test "\$GITHUB_WORKFLOW_REF" = \\\r?\n\s+"upgradedev\/archon-cockroach-memory\/\.github\/workflows\/recover-aws\.yml@refs\/heads\/main"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /git fetch --no-tags origin \\\r?\n\s+\+refs\/heads\/main:refs\/remotes\/origin\/main/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     (
       recoveryWorkflow.match(
         /test "\$\(git rev-parse origin\/main\)" = "\$GITHUB_SHA"/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 4 &&
     !/github\.event\.workflow_run\.head_sha/u.test(recoveryWorkflow) &&
-    /recover-staging:[\s\S]*?if: >-\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
+    /recover-staging:[\s\S]*?needs:\r?\n\s+- classify-recovery\r?\n\s+if: >-\r?\n\s+needs\.classify-recovery\.result == 'success' &&\r?\n\s+needs\.classify-recovery\.outputs\.staging_action == 'recover' &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
       recoveryWorkflow
     ) &&
-    /recover-production:[\s\S]*?needs:\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
+    /recover-production:[\s\S]*?needs:\r?\n\s+- classify-recovery\r?\n\s+- recover-staging\r?\n\s+if: >-\r?\n\s+always\(\) &&\r?\n\s+needs\.classify-recovery\.result == 'success' &&\r?\n\s+needs\.classify-recovery\.outputs\.production_action == 'recover' &&\r?\n\s+github\.repository == 'upgradedev\/archon-cockroach-memory' &&\r?\n\s+github\.ref == 'refs\/heads\/main'\r?\n\s+runs-on:/u.test(
       recoveryWorkflow
     ) &&
     !/needs\.recover-staging\.result/u.test(recoveryWorkflow) &&
@@ -2751,10 +2995,20 @@ function sourceChecks(): SourceCheck[] {
       recoveryWorkflow.match(
         /length == 1 and \(\.\[0\] \| type == "object"\)/gu
       ) ?? []
-    ).length === 16 &&
+    ).length === 17 &&
     (
       recoveryWorkflow.match(
         /bash aws\/classify-durable-recovery-source\.sh >"\$classification"\r?\n\s+jq -e -s/gu
+      ) ?? []
+    ).length === 3 &&
+    (
+      recoveryWorkflow.match(
+        /PREFLIGHT_CANDIDATE_SHA: \$\{\{ needs\.classify-recovery\.outputs\.(?:staging|production)_candidate_sha \}\}/gu
+      ) ?? []
+    ).length === 2 &&
+    (
+      recoveryWorkflow.match(
+        /and \.action == "recover"\r?\n\s+and \.candidateSha == \$candidate\r?\n\s+and \.sourceRunAttempt == \$sourceRunAttempt\r?\n\s+and \.sourceRunId == \$sourceRunId/gu
       ) ?? []
     ).length === 2 &&
     (
@@ -2779,27 +3033,27 @@ function sourceChecks(): SourceCheck[] {
       recoveryWorkflow.match(
         /bash aws\/enforce-cloudformation-controls\.sh audit/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 1 &&
     (
       recoveryWorkflow.match(
-        /name: Upload (?:staging|production) daily protection and drift audit/gu
+        /name: Upload exact protection and drift audit/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 1 &&
     (
       recoveryWorkflow.match(
         /github\.event_name == 'schedule' &&\r?\n\s+github\.event\.schedule == '17 4 \* \* \*'/gu
       ) ?? []
-    ).length === 4 &&
+    ).length === 1 &&
     (
       recoveryWorkflow.match(
         /github\.event_name == 'workflow_dispatch' &&\r?\n\s+inputs\.operation == 'audit'/gu
       ) ?? []
-    ).length === 4 &&
+    ).length === 1 &&
     (
       recoveryWorkflow.match(
-        /\$\{\{ runner\.temp \}\}\/(?:staging|production)-cloudformation-controls-audit\.json/gu
+        /path: \$\{\{ runner\.temp \}\}\/\$\{\{ matrix\.environment \}\}-cloudformation-controls-audit\.json/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 1 &&
     (
       recoveryWorkflow.match(
         /bash aws\/enforce-cloudformation-controls\.sh recover/gu
@@ -2832,6 +3086,13 @@ function sourceChecks(): SourceCheck[] {
       String.raw`.ETag | type == "string" and test("^\"[0-9a-f]{32}\"$")`
     ) &&
     /\.ServerSideEncryption == "AES256"/u.test(durableRecoveryLedger) &&
+    /\.ServerSideEncryption == "aws:kms"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /storage_key_alias="arn:aws:kms:\$\{AWS_REGION\}:\$\{AWS_ACCOUNT_ID\}:alias\/\$\{APP_NAME\}-storage"/u.test(
+      durableRecoveryLedger
+    ) &&
+    /\.BucketKeyEnabled == true/u.test(durableRecoveryLedger) &&
     /\.Metadata == \{/u.test(durableRecoveryLedger) &&
     /"kind": "recovery-ledger"/u.test(durableRecoveryLedger) &&
     /\(keys \| sort\) == \(\[/u.test(durableRecoveryLedger) &&
@@ -2846,7 +3107,10 @@ function sourceChecks(): SourceCheck[] {
       durableRecoveryLedger
     ) &&
     /put_args\+=\(--if-none-match '\*'\)/u.test(durableRecoveryLedger) &&
-    /--server-side-encryption AES256/u.test(durableRecoveryLedger) &&
+    /--server-side-encryption aws:kms/u.test(durableRecoveryLedger) &&
+    /--ssekms-key-id "\$storage_key_alias"/u.test(
+      durableRecoveryLedger
+    ) &&
     /--checksum-algorithm SHA256/u.test(durableRecoveryLedger) &&
     /validate_previous_ledger_provenance\(\)/u.test(
       durableRecoveryLedger
@@ -2887,7 +3151,10 @@ function sourceChecks(): SourceCheck[] {
     );
   const durableRecoveryDataContract =
     /--if-none-match '\*'/u.test(durableRecoveryObjectPublisher) &&
-    /--server-side-encryption AES256/u.test(
+    /--server-side-encryption aws:kms/u.test(
+      durableRecoveryObjectPublisher
+    ) &&
+    /--ssekms-key-id "\$storage_key_alias"/u.test(
       durableRecoveryObjectPublisher
     ) &&
     /--checksum-algorithm SHA256/u.test(durableRecoveryObjectPublisher) &&
@@ -2961,6 +3228,58 @@ function sourceChecks(): SourceCheck[] {
     /actions\/runs\/\$\{source_run_id\}\/attempts\/\$\{source_run_attempt\}/u.test(
       durableRecoveryClassifier
     ) &&
+    (
+      durableRecoveryClassifier.match(
+        /queued\|in_progress\|pending\|waiting\|requested/gu
+      ) ?? []
+    ).length === 2 &&
+    /The Deploy AWS run status is invalid\./u.test(
+      durableRecoveryClassifier
+    ) &&
+    /\.total_count == \(\.jobs \| length\)/u.test(
+      durableRecoveryClassifier
+    ) &&
+    /\.total_count <= 100/u.test(durableRecoveryClassifier) &&
+    /classifier fails closed on an unknown Deploy AWS source status/u.test(
+      recoveryWatchdogTests
+    ) &&
+    /classifier fails closed on a truncated Deploy AWS jobs response/u.test(
+      recoveryWatchdogTests
+    ) &&
+    /classifier fails closed on an unknown prior watchdog owner status/u.test(
+      recoveryWatchdogTests
+    ) &&
+    /trusted legacy workflow-run sources/u.test(recoveryWatchdogTests) &&
+    /if \[ "\$run_event" != "workflow_dispatch" \]; then[\s\S]*?classify_environment_job production/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /test "\$run_count" -eq "\$expected_run_count"/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /test "\$artifact_count" -eq "\$expected_artifact_count"/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /\.total_count == \(\.jobs \| length\)/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /GitHub preflight fails closed on an unknown listed deploy status/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated jobs response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated workflow-runs response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /GitHub preflight fails closed on a truncated recovery-artifact response/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /never promotes dispatch metadata into a production recovery candidate/u.test(
+      githubRecoveryPreflightTests
+    ) &&
+    /trusted legacy workflow-run deploy history/u.test(
+      githubRecoveryPreflightTests
+    ) &&
     /schema: "archon\.durable-recovery-bundle\.proof"/u.test(
       durableRecoveryBundleCreator
     ) &&
@@ -2987,6 +3306,214 @@ function sourceChecks(): SourceCheck[] {
       backendCoverageRunner
     ) &&
     /\.\.\.testFiles/u.test(backendCoverageRunner);
+  const stagingCodeDeployPolicyStart = deliveryBootstrap.indexOf(
+    "  StagingCodeDeployInspectionPolicy:"
+  );
+  const stagingCodeDeployPolicyEnd = deliveryBootstrap.indexOf(
+    "  StagingAlarmRoutingInspectionPolicy:",
+    stagingCodeDeployPolicyStart
+  );
+  const stagingCodeDeployPolicy =
+    stagingCodeDeployPolicyStart >= 0 &&
+    stagingCodeDeployPolicyEnd > stagingCodeDeployPolicyStart
+      ? deliveryBootstrap.slice(
+          stagingCodeDeployPolicyStart,
+          stagingCodeDeployPolicyEnd
+        )
+      : "";
+  const stagingCodeDeployActions = [
+    ...stagingCodeDeployPolicy.matchAll(
+      /(?:Action:\s+|- )(codedeploy:[A-Za-z]+)$/gmu
+    ),
+  ].map((match) => match[1]).sort();
+  const exactStagingCodeDeployActions =
+    JSON.stringify(stagingCodeDeployActions) ===
+    JSON.stringify(
+      [
+        "codedeploy:GetApplicationRevision",
+        "codedeploy:GetDeployment",
+        "codedeploy:GetDeploymentGroup",
+        "codedeploy:ListDeployments",
+      ].sort()
+    );
+  const stagingFaultInjectedRecoveryContract =
+    hasExactAwsDeployTrigger(deploy) &&
+    deploySourceGateJob.includes(
+      'test "$DEPLOY_TARGET_SHA" = "$EXPECTED_SHA"'
+    ) &&
+    deploySourceGateJob.includes(
+      '"FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG"'
+    ) &&
+    deploySourceGateJob.includes(
+      '[[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]'
+    ) &&
+    deploySourceGateJob.includes(
+      '"drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+    ) &&
+    /^    if: github\.event_name == 'push'$/mu.test(
+      deployDatabaseReleaseJob
+    ) &&
+    /^    if: github\.event_name == 'push'$/mu.test(managedMcpDeployJob) &&
+    /always\(\)/u.test(deployStagingJob) &&
+    /!cancelled\(\)/u.test(deployStagingJob) &&
+    /needs\.database-release\.result == 'success'/u.test(
+      deployStagingJob
+    ) &&
+    /needs\.managed-mcp-production-audit\.result == 'success'/u.test(
+      deployStagingJob
+    ) &&
+    /needs\.database-release\.result == 'skipped'/u.test(
+      deployStagingJob
+    ) &&
+    /needs\.managed-mcp-production-audit\.result == 'skipped'/u.test(
+      deployStagingJob
+    ) &&
+    /COCKROACH_SQL_DNS: \$\{\{ needs\.database-release\.outputs\.cockroach_sql_dns \|\| '' \}\}/u.test(
+      deployStagingJob
+    ) &&
+    /prior_cockroach_sql_dns=/u.test(deployStagingJob) &&
+    /exact_parameter\("CockroachSqlDns"; \$cockroachSqlDns\)/u.test(
+      deployStagingJob
+    ) &&
+    /COCKROACH_SQL_DNS=\$prior_cockroach_sql_dns/u.test(
+      deployStagingJob
+    ) &&
+    /name: Authorize the exact existing staging release for fault injection[\s\S]*?name: Persist and arm the immutable staging recovery intent[\s\S]*?name: Deploy staging with recovery-safe SAM canary/u.test(
+      deployStagingJob
+    ) &&
+    /candidate_database_secret_id="\$\{APP_NAME\}\/staging\/recovery-drill-inaccessible-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/u.test(
+      deployStagingJob
+    ) &&
+    /AdditionalVersionWeights/u.test(deployStagingJob) &&
+    /\.value >= 0\.099/u.test(deployStagingJob) &&
+    /\.value <= 0\.101/u.test(deployStagingJob) &&
+    /StateValue == "ALARM"/u.test(deployStagingJob) &&
+    /ExecutedVersion/u.test(deployStagingJob) &&
+    /test "\$sam_status" -ne 0/u.test(deployStagingJob) &&
+    /steps\.deploy\.outcome == 'failure'/u.test(deployStagingJob) &&
+    /staging-recovery-drill-started-epoch/u.test(deployStagingJob) &&
+    /bash aws\/fetch-codedeploy-appspec-revision\.sh/u.test(
+      deployStagingJob
+    ) &&
+    /deploy get-application-revision/u.test(
+      stagingCodeDeployAppSpecFetcher
+    ) &&
+    /appSpecContent: \{sha256: \$sha\}/u.test(
+      stagingCodeDeployAppSpecFetcher
+    ) &&
+    /\.revision\.appSpecContent\.sha256 == \$sha/u.test(
+      stagingCodeDeployAppSpecFetcher
+    ) &&
+    /select-staging-codedeploy-rollback\.mjs/u.test(deployStagingJob) &&
+    /EXPECTED_CLOUDFORMATION_STACK_ID/u.test(deployStagingJob) &&
+    /EXPECTED_CANDIDATE_OBSERVED_AT/u.test(deployStagingJob) &&
+    /sourceBinding\.externalStackIdMatched/u.test(deployStagingJob) &&
+    /sourceBinding\.appSpecSha256/u.test(deployStagingJob) &&
+    /sourceErrorCode: "ALARM_ACTIVE"/u.test(deployStagingJob) &&
+    /sourceStatus: "Stopped"/u.test(deployStagingJob) &&
+    /rollbackRelationProved: true/u.test(deployStagingJob) &&
+    /"UPDATE_ROLLBACK_COMPLETE"/u.test(deployStagingJob) &&
+    /schema: "archon\.staging-recovery-drill"/u.test(deployStagingJob) &&
+    /version: 2/u.test(deployStagingJob) &&
+    /behaviorFaultInjected: true/u.test(deployStagingJob) &&
+    /secretMaterialCreated: false/u.test(deployStagingJob) &&
+    /productionMutationPermitted: false/u.test(deployStagingJob) &&
+    /ledgerStateAfterInlineRecovery: "ARMED"/u.test(deployStagingJob) &&
+    /watchdogTerminalRecoveryPending: true/u.test(deployStagingJob) &&
+    /if: success\(\) && github\.event_name == 'push'/u.test(
+      deployProductionJob
+    ) &&
+    !/staging-recovery-drill/u.test(deployProductionJob) &&
+    /if \[ "\$run_event" != "workflow_dispatch" \]; then[\s\S]*?classify_environment_job production/u.test(
+      githubRecoveryPreflight
+    ) &&
+    /\.event == "workflow_run"/u.test(githubRecoveryPreflight) &&
+    /\.event == "workflow_dispatch" and \$environment == "staging"/u.test(
+      durableRecoveryClassifier
+    ) &&
+    /RecoveryDrillToken:/u.test(lambdaTemplate) &&
+    /RecoveryDrillIsStagingOnly:[\s\S]*?RuleCondition: !Not \[!Equals \[!Ref RecoveryDrillToken, disabled\]\][\s\S]*?Assert: !Equals \[!Ref Environment, staging\]/u.test(
+      lambdaTemplate
+    ) &&
+    /RECOVERY_DRILL_TOKEN: !Ref RecoveryDrillToken/u.test(lambdaTemplate) &&
+    exactStagingCodeDeployActions &&
+    /application:\$\{AppName\}-staging-\*/u.test(
+      stagingCodeDeployPolicy
+    ) &&
+    /deploymentgroup:\$\{AppName\}-staging-\*\/\*/u.test(
+      stagingCodeDeployPolicy
+    ) &&
+    (
+      stagingCodeDeployPolicy.match(
+        /aws:RequestedRegion: !Ref AWS::Region/gu
+      ) ?? []
+    ).length === 2 &&
+    (stagingCodeDeployPolicy.match(/Effect: Allow/gu) ?? []).length === 2 &&
+    !/Resource: "\*"/u.test(stagingCodeDeployPolicy) &&
+    /source\.status !== "Stopped"/u.test(stagingCodeDeploySelector) &&
+    /source\.externalId !== stackId/u.test(stagingCodeDeploySelector) &&
+    /revision\.currentVersion === previousVersion/u.test(
+      stagingCodeDeploySelector
+    ) &&
+    /revision\.targetVersion === candidateVersion/u.test(
+      stagingCodeDeploySelector
+    ) &&
+    /calculatedSha === requestedSha/u.test(stagingCodeDeploySelector) &&
+    /sourceMatches\.length === 1/u.test(stagingCodeDeploySelector) &&
+    /rollbackMatches\.length === 1/u.test(stagingCodeDeploySelector) &&
+    /observed >= started/u.test(stagingCodeDeploySelector) &&
+    /ended >= observed/u.test(stagingCodeDeploySelector) &&
+    /created >= sourceCreated/u.test(stagingCodeDeploySelector) &&
+    /staging fault injection is an exact protected manual operation/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /CodeDeploy selector proves the exact stack, drill window, AppSpec, and rollback relation/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /receipt requires Stopped ALARM_ACTIVE, related successful rollback/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /AppSpec fetcher sends the exact deployment SHA in the documented AWS request shape/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /CodeDeploy selector rejects reversed runner and deployment chronology/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /watchdog classifiers accept dispatch evidence only for staging/u.test(
+      stagingRecoveryDrillTests
+    ) &&
+    /"recoveryDrillTokenEnforcedStagingOnlyByTemplate":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"sourceDeploymentAlarmTerminalStatus":\s*"Stopped"/u.test(
+      wellArchitectedContract
+    ) &&
+    /"sourceDeploymentBoundToExactStackAndDrillWindow":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"sourceDeploymentBoundToShaVerifiedLambdaAppSpec":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"appSpecFetchRequestBehaviorallyTested":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"codeDeployInspectionStagingResourceScoped":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"githubRecoveryPaginationCompleteAndLegacyCompatible":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"watchdogUnknownStatusAndIncompleteInventoryFailClosed":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"sharedProductionDatabaseReconciliationPermitted":\s*false/u.test(
+      wellArchitectedContract
+    ) &&
+    /"sharedProductionManagedMcpAuditPermitted":\s*false/u.test(
+      wellArchitectedContract
+    ) &&
+    (packageSource.match(/tests\/staging-recovery-drill\.test\.ts/gu) ?? [])
+      .length === 1;
   const legacyCandidateReadPattern = "\\?".repeat(40);
   const durableRecoveryIamContract =
     (["staging", "production"] as const).every((environment) => {
@@ -3012,7 +3539,7 @@ function sourceChecks(): SourceCheck[] {
           "u"
         ).test(deliveryBootstrap) &&
         deploy.includes(
-          `--s3-prefix "candidates/deployments/${environment}/\${{ github.event.workflow_run.head_sha }}"`
+          `--s3-prefix "candidates/deployments/${environment}/\${{ github.sha }}"`
         ) &&
         (
           deliveryBootstrap.match(
@@ -3521,12 +4048,16 @@ function sourceChecks(): SourceCheck[] {
         /- managed-mcp-production-audit/u.test(
           deployProductionJob
         ) &&
-        /database-release-\$\{\{\s*github\.event\.workflow_run\.head_sha\s*\}\}/u.test(
+        /database-release-\$\{\{\s*github\.sha\s*\}\}/u.test(
           managedMcpDeployJob
         ) &&
         /receipt_sha256:\s*\$\{\{\s*steps\.receipt\.outputs\.receipt_sha256\s*\}\}/u.test(
           managedMcpDeployJob
         ) &&
+        /actions\/workflows\/deploy-aws\.yml\/runs\?branch=main&event=push&status=success/u.test(
+          managedMcpWorkflow
+        ) &&
+        !/event=workflow_run/u.test(managedMcpWorkflow) &&
         /- name: Upload the sanitized proof receipt[\s\S]*?if: success\(\)[\s\S]*?if-no-files-found: error/u.test(
           managedMcpWorkflow
         ) &&
@@ -3617,8 +4148,55 @@ function sourceChecks(): SourceCheck[] {
         /name:\s*Enforce zero-unwaived vulnerability and license findings/u.test(
           supplyChainWorkflow
         ) &&
-        (supplyChainWorkflow.match(/--exit-code 1/gu) ?? []).length >=
+        (supplyChainWorkflow.match(/--exit-code 1/gu) ?? []).length ===
+          1 &&
+        (supplyChainWorkflow.match(/--exit-code 0/gu) ?? []).length >=
           2 &&
+        /validate-trivy-iac-compatibility\.mjs\s+\\\s*\r?\n\s+--self-test/u.test(
+          supplyChainWorkflow
+        ) &&
+        /trivy-iac-compatibility-findings\.json/u.test(
+          supplyChainWorkflow
+        ) &&
+        /trivy-iac-blocking-findings\.json/u.test(
+          supplyChainWorkflow
+        ) &&
+        /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u.test(
+          supplyChainWorkflow
+        ) &&
+        /rawFindings == 1/u.test(supplyChainWorkflow) &&
+        /compatibilityFindings == 1/u.test(supplyChainWorkflow) &&
+        /blockingFindings == 0/u.test(supplyChainWorkflow) &&
+        /EXPECTED_SCANNER_VERSION = "0\.72\.0"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /EXPECTED_RULE_ID = "AWS-0013"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /EXPECTED_LEGACY_ALIAS = null/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /EXPECTED_TARGET = "aws\/template\.yaml"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /EXPECTED_RESOURCE = "Distribution"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /CloudFrontDefaultCertificate: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /mandatoryWebAcl: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /dynamicOriginSecret: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /accessLogging: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /captured Trivy version must be/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
         /"schema_version":\s*1/u.test(supplyChainWaivers) &&
         /"waivers":\s*\[\]/u.test(supplyChainWaivers) &&
         !/audit-first/u.test(supplyChainWorkflow) &&
@@ -3837,8 +4415,23 @@ function sourceChecks(): SourceCheck[] {
         /edge-waf-control-plane-boundary/u.test(
           wellArchitectedContractAudit
         ) &&
+        /wa04-edge-protection-control-plane-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /wa06-fault-injected-recovery-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
         /AWS::WAFv2::WebACL/u.test(wellArchitectedContractAudit) &&
         /finops-control-plane-boundary/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /wa07-managed-backup-restore-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /wa08-hosted-performance-evidence-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /wa09-finops-controls-source/u.test(
           wellArchitectedContractAudit
         ) &&
         /AWS::Budgets::Budget/u.test(wellArchitectedContractAudit) &&
@@ -3857,6 +4450,26 @@ function sourceChecks(): SourceCheck[] {
         (
           wellArchitectedWorkflow.match(
             /- "aws\/finops\.yaml"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          wellArchitectedWorkflow.match(
+            /- "\.github\/workflows\/edge-controls\.yml"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          wellArchitectedWorkflow.match(
+            /- "tests\/staging-recovery-drill\.test\.ts"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          wellArchitectedWorkflow.match(
+            /- "aws\/fetch-codedeploy-appspec-revision\.sh"/gu
+          ) ?? []
+        ).length === 2 &&
+        (
+          wellArchitectedWorkflow.match(
+            /- "aws\/select-staging-codedeploy-rollback\.mjs"/gu
           ) ?? []
         ).length === 2 &&
         !/cloudformation deploy[\s\S]*?--template-file aws\/(?:edge-waf|finops)\.yaml/u.test(
@@ -3880,14 +4493,400 @@ function sourceChecks(): SourceCheck[] {
         /"provisioningPermitted":\s*false/u.test(
           wellArchitectedContract
         ) &&
+        /"state":\s*"repository-prepared-live-restore-required"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"state":\s*"repository-prepared-hosted-measurement-required"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"state":\s*"repository-prepared-live-drill-required"/u.test(
+          wellArchitectedContract
+        ) &&
         /"status":\s*"pending-human-assignment"/u.test(
           wellArchitectedContract
         ) &&
         /"status":\s*"pending-human-decision"/u.test(
           wellArchitectedContract
         ),
-      "The default Well-Architected audit is credential-free and repository-only; optional live eu-west-1 inventory is explicit, read-only, owner/objective gated, and proves no tagged workload in us-west-2 while CloudFront WAF and FinOps billing controls remain approval-gated and dormant.",
+      "The default Well-Architected audit is credential-free and repository-only; optional live eu-west-1 inventory is explicit, read-only, owner/objective gated, and proves no tagged workload in us-west-2 while protected WAF and FinOps activation remain human-gated and live-unrun.",
       "The Well-Architected evidence contract, honest human-decision gates, region boundary, or non-mutating activation model is incomplete."
+    ),
+    sourceCheck(
+      "product.aws-account-security-baseline-audit",
+      "Production Readiness",
+      /name:\s*AWS Account Security Baseline Audit/u.test(
+        awsSecurityBaselineWorkflow
+      ) &&
+        /^\s{2}workflow_dispatch:/mu.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /environment:\s*security-audit/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /AWS_SECURITY_AUDIT_ROLE_ARN:\s*\$\{\{ vars\.AWS_SECURITY_AUDIT_ROLE_ARN \}\}/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /prove_workflow ci\.yml CI/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /prove_workflow codeql\.yml CodeQL/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /supply-chain\.yml "Supply Chain \(enforced\)"/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /allowed-account-ids:\s*\$\{\{ env\.AWS_ACCOUNT_ID \}\}/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /path:\s*\$\{\{ runner\.temp \}\}\/aws-account-security-baseline-receipt\.json/u.test(
+          awsSecurityBaselineWorkflow
+        ) &&
+        /s3control get-public-access-block/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /iam get-account-summary/u.test(awsSecurityBaselineScript) &&
+        /cloudtrail describe-trails/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /guardduty list-detectors/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /securityhub get-enabled-standards/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /configservice describe-configuration-recorders/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /accessanalyzer list-analyzers/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /ec2 get-ebs-encryption-by-default/u.test(
+          awsSecurityBaselineScript
+        ) &&
+        /"s3:GetAccountPublicAccessBlock"/u.test(
+          awsSecurityBaselinePolicy
+        ) &&
+        /"securityhub:GetEnabledStandards"/u.test(
+          awsSecurityBaselinePolicy
+        ) &&
+        /"aws:RequestedRegion": "eu-west-1"/u.test(
+          awsSecurityBaselinePolicy
+        ) &&
+        !/"(?:Create|Put|Update|Delete|Enable|Disable|Start|Stop|Attach|Detach)[A-Za-z]*"/u.test(
+          awsSecurityBaselinePolicy
+        ) &&
+        /"state": "repository-prepared-live-audit-required"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"protectedEnvironment": "security-audit"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"id": "account-security-baseline-audit"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"mutationPermitted": false/u.test(
+          wellArchitectedContract
+        ) &&
+        /wa03-account-security-baseline-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /Status: repository-prepared/u.test(
+          awsSecurityBaselineRunbook
+        ) &&
+        /does not enable or remediate/u.test(
+          awsSecurityBaselineRunbook
+        ),
+      "WA-03 has a protected exact-green-main read-only account audit, an exact least-privilege reference policy, sanitized receipt boundary, and honest live-activation runbook.",
+      "The protected WA-03 source, least-privilege policy, exact-SHA gate, sanitized receipt, or activation boundary is incomplete."
+    ),
+    sourceCheck(
+      "product.sustainability-intensity-evidence",
+      "Production Readiness",
+      /name:\s*Sustainability Intensity Evidence/u.test(
+        sustainabilityIntensityWorkflow
+      ) &&
+        /^\s{2}workflow_dispatch:/mu.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /environment:\s*sustainability-audit/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /AWS_SUSTAINABILITY_AUDIT_ROLE_ARN:\s*\$\{\{ vars\.AWS_SUSTAINABILITY_AUDIT_ROLE_ARN \}\}/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /prove_workflow ci\.yml CI/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /prove_workflow codeql\.yml CodeQL/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /Hosted Load Evidence/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /comparison_mode == 'compare'/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /path:\s*\$\{\{ runner\.temp \}\}\/sustainability-intensity-receipt\.json/u.test(
+          sustainabilityIntensityWorkflow
+        ) &&
+        /cloudformation describe-stacks/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /cloudwatch get-metric-data/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /logs describe-log-groups/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /configuredMemoryGbSecondsPerSuccessfulRecall/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /dataProcessedBytesPerSuccessfulRecall/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /transferBytesPerSuccessfulRecall/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /rawResponsesUploaded:\s*false/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /emissionsMeasured:\s*false/u.test(
+          sustainabilityIntensityScript
+        ) &&
+        /"cloudwatch:GetMetricData"/u.test(
+          sustainabilityIntensityPolicy
+        ) &&
+        /"logs:DescribeLogGroups"/u.test(
+          sustainabilityIntensityPolicy
+        ) &&
+        !/"(?:Create|Put|Update|Delete|Enable|Disable|Start|Stop|Invoke)[A-Za-z]*"/u.test(
+          sustainabilityIntensityPolicy
+        ) &&
+        /wa10-sustainability-intensity-source/u.test(
+          wellArchitectedContractAudit
+        ) &&
+        /"state": "repository-prepared-live-measurement-required"/u.test(
+          wellArchitectedContract
+        ) &&
+        /"id": "sustainability-intensity-measurement"/u.test(
+          wellArchitectedContract
+        ) &&
+        /Status: repository-prepared/u.test(
+          sustainabilityIntensityRunbook
+        ) &&
+        /no live baseline or improvement receipt is[\s\S]*?claimed/iu.test(
+          sustainabilityIntensityRunbook
+        ),
+      "WA-10 has a protected exact-green-main read-only engineering-intensity pipeline, exact hosted-recall denominator, equivalent baseline/after contract, sanitized digests, and explicit non-emissions boundary.",
+      "The WA-10 protected measurement source, least-privilege role contract, exact denominator, equivalent comparison, or honest claim boundary is incomplete."
+    ),
+    sourceCheck(
+      "product.database-credential-rotation",
+      "Production Readiness",
+      /name:\s*Rotate CockroachDB Runtime Credential/u.test(
+        databaseCredentialRotationWorkflow
+      ) &&
+        /^\s{2}workflow_dispatch:/mu.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /environment:\s*production-db/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /prove_workflow ci\.yml CI/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /prove_workflow codeql\.yml CodeQL/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /database-\?{6}/u.test(databaseCredentialRotationWorkflow) &&
+        /cockroach-admin-\?{6}/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        !/(?:database|cockroach-admin)-\*/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /ROTATION_INTERRUPTED_STATE_UNKNOWN/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /Attest the sanitized exact-SHA rotation receipt\s+if: always\(\)/u.test(
+          databaseCredentialRotationWorkflow
+        ) &&
+        /export async function recoverFailedRotation/u.test(
+          databaseCredentialRotationScript
+        ) &&
+        /new ListSecretVersionIdsCommand/u.test(
+          databaseCredentialRotationScript
+        ) &&
+        /RuntimeCredentialRotationFailure/u.test(
+          databaseCredentialRotationScript
+        ) &&
+        /process\.stdout\.write\(`\$\{JSON\.stringify\(receipt/u.test(
+          databaseCredentialRotationScript
+        ) &&
+        /lost Put response reconciles/u.test(
+          databaseCredentialRotationTests
+        ) &&
+        /lost Update response requires exact current observation/u.test(
+          databaseCredentialRotationTests
+        ) &&
+        /stale cutover reads fail closed/u.test(
+          databaseCredentialRotationTests
+        ) &&
+        /partial Cockroach DDL is reconciled/u.test(
+          databaseCredentialRotationTests
+        ) &&
+        /injected rollback and cleanup failures/u.test(
+          databaseCredentialRotationTests
+        ) &&
+        /createCredentialPoolController/u.test(databaseClient) &&
+        /resolveDatabaseCredential/u.test(databaseClient) &&
+        /concurrent fake-pg refresh coalesces/u.test(
+          databaseClientRotationTests
+        ) &&
+        /failed fake-pg candidate never replaces/u.test(
+          databaseClientRotationTests
+        ) &&
+        /COCKROACH_SQL_DNS:\s*!Ref CockroachSqlDns/u.test(
+          lambdaTemplate
+        ) &&
+        /wa05-database-credential-rotation-source/u.test(
+          wellArchitectedContractAudit
+        ),
+      "WA-05 has protected exact-release two-principal rotation, exact secret ARN suffixes, hot pool refresh, injected failure-state tests, phase-specific attested receipts, and fail-closed interrupted-run evidence.",
+      "The WA-05 protected rotation, exact IAM boundary, behavioral failure tests, hot refresh, or actionable failure receipt contract is incomplete."
+    ),
+    sourceCheck(
+      "product.protected-foundation-and-edge-delivery",
+      "Production Readiness",
+      /name:\s*Foundation Storage Migration/u.test(
+        foundationMigrationWorkflow
+      ) &&
+        /- retire/u.test(foundationMigrationWorkflow) &&
+        /environment:\s*bootstrap/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /foundation-migration-authority\.sh verify/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /foundation-storage-migration-policy\.json/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /bootstrap-stack-policy\.pre-storage-migration\.json/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /bootstrap-stack-policy\.json/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /recoveryAnchor/u.test(foundationMigrationWorkflow) &&
+        /prove-foundation-storage-controls\.sh/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /RETIRE-FOUNDATION-MIGRATION-AUTHORITY/u.test(
+          foundationMigrationWorkflow
+        ) &&
+        /"replacementPolicy":\s*"forbidden"/u.test(
+          foundationStorageMigrationPolicy
+        ) &&
+        /"FinOpsCloudFormationExecutionRole"/u.test(
+          foundationStorageMigrationPolicy
+        ) &&
+        /"FinOpsControlRole"/u.test(
+          foundationStorageMigrationPolicy
+        ) &&
+        /render-trust\|render-policy\|render-template\|verify/u.test(
+          foundationMigrationAuthority
+        ) &&
+        /migrationAuthorityRetired/u.test(foundationStorageProof) &&
+        /arnSha256/u.test(foundationStorageProof) &&
+        /roleSeparation:\s*true/u.test(foundationStorageProof) &&
+        /LogicalResourceId\/ApplicationStorageKey/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/FinOpsControlRole/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /name:\s*Manage AWS Edge Controls/u.test(
+          edgeControlsWorkflow
+        ) &&
+        /environment:\s*edge-controls/u.test(edgeControlsWorkflow) &&
+        /set-stack-policy/u.test(edgeControlsWorkflow) &&
+        /update-termination-protection/u.test(edgeControlsWorkflow) &&
+        /Prove exact deployed WAF controls/u.test(edgeControlsWorkflow) &&
+        /LogicalResourceId\/ArchonCloudFrontWebAcl/u.test(
+          edgeStackPolicy
+        ) &&
+        /DeletionPolicy:\s*RetainExceptOnCreate/u.test(edgeTemplate) &&
+        /CloudFrontWebAclArn:[\s\S]*?AllowedPattern:[\s\S]*?Rules:/u.test(
+          lambdaTemplate
+        ) &&
+        !/CloudFrontWebAclArn:[\s\S]*?Default:\s*""[\s\S]*?Rules:/u.test(
+          lambdaTemplate
+        ) &&
+        /WebACLId:\s*!Ref CloudFrontWebAclArn/u.test(lambdaTemplate) &&
+        /\{\{resolve:secretsmanager:\$\{AppName\}\/\$\{Environment\}\/origin-verification:SecretString:ORIGIN_VERIFY_TOKEN\}\}/u.test(
+          lambdaTemplate
+        ) &&
+        /environment !== "staging" && environment !== "production"/u.test(
+          lambdaRuntime
+        ) &&
+        /deployed environments reject missing, blank, or malformed origin capability/u.test(
+          lambdaRuntimeTests
+        ) &&
+        /Require exact-SHA foundation and edge-control receipts/u.test(
+          deploy
+        ) &&
+        /Resolve the exact staging edge-stack handoff/u.test(deploy) &&
+        /Resolve the exact production edge-stack handoff/u.test(deploy) &&
+        !/CLOUDFRONT_WEB_ACL_ARN:\s*\$\{\{\s*vars\./u.test(deploy),
+      "The exact-SHA foundation migration, retained KMS/secret/control roles, mandatory WAF association, direct edge-stack handoff, one-time-authority retirement, and sanitized live proofs are source-complete and fail closed.",
+      "The protected foundation migration, mandatory WAF handoff, role/stack protection, or sanitized live-proof contract is incomplete."
+    ),
+    sourceCheck(
+      "product.separated-finops-control-plane",
+      "Production Readiness",
+      /name:\s*Manage AWS FinOps Controls/u.test(
+        finOpsControlsWorkflow
+      ) &&
+        /environment:\s*finops-controls/u.test(finOpsControlsWorkflow) &&
+        /AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN/u.test(
+          finOpsControlsWorkflow
+        ) &&
+        /--role-arn "\$AWS_FINOPS_CLOUDFORMATION_EXECUTION_ROLE_ARN"/u.test(
+          finOpsControlsWorkflow
+        ) &&
+        !/\$\{\{\s*vars\.AWS_FINOPS_/u.test(finOpsControlsWorkflow) &&
+        /rawAwsIdentifiersStored:\s*false/u.test(
+          finOpsControlsWorkflow
+        ) &&
+        /routingTest:[\s\S]*?published/u.test(finOpsControlsWorkflow) &&
+        /AWS::Budgets::Budget/u.test(finOpsTemplate) &&
+        /AWS::CE::AnomalyMonitor/u.test(finOpsTemplate) &&
+        /AWS::CE::AnomalySubscription/u.test(finOpsTemplate) &&
+        /FinOpsCloudFormationExecutionRole:/u.test(deliveryBootstrap) &&
+        /RoleName:\s*!Sub "\$\{AppName\}-finops-cloudformation-execution"/u.test(
+          deliveryBootstrap
+        ) &&
+        /Principal:[\s\S]*?Service:\s*cloudformation\.amazonaws\.com/u.test(
+          deliveryBootstrap
+        ) &&
+        /FinOpsControlRole:/u.test(deliveryBootstrap) &&
+        /RoleName:\s*!Sub "\$\{AppName\}-github-finops-controls"/u.test(
+          deliveryBootstrap
+        ) &&
+        /environment:finops-controls/u.test(deliveryBootstrap) &&
+        /workflow:\s*Manage AWS FinOps Controls/u.test(
+          deliveryBootstrap
+        ) &&
+        /PassOnlyFinOpsCloudFormationExecutionRole/u.test(
+          deliveryBootstrap
+        ) &&
+        /PublishOnlyThroughAccountBoundEncryptedSns/u.test(
+          deliveryBootstrap
+        ) &&
+        /controllerRoleArnSha256/u.test(foundationStorageProof) &&
+        /executionRoleArnSha256/u.test(foundationStorageProof),
+      "FinOps uses deterministic repository-bound OIDC control, a separate CloudFormation execution role, exact billing resources, encrypted human routing, digest-only receipts, and no workload permissions.",
+      "The FinOps workflow, deterministic role separation, exact CloudFormation role handoff, encrypted route proof, or sanitized receipt is incomplete."
     ),
     sourceCheck(
       "tech.release-dependency-governance",
@@ -4306,17 +5305,27 @@ function sourceChecks(): SourceCheck[] {
         /artifact_name:\s*zap-baseline-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
           hostedDastCiJob
         ) &&
-        /workflows:\s*\["Deploy AWS"\]/u.test(securityDastWorkflow) &&
-        /types:\s*\[completed\]/u.test(securityDastWorkflow) &&
+        /workflow_call:/u.test(securityDastWorkflow) &&
+        !/workflow_run:/u.test(securityDastWorkflow) &&
         /cron:\s*"43 4 \* \* 1"/u.test(securityDastWorkflow) &&
         /DAST_REQUIRE_HARDENED_HEADERS:\s*"1"/u.test(
           securityDastWorkflow
         ) &&
-        /DAST_SOURCE_DEPLOY_RUN_ID:\s*\$\{\{\s*github\.event\.workflow_run\.id \|\| ''\s*\}\}/u.test(
-          securityDastWorkflow
+        deployHostedDastJob.length > 0 &&
+        /needs:\s*\r?\n\s+- deploy-production\r?\n\s+- managed-mcp-production-audit/u.test(
+          deployHostedDastJob
         ) &&
-        /DAST_SOURCE_DEPLOY_RUN_ATTEMPT:\s*\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| ''\s*\}\}/u.test(
-          securityDastWorkflow
+        /uses:\s*\.\/\.github\/workflows\/security-dast\.yml/u.test(
+          deployHostedDastJob
+        ) &&
+        /exact_sha:\s*\$\{\{\s*github\.sha\s*\}\}/u.test(
+          deployHostedDastJob
+        ) &&
+        /deploy_run_id:\s*\$\{\{\s*github\.run_id\s*\}\}/u.test(
+          deployHostedDastJob
+        ) &&
+        /deploy_run_attempt:\s*\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          deployHostedDastJob
         ) &&
         hostedDastSourceGateJob.length > 0 &&
         /name:\s*Validate Hosted DAST source deployment/u.test(
@@ -4325,23 +5334,32 @@ function sourceChecks(): SourceCheck[] {
         /name:\s*Require successful operation-bound Deploy AWS source/u.test(
           hostedDastSourceGateJob
         ) &&
-        /test "\$SOURCE_CONCLUSION" = "success"/u.test(
+        /test "\$EVENT_NAME" = "push"/u.test(
           hostedDastSourceGateJob
         ) &&
         hasExactTrimmedLine(
           hostedDastSourceGateJob,
-          '[[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
+          '[[ "$REQUESTED_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
         ) &&
         hasExactTrimmedLine(
           hostedDastSourceGateJob,
-          '[[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]'
+          '[[ "$REQUESTED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]'
         ) &&
         hasExactTrimmedLine(
           hostedDastSourceGateJob,
-          '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+          '[[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]'
+        ) &&
+        /test "\$GITHUB_RUN_ID" = "\$REQUESTED_RUN_ID"/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /test "\$GITHUB_RUN_ATTEMPT" = "\$REQUESTED_RUN_ATTEMPT"/u.test(
+          hostedDastSourceGateJob
+        ) &&
+        /test "\$GITHUB_SHA" = "\$REQUESTED_SHA"/u.test(
+          hostedDastSourceGateJob
         ) &&
         /actions:\s*read/u.test(hostedDastSourceGateJob) &&
-        /actions\/runs\/\$\{SOURCE_RUN_ID\}\/attempts\/\$\{SOURCE_RUN_ATTEMPT\}\/jobs\?per_page=100/u.test(
+        /actions\/runs\/\$\{REQUESTED_RUN_ID\}\/attempts\/\$\{REQUESTED_RUN_ATTEMPT\}\/jobs\?per_page=100/u.test(
           hostedDastSourceGateJob
         ) &&
         /exact_job\("Validate Deploy AWS source CI"\)/u.test(
@@ -4369,7 +5387,16 @@ function sourceChecks(): SourceCheck[] {
         /node scripts\/hosted-dast\.mjs/u.test(
           hostedDastReleaseBoundaryJob
         ) &&
-        /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.id \|\| github\.run_id\s*\}\}-\$\{\{\s*github\.event\.workflow_run\.run_attempt \|\| github\.run_attempt\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+        /DAST_SOURCE_DEPLOY_RUN_ID:\s*\$\{\{\s*needs\.source-gate\.outputs\.source_deploy_run_id\s*\}\}/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /DAST_SOURCE_DEPLOY_RUN_ATTEMPT:\s*\$\{\{\s*needs\.source-gate\.outputs\.source_deploy_run_attempt\s*\}\}/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*needs\.source-gate\.outputs\.expected_release_sha\s*\}\}/u.test(
+          hostedDastReleaseBoundaryJob
+        ) &&
+        /name:\s*hosted-dast-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_id\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_attempt\s*\}\}/u.test(
           hostedDastReleaseBoundaryJob
         ) &&
         /retention-days:\s*90/u.test(hostedDastReleaseBoundaryJob) &&
@@ -4399,7 +5426,7 @@ function sourceChecks(): SourceCheck[] {
         /allow_issue_writing:\s*false/u.test(
           hostedDastReleaseZapJob
         ) &&
-        /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+        /artifact_name:\s*zap-baseline-\$\{\{\s*env\.DAST_CHECKOUT_SHA\s*\}\}-\$\{\{\s*needs\.source-gate\.outputs\.artifact_run_attempt\s*\}\}/u.test(
           hostedDastReleaseZapJob
         ) &&
         hasExactZapIgnorePolicy(zapPredeployRules, [
@@ -4422,9 +5449,6 @@ function sourceChecks(): SourceCheck[] {
           "10109",
           "90005",
         ]) &&
-        /DAST_EXPECTED_RELEASE_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha \|\| ''\s*\}\}/u.test(
-          securityDastWorkflow
-        ) &&
         /EXPECTED_PRODUCTION_URL\s*=\s*\n?\s*"https:\/\/d2s5v0o0eg2aaw\.cloudfront\.net"/u.test(
           hostedDast
         ) &&
@@ -4521,12 +5545,13 @@ function sourceChecks(): SourceCheck[] {
         /refuses non-owned or non-HTTPS targets before fetching/u.test(
           hostedDastTests
         ) &&
-        /exactShaWorkflowRuns\(\s*"security-dast\.yml",\s*"workflow_run"/u.test(
+        /exactShaWorkflowRuns\(\s*"deploy-aws\.yml",\s*"push"/u.test(
           finalSubmissionGate
         ) &&
-        /selectedRuns\.hostedDast = toSelectedRun\(hostedDastRun\)/u.test(
+        !/exactShaWorkflowRuns\(\s*"security-dast\.yml"/u.test(
           finalSubmissionGate
         ) &&
+        !/selectedRuns\.hostedDast/u.test(finalSubmissionGate) &&
         (
           finalSubmissionGate.match(
             /requireSuccessfulHostedDastJobs\(/gu
@@ -4614,7 +5639,7 @@ function sourceChecks(): SourceCheck[] {
       "The public proof can drift from the protected commit promoted by AWS CI/CD."
     ),
     sourceCheck(
-      "product.dormant-encrypted-alarm-routing",
+      "product.protected-encrypted-alarm-routing-control-loop",
       "Production Readiness",
       /AlarmRoutingEnabled:\s+Type: String\s+Default: "false"\s+AllowedValues:\s+- "true"\s+- "false"/u.test(
         deliveryBootstrap
@@ -4674,6 +5699,83 @@ function sourceChecks(): SourceCheck[] {
         /LogicalResourceId\/ProductionAlarmTopic/u.test(
           bootstrapStackPolicy
         ) &&
+        /AlarmRoutingCloudFormationExecutionRole:[\s\S]*?Principal:\s+Service: cloudformation\.amazonaws\.com[\s\S]*?activate-exact-alarm-routing-resources/u.test(
+          deliveryBootstrap
+        ) &&
+        /AlarmRoutingControlRole:[\s\S]*?token\.actions\.githubusercontent\.com:environment: alarm-routing-controls/u.test(
+          deliveryBootstrap
+        ) &&
+        /token\.actions\.githubusercontent\.com:workflow: Manage AWS Alarm Routing/u.test(
+          deliveryBootstrap
+        ) &&
+        /ManageExactAlarmSubscriptions[\s\S]*?sns:SetSubscriptionAttributes[\s\S]*?staging-alarms:\*/u.test(
+          deliveryBootstrap
+        ) &&
+        /InspectExactAlarmSubscriptions[\s\S]*?sns:GetSubscriptionAttributes[\s\S]*?staging-alarms:\*/u.test(
+          deliveryBootstrap
+        ) &&
+        /StagingAlarmRoutingDrillAlarm:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?AlarmName: !Sub "\$\{AppName\}-staging-routing-drill"[\s\S]*?AlarmActions:\s+- !Ref StagingAlarmTopic/u.test(
+          deliveryBootstrap
+        ) &&
+        /StagingAlarmRoutingDrillQueue:[\s\S]*?Condition: EnableAlarmRouting[\s\S]*?MessageRetentionPeriod: 300[\s\S]*?synthetic-operational-evidence/u.test(
+          deliveryBootstrap
+        ) &&
+        /StagingAlarmRoutingDrillSubscription:[\s\S]*?FilterPolicyScope: MessageBody[\s\S]*?AlarmName:[\s\S]*?!Sub "\$\{AppName\}-staging-routing-drill"/u.test(
+          deliveryBootstrap
+        ) &&
+        /LogicalResourceId\/AlarmRoutingCloudFormationExecutionRole/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/AlarmRoutingControlRole/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/StagingAlarmRoutingDrillAlarm/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/StagingAlarmRoutingDrillQueue/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /LogicalResourceId\/StagingAlarmRoutingDrillSubscription/u.test(
+          bootstrapStackPolicy
+        ) &&
+        /name: Manage AWS Alarm Routing/u.test(alarmRoutingControls) &&
+        /workflow_dispatch:/u.test(alarmRoutingControls) &&
+        /environment: alarm-routing-controls/u.test(alarmRoutingControls) &&
+        /test "\$GITHUB_SHA" = "\$TARGET_SHA"/u.test(
+          alarmRoutingControls
+        ) &&
+        /prove_workflow ci\.yml CI/u.test(alarmRoutingControls) &&
+        /prove_workflow codeql\.yml CodeQL/u.test(
+          alarmRoutingControls
+        ) &&
+        /ACTIVATE-ENCRYPTED-ALARM-ROUTING/u.test(
+          alarmRoutingControls
+        ) &&
+        /DRILL-STAGING-ALARM-DELIVERY/u.test(alarmRoutingControls) &&
+        /if \[ "\$OPERATION" = "drill" \]; then[\s\S]*?now_epoch - updated_epoch[\s\S]*?-ge 900/u.test(
+          alarmRoutingControls
+        ) &&
+        /StateValue \| IN\([\s\S]*?"OK",[\s\S]*?"INSUFFICIENT_DATA"/u.test(
+          alarmRoutingControls
+        ) &&
+        /if \[ "\$initial_state" = "INSUFFICIENT_DATA" \]; then[\s\S]*?--state-value OK/u.test(
+          alarmRoutingControls
+        ) &&
+        /existingResourceMutations: 0/u.test(alarmRoutingControls) &&
+        /resourceAdditions: 15/u.test(alarmRoutingControls) &&
+        /replacementCount: 0/u.test(alarmRoutingControls) &&
+        (
+          alarmRoutingControls.match(/--template-stage Original/gu) ??
+          []
+        ).length === 3 &&
+        /remove_unverified_plan/u.test(alarmRoutingControls) &&
+        /cloudformation delete-change-set/u.test(
+          alarmRoutingControls
+        ) &&
+        /--visibility-timeout 0/u.test(alarmRoutingControls) &&
+        !/sqs delete-message/u.test(alarmRoutingControls) &&
+        /humanContactDetailsStored: false/u.test(alarmRoutingControls) &&
+        !/us-west-2/u.test(alarmRoutingControls) &&
         /mode="\$\{1:-discover\}"/u.test(alarmRoutingProof) &&
         /discover\|verify/u.test(alarmRoutingProof) &&
         /legacy-inactive-not-provisioned/u.test(alarmRoutingProof) &&
@@ -4755,8 +5857,8 @@ function sourceChecks(): SourceCheck[] {
         /proof rejects a weakened archive producer deny/u.test(
           alarmRoutingTests
         ),
-      "A dormant, protected, customer-key-encrypted SNS-to-SQS alarm-routing contract is source-controlled with exact producer policies, migration-safe legacy discovery, stale-action rejection after foundation synchronization, and fake-AWS CI coverage.",
-      "The dormant alarm-routing foundation, protection, discovery, post-deploy proof, or CI coverage is incomplete."
+      "A manual exact-green-main control loop can plan and activate only the dormant false-to-true foundation switch through dedicated OIDC and CloudFormation roles, reject every replacement or existing-resource mutation, verify both encrypted routes, and run a bounded staging-only ALARM-to-OK archive drill with sanitized approval evidence. Live activation and human paging are not claimed until hosted receipts exist.",
+      "The protected alarm-routing foundation, activation plan, dedicated authority, bounded staging drill, post-deploy proof, sanitized receipt, or CI coverage is incomplete."
     ),
     sourceCheck(
       "product.s3-access-logging-foundation",
@@ -5059,6 +6161,13 @@ function sourceChecks(): SourceCheck[] {
       "Durable pre-mutation fencing, S3 conditional CAS, receipt-bound terminal state, CloudFormation protection/drift evidence, trusted watchdog recovery, CI coverage, or runner artifact hygiene is incomplete."
     ),
     sourceCheck(
+      "product.staging-fault-injected-recovery",
+      "Production Readiness",
+      stagingFaultInjectedRecoveryContract && localArtifacts.length === 0,
+      "A protected staging-only dispatch injects a real inaccessible-secret candidate fault, proves the 10% canary alarm plus linked CodeDeploy/CloudFormation automatic rollback, restores the live release, and leaves an attested handoff for watchdog terminalization; the live drill receipt remains an explicit activation requirement.",
+      "The staging-only fault boundary, candidate alarm observation, automatic rollback linkage, sanitized handoff, watchdog classification, CI regression contract, or runner artifact hygiene is incomplete."
+    ),
+    sourceCheck(
       "product.oidc-promotion-rollback",
       "Production Readiness",
       has("aws/bootstrap-oidc.yaml") &&
@@ -5069,30 +6178,30 @@ function sourceChecks(): SourceCheck[] {
         /name:\s*Require successful exact-main push CI source/u.test(
           deploySourceGateJob
         ) &&
-        hasExactTrimmedLine(
-          deploySourceGateJob,
-          'test "$SOURCE_CONCLUSION" = "success"'
+        /case "\$GITHUB_EVENT_NAME" in[\s\S]*?push\)[\s\S]*?test "\$DEPLOY_OPERATION" = "release"[\s\S]*?test "\$RECOVERY_DRILL_TOKEN" = "disabled"[\s\S]*?workflow_dispatch\)[\s\S]*?test "\$DEPLOY_OPERATION" = "staging-recovery-drill"[\s\S]*?FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG/u.test(
+          deploySourceGateJob
         ) &&
         hasExactTrimmedLine(
           deploySourceGateJob,
-          'test "$SOURCE_EVENT" = "push"'
+          'test "$GITHUB_REF" = "refs/heads/main"'
         ) &&
         hasExactTrimmedLine(
           deploySourceGateJob,
-          'test "$SOURCE_BRANCH" = "main"'
+          '[[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]'
         ) &&
-        hasExactTrimmedLine(
-          deploySourceGateJob,
-          '[[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
+        /actions\/workflows\/ci\.yml\/runs\?branch=main&event=push/u.test(
+          deploySourceGateJob
         ) &&
-        hasExactTrimmedLine(
-          deploySourceGateJob,
-          '[[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]'
+        /\.head_sha == \$sha[\s\S]*?\.head_branch == "main"[\s\S]*?\.event == "push"[\s\S]*?\.name == "CI"[\s\S]*?\.path == "\.github\/workflows\/ci\.yml"/u.test(
+          deploySourceGateJob
         ) &&
-        hasExactTrimmedLine(
-          deploySourceGateJob,
-          '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+        /ci_run_id:\s*\$\{\{\s*steps\.source_ci\.outputs\.run_id\s*\}\}/u.test(
+          deploySourceGateJob
         ) &&
+        /ci_run_attempt:\s*\$\{\{\s*steps\.source_ci\.outputs\.run_attempt\s*\}\}/u.test(
+          deploySourceGateJob
+        ) &&
+        !/github\.event\.workflow_run/u.test(deploySourceGateJob) &&
         deployBuildOnceJob.length > 0 &&
         /needs:\s*\r?\n\s+- source-gate/u.test(deployBuildOnceJob) &&
         !/^    if:/mu.test(deployBuildOnceJob) &&
@@ -5510,6 +6619,21 @@ function sourceChecks(): SourceCheck[] {
         /DEMO_VIDEO_SOURCE_GATE_ATTEMPT/u.test(
           demoVideoReleaseGate
         ) &&
+        /workflowRunsPath\("deploy-aws\.yml",\s*"push",\s*sha\)/u.test(
+          demoVideoReleaseGate
+        ) &&
+        !/workflowRunsPath\("security-dast\.yml"/u.test(
+          demoVideoReleaseGate
+        ) &&
+        /requireDemoVideoDeployContract\(/u.test(
+          demoVideoReleaseGate
+        ) &&
+        demoVideoReleaseGate.includes(
+          "Reconcile CockroachDB memory release / Schema, runtime RLS, C-SPANN, and resolution-loop execution proof"
+        ) &&
+        /hosted-dast-\$\{sha\}-\$\{deployRun\.id\}-\$\{deployRun\.run_attempt\}/u.test(
+          demoVideoReleaseGate
+        ) &&
         demoVideoReleaseGate.includes("fsConstants.O_NOFOLLOW") &&
         demoVideoReleaseGate.includes(
           'throw new Error("This runner cannot enforce no-follow receipt reads")'
@@ -5636,15 +6760,13 @@ function sourceChecks(): SourceCheck[] {
         /const WORKFLOW_REF =\s+`\$\{REPOSITORY\}\/\.github\/workflows\/submission-readiness\.yml@refs\/heads\/main`/u.test(
           finalSubmissionGate
         ) &&
-        /selectSuccessfulRun\([\s\S]*?"CI"[\s\S]*?"CodeQL"[\s\S]*?"Deploy AWS"[\s\S]*?"Hosted DAST"[\s\S]*?"Cockroach Cloud Managed MCP Audit"[\s\S]*?"Recover AWS"/u.test(
+        /selectSuccessfulRun\([\s\S]*?"CI"[\s\S]*?"CodeQL"[\s\S]*?"Deploy AWS"[\s\S]*?"Cockroach Cloud Managed MCP Audit"[\s\S]*?"Recover AWS"/u.test(
           finalSubmissionGate
         ) &&
-        /Deploy timing must be valid and all independent audits must start after deploy completes/u.test(
+        /DAST must belong to Deploy AWS and all independent audits must start after deploy completes/u.test(
           finalSubmissionGate
         ) &&
-        /selectedRuns\.hostedDast = toSelectedRun\(hostedDastRun\)/u.test(
-          finalSubmissionGate
-        ) &&
+        !/selectedRuns\.hostedDast/u.test(finalSubmissionGate) &&
         /selectedRuns\.demoVideo = toSelectedRun\(demoVideoRun\)/u.test(
           finalSubmissionGate
         ) &&
@@ -5723,14 +6845,17 @@ function sourceChecks(): SourceCheck[] {
         /terminalHostedDastZapArtifact\.digest !==/u.test(
           finalSubmissionGate
         ) &&
-        /hosted-dast-\$\{sha\}-\$\{deployRun\.id\}-\$\{deployRun\.run_attempt\}-\$\{hostedDastRun\.run_attempt\}/u.test(
+        /hosted-dast-\$\{sha\}-\$\{deployRun\.id\}-\$\{deployRun\.run_attempt\}/u.test(
           finalSubmissionGate
         ) &&
         /terminalHostedDastArtifact\.digest !== hostedDastArtifact\.digest/u.test(
           finalSubmissionGate
         ) &&
         /requireSuccessfulRecoveryAuditJobs/u.test(finalSubmissionGate) &&
-        /Terminal exact Hosted DAST jobs/u.test(finalSubmissionGate) &&
+        /Terminal exact Deploy AWS jobs/u.test(finalSubmissionGate) &&
+        /Terminal exact Deploy AWS artifacts containing Hosted DAST/u.test(
+          finalSubmissionGate
+        ) &&
         /must have completed within 24 hours/u.test(finalSubmissionGate) &&
         /release\?\.commitSha !== sha/u.test(finalSubmissionGate) &&
         /\^archon_production_\[0-9a-f\]\{10\}\$/u.test(

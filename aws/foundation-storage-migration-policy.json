@@ -1,0 +1,105 @@
+{
+  "schema": "archon.aws.foundation-storage-migration-policy",
+  "schemaVersion": 1,
+  "requiredNewResources": [
+    {
+      "logicalResourceId": "AlarmRoutingCloudFormationExecutionRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "AlarmRoutingControlRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "ApplicationStorageKey",
+      "resourceType": "AWS::KMS::Key"
+    },
+    {
+      "logicalResourceId": "ApplicationStorageKeyAlias",
+      "resourceType": "AWS::KMS::Alias"
+    },
+    {
+      "logicalResourceId": "CloudFrontAccessLogBucket",
+      "resourceType": "AWS::S3::Bucket"
+    },
+    {
+      "logicalResourceId": "CloudFrontAccessLogBucketPolicy",
+      "resourceType": "AWS::S3::BucketPolicy"
+    },
+    {
+      "logicalResourceId": "CloudFrontAccessLogKey",
+      "resourceType": "AWS::KMS::Key"
+    },
+    {
+      "logicalResourceId": "CloudFrontAccessLogKeyAlias",
+      "resourceType": "AWS::KMS::Alias"
+    },
+    {
+      "logicalResourceId": "EdgeControlRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "FinOpsCloudFormationExecutionRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "FinOpsControlRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "ProductionOriginVerifySecret",
+      "resourceType": "AWS::SecretsManager::Secret"
+    },
+    {
+      "logicalResourceId": "StagingCodeDeployInspectionPolicy",
+      "resourceType": "AWS::IAM::Policy"
+    },
+    {
+      "logicalResourceId": "StagingOriginVerifySecret",
+      "resourceType": "AWS::SecretsManager::Secret"
+    }
+  ],
+  "allowedModifications": [
+    {
+      "logicalResourceId": "ArtifactBucket",
+      "resourceType": "AWS::S3::Bucket"
+    },
+    {
+      "logicalResourceId": "ArtifactBucketPolicy",
+      "resourceType": "AWS::S3::BucketPolicy"
+    },
+    {
+      "logicalResourceId": "DatabaseOperatorRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "FoundationPromotionRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "ProductionCloudFormationResourcePolicy",
+      "resourceType": "AWS::IAM::ManagedPolicy"
+    },
+    {
+      "logicalResourceId": "ProductionDeployRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
+      "logicalResourceId": "S3AccessLogArchivePolicy",
+      "resourceType": "AWS::S3::BucketPolicy"
+    },
+    {
+      "logicalResourceId": "StagingCloudFormationResourcePolicy",
+      "resourceType": "AWS::IAM::ManagedPolicy"
+    },
+    {
+      "logicalResourceId": "StagingDeployRole",
+      "resourceType": "AWS::IAM::Role"
+    }
+  ],
+  "forbiddenActions": [
+    "Import",
+    "Remove"
+  ],
+  "replacementPolicy": "forbidden"
+}

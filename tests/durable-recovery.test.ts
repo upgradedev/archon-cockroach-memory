@@ -689,7 +689,9 @@ case "$*" in
     ;;
   *"s3api put-object"*)
     body="$(arg_value --body "$@")"
-    test "$(arg_value --server-side-encryption "$@")" = "AES256"
+    test "$(arg_value --server-side-encryption "$@")" = "aws:kms"
+    test "$(arg_value --ssekms-key-id "$@")" = \
+      "arn:aws:kms:$AWS_REGION:$AWS_ACCOUNT_ID:alias/$APP_NAME-storage"
     test "$(arg_value --content-type "$@")" = "application/json"
     test "$(arg_value --metadata "$@")" = \\
       "environment=staging,kind=recovery-ledger"
@@ -717,7 +719,9 @@ case "$*" in
       '{
         VersionId: $versionId,
         ChecksumSHA256: $checksum,
-        ServerSideEncryption: "AES256"
+        ServerSideEncryption: "aws:kms",
+        SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+        BucketKeyEnabled: true
       }'
     ;;
   *) exit 97 ;;
@@ -1943,7 +1947,9 @@ emit_receipt_metadata() {
     '{
       VersionId: "receipt-version-1",
       ChecksumSHA256: $checksum,
-      ServerSideEncryption: "AES256",
+      ServerSideEncryption: "aws:kms",
+      SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+      BucketKeyEnabled: true,
       ContentLength: $bytes,
       ContentType: $contentType,
       Metadata: {
@@ -1966,7 +1972,9 @@ emit_control_metadata() {
     '{
       VersionId: "control-version-1",
       ChecksumSHA256: $checksum,
-      ServerSideEncryption: "AES256",
+      ServerSideEncryption: "aws:kms",
+      SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+      BucketKeyEnabled: true,
       ContentLength: $bytes,
       ContentType: "application/json",
       Metadata: {
@@ -2038,7 +2046,9 @@ if [ "$1 $2" = "s3api head-object" ]; then
 fi
 if [ "$1 $2" = "s3api put-object" ]; then
   body="$(arg_value --body "$@")"
-  test "$(arg_value --server-side-encryption "$@")" = "AES256"
+  test "$(arg_value --server-side-encryption "$@")" = "aws:kms"
+  test "$(arg_value --ssekms-key-id "$@")" = \
+    "arn:aws:kms:$AWS_REGION:$AWS_ACCOUNT_ID:alias/$APP_NAME-storage"
   test "$(arg_value --content-type "$@")" = "application/json"
   if [ "$key" = "$FAKE_RECEIPT_KEY" ]; then
     test "$(arg_value --if-none-match "$@")" = "*"
@@ -2055,7 +2065,9 @@ if [ "$1 $2" = "s3api put-object" ]; then
       '{
         VersionId: "receipt-version-1",
         ChecksumSHA256: $checksum,
-        ServerSideEncryption: "AES256"
+        ServerSideEncryption: "aws:kms",
+        SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+        BucketKeyEnabled: true
     }'
     exit 0
   fi
@@ -2075,7 +2087,9 @@ if [ "$1 $2" = "s3api put-object" ]; then
       '{
         VersionId: "control-version-1",
         ChecksumSHA256: $checksum,
-        ServerSideEncryption: "AES256"
+        ServerSideEncryption: "aws:kms",
+        SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+        BucketKeyEnabled: true
       }'
     exit 0
   fi
@@ -2113,7 +2127,9 @@ if [ "$1 $2" = "s3api put-object" ]; then
     '{
       VersionId: $versionId,
       ChecksumSHA256: $checksum,
-      ServerSideEncryption: "AES256"
+      ServerSideEncryption: "aws:kms",
+      SSEKMSKeyId: "arn:aws:kms:eu-west-1:123456789012:key/11111111-1111-4111-8111-111111111111",
+      BucketKeyEnabled: true
     }'
   exit 0
 fi

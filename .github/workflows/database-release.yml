@@ -7,6 +7,14 @@ on:
         description: Exact green main commit to reconcile
         required: true
         type: string
+    secrets:
+      CCLOUD_API_KEY:
+        description: CockroachDB Cloud service-account API key
+        required: true
+    outputs:
+      cockroach_sql_dns:
+        description: Authenticated primary eu-west-1 Cockroach Cloud SQL DNS name.
+        value: ${{ jobs.reconcile.outputs.cockroach_sql_dns }}
   workflow_dispatch:
     inputs:
       target_sha:
@@ -27,6 +35,8 @@ jobs:
     if: github.event_name == 'workflow_call' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      cockroach_sql_dns: ${{ steps.cluster.outputs.cockroach_sql_dns }}
     environment:
       name: production-db
     permissions:
@@ -37,7 +47,6 @@ jobs:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
       AWS_DATABASE_OPERATOR_ROLE_ARN: ${{ vars.AWS_DATABASE_OPERATOR_ROLE_ARN }}
-      CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
       COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
       COCKROACH_ADMIN_SECRET_ID: ${{ vars.COCKROACH_ADMIN_SECRET_ID || 'archon-memory/operator/cockroach-admin' }}
       STAGING_DATABASE_SECRET_ID: ${{ vars.STAGING_DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
@@ -70,6 +79,8 @@ jobs:
         run: npm ci
 
       - name: Validate protected environment configuration
+        env:
+          CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
         run: |
           set -euo pipefail
           test -n "$AWS_ACCOUNT_ID"
@@ -79,6 +90,9 @@ jobs:
           test "$AWS_REGION" = "eu-west-1"
 
       - name: Prove CockroachDB Cloud provider, plan, state, and region
+        id: cluster
+        env:
+          CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
         run: |
           set -euo pipefail
           CLUSTER_METADATA="$(curl --fail --silent --show-error \
@@ -115,6 +129,8 @@ jobs:
             echo "COCKROACH_CLOUD_VERSION=$(jq -er '.cockroach_version' <<<"$CLUSTER_METADATA")"
             echo "COCKROACH_SQL_DNS=$COCKROACH_SQL_DNS"
           } >> "$GITHUB_ENV"
+          printf 'cockroach_sql_dns=%s\n' "$COCKROACH_SQL_DNS" \
+            >>"$GITHUB_OUTPUT"
           unset CLUSTER_METADATA COCKROACH_SQL_DNS
 
       - name: Configure short-lived database-operator credentials

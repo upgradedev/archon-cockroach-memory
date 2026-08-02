@@ -119,9 +119,10 @@ and exited successfully without a lease or restoration mutation:
   `If-Match` against its current ETag, forming a compare-and-swap chain that
   implements `ARMED → COMMITTED` or
   `ARMED → RECOVERING → RECOVERED`;
-- the independent `Recover AWS` workflow is defined for the exact completed
-  `Deploy AWS` run, manual dispatch, and a 15-minute watchdog schedule. Its
-  two-hour lease is bound to the exact watchdog run, attempt, and environment;
+- the independent `Recover AWS` workflow runs on a 15-minute watchdog
+  schedule, a daily audit schedule, or manual dispatch, and classifies only
+  the exact `Deploy AWS` push run/attempt bound by the ledger. Its two-hour
+  lease is bound to the exact watchdog run, attempt, and environment;
   an active owner blocks a competitor, while expiry or an exactly proved dead
   owner permits a CAS reclaim;
 - recovery emits a strict schema-v2
@@ -188,6 +189,8 @@ pipeline. Its migration requires a separate two-principal
 pending→prove→activate→observe→retire workflow. It is no longer attached to a
 `us-west-2` compute workload.
 
-`aws/deploy-lambda.sh` remains break-glass only. It requires both
-`ALLOW_LEGACY_DEPLOY=1` and an explicit region, uses a temporary package
-directory, and cannot silently recreate a default `us-west-2` workload.
+The former direct `aws/deploy-lambda.sh`/Dockerfile path has been removed. It
+could recreate an ungoverned second deployment mechanism and placed a database
+URL directly in Lambda configuration. Recovery and deployment now have one
+pipeline-owned SAM path only; the historical source remains recoverable from
+Git.

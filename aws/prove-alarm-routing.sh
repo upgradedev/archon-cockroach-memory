@@ -48,7 +48,7 @@ for required in APP_NAME AWS_ACCOUNT_ID AWS_REGION ENVIRONMENT; do
   require_env "$required"
 done
 
-[[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,24}$ ]] ||
+[[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]] ||
   fail "APP_NAME is outside the foundation naming contract"
 [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] ||
   fail "AWS_ACCOUNT_ID must be a 12-digit account id"
@@ -94,6 +94,7 @@ prove_alarm_configuration() {
     --arg topicArn "$expected_topic_arn" \
     '
       . as $root
+      | ($app + "-staging-routing-drill") as $drillName
       | [
           ($app + "-" + $environment + "-lambda-errors"),
           ($app + "-" + $environment + "-lambda-throttles"),
@@ -101,20 +102,35 @@ prove_alarm_configuration() {
         ] as $staticNames
       | ("^" + $app + "-" + $environment
           + "-lambda-canary-errors-v[0-9]+$") as $canaryPattern
-      | (.MetricAlarms | type == "array" and length == 4)
+      | (.MetricAlarms // []) as $allAlarms
+      | [$allAlarms[] | select(.AlarmName != $drillName)]
+          as $deploymentAlarms
+      | [$allAlarms[] | select(.AlarmName == $drillName)]
+          as $drillAlarms
+      | (
+          if $actionState == "routed" and $environment == "staging"
+          then 1
+          else 0
+          end
+        ) as $expectedDrillCount
+      | ($allAlarms | type == "array")
       and ((.CompositeAlarms // []) | length == 0)
-      and ([.MetricAlarms[].AlarmName] | unique | length) == 4
+      and ($allAlarms | length) == (4 + $expectedDrillCount)
+      and ([$allAlarms[].AlarmName] | unique | length)
+        == (4 + $expectedDrillCount)
+      and ($deploymentAlarms | length) == 4
+      and ($drillAlarms | length) == $expectedDrillCount
       and all(
         $staticNames[];
         . as $name
-        | [$root.MetricAlarms[].AlarmName] | index($name) != null
+        | [$deploymentAlarms[].AlarmName] | index($name) != null
       )
       and (
-        [.MetricAlarms[].AlarmName | select(test($canaryPattern))]
+        [$deploymentAlarms[].AlarmName | select(test($canaryPattern))]
         | length
       ) == 1
       and all(
-        .MetricAlarms[];
+        $deploymentAlarms[];
         .ActionsEnabled == true
         and (.AlarmActions | type == "array")
         and (.OKActions | type == "array" and length == 0)
@@ -127,6 +143,16 @@ prove_alarm_configuration() {
           then .AlarmActions == [$topicArn]
           else .AlarmActions == []
           end
+        )
+      )
+      and all(
+        $drillAlarms[];
+        .ActionsEnabled == true
+        and .AlarmActions == [$topicArn]
+        and (.OKActions | type == "array" and length == 0)
+        and (
+          .InsufficientDataActions
+          | type == "array" and length == 0
         )
       )
     '
@@ -147,6 +173,8 @@ foundation="$(
 require_jq \
   "foundation stack identity, state, or termination protection is invalid" \
   "$foundation" \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
   --arg stack "$foundation_stack_name" \
   --arg prefix "$foundation_stack_prefix" \
   '
@@ -156,12 +184,20 @@ require_jq \
     and (
       .Stacks[0].StackStatus == "CREATE_COMPLETE"
       or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+      or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
     )
     and .Stacks[0].EnableTerminationProtection == true
-    and ((.Stacks[0].RoleARN // null) == null)
+    and (
+      (.Stacks[0].RoleARN // null) == null
+      or .Stacks[0].RoleARN == (
+        "arn:aws:iam::" + $account + ":role/" + $app
+        + "-alarm-routing-cloudformation-execution"
+      )
+    )
   '
 
 foundation_stack_id="$(jq -er '.Stacks[0].StackId' <<<"$foundation")"
+foundation_stack_status="$(jq -er '.Stacks[0].StackStatus' <<<"$foundation")"
 parameter_values="$(
   jq -c \
     '[
@@ -182,6 +218,20 @@ case "$(jq -r 'length' <<<"$parameter_values")" in
   *) fail "AlarmRoutingEnabled is duplicated" ;;
 esac
 
+expected_alarm_execution_role="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-alarm-routing-cloudformation-execution"
+foundation_execution_role="$(jq -r '.Stacks[0].RoleARN // ""' <<<"$foundation")"
+if [ "$alarm_parameter_state" = "true" ]; then
+  [ "$foundation_stack_status" = "UPDATE_COMPLETE" ] ||
+    fail "active alarm routing is not in a terminal successful stack state"
+  [ "$foundation_execution_role" = "$expected_alarm_execution_role" ] ||
+    fail "active alarm routing is not bound to the dedicated CloudFormation execution role"
+else
+  if [ -n "$foundation_execution_role" ] &&
+     [ "$foundation_execution_role" != "$expected_alarm_execution_role" ]; then
+    fail "inactive alarm routing is bound to an unexpected CloudFormation execution role"
+  fi
+fi
+
 alarm_output_keys="$(
   jq -cn '[
     "AlarmRoutingContractVersion",
@@ -189,6 +239,7 @@ alarm_output_keys="$(
     "StagingAlarmTopicArn",
     "ProductionAlarmTopicArn",
     "StagingAlarmArchiveQueueArn",
+    "StagingAlarmRoutingDrillQueueArn",
     "ProductionAlarmArchiveQueueArn"
   ]'
 )"
@@ -219,6 +270,7 @@ if [ "$alarm_parameter_state" = "missing" ] &&
       keyArn: null,
       topicArn: null,
       archiveQueueArn: null,
+      drillQueueArn: null,
       alarmCount: null
     }'
   exit 0
@@ -248,6 +300,7 @@ if [ "$alarm_parameter_state" = "false" ] &&
       keyArn: null,
       topicArn: null,
       archiveQueueArn: null,
+      drillQueueArn: null,
       alarmCount: $alarmCount
     }'
   exit 0
@@ -255,7 +308,7 @@ fi
 
 [ "$alarm_parameter_state" = "true" ] ||
   fail "alarm-routing outputs exist while the foundation switch is inactive"
-[ "$alarm_output_count" = "6" ] ||
+[ "$alarm_output_count" = "7" ] ||
   fail "the active alarm-routing output contract is incomplete"
 
 require_jq \
@@ -268,8 +321,8 @@ require_jq \
       | select(.OutputKey as $key | $keys | index($key))
       | .OutputKey
     ] as $present
-    | ($present | length) == 6
-      and ($present | unique | length) == 6
+    | ($present | length) == 7
+      and ($present | unique | length) == 7
   '
 
 output_value() {
@@ -295,6 +348,7 @@ key_arn="$(output_value AlarmNotificationsKeyArn)"
 staging_topic_arn="$(output_value StagingAlarmTopicArn)"
 production_topic_arn="$(output_value ProductionAlarmTopicArn)"
 staging_queue_arn="$(output_value StagingAlarmArchiveQueueArn)"
+drill_queue_arn="$(output_value StagingAlarmRoutingDrillQueueArn)"
 production_queue_arn="$(output_value ProductionAlarmArchiveQueueArn)"
 
 [ "$contract_version" = "1" ] ||
@@ -308,6 +362,9 @@ production_queue_arn="$(output_value ProductionAlarmArchiveQueueArn)"
 [ "$staging_queue_arn" = \
   "arn:aws:sqs:${AWS_REGION}:${AWS_ACCOUNT_ID}:${APP_NAME}-staging-alarm-archive" ] ||
   fail "staging archive queue ARN is not the deterministic foundation resource"
+[ "$drill_queue_arn" = \
+  "arn:aws:sqs:${AWS_REGION}:${AWS_ACCOUNT_ID}:${APP_NAME}-staging-alarm-routing-drill" ] ||
+  fail "staging drill queue ARN is not the deterministic foundation resource"
 [ "$production_queue_arn" = \
   "arn:aws:sqs:${AWS_REGION}:${AWS_ACCOUNT_ID}:${APP_NAME}-production-alarm-archive" ] ||
   fail "production archive queue ARN is not the deterministic foundation resource"
@@ -494,6 +551,7 @@ require_jq \
   "$topic" \
   --arg account "$AWS_ACCOUNT_ID" \
   --arg arn "$topic_arn" \
+  --arg environment "$ENVIRONMENT" \
   --arg keyArn "$key_arn" \
   --arg rootArn "arn:aws:iam::${AWS_ACCOUNT_ID}:root" \
   --arg stagingArn "$staging_topic_arn" \
@@ -522,7 +580,9 @@ require_jq \
     and .Attributes.TopicArn == $arn
     and .Attributes.Owner == $account
     and .Attributes.KmsMasterKeyId == $keyArn
-    and .Attributes.SubscriptionsConfirmed == "1"
+    and .Attributes.SubscriptionsConfirmed == (
+      if $environment == "staging" then "2" else "1" end
+    )
     and .Attributes.SubscriptionsPending == "0"
     and .Attributes.SubscriptionsDeleted == "0"
     and (
@@ -691,25 +751,42 @@ subscriptions="$(
     --no-cli-pager
 )"
 require_jq \
-  "SNS topic must have exactly one confirmed archive subscription" \
+  "SNS topic subscriptions are outside the archive and drill contract" \
   "$subscriptions" \
+  --arg drillQueueArn "$drill_queue_arn" \
+  --arg environment "$ENVIRONMENT" \
   --arg topicArn "$topic_arn" \
   --arg queueArn "$queue_arn" \
   '
-    (.Subscriptions | type == "array" and length == 1)
-    and .Subscriptions[0].TopicArn == $topicArn
-    and .Subscriptions[0].Protocol == "sqs"
-    and .Subscriptions[0].Endpoint == $queueArn
-    and (
-      .Subscriptions[0].SubscriptionArn
-      | type == "string"
-        and . != "PendingConfirmation"
-        and . != "Deleted"
-        and startswith("arn:aws:sns:")
+    (.Subscriptions | type == "array")
+    and (.Subscriptions | length) == (
+      if $environment == "staging" then 2 else 1 end
+    )
+    and all(
+      .Subscriptions[];
+      .TopicArn == $topicArn
+      and .Protocol == "sqs"
+      and (
+        .SubscriptionArn
+        | type == "string"
+          and . != "PendingConfirmation"
+          and . != "Deleted"
+          and startswith("arn:aws:sns:")
+      )
+    )
+    and ([.Subscriptions[].Endpoint] | sort) == (
+      if $environment == "staging"
+      then ([$queueArn, $drillQueueArn] | sort)
+      else [$queueArn]
+      end
     )
   '
 subscription_arn="$(
-  jq -er '.Subscriptions[0].SubscriptionArn' <<<"$subscriptions"
+  jq -er \
+    --arg endpoint "$queue_arn" \
+    '[.Subscriptions[] | select(.Endpoint == $endpoint)]
+     | if length == 1 then .[0].SubscriptionArn else error("invalid") end' \
+    <<<"$subscriptions"
 )"
 subscription="$(
   run_aws \
@@ -735,6 +812,44 @@ require_jq \
     and .Attributes.Owner == $account
     and .Attributes.RawMessageDelivery == "false"
   '
+
+if [ "$ENVIRONMENT" = "staging" ]; then
+  drill_subscription_arn="$(
+    jq -er \
+      --arg endpoint "$drill_queue_arn" \
+      '[.Subscriptions[] | select(.Endpoint == $endpoint)]
+       | if length == 1 then .[0].SubscriptionArn else error("invalid") end' \
+      <<<"$subscriptions"
+  )"
+  drill_subscription="$(
+    run_aws \
+      "SNS drill subscription-attribute discovery" \
+      sns get-subscription-attributes \
+      --subscription-arn "$drill_subscription_arn" \
+      --region "$AWS_REGION" \
+      --output json \
+      --no-cli-pager
+  )"
+  require_jq \
+    "SNS drill subscription filter is outside the exact AlarmName contract" \
+    "$drill_subscription" \
+    --arg account "$AWS_ACCOUNT_ID" \
+    --arg alarmName "${APP_NAME}-staging-routing-drill" \
+    --arg queueArn "$drill_queue_arn" \
+    --arg subscriptionArn "$drill_subscription_arn" \
+    --arg topicArn "$staging_topic_arn" \
+    '
+      .Attributes.SubscriptionArn == $subscriptionArn
+      and .Attributes.TopicArn == $topicArn
+      and .Attributes.Protocol == "sqs"
+      and .Attributes.Endpoint == $queueArn
+      and .Attributes.Owner == $account
+      and .Attributes.RawMessageDelivery == "false"
+      and .Attributes.FilterPolicyScope == "MessageBody"
+      and (.Attributes.FilterPolicy | fromjson)
+        == {AlarmName:[$alarmName]}
+    '
+fi
 
 queue_url_response="$(
   run_aws \
@@ -769,6 +884,7 @@ require_jq \
   --arg account "$AWS_ACCOUNT_ID" \
   --arg arn "$queue_arn" \
   --arg keyArn "$key_arn" \
+  --arg drillQueueArn "$drill_queue_arn" \
   --arg stagingQueueArn "$staging_queue_arn" \
   --arg productionQueueArn "$production_queue_arn" \
   --arg stagingTopicArn "$staging_topic_arn" \
@@ -781,14 +897,16 @@ require_jq \
     def exact_keys($expected):
       (keys | sort) == ($expected | sort);
     (.Attributes.Policy | fromjson | .Statement) as $statements
-    | ($statements | length) == 5
+    | ($statements | length) == 7
     and (
       [$statements[].Sid] | unique | sort
     ) == ([
       "AllowProductionAlarmArchiveDelivery",
       "AllowStagingAlarmArchiveDelivery",
+      "AllowStagingAlarmRoutingDrillDelivery",
       "DenyProductionAlarmArchiveInjection",
       "DenyStagingAlarmArchiveInjection",
+      "DenyStagingAlarmRoutingDrillInjection",
       "DenyInsecureTransport"
     ] | sort)
     and .Attributes.QueueArn == $arn
@@ -867,6 +985,32 @@ require_jq \
     )
     and (
       $statements[]
+      | select(.Sid == "AllowStagingAlarmRoutingDrillDelivery")
+      | exact_keys([
+          "Action",
+          "Condition",
+          "Effect",
+          "Principal",
+          "Resource",
+          "Sid"
+        ])
+        and .Effect == "Allow"
+        and (
+          .Principal
+          | exact_keys(["Service"])
+            and .Service == "sns.amazonaws.com"
+        )
+        and (.Action | action_list) == ["sqs:sendmessage"]
+        and .Resource == $drillQueueArn
+        and (
+          .Condition
+          | exact_keys(["ArnEquals", "StringEquals"])
+            and .StringEquals."aws:SourceAccount" == $account
+            and .ArnEquals."aws:SourceArn" == $stagingTopicArn
+        )
+    )
+    and (
+      $statements[]
       | select(.Sid == "DenyStagingAlarmArchiveInjection")
       | exact_keys([
           "Action",
@@ -888,6 +1032,27 @@ require_jq \
               | exact_keys(["aws:SourceArn"])
                 and ."aws:SourceArn" == $stagingTopicArn
             )
+        )
+    )
+    and (
+      $statements[]
+      | select(.Sid == "DenyStagingAlarmRoutingDrillInjection")
+      | exact_keys([
+          "Action",
+          "Condition",
+          "Effect",
+          "Principal",
+          "Resource",
+          "Sid"
+        ])
+        and .Effect == "Deny"
+        and .Principal == "*"
+        and (.Action | action_list) == ["sqs:sendmessage"]
+        and .Resource == $drillQueueArn
+        and (
+          .Condition
+          | exact_keys(["ArnNotLike"])
+            and .ArnNotLike."aws:SourceArn" == $stagingTopicArn
         )
     )
     and (
@@ -932,7 +1097,7 @@ require_jq \
         and (
           .Resource
           | if type == "array" then sort else [] end
-        ) == ([$stagingQueueArn, $productionQueueArn] | sort)
+        ) == ([$stagingQueueArn, $drillQueueArn, $productionQueueArn] | sort)
         and (
           .Condition
           | exact_keys(["Bool"])
@@ -967,6 +1132,76 @@ require_jq \
     and .Tags.ManagedBy == "CloudFormation"
   '
 
+drill_queue_proven=false
+if [ "$ENVIRONMENT" = "staging" ]; then
+  drill_queue_name="${APP_NAME}-staging-alarm-routing-drill"
+  expected_drill_queue_url="https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/${drill_queue_name}"
+  drill_queue_url_response="$(
+    run_aws \
+      "SQS drill queue-url discovery" \
+      sqs get-queue-url \
+      --queue-name "$drill_queue_name" \
+      --queue-owner-aws-account-id "$AWS_ACCOUNT_ID" \
+      --region "$AWS_REGION" \
+      --output json \
+      --no-cli-pager
+  )"
+  require_jq \
+    "SQS drill queue URL is not deterministic" \
+    "$drill_queue_url_response" \
+    --arg url "$expected_drill_queue_url" \
+    '.QueueUrl == $url'
+  drill_queue_url="$(jq -er '.QueueUrl' <<<"$drill_queue_url_response")"
+  drill_queue="$(
+    run_aws \
+      "SQS drill queue-attribute discovery" \
+      sqs get-queue-attributes \
+      --queue-url "$drill_queue_url" \
+      --attribute-names All \
+      --region "$AWS_REGION" \
+      --output json \
+      --no-cli-pager
+  )"
+  archive_policy="$(jq -cer '.Attributes.Policy | fromjson | tojson' <<<"$queue")"
+  require_jq \
+    "SQS drill queue is outside the encrypted short-retention contract" \
+    "$drill_queue" \
+    --arg arn "$drill_queue_arn" \
+    --arg expectedPolicy "$archive_policy" \
+    --arg keyArn "$key_arn" \
+    '
+      .Attributes.QueueArn == $arn
+      and .Attributes.KmsMasterKeyId == $keyArn
+      and .Attributes.KmsDataKeyReusePeriodSeconds == "300"
+      and .Attributes.MessageRetentionPeriod == "300"
+      and .Attributes.ReceiveMessageWaitTimeSeconds == "20"
+      and .Attributes.VisibilityTimeout == "60"
+      and (.Attributes.Policy | fromjson)
+        == ($expectedPolicy | fromjson)
+    '
+  drill_queue_tags="$(
+    run_aws \
+      "SQS drill queue tag discovery" \
+      sqs list-queue-tags \
+      --queue-url "$drill_queue_url" \
+      --region "$AWS_REGION" \
+      --output json \
+      --no-cli-pager
+  )"
+  require_jq \
+    "SQS drill queue tags are incomplete" \
+    "$drill_queue_tags" \
+    --arg app "$APP_NAME" \
+    '
+      (.Tags | type == "object")
+      and .Tags.Application == $app
+      and .Tags.Environment == "staging"
+      and .Tags.DataClassification == "synthetic-operational-evidence"
+      and .Tags.ManagedBy == "CloudFormation"
+    '
+  drill_queue_proven=true
+fi
+
 alarm_count="null"
 if [ "$mode" = "verify" ]; then
   prove_alarm_configuration routed "$topic_arn"
@@ -981,7 +1216,9 @@ jq -cn \
   --arg keyArn "$key_arn" \
   --arg mode "$mode" \
   --arg topicArn "$topic_arn" \
+  --arg drillQueueArn "$drill_queue_arn" \
   --argjson alarmCount "$alarm_count" \
+  --argjson drillQueueProven "$drill_queue_proven" \
   '{
     schema: "archon.alarm-routing.proof",
     version: 1,
@@ -994,5 +1231,7 @@ jq -cn \
     keyArn: $keyArn,
     topicArn: $topicArn,
     archiveQueueArn: $archiveQueueArn,
+    drillQueueArn: $drillQueueArn,
+    dedicatedDrillQueueProven: $drillQueueProven,
     alarmCount: $alarmCount
   }'

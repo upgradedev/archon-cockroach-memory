@@ -74,6 +74,14 @@ submission-readiness-receipt.json
 supply-chain-release-receipt.json
 well-architected-repository-receipt.json
 well-architected-live-receipt.json
+aws-account-security-baseline-receipt.json
+database-credential-rotation-receipt.json
+hosted-load-receipt.json
+hosted-k6-summary.json
+hosted-load-contract.sha256
+k6-machine-readable-schema.json
+sustainability-intensity-receipt.json
+human-impact-receipt.json
 evidence-manifest.sha256
 lambda-zip-content.sha256
 sbom-inputs-and-documents.sha256

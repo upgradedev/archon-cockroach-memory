@@ -17,6 +17,11 @@ backups for 30 days. Without a failed or delayed backup, the default worst-case
 RPO is therefore up to 24 hours. That schedule is not point-in-time recovery.
 RTO remains unknown until a protected live drill completes.
 
+The private S3 candidate/recovery evidence lifecycle is bounded to 2,555 days.
+At least annually, and after every material recovery-contract change, produce
+and drill a newer exact-release recovery point so an active environment never
+depends on evidence approaching that horizon.
+
 The isolated destination must:
 
 - already exist in the same CockroachDB Cloud organization;
@@ -32,8 +37,15 @@ and deleting it later are separate, explicit approval boundaries.
 
 ## Protected configuration
 
-The `production-db` GitHub Environment must require an accountable reviewer.
-It provides the existing source configuration plus:
+The credential-free `operations-drill` GitHub Environment first requires an
+accountable reviewer. Its job binds that approval to the exact current-main
+SHA, destination, backup, destructive confirmation, objectives, polling
+window, and approval reference, then exposes only a SHA-256 authorization
+digest.
+
+The separate `production-db` GitHub Environment requires its own accountable
+reviewer before any credentials or mutation are available. It provides the
+existing source configuration plus:
 
 - `CCLOUD_API_KEY`: an organization-visible CockroachDB Cloud service account
   authorized to read the organization and administer both source and
@@ -77,10 +89,13 @@ architecture or plan, not optimistic labeling.
 
 ## Fail-closed sequence
 
-1. Check out the exact protected `main` SHA without persisted credentials and
-   prove it is still the remote `main` head.
-2. Enter the reviewer-protected `production-db` environment and assume the
-   existing short-lived AWS database-operator role.
+1. In the credential-free, reviewer-protected `operations-drill` environment,
+   check out the exact protected `main` SHA without persisted credentials,
+   prove it is still the remote `main` head, validate the bounded inputs, and
+   emit only their run-bound SHA-256 authorization digest.
+2. Enter the separately reviewer-protected `production-db` environment,
+   require that exact authorization digest, and assume the existing
+   short-lived AWS database-operator role.
 3. Read source, destination, and caller-organization metadata with the pinned
    `Cc-Version: 2024-09-16` API contract.
 4. Require source and destination to be distinct, `CREATED`, AWS Basic,

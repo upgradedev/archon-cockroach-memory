@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
+import {
+  isExpectedResolutionRoutineCreateStatement,
+} from "../src/db/routine-proof.js";
 import { closePool, query } from "../src/db/client.js";
 import {
   handleCreateResolutionSession,
@@ -100,6 +103,60 @@ class RecordingResolutionStore implements ResolutionStore {
     return this.snapshot;
   }
 }
+
+test("resolution routine catalog gate trusts only descriptor-backed definer metadata", () => {
+  const routineName = "archon_resolution_create_session";
+  const valid = `CREATE FUNCTION archon_memory.public.${routineName}(
+      p_token_hash STRING
+    )
+    RETURNS STRING
+    VOLATILE
+    NOT LEAKPROOF
+    CALLED ON NULL INPUT
+    SECURITY DEFINER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      RETURN 'created';
+    END;
+    $$`;
+  assert.equal(
+    isExpectedResolutionRoutineCreateStatement(valid, routineName),
+    true
+  );
+  assert.equal(
+    isExpectedResolutionRoutineCreateStatement(
+      valid.replace("archon_memory.", ""),
+      routineName
+    ),
+    true
+  );
+
+  for (const drifted of [
+    "",
+    " AS $$ SECURITY DEFINER LANGUAGE plpgsql VOLATILE",
+    valid.replace("SECURITY DEFINER", ""),
+    valid.replace("SECURITY DEFINER", "SECURITY INVOKER"),
+    valid.replace(
+      "SECURITY DEFINER",
+      "SECURITY DEFINER SECURITY DEFINER"
+    ),
+    valid.replace("LANGUAGE plpgsql", "LANGUAGE SQL"),
+    valid.replace("VOLATILE", "STABLE"),
+    valid.replace(routineName, "archon_resolution_decide"),
+    valid
+      .replace("SECURITY DEFINER", "SECURITY INVOKER")
+      .replace(
+        "RETURN 'created';",
+        "RETURN 'body text SECURITY DEFINER must not spoof metadata';"
+      ),
+  ]) {
+    assert.equal(
+      isExpectedResolutionRoutineCreateStatement(drifted, routineName),
+      false
+    );
+  }
+});
 
 test("resolution tokens are high-entropy bearer values and only hashes reach stores", async () => {
   const token = issueResolutionToken();

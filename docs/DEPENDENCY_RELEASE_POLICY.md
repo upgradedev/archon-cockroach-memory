@@ -12,7 +12,7 @@ security-update freeze.
 
 - Every configured Dependabot ecosystem uses the numeric
   `open-pull-requests-limit: 0`.
-- Root and web npm, GitHub Actions, the AWS Dockerfile, and root Docker Compose
+- Root and web npm, GitHub Actions, and root Docker Compose
   manifests are all represented using GitHub's
   [supported package ecosystems](https://docs.github.com/en/code-security/reference/supply-chain-security/supported-ecosystems-and-repositories).
 - Dependabot security updates remain enabled and are not subject to the
@@ -56,7 +56,10 @@ After judging, restore normal version-update limits deliberately:
 - web npm: 5
 - GitHub Actions: 5
 - root Docker Compose: 5
-- AWS Dockerfile: 3
+
+The retired AWS container/legacy direct-deploy path has no Dependabot entry.
+If a container delivery path is reintroduced after judging, its Dockerfile and
+an explicit update policy must be reviewed together before activation.
 
 Major migrations remain separate even after thaw so their compatibility and
 visual effects can be reviewed independently.

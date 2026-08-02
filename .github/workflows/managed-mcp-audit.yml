@@ -52,10 +52,16 @@ jobs:
           set -euo pipefail
           run_id="$(
             gh api \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-aws.yml/runs?branch=main&event=workflow_run&status=success&per_page=100" |
+              "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-aws.yml/runs?branch=main&event=push&status=success&per_page=100" |
               jq -er --arg sha "$RELEASE_SHA" '
                 [.workflow_runs[] |
-                  select(.head_sha == $sha and .conclusion == "success")][0].id
+                  select(
+                    .head_sha == $sha and
+                    .head_branch == "main" and
+                    .event == "push" and
+                    .path == ".github/workflows/deploy-aws.yml" and
+                    .conclusion == "success"
+                  )][0].id
               '
           )"
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
@@ -209,11 +215,11 @@ jobs:
             sha256sum managed-mcp-receipt.json | awk '{print $1}'
           )"
           [[ "$receipt_sha256" =~ ^[a-f0-9]{64}$ ]]
-          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
-          echo "checked_at=$(jq -er '.checkedAt' managed-mcp-receipt.json)" \
-            >>"$GITHUB_OUTPUT"
-          echo "explain_status=$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-receipt.json)" \
-            >>"$GITHUB_OUTPUT"
+          {
+            echo "receipt_sha256=$receipt_sha256"
+            echo "checked_at=$(jq -er '.checkedAt' managed-mcp-receipt.json)"
+            echo "explain_status=$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-receipt.json)"
+          } >>"$GITHUB_OUTPUT"
           {
             echo "### CockroachDB tool-chain attestation"
             echo

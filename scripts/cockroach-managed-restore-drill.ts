@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -104,6 +102,7 @@ interface DrillState {
   runAttempt?: string;
   runUrl?: string;
   approvalReference?: string;
+  operationsAuthorizationSha256?: string;
   sourceClusterId?: string;
   destinationClusterId?: string;
   backupId?: string;
@@ -1107,7 +1106,7 @@ function receipt(
   );
   return {
     schema: "archon.cockroach.managed-backup-restore-drill",
-    version: 1,
+    version: 2,
     ok: status === "passed",
     status,
     generatedAt: new Date().toISOString(),
@@ -1117,13 +1116,15 @@ function receipt(
       runId: state.runId ?? null,
       runAttempt: state.runAttempt ?? null,
       runUrl: state.runUrl ?? null,
-      protectedEnvironment: "production-db",
+      protectedEnvironments: ["operations-drill", "production-db"],
       manualDispatchOnly: true,
     },
     approval: {
       referenceSha256: state.approvalReference
         ? sha256(state.approvalReference)
         : null,
+      operationsAuthorizationSha256:
+        state.operationsAuthorizationSha256 ?? null,
       destructiveConfirmationBoundToExactIds:
         state.checks.destructiveConfirmation ?? null,
     },
@@ -1259,25 +1260,16 @@ function receipt(
   };
 }
 
-function writeReceipt(
-  path: string,
-  value: Record<string, unknown>
-): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
-
 async function execute(state: DrillState): Promise<void> {
-  const receiptPath = required("RECEIPT_PATH");
   state.repository = required("GITHUB_REPOSITORY");
   state.runId = required("GITHUB_RUN_ID");
   state.runAttempt = required("GITHUB_RUN_ATTEMPT");
   state.runUrl = required("GITHUB_RUN_URL");
   state.targetSha = required("TARGET_SHA");
   state.approvalReference = required("APPROVAL_REFERENCE");
+  state.operationsAuthorizationSha256 = required(
+    "OPERATIONS_AUTHORIZATION_SHA256"
+  );
   state.sourceClusterId = requiredUuid("SOURCE_CLUSTER_ID");
   state.destinationClusterId = requiredUuid("DESTINATION_CLUSTER_ID");
   state.backupId = requiredOpaqueId("BACKUP_ID");
@@ -1292,7 +1284,8 @@ async function execute(state: DrillState): Promise<void> {
   if (
     state.repository !== "upgradedev/archon-cockroach-memory" ||
     !SHA_PATTERN.test(state.targetSha) ||
-    required("GITHUB_SHA") !== state.targetSha
+    required("GITHUB_SHA") !== state.targetSha ||
+    !/^[0-9a-f]{64}$/u.test(state.operationsAuthorizationSha256)
   ) {
     throw new DrillError("source-gate", "NOT_EXACT_MAIN_SHA");
   }
@@ -1593,22 +1586,23 @@ async function execute(state: DrillState): Promise<void> {
     throw new DrillError("objectives", "RTO_OR_RPO_OBJECTIVE_MISSED");
   }
 
-  writeReceipt(receiptPath, receipt(state, "passed"));
 }
 
 async function main(): Promise<void> {
-  const receiptPath =
-    process.env.RECEIPT_PATH?.trim() ||
-    `${process.env.RUNNER_TEMP?.trim() || "/tmp"}/cockroach-managed-restore/receipt.json`;
   const state: DrillState = { checks: {} };
   try {
     await execute(state);
+    process.stdout.write(
+      `${JSON.stringify(receipt(state, "passed"), null, 2)}\n`
+    );
   } catch (error) {
     const failure =
       error instanceof DrillError
         ? error
         : new DrillError("unexpected", "UNCLASSIFIED_FAILURE");
-    writeReceipt(receiptPath, receipt(state, "failed", failure));
+    process.stdout.write(
+      `${JSON.stringify(receipt(state, "failed", failure), null, 2)}\n`
+    );
     process.stderr.write(
       `Managed-backup restore drill failed closed at ${failure.stage} (${failure.code}).\n`
     );

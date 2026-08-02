@@ -24,6 +24,11 @@ import {
 import { basename, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { finished } from "node:stream/promises";
+import {
+  deriveVectorEvidenceGates,
+  evaluateMemoryPolicy as evaluateSharedMemoryPolicy,
+  parseVectorBenchmarkSummary as parseSharedVectorBenchmarkSummary,
+} from "../src/evaluation/memory-policy.js";
 
 type DecisionOutcome = "approved" | "rejected";
 
@@ -170,6 +175,8 @@ interface Cli {
   sourceSha: string;
   scaleRecords: number;
   vectorLog?: string;
+  vectorProvenance?: string;
+  runtimeResult?: string;
 }
 
 interface ScaleEvent {
@@ -309,7 +316,13 @@ function parseCli(argv: string[]): Cli {
     if (!cli.fixture) fail("policy mode requires --fixture.");
   } else {
     cli.vectorLog = options.get("vector-log");
-    if (!cli.vectorLog) fail("finalize mode requires --vector-log.");
+    cli.vectorProvenance = options.get("vector-provenance");
+    cli.runtimeResult = options.get("runtime-result");
+    if (!cli.vectorLog || !cli.vectorProvenance || !cli.runtimeResult) {
+      fail(
+        "finalize mode requires --vector-log, --vector-provenance, and --runtime-result."
+      );
+    }
   }
   return cli;
 }
@@ -1303,14 +1316,8 @@ async function runPolicy(cli: Cli, output: string): Promise<void> {
     "--fixture"
   );
   const fixtureText = await readFile(fixturePath, "utf8");
-  const fixture = validateFixture(JSON.parse(fixtureText));
-  const baselines = BASELINES.map((config) =>
-    evaluateVariant(fixture, config)
-  );
-  const ablations = ABLATIONS.map((config) =>
-    evaluateVariant(fixture, config)
-  );
-  const gates = policyGates(baselines, ablations);
+  const evaluated = evaluateSharedMemoryPolicy(JSON.parse(fixtureText));
+  const { fixture, baselines, ablations, gates } = evaluated;
   if (Object.values(gates).some((passed) => !passed)) {
     const failures = Object.entries(gates)
       .filter(([, passed]) => !passed)
@@ -1335,6 +1342,15 @@ async function runPolicy(cli: Cli, output: string): Promise<void> {
       sameSemanticScores: true,
       sameThreshold: fixture.defaults.semanticThreshold,
       deterministic: true,
+      evaluatorModule: "src/evaluation/memory-policy.ts",
+      actionMetricDenominators: {
+        proposalDecision:
+          "only cases with an explicit action proposal",
+        safeNoAction:
+          "only proposal cases whose expected action is null",
+        exactAction:
+          "only proposal cases whose expected action is non-null",
+      },
       warning:
         "Fixture semantic scores isolate lifecycle-policy effects; they are not C-SPANN measurements.",
     },
@@ -1461,8 +1477,89 @@ async function readAndValidateArtifact(
   return { path, sha256: sha256Text(raw), value };
 }
 
+function validateSealedRuntimeEvidence(
+  value: Record<string, unknown>
+): Record<string, unknown> {
+  if (
+    value.schemaVersion !== "1.0.0" ||
+    value.evidenceClass !==
+      "real-ephemeral-cockroachdb-runtime-partial-parity"
+  ) {
+    fail("Runtime parity evidence has an unsupported schema or evidence class.");
+  }
+  const gates = asObject(value.gates, "runtime parity gates");
+  if (
+    Object.keys(gates).length === 0 ||
+    Object.values(gates).some((passed) => passed !== true)
+  ) {
+    fail("Runtime parity evidence contains a failed or empty gate set.");
+  }
+  const receipt = asObject(value.receipt, "runtime parity receipt");
+  if (
+    receipt.algorithm !== "sha256" ||
+    typeof receipt.digest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(receipt.digest)
+  ) {
+    fail("Runtime parity evidence receipt is invalid.");
+  }
+  const { receipt: _receipt, ...body } = value;
+  if (sha256Text(canonicalJson(body)) !== receipt.digest) {
+    fail("Runtime parity evidence receipt digest does not match its body.");
+  }
+  const claims = asObject(value.claims, "runtime parity claims");
+  if (
+    !Array.isArray(claims.supported) ||
+    claims.supported.length === 0 ||
+    !Array.isArray(claims.notSupported) ||
+    !claims.notSupported.includes("full-B0-through-B4-production-runtime-parity") ||
+    !claims.notSupported.includes("authenticated-financial-controller-identity")
+  ) {
+    fail("Runtime parity evidence is missing mandatory claim boundaries.");
+  }
+  return gates;
+}
+
 async function runFinalize(cli: Cli, output: string): Promise<void> {
-  const policy = await readAndValidateArtifact(
+  const expectedRuntimePath = resolve(
+    output,
+    "runtime-longitudinal-results.json"
+  );
+  const expectedProvenancePath = resolve(output, "vector-provenance.json");
+  if (
+    resolve(cli.runtimeResult!) !== expectedRuntimePath ||
+    resolve(cli.vectorProvenance!) !== expectedProvenancePath
+  ) {
+    fail(
+      "--runtime-result and --vector-provenance must name the fixed artifacts beneath --output."
+    );
+  }
+  const runtime = await readAndValidateArtifact(
+    output,
+    "runtime-longitudinal-results.json",
+    cli.sourceSha
+  );
+  const runtimeGates = validateSealedRuntimeEvidence(runtime.value);
+  let policy = await readAndValidateArtifact(
+    output,
+    "policy-results.json",
+    cli.sourceSha
+  );
+  if (policy.value.runtimeParityEvidence !== undefined) {
+    fail("policy-results.json already contains runtime parity evidence.");
+  }
+  await writeJson(policy.path, {
+    ...policy.value,
+    runtimeParityEvidence: {
+      binding: "transitively-sha-bound-inside-policy-results",
+      artifact: {
+        file: basename(runtime.path),
+        sha256: runtime.sha256,
+      },
+      gates: runtimeGates,
+      result: runtime.value,
+    },
+  });
+  policy = await readAndValidateArtifact(
     output,
     "policy-results.json",
     cli.sourceSha
@@ -1472,10 +1569,24 @@ async function runFinalize(cli: Cli, output: string): Promise<void> {
     "scale-manifest.json",
     cli.sourceSha
   );
+  const provenance = await readAndValidateArtifact(
+    output,
+    "vector-provenance.json",
+    cli.sourceSha
+  );
   const vectorLogPath = resolve(cli.vectorLog!);
   assertFileWithin(output, vectorLogPath, "--vector-log");
   const vectorLog = await readFile(vectorLogPath, "utf8");
-  const summary = parseVectorBenchmarkLog(vectorLog);
+  const vectorLogSha256 = sha256Text(vectorLog);
+  const summary = parseSharedVectorBenchmarkSummary(vectorLog);
+  const derivedVectorEvidence = deriveVectorEvidenceGates(
+    provenance.value,
+    summary,
+    {
+      sourceSha: cli.sourceSha,
+      vectorLogSha256,
+    }
+  );
   const bestRecall = Math.max(
     ...summary.beams.map((item) => item.recall_at_k_mean)
   );
@@ -1488,8 +1599,7 @@ async function runFinalize(cli: Cli, output: string): Promise<void> {
     fail("VECTOR_RECALL_FLOOR must be in (0, 1].");
   }
   const vectorGates = {
-    realCockroachDbRun: true,
-    exactGroundTruthPresent: true,
+    ...derivedVectorEvidence.gates,
     cspannRecallFloorMet: bestRecall >= recallFloor,
     corpusAtLeast1500: summary.corpus_size >= 1_500,
     queriesAtLeast50: summary.queries >= 50,
@@ -1517,9 +1627,17 @@ async function runFinalize(cli: Cli, output: string): Promise<void> {
       recallFloor,
     },
     benchmark: summary,
+    provenance: {
+      binding: "transitively-sha-bound-inside-vector-results",
+      artifact: {
+        file: basename(provenance.path),
+        sha256: provenance.sha256,
+      },
+      evidence: derivedVectorEvidence.provenance,
+    },
     rawLog: {
       file: basename(vectorLogPath),
-      sha256: sha256Text(vectorLog),
+      sha256: vectorLogSha256,
     },
     gates: vectorGates,
   };

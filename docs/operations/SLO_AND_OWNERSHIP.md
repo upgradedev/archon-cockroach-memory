@@ -56,6 +56,30 @@ They exercise a bounded CI workload and are not represented as production SLOs.
 A human may adopt or change them only after hosted-path evidence and a cost
 review.
 
+The manual **Hosted Load Evidence** workflow closes the measurement gap without
+inventing a production claim. It requires an exact current `main` SHA whose CI,
+CodeQL, supply-chain, and deployment runs succeeded; a protected environment;
+an explicit confirmation; an owned CloudFront target that proves the same
+release; and operator-supplied p95/error objectives. It sends only 20–200
+read-only recall requests with 2–10 virtual users against the synthetic public
+demo corpus. The pipeline records observed latency, errors, grounded citation
+completeness, tenant/status isolation, source deployment, and raw-summary
+digest. Every measured recall must pass the contract, grounding, and isolation
+validators; one semantic failure fails the run. Main CI also parses the shipped
+k6 module with bounded dummy configuration without executing its networked
+functions, while behavioral fixtures execute the same runtime-neutral validator
+that k6 imports. It does not silently convert the results into a business SLA or
+claim production-scale traffic.
+
+The manual **Sustainability Intensity Evidence** workflow reuses the exact
+successful version-2 hosted-load receipt as its functional-unit denominator.
+It requires an assigned sustainability owner, a protected approval, an exact
+green deployed release, an existing read-only audit role, a human-selected
+primary proxy, and an approved reduction target. A baseline run records no
+improvement; an equivalent after run must satisfy the same hosted correctness
+and service objectives and meet the target before the receipt passes. These
+measurements do not create an SLO, emissions claim, or production-scale claim.
+
 ## Live-activation gate
 
 A `live-read-only` Well-Architected audit may proceed only when:

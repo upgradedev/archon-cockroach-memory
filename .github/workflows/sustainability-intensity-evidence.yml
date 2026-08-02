@@ -1,0 +1,443 @@
+name: Sustainability Intensity Evidence
+
+# Manual, protected and read-only. This workflow measures engineering resource
+# intensity for an already-completed, bounded hosted recall run. It does not
+# estimate emissions, provision telemetry, change workload configuration, or
+# create an application workload in another region.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Exact hosted environment whose bounded recall run is measured.
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      target_sha:
+        description: Exact 40-character current green main SHA deployed to the target.
+        required: true
+        type: string
+      hosted_load_run_id:
+        description: Successful Hosted Load Evidence workflow run id for target_sha.
+        required: true
+        type: string
+      hosted_load_run_attempt:
+        description: Exact successful Hosted Load Evidence run attempt.
+        required: true
+        default: "1"
+        type: string
+      hosted_load_receipt_sha256:
+        description: SHA-256 of that run's version-2 hosted-load-receipt.json.
+        required: true
+        type: string
+      comparison_mode:
+        description: Record a baseline or compare an equivalent after release to one.
+        required: true
+        type: choice
+        options:
+          - baseline
+          - compare
+      primary_proxy:
+        description: Human-approved primary engineering intensity proxy.
+        required: true
+        type: choice
+        options:
+          - lambda-configured-gb-seconds
+          - api-data-processed-bytes
+          - cloudfront-transfer-bytes
+      approved_target_reduction_bps:
+        description: Human-approved reduction target, 1-9000 basis points; fixed in baseline and after receipts.
+        required: true
+        type: string
+      approval_reference:
+        description: Non-secret approval record reference; only its SHA-256 is retained.
+        required: true
+        type: string
+      baseline_run_id:
+        description: Compare mode only; successful baseline Sustainability Intensity Evidence run id, otherwise 0.
+        required: true
+        default: "0"
+        type: string
+      baseline_run_attempt:
+        description: Compare mode only; exact baseline run attempt, otherwise 0.
+        required: true
+        default: "0"
+        type: string
+      baseline_commit_sha:
+        description: Compare mode only; exact baseline release SHA, otherwise forty zeroes.
+        required: true
+        default: "0000000000000000000000000000000000000000"
+        type: string
+      baseline_receipt_sha256:
+        description: Compare mode only; exact baseline receipt SHA-256, otherwise sixty-four zeroes.
+        required: true
+        default: "0000000000000000000000000000000000000000000000000000000000000000"
+        type: string
+      confirmation:
+        description: Enter MEASURE-<ENVIRONMENT>-<MODE>-<TARGET_SHA> exactly.
+        required: true
+        type: string
+
+concurrency:
+  group: sustainability-intensity-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  APP_NAME: archon-memory
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: eu-west-1
+  AWS_SUSTAINABILITY_AUDIT_ROLE_ARN: ${{ vars.AWS_SUSTAINABILITY_AUDIT_ROLE_ARN }}
+  TARGET_ENVIRONMENT: ${{ inputs.environment }}
+  TARGET_SHA: ${{ inputs.target_sha }}
+
+jobs:
+  authorize:
+    name: Authorize exact green deployed measurement sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the requested source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind exact inputs and current main
+        shell: bash
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          BASELINE_COMMIT_SHA: ${{ inputs.baseline_commit_sha }}
+          BASELINE_RECEIPT_SHA256: ${{ inputs.baseline_receipt_sha256 }}
+          BASELINE_RUN_ATTEMPT: ${{ inputs.baseline_run_attempt }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+          COMPARISON_MODE: ${{ inputs.comparison_mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          HOSTED_LOAD_RECEIPT_SHA256: ${{ inputs.hosted_load_receipt_sha256 }}
+          HOSTED_LOAD_RUN_ATTEMPT: ${{ inputs.hosted_load_run_attempt }}
+          HOSTED_LOAD_RUN_ID: ${{ inputs.hosted_load_run_id }}
+          PRIMARY_PROXY: ${{ inputs.primary_proxy }}
+          TARGET_REDUCTION_BPS: ${{ inputs.approved_target_reduction_bps }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REPOSITORY" = "upgradedev/archon-cockroach-memory"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/sustainability-intensity-evidence.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HOSTED_LOAD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HOSTED_LOAD_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HOSTED_LOAD_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TARGET_REDUCTION_BPS" =~ ^[0-9]+$ ]]
+          test "$TARGET_REDUCTION_BPS" -ge 1
+          test "$TARGET_REDUCTION_BPS" -le 9000
+          [[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#-]{2,127}$ ]]
+          case "$PRIMARY_PROXY" in
+            lambda-configured-gb-seconds|api-data-processed-bytes|cloudfront-transfer-bytes) ;;
+            *) exit 1 ;;
+          esac
+          case "$TARGET_ENVIRONMENT" in
+            staging|production) ;;
+            *) exit 1 ;;
+          esac
+          expected_confirmation="MEASURE-$(tr '[:lower:]' '[:upper:]' <<<"$TARGET_ENVIRONMENT")-$(tr '[:lower:]' '[:upper:]' <<<"$COMPARISON_MODE")-${TARGET_SHA}"
+          test "$CONFIRMATION" = "$expected_confirmation"
+
+          case "$COMPARISON_MODE" in
+            baseline)
+              test "$BASELINE_RUN_ID" = "0"
+              test "$BASELINE_RUN_ATTEMPT" = "0"
+              test "$BASELINE_COMMIT_SHA" = "0000000000000000000000000000000000000000"
+              test "$BASELINE_RECEIPT_SHA256" = "0000000000000000000000000000000000000000000000000000000000000000"
+              ;;
+            compare)
+              [[ "$BASELINE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [[ "$BASELINE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+              [[ "$BASELINE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+              test "$BASELINE_COMMIT_SHA" != "$TARGET_SHA"
+              [[ "$BASELINE_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+              test "$BASELINE_RECEIPT_SHA256" != "0000000000000000000000000000000000000000000000000000000000000000"
+              ;;
+            *) exit 1 ;;
+          esac
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+      - name: Require exact-SHA green CI and deployment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prove_workflow() {
+            local workflow expected_name expected_path state
+            workflow="$1"
+            expected_name="$2"
+            expected_path="$3"
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er \
+                  --arg sha "$TARGET_SHA" \
+                  --arg name "$expected_name" \
+                  --arg path "$expected_path" \
+                  '
+                    [
+                      .workflow_runs[]
+                      | select(
+                          .head_sha == $sha
+                          and .head_branch == "main"
+                          and .event == "push"
+                          and .name == $name
+                          and .path == $path
+                        )
+                    ]
+                    | sort_by(.run_number, .run_attempt)
+                    | last
+                    | select(.conclusion == "success")
+                  '
+            )"
+            test "$(jq -r '.conclusion' <<<"$state")" = "success"
+          }
+
+          prove_workflow ci.yml CI .github/workflows/ci.yml
+          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml
+          prove_workflow \
+            supply-chain.yml "Supply Chain (enforced)" \
+            .github/workflows/supply-chain.yml
+          prove_workflow \
+            deploy-aws.yml "Deploy AWS" \
+            .github/workflows/deploy-aws.yml
+
+      - name: Prove exact successful hosted and optional baseline runs
+        shell: bash
+        env:
+          BASELINE_COMMIT_SHA: ${{ inputs.baseline_commit_sha }}
+          BASELINE_RUN_ATTEMPT: ${{ inputs.baseline_run_attempt }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+          COMPARISON_MODE: ${{ inputs.comparison_mode }}
+          GH_TOKEN: ${{ github.token }}
+          HOSTED_LOAD_RUN_ATTEMPT: ${{ inputs.hosted_load_run_attempt }}
+          HOSTED_LOAD_RUN_ID: ${{ inputs.hosted_load_run_id }}
+        run: |
+          set -euo pipefail
+          prove_run() {
+            local run_id="$1"
+            local run_attempt="$2"
+            local sha="$3"
+            local name="$4"
+            local path="$5"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" |
+              jq -e \
+                --argjson id "$run_id" \
+                --argjson attempt "$run_attempt" \
+                --arg sha "$sha" \
+                --arg name "$name" \
+                --arg path "$path" \
+                '
+                  .id == $id
+                  and .run_attempt == $attempt
+                  and .head_sha == $sha
+                  and .head_branch == "main"
+                  and .event == "workflow_dispatch"
+                  and .name == $name
+                  and .path == $path
+                  and .status == "completed"
+                  and .conclusion == "success"
+                ' >/dev/null
+          }
+          prove_artifact() {
+            local run_id="$1"
+            local expected_name="$2"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" |
+              jq -e \
+                --arg name "$expected_name" \
+                '[.artifacts[] | select(.name == $name and .expired == false)] | length == 1' \
+                >/dev/null
+          }
+
+          hosted_name="hosted-load-${TARGET_ENVIRONMENT}-${TARGET_SHA}-${HOSTED_LOAD_RUN_ID}-${HOSTED_LOAD_RUN_ATTEMPT}"
+          prove_run \
+            "$HOSTED_LOAD_RUN_ID" "$HOSTED_LOAD_RUN_ATTEMPT" "$TARGET_SHA" \
+            "Hosted Load Evidence" ".github/workflows/hosted-load-evidence.yml"
+          prove_artifact "$HOSTED_LOAD_RUN_ID" "$hosted_name"
+
+          if [ "$COMPARISON_MODE" = compare ]; then
+            baseline_name="sustainability-intensity-${TARGET_ENVIRONMENT}-${BASELINE_COMMIT_SHA}-${BASELINE_RUN_ID}-${BASELINE_RUN_ATTEMPT}"
+            prove_run \
+              "$BASELINE_RUN_ID" "$BASELINE_RUN_ATTEMPT" "$BASELINE_COMMIT_SHA" \
+              "Sustainability Intensity Evidence" \
+              ".github/workflows/sustainability-intensity-evidence.yml"
+            prove_artifact "$BASELINE_RUN_ID" "$baseline_name"
+          fi
+
+  measure:
+    name: Measure read-only engineering intensity
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: sustainability-audit
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+      BASELINE_COMMIT_SHA: ${{ inputs.baseline_commit_sha }}
+      BASELINE_RECEIPT_PATH: ${{ runner.temp }}/baseline-artifact/sustainability-intensity-receipt.json
+      BASELINE_RECEIPT_SHA256: ${{ inputs.baseline_receipt_sha256 }}
+      BASELINE_RUN_ATTEMPT: ${{ inputs.baseline_run_attempt }}
+      BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+      COMPARISON_MODE: ${{ inputs.comparison_mode }}
+      HOSTED_LOAD_CONTRACT_MANIFEST_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-contract.sha256
+      HOSTED_LOAD_RECEIPT_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-receipt.json
+      HOSTED_LOAD_RECEIPT_SHA256: ${{ inputs.hosted_load_receipt_sha256 }}
+      HOSTED_LOAD_RUN_ATTEMPT: ${{ inputs.hosted_load_run_attempt }}
+      HOSTED_LOAD_RUN_ID: ${{ inputs.hosted_load_run_id }}
+      HOSTED_LOAD_SUMMARY_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-k6-summary.json
+      PRIMARY_PROXY: ${{ inputs.primary_proxy }}
+      RECEIPT_PATH: ${{ runner.temp }}/sustainability-intensity-receipt.json
+      TARGET_REDUCTION_BPS: ${{ inputs.approved_target_reduction_bps }}
+    steps:
+      - name: Initialize fail-closed sanitized receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' \
+            '{"schema":"archon.sustainability-intensity-evidence","version":1,"ok":false,"result":"not-finalized"}' \
+            >"$RECEIPT_PATH"
+
+      - name: Check out the exact approved source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Re-prove current main and bind the human owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "upgradedev/archon-cockroach-memory/.github/workflows/sustainability-intensity-evidence.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          owner="$(
+            jq -er '
+              .owners.sustainability
+              | select(.status == "assigned")
+              | .value
+              | select(type == "string" and length > 0)
+              | select(test("^(tbd|todo|unknown|unassigned|n/a)$"; "i") | not)
+            ' docs/operations/well-architected-contract.json
+          )"
+          owner_digest="$(printf '%s' "$owner" | sha256sum | awk '{print $1}')"
+          approval_digest="$(printf '%s' "$APPROVAL_REFERENCE" | sha256sum | awk '{print $1}')"
+          printf '::add-mask::%s\n' "$owner"
+          printf '::add-mask::%s\n' "$APPROVAL_REFERENCE"
+          {
+            echo "SUSTAINABILITY_OWNER_DIGEST=$owner_digest"
+            echo "APPROVAL_REFERENCE_DIGEST=$approval_digest"
+          } >>"$GITHUB_ENV"
+
+      - name: Download the exact hosted-load receipt source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hosted-load-${{ inputs.environment }}-${{ inputs.target_sha }}-${{ inputs.hosted_load_run_id }}-${{ inputs.hosted_load_run_attempt }}
+          path: ${{ runner.temp }}/hosted-load-artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.hosted_load_run_id }}
+
+      - name: Download the exact baseline receipt source
+        if: inputs.comparison_mode == 'compare'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sustainability-intensity-${{ inputs.environment }}-${{ inputs.baseline_commit_sha }}-${{ inputs.baseline_run_id }}-${{ inputs.baseline_run_attempt }}
+          path: ${{ runner.temp }}/baseline-artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.baseline_run_id }}
+
+      - name: Configure the existing read-only sustainability audit role
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_SUSTAINABILITY_AUDIT_ROLE_ARN }}
+          role-duration-seconds: 900
+          role-session-name: archon-sustainability-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Measure bounded engineering intensity without mutation
+        shell: bash
+        run: bash aws/measure-sustainability-intensity.sh
+
+      - name: Upload only the sanitized receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sustainability-intensity-${{ inputs.environment }}-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sustainability-intensity-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce sanitized successful evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RECEIPT_PATH"
+          test ! -L "$RECEIPT_PATH"
+          ! grep -Eqi \
+            'arn:(aws|aws-cn|aws-us-gov):|:assumed-role/|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|cloudfront\.net' \
+            "$RECEIPT_PATH"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$TARGET_SHA" \
+            --arg environment "$TARGET_ENVIRONMENT" \
+            --arg mode "$COMPARISON_MODE" \
+            --arg proxy "$PRIMARY_PROXY" \
+            '
+              .schema == "archon.sustainability-intensity-evidence"
+              and .version == 1
+              and .ok == true
+              and .evidenceClass == "engineering-intensity-proxy-not-emissions"
+              and .repository == $repository
+              and .commitSha == $commit
+              and .environment == $environment
+              and .regionPolicy.applicationRegion == "eu-west-1"
+              and .regionPolicy.cloudFrontTelemetryControlPlane == "us-east-1"
+              and .regionPolicy.additionalRegionalWorkloadCreated == false
+              and .workloadEvidence.corpus == "synthetic-public-demo"
+              and .workloadEvidence.productionScaleClaimed == false
+              and .equivalentWorkload.successfulRecalls > 0
+              and .primaryProxy.id == $proxy
+              and .primaryProxy.valuePerSuccessfulRecall > 0
+              and .comparison.mode == $mode
+              and (.rawEvidenceDigests | all(.[];
+                (type == "string" and test("^[0-9a-f]{64}$"))
+                or (type == "boolean" and . == false)
+              ))
+              and .rawEvidenceDigests.rawResponsesUploaded == false
+              and .claims == {
+                emissionsMeasured: false,
+                carbonReductionClaimed: false,
+                productionScaleClaimed: false,
+                ccftUsed: false
+              }
+              and (.limitations | length) == 4
+            ' "$RECEIPT_PATH" >/dev/null

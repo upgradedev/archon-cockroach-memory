@@ -368,8 +368,9 @@ if [ "$STACK_STATE" = "existing" ]; then
     component_paths+=(previous-index.html)
   fi
 fi
-IFS=$'\n' component_paths=($(printf '%s\n' "${component_paths[@]}" | sort))
-unset IFS
+mapfile -t component_paths < <(
+  printf '%s\n' "${component_paths[@]}" | LC_ALL=C sort
+)
 files_json='[]'
 for relative_path in "${component_paths[@]}"; do
   absolute_path="$bundle_dir/$relative_path"

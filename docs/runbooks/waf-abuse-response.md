@@ -1,11 +1,38 @@
 # WAF and public-demo abuse response
 
-Status: repository-prepared; live activation and drills require explicit
-approval.
+Status: repository-prepared; live activation, delivery drills, and human paging
+require explicit approval and hosted evidence.
+
+## Prepared control contract
+
+The protected edge stack defines three CloudWatch alarms in `us-east-1`: total
+WebACL blocks, aggregate API rate-rule blocks, and resolution-create rate-rule
+blocks. `ALARM` and `OK` transitions route to a customer-managed-KMS encrypted
+SNS topic and then to a customer-managed-KMS encrypted SQS archive with 14-day
+retention. The queue is durable machine evidence, not a human paging channel.
+
+AWS WAF request sampling is disabled because WAF logging redaction does not
+apply to sampled requests. The only request-level evidence route is a 30-day,
+customer-managed-KMS encrypted CloudWatch Logs group. Its logging filter drops
+everything except `BLOCK` records and redacts query strings plus
+`authorization`, `cookie`, `referer`, `x-api-key`, and
+`x-archon-origin-verify` headers. Never copy raw WAF log records into a GitHub
+artifact or incident document.
+
+CloudFront WAF metrics intentionally omit the `Region` dimension, as required
+by the AWS WAF metrics contract for CloudFront distributions. The implementation
+follows the current AWS primary documentation for
+[WAF metrics and dimensions](https://docs.aws.amazon.com/waf/latest/developerguide/waf-metrics.html),
+[CloudWatch Logs WAF delivery](https://docs.aws.amazon.com/waf/latest/developerguide/logging-cw-logs.html),
+[WAF logging filters and redaction](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-wafv2-loggingconfiguration.html),
+[encrypted SNS event sources](https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html),
+and
+[encrypted SNS-to-SQS delivery](https://docs.aws.amazon.com/sns/latest/dg/sns-enable-encryption-for-topic-sqs-queue-subscriptions.html).
 
 ## Trigger
 
-- CloudFront WAF blocked-request or rate-rule alarm;
+- a verified CloudFront WAF blocked-request or rate-rule alarm transition;
+- an archived edge-alarm notification in the encrypted SQS evidence route;
 - API Gateway throttling, Lambda throttling, or resolution-sandbox capacity
   alarm;
 - unexpected cost or session-creation increase;
@@ -14,11 +41,15 @@ approval.
 
 ## Triage
 
-1. Acknowledge through the approved alarm destination and record the alert,
-   exact deployed SHA, WebACL ARN digest, rule, timestamp, and responder.
-2. Confirm the public application through CloudFront and inspect only
-   sanitized aggregate metrics. Do not copy bearer tokens, database secrets,
-   request bodies, or sampled sensitive headers into the incident record.
+1. If a separately approved human paging destination exists, acknowledge there.
+   Otherwise record that paging and acknowledgement are `not configured`; an
+   SQS archive message must never be represented as human acknowledgement.
+   Record the alert, exact deployed SHA, WebACL ARN digest, rule, timestamp, and
+   responder through the approved incident process.
+2. Confirm the public application through CloudFront and inspect sanitized
+   aggregate metrics first. Raw BLOCK logs require separately approved incident
+   access. Do not copy bearer tokens, database secrets, request bodies, client
+   identifiers, or sensitive headers into the incident record.
 3. Check whether the event is a managed-rule match, aggregate API rate,
    resolution-create rate, API Gateway throttle, or bounded session-capacity
    response.
@@ -57,6 +88,19 @@ printed, and rotated after suspected disclosure. An empty parameter means the
 control is dormant and must not be reported as active.
 
 ## Drill evidence
+
+`Manage AWS Edge Controls` has `plan|apply|verify` operations. `apply` and
+`verify` prove the live resource configuration and emit only identifier hashes;
+they do not generate traffic, read the archive queue, page a human, or prove
+delivery. Its receipt therefore fixes `alarmDeliveryDrill` to `not-run`,
+`humanPagingDestination` to `not-configured-by-this-stack`, and
+`humanAcknowledgement` to `not-claimed`.
+
+A separate explicitly approved hosted drill is required before any alarm
+delivery or response claim. It must use a dedicated, short-lived reader role
+that can read only the exact environment archive queue and decrypt only through
+SQS; the edge deployment role deliberately has no `ReceiveMessage` or
+`DeleteMessage` permission.
 
 The pipeline receipt must bind:
 

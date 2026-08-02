@@ -35,6 +35,7 @@ case "$RECOVERY_ENVIRONMENT" in
 esac
 
 artifact_bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
 ledger_key="candidates/recovery/${RECOVERY_ENVIRONMENT}/ledger.json"
 state_file="$(mktemp)"
 response_file="$(mktemp)"
@@ -142,12 +143,25 @@ read_item() {
     jq -e \
       --arg checksum "$expected_checksum" \
       --arg environment "$RECOVERY_ENVIRONMENT" \
+      --arg kmsPrefix \
+        "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/" \
       --argjson bytes "$(wc -c <"$state_file")" \
       '
         (.VersionId | type == "string" and length > 0 and . != "null")
         and (.ETag | type == "string" and test("^\"[0-9a-f]{32}\"$"))
         and .ChecksumSHA256 == $checksum
-        and .ServerSideEncryption == "AES256"
+        and (
+          .ServerSideEncryption == "AES256"
+          or (
+            .ServerSideEncryption == "aws:kms"
+            and (
+              .SSEKMSKeyId
+              | type == "string"
+                and startswith($kmsPrefix)
+            )
+            and .BucketKeyEnabled == true
+          )
+        )
         and .ContentLength == $bytes
         and .ContentType == "application/json"
         and .Metadata == {
@@ -461,7 +475,8 @@ publish_state() {
     --key "$ledger_key"
     --body "$next_file"
     --expected-bucket-owner "$AWS_ACCOUNT_ID"
-    --server-side-encryption AES256
+    --server-side-encryption aws:kms
+    --ssekms-key-id "$storage_key_alias"
     --checksum-algorithm SHA256
     --checksum-sha256 "$next_checksum"
     --content-type application/json
@@ -482,10 +497,18 @@ publish_state() {
     "The recovery ledger S3 write response"
   jq -e \
     --arg checksum "$next_checksum" \
+    --arg kmsPrefix \
+      "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/" \
     '
       (.VersionId | type == "string" and length > 0 and . != "null")
       and .ChecksumSHA256 == $checksum
-      and .ServerSideEncryption == "AES256"
+      and .ServerSideEncryption == "aws:kms"
+      and (
+        .SSEKMSKeyId
+        | type == "string"
+          and startswith($kmsPrefix)
+      )
+      and .BucketKeyEnabled == true
     ' "$response_file" >/dev/null
 }
 

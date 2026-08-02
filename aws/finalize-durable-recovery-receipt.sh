@@ -144,6 +144,7 @@ terminal_error="$work_dir/terminal-error.txt"
 terminal_read="$work_dir/terminal-read.json"
 
 artifact_bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
 ledger_key="candidates/recovery/${RECOVERY_ENVIRONMENT}/ledger.json"
 receipt_key="candidates/recovery/${RECOVERY_ENVIRONMENT}/receipts/${RECOVERY_INTENT_ID}/${receipt_sha256}.json"
 control_proof_key="candidates/recovery/${RECOVERY_ENVIRONMENT}/controls/${RECOVERY_INTENT_ID}/${control_proof_sha256}.json"
@@ -484,7 +485,21 @@ case "$current_state" in
         .VersionId == $versionId
         and .ETag == $etag
         and .ChecksumSHA256 == $checksum
-        and .ServerSideEncryption == "AES256"
+        and (
+          .ServerSideEncryption == "AES256"
+          or (
+            .ServerSideEncryption == "aws:kms"
+            and (
+              .SSEKMSKeyId
+              | type == "string"
+                and startswith(
+                  "arn:aws:kms:eu-west-1:"
+                  + env.AWS_ACCOUNT_ID + ":key/"
+                )
+            )
+            and .BucketKeyEnabled == true
+          )
+        )
         and .ContentLength == $bytes
         and .ContentType == "application/json"
         and .Metadata == {
@@ -642,7 +657,8 @@ publish_control_proof() {
       --body "$control_proof_file" \
       --if-none-match '*' \
       --expected-bucket-owner "$AWS_ACCOUNT_ID" \
-      --server-side-encryption AES256 \
+      --server-side-encryption aws:kms \
+      --ssekms-key-id "$storage_key_alias" \
       --checksum-algorithm SHA256 \
       --checksum-sha256 "$control_checksum_base64" \
       --content-type application/json \
@@ -658,7 +674,16 @@ publish_control_proof() {
         '
           (.VersionId | type == "string" and length > 0 and . != "null")
           and .ChecksumSHA256 == $checksum
-          and .ServerSideEncryption == "AES256"
+          and .ServerSideEncryption == "aws:kms"
+          and (
+            .SSEKMSKeyId
+            | type == "string"
+              and startswith(
+                "arn:aws:kms:eu-west-1:"
+                + env.AWS_ACCOUNT_ID + ":key/"
+              )
+          )
+          and .BucketKeyEnabled == true
         ' "$control_put_response" >/dev/null
       control_version="$(jq -er '.VersionId' "$control_put_response")"
       put_complete=true
@@ -687,7 +712,21 @@ publish_control_proof() {
           '
             (.VersionId | type == "string" and length > 0 and . != "null")
             and .ChecksumSHA256 == $checksum
-            and .ServerSideEncryption == "AES256"
+            and (
+              .ServerSideEncryption == "AES256"
+              or (
+                .ServerSideEncryption == "aws:kms"
+                and (
+                  .SSEKMSKeyId
+                  | type == "string"
+                    and startswith(
+                      "arn:aws:kms:eu-west-1:"
+                      + env.AWS_ACCOUNT_ID + ":key/"
+                    )
+                )
+                and .BucketKeyEnabled == true
+              )
+            )
             and .ContentLength == $bytes
             and .ContentType == "application/json"
             and .Metadata == {
@@ -798,7 +837,21 @@ jq -e \
   '
     .VersionId == $versionId
     and .ChecksumSHA256 == $checksum
-    and .ServerSideEncryption == "AES256"
+    and (
+      .ServerSideEncryption == "AES256"
+      or (
+        .ServerSideEncryption == "aws:kms"
+        and (
+          .SSEKMSKeyId
+          | type == "string"
+            and startswith(
+              "arn:aws:kms:eu-west-1:"
+              + env.AWS_ACCOUNT_ID + ":key/"
+            )
+        )
+        and .BucketKeyEnabled == true
+      )
+    )
     and .ContentLength == $bytes
     and .ContentType == "application/json"
     and .Metadata == {
@@ -845,7 +898,21 @@ jq -e \
   '
     .VersionId == $versionId
     and .ChecksumSHA256 == $checksum
-    and .ServerSideEncryption == "AES256"
+    and (
+      .ServerSideEncryption == "AES256"
+      or (
+        .ServerSideEncryption == "aws:kms"
+        and (
+          .SSEKMSKeyId
+          | type == "string"
+            and startswith(
+              "arn:aws:kms:eu-west-1:"
+              + env.AWS_ACCOUNT_ID + ":key/"
+            )
+        )
+        and .BucketKeyEnabled == true
+      )
+    )
     and .ContentLength == $bytes
     and .ContentType == "application/json"
     and .Metadata == {

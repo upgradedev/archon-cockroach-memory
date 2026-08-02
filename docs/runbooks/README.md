@@ -1,7 +1,7 @@
 # Runbooks
 
 Status: decision paths documented; no live responder, paging destination,
-second region, billing control, or credential-rotation mechanism is claimed.
+second region, billing control, or completed credential rotation is claimed.
 
 Runbooks are executed through protected CI/CD workflows. They are not
 instructions to build, test, recover, or mutate production from a developer
@@ -9,12 +9,14 @@ laptop.
 
 | Condition | Runbook | Live capability |
 |---|---|---|
-| Alarm or SLO symptom | [Alarm response](./alarm-response.md) | CloudWatch rollback alarms exist; human paging is dormant |
+| AWS account security baseline gap | [Account security baseline audit](./aws-account-security-baseline.md) | Protected read-only audit prepared; role, controls, and live receipt require approval |
+| Alarm or SLO symptom | [Alarm response](./alarm-response.md) | Protected activation/dedicated filtered-queue drill path prepared; live route and human paging remain unclaimed |
 | Failed deployment or unresolved recovery intent | [Rollback and recovery](./rollback-recovery.md) | Existing deployment/watchdog workflows; no fault-injected recovery receipt |
 | Regional outage | [Regional outage](./regional-outage.md) | `eu-west-1` only; no approved second-region DR |
-| Suspected credential compromise | [Credential compromise](./credential-compromise.md) | Secret storage exists; rotation is not implemented |
+| Suspected credential compromise | [Credential compromise](./credential-compromise.md) | Protected two-principal rotation prepared; no live receipt |
 | Database loss/corruption | [Database restore](./database-restore.md) | Approval-gated managed-backup drill prepared; no live receipt or PITR |
 | Spend or usage anomaly | [Cost anomaly](./cost-anomaly.md) | No live Budget/anomaly monitor |
+| Sustainability intensity baseline or comparison | [Sustainability intensity](./sustainability-intensity.md) | Protected read-only source prepared; no live baseline or improvement receipt |
 | WAF block, public-demo abuse, or direct-origin bypass | [WAF and abuse response](./waf-abuse-response.md) | IaC prepared; live WebACL, origin token, routing, and drill require approval |
 
 For every runbook:

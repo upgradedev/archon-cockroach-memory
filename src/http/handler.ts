@@ -206,6 +206,7 @@ export async function handleRecall(raw: unknown, agent: MemoryAgent = buildAgent
           index: "native C-SPANN vector index",
           metric: "cosine",
           embeddingModel: agent.embeddingModelId,
+          requestedKind: parsed.kind ?? null,
           requestedTopK: parsed.limit,
           recalled: hits.length,
           minScore: MIN_RECALL_SCORE,

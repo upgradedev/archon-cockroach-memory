@@ -103,17 +103,33 @@
       "id": "WA-02",
       "name": "Human alarm delivery and incident loop",
       "scope": "account-and-human",
-      "state": "approval-required",
+      "state": "repository-prepared-activation-and-human-paging-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/alarm-routing-controls.yml",
+      "foundationTemplate": "aws/bootstrap-oidc.yaml",
+      "proofScript": "aws/prove-alarm-routing.sh",
+      "runbook": "docs/runbooks/alarm-response.md",
+      "protectedEnvironment": "alarm-routing-controls",
+      "activationMutation": "AlarmRoutingEnabled false-to-true only",
+      "drillMutationBoundary": "staging synthetic probe ALARM-to-OK only",
+      "drillDeliveryBoundary": "dedicated KMS-encrypted five-minute SQS queue with exact AlarmName MessageBody filter; operational archive unreadable by drill role",
+      "humanPagingEvidenceRequiredSeparately": true
     },
     {
       "id": "WA-03",
       "name": "Account security baseline",
       "scope": "account-or-organization",
-      "state": "approval-required",
+      "state": "repository-prepared-live-audit-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/aws-security-baseline.yml",
+      "auditScript": "aws/audit-account-security-baseline.sh",
+      "referencePolicy": "aws/account-security-baseline-audit-policy.json",
+      "runbook": "docs/runbooks/aws-account-security-baseline.md",
+      "protectedEnvironment": "security-audit",
+      "roleVariable": "AWS_SECURITY_AUDIT_ROLE_ARN",
+      "mutationPermitted": false
     },
     {
       "id": "WA-04",
@@ -121,39 +137,89 @@
       "scope": "application-and-account",
       "state": "repository-prepared-activation-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/edge-controls.yml",
+      "controlPlaneTemplate": "aws/edge-waf.yaml",
+      "stackPolicy": "aws/edge-stack-policy.json",
+      "runbook": "docs/runbooks/waf-abuse-response.md",
+      "protectedEnvironment": "edge-controls",
+      "operations": "plan|apply|verify",
+      "controlPlaneRegion": "us-east-1",
+      "applicationWorkloadRegion": false,
+      "evidenceBoundary": "BLOCK-only redacted encrypted logs and encrypted durable alarm archive; human paging not claimed"
     },
     {
       "id": "WA-05",
       "name": "CockroachDB credential rotation",
       "scope": "application-aws-and-cockroachdb",
-      "state": "approval-required",
+      "state": "repository-prepared-activation-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/database-credential-rotation.yml",
+      "runtimeRefresh": "src/db/client.ts",
+      "rotationScript": "scripts/rotate-runtime-secret.ts",
+      "runbook": "docs/runbooks/credential-compromise.md",
+      "protectedEnvironment": "production-db",
+      "mutationPermittedOnlyByEvidenceWorkflow": true
     },
     {
       "id": "WA-06",
-      "name": "Fault-injected deployment recovery",
+      "name": "Fault-injected deployment and durable recovery",
       "scope": "application-and-account",
-      "state": "approval-required",
+      "state": "repository-prepared-live-drill-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/deploy-aws.yml",
+      "terminalizationWorkflow": ".github/workflows/recover-aws.yml",
+      "applicationTemplate": "aws/template.yaml",
+      "runbook": "docs/runbooks/rollback-recovery.md",
+      "protectedEnvironment": "staging",
+      "mutationBoundary": "inaccessible candidate-only database secret behind observed 10 percent CodeDeploy canary",
+      "automaticRollbackProof": "candidate alarm ALARM plus exact-stack and bounded-time source deployment Stopped ALARM_ACTIVE plus SHA-verified AppSpec previous-to-candidate binding plus related rollback Succeeded plus UPDATE_ROLLBACK_COMPLETE",
+      "durableTerminalProof": "ARMED handoff followed by watchdog RECOVERED receipt and subsequent GitHub-only noop classification",
+      "recoveryDrillTokenEnforcedStagingOnlyByTemplate": true,
+      "sourceDeploymentAlarmTerminalStatus": "Stopped",
+      "sourceDeploymentBoundToExactStackAndDrillWindow": true,
+      "sourceDeploymentBoundToShaVerifiedLambdaAppSpec": true,
+      "appSpecFetchRequestBehaviorallyTested": true,
+      "codeDeployInspectionStagingResourceScoped": true,
+      "githubRecoveryPaginationCompleteAndLegacyCompatible": true,
+      "watchdogUnknownStatusAndIncompleteInventoryFailClosed": true,
+      "sharedProductionDatabaseReconciliationPermitted": false,
+      "sharedProductionManagedMcpAuditPermitted": false,
+      "productionFaultInjectionPermitted": false,
+      "liveTerminalRecoveryClaimedByRepository": false
     },
     {
       "id": "WA-07",
-      "name": "Regional disaster recovery",
+      "name": "Managed-backup restore and regional recovery decision",
       "scope": "application-account-and-cockroachdb",
-      "state": "blocked-on-region-rto-rpo-and-cost-approval",
+      "state": "repository-prepared-live-restore-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/cockroach-restore-drill.yml",
+      "drillScript": "scripts/cockroach-managed-restore-drill.ts",
+      "runbook": "docs/runbooks/database-restore.md",
+      "protectedAuthorizationEnvironment": "operations-drill",
+      "protectedMutationEnvironment": "production-db",
+      "mutationBoundary": "one exact managed-backup restore into an existing empty isolated destination; no provision cutover or delete",
+      "pointInTimeRestoreClaimed": false,
+      "additionalRegionActivated": false
     },
     {
       "id": "WA-08",
       "name": "Quota and hosted performance evidence",
       "scope": "repository-and-account",
-      "state": "approval-required",
+      "state": "repository-prepared-hosted-measurement-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/hosted-load-evidence.yml",
+      "workload": "load/hosted-recall.js",
+      "responseContract": "load/hosted-recall-contract.js",
+      "protectedEnvironmentBoundary": "staging-or-production-audit",
+      "requestBoundary": "20-200 exact shared iterations with 2-10 virtual users",
+      "mutationPermitted": false,
+      "productionScaleClaimPermitted": false
     },
     {
       "id": "WA-09",
@@ -161,15 +227,32 @@
       "scope": "repository-and-billing-account",
       "state": "repository-prepared-activation-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/finops-controls.yml",
+      "controlPlaneTemplate": "aws/finops.yaml",
+      "runbook": "docs/runbooks/cost-anomaly.md",
+      "costModel": "docs/finops/COST_MODEL.md",
+      "protectedEnvironment": "finops-controls",
+      "operations": "plan|apply|verify",
+      "controlPlaneRegion": "us-east-1",
+      "applicationWorkloadRegion": false,
+      "humanApprovedInputsRequired": true
     },
     {
       "id": "WA-10",
       "name": "Measured sustainability improvement",
       "scope": "repository-and-account-telemetry",
-      "state": "pending-baseline-and-human-target",
+      "state": "repository-prepared-live-measurement-required",
       "requiresExternalApproval": true,
-      "activatedByThisContract": false
+      "activatedByThisContract": false,
+      "evidenceWorkflow": ".github/workflows/sustainability-intensity-evidence.yml",
+      "auditScript": "aws/measure-sustainability-intensity.sh",
+      "referencePolicy": "aws/sustainability-intensity-audit-policy.json",
+      "runbook": "docs/runbooks/sustainability-intensity.md",
+      "protectedEnvironment": "sustainability-audit",
+      "roleVariable": "AWS_SUSTAINABILITY_AUDIT_ROLE_ARN",
+      "mutationPermitted": false,
+      "emissionsClaimPermitted": false
     }
   ],
   "approvalGates": [
@@ -184,6 +267,47 @@
         "all required objectives approved",
         "exact main-branch source",
         "existing least-privilege audit role"
+      ]
+    },
+    {
+      "id": "account-security-baseline-audit",
+      "required": true,
+      "mutationAllowed": false,
+      "conditions": [
+        "exact current main SHA with successful CI CodeQL and Supply Chain",
+        "assigned security owner",
+        "security-audit environment approval",
+        "existing least-privilege AWS_SECURITY_AUDIT_ROLE_ARN",
+        "read-only AWS APIs only",
+        "sanitized all-pass 10-of-10 receipt"
+      ]
+    },
+    {
+      "id": "sustainability-intensity-measurement",
+      "required": true,
+      "mutationAllowed": false,
+      "conditions": [
+        "exact current green main SHA and exact successful hosted-load receipt",
+        "assigned sustainability owner and protected sustainability-audit approval",
+        "existing least-privilege AWS_SUSTAINABILITY_AUDIT_ROLE_ARN",
+        "human-approved primary proxy and reduction target",
+        "equivalent synthetic corpus concurrency correctness and objectives",
+        "sanitized receipt with no emissions or production-scale claim"
+      ]
+    },
+    {
+      "id": "staging-fault-injected-recovery",
+      "required": true,
+      "mutationAllowed": true,
+      "conditions": [
+        "exact current green main SHA with a successful push staging receipt",
+        "protected staging environment approval and non-secret change reference",
+        "exact FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG confirmation",
+        "existing same-SHA staging release with disabled drill token",
+        "candidate-only inaccessible secret and observed 10 percent weighted alias",
+        "exact-stack bounded-time Stopped/ALARM_ACTIVE CodeDeploy source with SHA-verified previous-to-candidate Lambda AppSpec and related successful automatic rollback",
+        "production job skipped and no production fault injection authority",
+        "watchdog RECOVERED terminal receipt followed by idempotent noop evidence"
       ]
     },
     {
@@ -217,12 +341,14 @@
     "docs/finops/COST_MODEL.md",
     "docs/sustainability/BASELINE_AND_TARGETS.md",
     "docs/runbooks/README.md",
+    "docs/runbooks/aws-account-security-baseline.md",
     "docs/runbooks/alarm-response.md",
     "docs/runbooks/rollback-recovery.md",
     "docs/runbooks/regional-outage.md",
     "docs/runbooks/credential-compromise.md",
     "docs/runbooks/database-restore.md",
     "docs/runbooks/cost-anomaly.md",
+    "docs/runbooks/sustainability-intensity.md",
     "docs/runbooks/waf-abuse-response.md",
     "aws/finops.yaml"
   ]

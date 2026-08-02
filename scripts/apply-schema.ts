@@ -25,6 +25,9 @@ import {
   affirmativeSystemGrants,
   type SystemGrant,
 } from "../src/db/system-grants.js";
+import {
+  isExpectedResolutionRoutineCreateStatement,
+} from "../src/db/routine-proof.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = join(here, "..", "src", "db", "schema.sql");
@@ -561,14 +564,12 @@ async function verifyResolutionFunctions(client: PoolClient): Promise<void> {
   const routines = await client.query<{
     proname: string;
     owner: string;
-    prosecdef: boolean;
     provolatile: string;
     lanname: string;
     prosrc: string;
   }>(
     `SELECT procedures.proname,
             roles.rolname AS owner,
-            procedures.prosecdef,
             procedures.provolatile,
             languages.lanname,
             procedures.prosrc
@@ -583,20 +584,77 @@ async function verifyResolutionFunctions(client: PoolClient): Promise<void> {
         AND procedures.proname = ANY($1::STRING[])`,
     [routineNames]
   );
+
+  // CockroachDB v26.2.3's PostgreSQL-compatibility pg_proc currently exposes
+  // prosecdef=false for user-defined routines regardless of their descriptor.
+  // SHOW CREATE FUNCTION is generated from that descriptor and preserves the
+  // actual SECURITY DEFINER mode, so it is the authoritative fail-closed check.
+  const createStatements = new Map<string, string>();
+  const showCreateCounts = new Map<string, number>();
+  for (const routine of RESOLUTION_FUNCTIONS) {
+    const shown = await client.query<{
+      function_name: string;
+      create_statement: string;
+    }>(
+      `SHOW CREATE FUNCTION public.${quoteIdentifier(routine.name)}`
+    );
+    showCreateCounts.set(routine.name, shown.rows.length);
+    if (
+      shown.rows.length === 1 &&
+      shown.rows[0]?.function_name === routine.name
+    ) {
+      createStatements.set(
+        routine.name,
+        shown.rows[0].create_statement
+      );
+    }
+  }
+
+  const routineEvidence = RESOLUTION_FUNCTIONS.map((expected) => {
+    const matchingRows = routines.rows.filter(
+      (routine) => routine.proname === expected.name
+    );
+    const routine = matchingRows[0];
+    const createStatement = createStatements.get(expected.name);
+    return {
+      name: expected.name,
+      catalogRows: matchingRows.length,
+      showCreateRows: showCreateCounts.get(expected.name) ?? 0,
+      ownerMatches:
+        routine?.owner === RESOLUTION_TRANSITION_OWNER,
+      securityDefinerMatches:
+        createStatement !== undefined &&
+        isExpectedResolutionRoutineCreateStatement(
+          createStatement,
+          expected.name
+        ),
+      volatileMatches: routine?.provolatile === "v",
+      languageMatches:
+        routine?.lanname.toLowerCase() === "plpgsql",
+      dynamicSqlAbsent:
+        routine !== undefined && !/\bexecute\b/iu.test(routine.prosrc),
+      boundedBodyPresent:
+        routine?.prosrc.includes("public.memory_demo_sessions") === true,
+    };
+  });
   if (
     routines.rows.length !== RESOLUTION_FUNCTIONS.length ||
-    routines.rows.some(
-      (routine) =>
-        routine.owner !== RESOLUTION_TRANSITION_OWNER ||
-        !routine.prosecdef ||
-        routine.provolatile !== "v" ||
-        routine.lanname.toLowerCase() !== "plpgsql" ||
-        /\bexecute\b/iu.test(routine.prosrc) ||
-        !routine.prosrc.includes("public.memory_demo_sessions")
+    routineEvidence.some(
+      (evidence) =>
+        evidence.catalogRows !== 1 ||
+        evidence.showCreateRows !== 1 ||
+        !evidence.ownerMatches ||
+        !evidence.securityDefinerMatches ||
+        !evidence.volatileMatches ||
+        !evidence.languageMatches ||
+        !evidence.dynamicSqlAbsent ||
+        !evidence.boundedBodyPresent
     )
   ) {
     throw new Error(
-      "Resolution SECURITY DEFINER routine ownership or body contract drifted."
+      `Resolution SECURITY DEFINER routine ownership or body contract drifted: ${JSON.stringify(
+        routineEvidence
+      )}`
     );
   }
   const createBody = routines.rows.find(

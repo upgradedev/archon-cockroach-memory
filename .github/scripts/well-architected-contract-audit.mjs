@@ -51,6 +51,75 @@ const DEPLOYMENT_BOUNDARY_FILES = [
 ];
 const EDGE_WAF_CONTROL_PLANE_FILE = "aws/edge-waf.yaml";
 const FINOPS_CONTROL_PLANE_FILE = "aws/finops.yaml";
+const ACCOUNT_SECURITY_BASELINE_FILES = [
+  ".github/workflows/aws-security-baseline.yml",
+  "aws/audit-account-security-baseline.sh",
+  "aws/account-security-baseline-audit-policy.json",
+  "docs/runbooks/aws-account-security-baseline.md",
+];
+const ALARM_ROUTING_CONTROL_FILES = [
+  ".github/workflows/alarm-routing-controls.yml",
+  "aws/bootstrap-oidc.yaml",
+  "aws/bootstrap-stack-policy.json",
+  "aws/prove-alarm-routing.sh",
+  "docs/runbooks/alarm-response.md",
+];
+const EDGE_PROTECTION_CONTROL_FILES = [
+  ".github/workflows/edge-controls.yml",
+  "aws/edge-waf.yaml",
+  "aws/edge-stack-policy.json",
+  "tests/waf-controls.test.ts",
+  "docs/runbooks/waf-abuse-response.md",
+];
+const SUSTAINABILITY_INTENSITY_FILES = [
+  ".github/workflows/sustainability-intensity-evidence.yml",
+  "aws/measure-sustainability-intensity.sh",
+  "aws/sustainability-intensity-audit-policy.json",
+  "docs/runbooks/sustainability-intensity.md",
+];
+const DATABASE_CREDENTIAL_ROTATION_FILES = [
+  ".github/workflows/database-credential-rotation.yml",
+  "scripts/rotate-runtime-secret.ts",
+  "src/db/client.ts",
+  "tests/database-credential-rotation.test.ts",
+  "tests/db-client-rotation.test.ts",
+  "docs/runbooks/credential-compromise.md",
+];
+const STAGING_RECOVERY_DRILL_FILES = [
+  ".github/workflows/deploy-aws.yml",
+  ".github/workflows/recover-aws.yml",
+  "aws/template.yaml",
+  "aws/bootstrap-oidc.yaml",
+  "aws/bootstrap-stack-policy.json",
+  "aws/classify-github-recovery-preflight.sh",
+  "aws/classify-durable-recovery-source.sh",
+  "aws/fetch-codedeploy-appspec-revision.sh",
+  "aws/select-staging-codedeploy-rollback.mjs",
+  "tests/staging-recovery-drill.test.ts",
+  "tests/github-recovery-preflight.test.ts",
+  "tests/recovery-watchdog.test.ts",
+  "docs/runbooks/rollback-recovery.md",
+];
+const MANAGED_RESTORE_DRILL_FILES = [
+  ".github/workflows/cockroach-restore-drill.yml",
+  "scripts/cockroach-managed-restore-drill.ts",
+  "tests/cockroach-managed-restore-drill.test.ts",
+  "docs/runbooks/database-restore.md",
+];
+const HOSTED_PERFORMANCE_EVIDENCE_FILES = [
+  ".github/workflows/hosted-load-evidence.yml",
+  "load/hosted-recall.js",
+  "load/hosted-recall-contract.js",
+  "load/k6-summary-schema-smoke.js",
+  "tests/hosted-load-evidence.test.ts",
+];
+const FINOPS_CONTROL_FILES = [
+  ".github/workflows/finops-controls.yml",
+  "aws/finops.yaml",
+  "tests/finops-controls.test.ts",
+  "docs/finops/COST_MODEL.md",
+  "docs/runbooks/cost-anomaly.md",
+];
 
 function parseArguments(argv) {
   const parsed = {};
@@ -104,6 +173,14 @@ function sameStrings(left, right) {
     left.length === right.length &&
     left.every((value, index) => value === right[index])
   );
+}
+
+function readRepositorySource(path) {
+  try {
+    return readFileSync(resolve(ROOT, path), "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function isAssignedOwner(owner) {
@@ -298,25 +375,750 @@ check(
   "Only repository evidence is activated; external, billable, and account-wide controls remain approval-gated.",
 );
 
+const wa02 = controls.find((control) => control.id === "WA-02");
+const alarmRoutingControlFilesValid =
+  ALARM_ROUTING_CONTROL_FILES.every((file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  });
+check(
+  "wa02-alarm-routing-control-loop-source",
+  alarmRoutingControlFilesValid &&
+    wa02?.state ===
+      "repository-prepared-activation-and-human-paging-required" &&
+    wa02?.requiresExternalApproval === true &&
+    wa02?.activatedByThisContract === false &&
+    wa02?.evidenceWorkflow ===
+      ".github/workflows/alarm-routing-controls.yml" &&
+    wa02?.foundationTemplate === "aws/bootstrap-oidc.yaml" &&
+    wa02?.proofScript === "aws/prove-alarm-routing.sh" &&
+    wa02?.runbook === "docs/runbooks/alarm-response.md" &&
+    wa02?.protectedEnvironment === "alarm-routing-controls" &&
+    wa02?.activationMutation ===
+      "AlarmRoutingEnabled false-to-true only" &&
+    wa02?.drillMutationBoundary ===
+      "staging synthetic probe ALARM-to-OK only" &&
+    wa02?.humanPagingEvidenceRequiredSeparately === true,
+  "WA-02 binds dedicated protected activation and staging filtered-queue delivery evidence without claiming live activation or human paging.",
+);
+
+const wa03 = controls.find((control) => control.id === "WA-03");
+const accountSecurityBaselineFilesValid =
+  ACCOUNT_SECURITY_BASELINE_FILES.every((file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  });
+check(
+  "wa03-account-security-baseline-source",
+  accountSecurityBaselineFilesValid &&
+    wa03?.state === "repository-prepared-live-audit-required" &&
+    wa03?.requiresExternalApproval === true &&
+    wa03?.activatedByThisContract === false &&
+    wa03?.evidenceWorkflow ===
+      ".github/workflows/aws-security-baseline.yml" &&
+    wa03?.auditScript === "aws/audit-account-security-baseline.sh" &&
+    wa03?.referencePolicy ===
+      "aws/account-security-baseline-audit-policy.json" &&
+    wa03?.runbook ===
+      "docs/runbooks/aws-account-security-baseline.md" &&
+    wa03?.protectedEnvironment === "security-audit" &&
+    wa03?.roleVariable === "AWS_SECURITY_AUDIT_ROLE_ARN" &&
+    wa03?.mutationPermitted === false,
+  "WA-03 binds a non-mutating protected workflow, audit script, least-privilege reference policy, and activation runbook without claiming live evidence.",
+);
+
+const wa04 = controls.find((control) => control.id === "WA-04");
+const edgeProtectionFilesValid = EDGE_PROTECTION_CONTROL_FILES.every((file) => {
+  const absolutePath = resolve(ROOT, file);
+  return (
+    existsSync(absolutePath) &&
+    statSync(absolutePath).isFile() &&
+    statSync(absolutePath).size > 0
+  );
+});
+const edgeControlWorkflowSource = readRepositorySource(
+  ".github/workflows/edge-controls.yml",
+);
+const edgeControlTemplateSource = readRepositorySource("aws/edge-waf.yaml");
+const edgeControlTestSource = readRepositorySource("tests/waf-controls.test.ts");
+const edgeProtectionSemanticsValid =
+  /^\s{2}workflow_dispatch:/mu.test(edgeControlWorkflowSource) &&
+  /-\s+plan[\s\S]*?-\s+apply[\s\S]*?-\s+verify/u.test(
+    edgeControlWorkflowSource,
+  ) &&
+  /environment:\s*edge-controls/u.test(edgeControlWorkflowSource) &&
+  /AWS_REGION:\s*us-east-1/u.test(edgeControlWorkflowSource) &&
+  /REVIEW_IN_PROGRESS\)[\s\S]*?test "\$OPERATION" = "apply"[\s\S]*?\.ChangeSetType == "CREATE"/u.test(
+    edgeControlWorkflowSource,
+  ) &&
+  /sha256sum "\$pending_template"[\s\S]*?EDGE_TEMPLATE_DIGEST/u.test(
+    edgeControlWorkflowSource,
+  ) &&
+  /AWS::WAFv2::LoggingConfiguration/u.test(edgeControlTemplateSource) &&
+  /DefaultBehavior:\s*DROP[\s\S]*?Action:\s*BLOCK/u.test(
+    edgeControlTemplateSource,
+  ) &&
+  /RedactedFields:/u.test(edgeControlTemplateSource) &&
+  !/SampledRequestsEnabled:\s*true/u.test(edgeControlTemplateSource) &&
+  /Type:\s*AWS::SNS::Topic/u.test(edgeControlTemplateSource) &&
+  /Type:\s*AWS::SQS::Queue/u.test(edgeControlTemplateSource) &&
+  /MessageRetentionPeriod:\s*1209600/u.test(edgeControlTemplateSource) &&
+  /humanPagingDestination:\s*"not-configured-by-this-stack"/u.test(
+    edgeControlWorkflowSource,
+  ) &&
+  /WAF evidence is BLOCK-only, redacted, encrypted, durable, and alarmed/u.test(
+    edgeControlTestSource,
+  ) &&
+  !/us-west-2/u.test(edgeControlTemplateSource);
+check(
+  "wa04-edge-protection-control-plane-source",
+  edgeProtectionFilesValid &&
+    edgeProtectionSemanticsValid &&
+    wa04?.state === "repository-prepared-activation-required" &&
+    wa04?.requiresExternalApproval === true &&
+    wa04?.activatedByThisContract === false &&
+    wa04?.evidenceWorkflow === ".github/workflows/edge-controls.yml" &&
+    wa04?.controlPlaneTemplate === "aws/edge-waf.yaml" &&
+    wa04?.stackPolicy === "aws/edge-stack-policy.json" &&
+    wa04?.runbook === "docs/runbooks/waf-abuse-response.md" &&
+    wa04?.protectedEnvironment === "edge-controls" &&
+    wa04?.operations === "plan|apply|verify" &&
+    wa04?.controlPlaneRegion === "us-east-1" &&
+    wa04?.applicationWorkloadRegion === false,
+  "WA-04 binds protected plan/apply/verify edge controls, BLOCK-only redacted encrypted WAF evidence, durable encrypted alarm evidence, and an honest no-human-paging boundary.",
+);
+
+const wa05 = controls.find((control) => control.id === "WA-05");
+const databaseCredentialRotationFilesValid =
+  DATABASE_CREDENTIAL_ROTATION_FILES.every((file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  });
+const databaseCredentialRotationWorkflowSource = readRepositorySource(
+  ".github/workflows/database-credential-rotation.yml",
+);
+const databaseCredentialRotationScriptSource = readRepositorySource(
+  "scripts/rotate-runtime-secret.ts",
+);
+const databaseClientSource = readRepositorySource("src/db/client.ts");
+const databaseCredentialRotationTestSource = readRepositorySource(
+  "tests/database-credential-rotation.test.ts",
+);
+const databaseClientRotationTestSource = readRepositorySource(
+  "tests/db-client-rotation.test.ts",
+);
+const databaseCredentialRotationSemanticsValid =
+  /^\s{2}workflow_dispatch:/mu.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  /environment:\s*production-db/u.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  /database-\?{6}/u.test(databaseCredentialRotationWorkflowSource) &&
+  /cockroach-admin-\?{6}/u.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  !/(?:database|cockroach-admin)-\*/u.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  /ROTATION_INTERRUPTED_STATE_UNKNOWN/u.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  /Attest the sanitized exact-SHA rotation receipt\s+if: always\(\)/u.test(
+    databaseCredentialRotationWorkflowSource,
+  ) &&
+  /export async function recoverFailedRotation/u.test(
+    databaseCredentialRotationScriptSource,
+  ) &&
+  /new ListSecretVersionIdsCommand/u.test(
+    databaseCredentialRotationScriptSource,
+  ) &&
+  /RuntimeCredentialRotationFailure/u.test(
+    databaseCredentialRotationScriptSource,
+  ) &&
+  /createCredentialPoolController/u.test(databaseClientSource) &&
+  /COCKROACH_SQL_DNS/u.test(databaseClientSource) &&
+  /lost Put response reconciles/u.test(
+    databaseCredentialRotationTestSource,
+  ) &&
+  /lost Update response requires exact current observation/u.test(
+    databaseCredentialRotationTestSource,
+  ) &&
+  /stale cutover reads fail closed/u.test(
+    databaseCredentialRotationTestSource,
+  ) &&
+  /injected rollback and cleanup failures/u.test(
+    databaseCredentialRotationTestSource,
+  ) &&
+  /concurrent fake-pg refresh coalesces/u.test(
+    databaseClientRotationTestSource,
+  ) &&
+  /failed fake-pg candidate never replaces/u.test(
+    databaseClientRotationTestSource,
+  );
+check(
+  "wa05-database-credential-rotation-source",
+  databaseCredentialRotationFilesValid &&
+    databaseCredentialRotationSemanticsValid &&
+    wa05?.state === "repository-prepared-activation-required" &&
+    wa05?.requiresExternalApproval === true &&
+    wa05?.activatedByThisContract === false &&
+    wa05?.evidenceWorkflow ===
+      ".github/workflows/database-credential-rotation.yml" &&
+    wa05?.runtimeRefresh === "src/db/client.ts" &&
+    wa05?.rotationScript === "scripts/rotate-runtime-secret.ts" &&
+    wa05?.runbook === "docs/runbooks/credential-compromise.md" &&
+    wa05?.protectedEnvironment === "production-db" &&
+    wa05?.mutationPermittedOnlyByEvidenceWorkflow === true,
+  "WA-05 binds protected two-principal rotation, hot runtime refresh, explicit operator tooling, and its compromise runbook without claiming a live drill.",
+);
+
+const wa06 = controls.find((control) => control.id === "WA-06");
+const stagingRecoveryDrillFilesValid = STAGING_RECOVERY_DRILL_FILES.every(
+  (file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  },
+);
+const stagingRecoveryDeploySource = readRepositorySource(
+  ".github/workflows/deploy-aws.yml",
+);
+const stagingRecoveryWatchdogSource = readRepositorySource(
+  ".github/workflows/recover-aws.yml",
+);
+const stagingRecoveryTemplateSource = readRepositorySource("aws/template.yaml");
+const stagingRecoveryBootstrapSource = readRepositorySource(
+  "aws/bootstrap-oidc.yaml",
+);
+const stagingRecoveryGitHubClassifierSource = readRepositorySource(
+  "aws/classify-github-recovery-preflight.sh",
+);
+const stagingRecoveryDurableClassifierSource = readRepositorySource(
+  "aws/classify-durable-recovery-source.sh",
+);
+const stagingRecoveryCodeDeploySelectorSource = readRepositorySource(
+  "aws/select-staging-codedeploy-rollback.mjs",
+);
+const stagingRecoveryAppSpecFetcherSource = readRepositorySource(
+  "aws/fetch-codedeploy-appspec-revision.sh",
+);
+const stagingRecoveryTestSource = readRepositorySource(
+  "tests/staging-recovery-drill.test.ts",
+);
+const stagingRecoveryWatchdogTestSource = readRepositorySource(
+  "tests/recovery-watchdog.test.ts",
+);
+const stagingRecoveryGitHubPreflightTestSource = readRepositorySource(
+  "tests/github-recovery-preflight.test.ts",
+);
+const stagingCodeDeployPolicyStart = stagingRecoveryBootstrapSource.indexOf(
+  "  StagingCodeDeployInspectionPolicy:",
+);
+const stagingCodeDeployPolicyEnd = stagingRecoveryBootstrapSource.indexOf(
+  "  StagingAlarmRoutingInspectionPolicy:",
+  stagingCodeDeployPolicyStart,
+);
+const stagingCodeDeployPolicySource =
+  stagingCodeDeployPolicyStart >= 0 &&
+  stagingCodeDeployPolicyEnd > stagingCodeDeployPolicyStart
+    ? stagingRecoveryBootstrapSource.slice(
+        stagingCodeDeployPolicyStart,
+        stagingCodeDeployPolicyEnd,
+      )
+    : "";
+const stagingCodeDeployActions = [
+  ...stagingCodeDeployPolicySource.matchAll(
+    /(?:Action:\s+|- )(codedeploy:[A-Za-z]+)$/gmu,
+  ),
+].map((match) => match[1]).sort();
+const exactStagingCodeDeployActions =
+  JSON.stringify(stagingCodeDeployActions) ===
+  JSON.stringify(
+    [
+      "codedeploy:GetApplicationRevision",
+      "codedeploy:GetDeployment",
+      "codedeploy:GetDeploymentGroup",
+      "codedeploy:ListDeployments",
+    ].sort(),
+  );
+const recoveryDrillGatePosition = stagingRecoveryDeploySource.indexOf(
+  "Authorize the exact existing staging release for fault injection",
+);
+const recoveryDrillArmPosition = stagingRecoveryDeploySource.indexOf(
+  "Persist and arm the immutable staging recovery intent",
+);
+const recoveryDrillDeployPosition = stagingRecoveryDeploySource.indexOf(
+  "Deploy staging with recovery-safe SAM canary",
+);
+const stagingRecoverySemanticsValid =
+  recoveryDrillGatePosition >= 0 &&
+  recoveryDrillGatePosition < recoveryDrillArmPosition &&
+  recoveryDrillArmPosition < recoveryDrillDeployPosition &&
+  /-\s+staging-recovery-drill/u.test(stagingRecoveryDeploySource) &&
+  /FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /test "\$HAS_PREVIOUS_STACK" = "true"/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /exact_parameter\("ReleaseCommitSha"; \$release\)/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /exact_parameter\("RecoveryDrillToken"; "disabled"\)/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /database-release:[\s\S]*?if: github\.event_name == 'push'/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /managed-mcp-production-audit:[\s\S]*?if: github\.event_name == 'push'/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /needs\.database-release\.result == 'skipped'/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /!cancelled\(\)/u.test(stagingRecoveryDeploySource) &&
+  /needs\.managed-mcp-production-audit\.result == 'skipped'/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /exact_parameter\("CockroachSqlDns"; \$cockroachSqlDns\)/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /staging-deployment-receipt-/u.test(stagingRecoveryDeploySource) &&
+  /recovery-drill-inaccessible-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /AdditionalVersionWeights[\s\S]*?\.value >= 0\.099[\s\S]*?\.value <= 0\.101/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /source\.errorInformation\?\.code !== "ALARM_ACTIVE"/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /source\.status !== "Stopped"/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /source\.externalId !== stackId/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /revision\.currentVersion === previousVersion/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /revision\.targetVersion === candidateVersion/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /calculatedSha === requestedSha/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /sourceMatches\.length === 1/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /rollbackMatches\.length === 1/u.test(
+    stagingRecoveryCodeDeploySelectorSource,
+  ) &&
+  /observed >= started/u.test(stagingRecoveryCodeDeploySelectorSource) &&
+  /ended >= observed/u.test(stagingRecoveryCodeDeploySelectorSource) &&
+  /created >= sourceCreated/u.test(stagingRecoveryCodeDeploySelectorSource) &&
+  /staging-recovery-drill-started-epoch/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /bash aws\/fetch-codedeploy-appspec-revision\.sh/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /deploy get-application-revision/u.test(
+    stagingRecoveryAppSpecFetcherSource,
+  ) &&
+  /appSpecContent: \{sha256: \$sha\}/u.test(
+    stagingRecoveryAppSpecFetcherSource,
+  ) &&
+  /\.revision\.appSpecContent\.sha256 == \$sha/u.test(
+    stagingRecoveryAppSpecFetcherSource,
+  ) &&
+  /sourceStatus: "Stopped"/u.test(stagingRecoveryDeploySource) &&
+  /"UPDATE_ROLLBACK_COMPLETE"/u.test(stagingRecoveryDeploySource) &&
+  /schema:\s*"archon\.staging-recovery-drill"[\s\S]*?version:\s*2/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /behaviorFaultInjected:\s*true/u.test(stagingRecoveryDeploySource) &&
+  /productionMutationPermitted:\s*false/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /deploy-production:[\s\S]*?if: success\(\) && github\.event_name == 'push'/u.test(
+    stagingRecoveryDeploySource,
+  ) &&
+  /\.state == "RECOVERED"/u.test(stagingRecoveryWatchdogSource) &&
+  /successful-recovery-receipt-proved/u.test(
+    stagingRecoveryGitHubClassifierSource,
+  ) &&
+  /if \[ "\$run_event" != "workflow_dispatch" \]; then[\s\S]*?classify_environment_job production/u.test(
+    stagingRecoveryGitHubClassifierSource,
+  ) &&
+  /\.event == "workflow_run"/u.test(
+    stagingRecoveryGitHubClassifierSource,
+  ) &&
+  /test "\$run_count" -eq "\$expected_run_count"/u.test(
+    stagingRecoveryGitHubClassifierSource,
+  ) &&
+  /test "\$artifact_count" -eq "\$expected_artifact_count"/u.test(
+    stagingRecoveryGitHubClassifierSource,
+  ) &&
+  /\.event == "workflow_dispatch" and \$environment == "staging"/u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  /\.event == "workflow_run"/u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  !/\.event == "workflow_dispatch" and \$environment == "production"/u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  /queued\|in_progress\|pending\|waiting\|requested/u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  /The Deploy AWS run status is invalid\./u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  /\.total_count == \(\.jobs \| length\)/u.test(
+    stagingRecoveryDurableClassifierSource,
+  ) &&
+  /classifier fails closed on an unknown Deploy AWS source status/u.test(
+    stagingRecoveryWatchdogTestSource,
+  ) &&
+  /classifier fails closed on a truncated Deploy AWS jobs response/u.test(
+    stagingRecoveryWatchdogTestSource,
+  ) &&
+  /classifier fails closed on an unknown prior watchdog owner status/u.test(
+    stagingRecoveryWatchdogTestSource,
+  ) &&
+  /trusted legacy workflow-run sources/u.test(
+    stagingRecoveryWatchdogTestSource,
+  ) &&
+  /GitHub preflight fails closed on an unknown listed deploy status/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /GitHub preflight fails closed on a truncated jobs response/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /GitHub preflight fails closed on a truncated workflow-runs response/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /GitHub preflight fails closed on a truncated recovery-artifact response/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /never promotes dispatch metadata into a production recovery candidate/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /trusted legacy workflow-run deploy history/u.test(
+    stagingRecoveryGitHubPreflightTestSource,
+  ) &&
+  /RecoveryDrillToken:/u.test(stagingRecoveryTemplateSource) &&
+  /RecoveryDrillIsStagingOnly:[\s\S]*?RuleCondition: !Not \[!Equals \[!Ref RecoveryDrillToken, disabled\]\][\s\S]*?Assert: !Equals \[!Ref Environment, staging\]/u.test(
+    stagingRecoveryTemplateSource,
+  ) &&
+  /RECOVERY_DRILL_TOKEN:\s*!Ref RecoveryDrillToken/u.test(
+    stagingRecoveryTemplateSource,
+  ) &&
+  exactStagingCodeDeployActions &&
+  /application:\$\{AppName\}-staging-\*/u.test(
+    stagingCodeDeployPolicySource,
+  ) &&
+  /deploymentgroup:\$\{AppName\}-staging-\*\/\*/u.test(
+    stagingCodeDeployPolicySource,
+  ) &&
+  (stagingCodeDeployPolicySource.match(
+    /aws:RequestedRegion: !Ref AWS::Region/gu,
+  ) ?? []).length === 2 &&
+  (stagingCodeDeployPolicySource.match(/Effect: Allow/gu) ?? []).length ===
+    2 &&
+  !/Resource: "\*"/u.test(stagingCodeDeployPolicySource) &&
+  /CodeDeploy selector proves the exact stack, drill window, AppSpec, and rollback relation/u.test(
+    stagingRecoveryTestSource,
+  ) &&
+  /receipt requires Stopped ALARM_ACTIVE, related successful rollback/u.test(
+    stagingRecoveryTestSource,
+  ) &&
+  /AppSpec fetcher sends the exact deployment SHA in the documented AWS request shape/u.test(
+    stagingRecoveryTestSource,
+  ) &&
+  /CodeDeploy selector rejects reversed runner and deployment chronology/u.test(
+    stagingRecoveryTestSource,
+  );
+check(
+  "wa06-fault-injected-recovery-source",
+  stagingRecoveryDrillFilesValid &&
+    stagingRecoverySemanticsValid &&
+    wa06?.state === "repository-prepared-live-drill-required" &&
+    wa06?.requiresExternalApproval === true &&
+    wa06?.activatedByThisContract === false &&
+    wa06?.evidenceWorkflow === ".github/workflows/deploy-aws.yml" &&
+    wa06?.terminalizationWorkflow === ".github/workflows/recover-aws.yml" &&
+    wa06?.applicationTemplate === "aws/template.yaml" &&
+    wa06?.runbook === "docs/runbooks/rollback-recovery.md" &&
+    wa06?.protectedEnvironment === "staging" &&
+    wa06?.recoveryDrillTokenEnforcedStagingOnlyByTemplate === true &&
+    wa06?.sourceDeploymentAlarmTerminalStatus === "Stopped" &&
+    wa06?.sourceDeploymentBoundToExactStackAndDrillWindow === true &&
+    wa06?.sourceDeploymentBoundToShaVerifiedLambdaAppSpec === true &&
+    wa06?.appSpecFetchRequestBehaviorallyTested === true &&
+    wa06?.codeDeployInspectionStagingResourceScoped === true &&
+    wa06?.githubRecoveryPaginationCompleteAndLegacyCompatible === true &&
+    wa06?.watchdogUnknownStatusAndIncompleteInventoryFailClosed === true &&
+    wa06?.sharedProductionDatabaseReconciliationPermitted === false &&
+    wa06?.sharedProductionManagedMcpAuditPermitted === false &&
+    wa06?.productionFaultInjectionPermitted === false &&
+    wa06?.liveTerminalRecoveryClaimedByRepository === false,
+  "WA-06 binds a template-enforced staging-only fault to an observed 10% canary, exact-stack/time/AppSpec ALARM_ACTIVE CodeDeploy rollback, exact automatic prestate proof, durable ARMED handoff, fail-closed watchdog evidence, and subsequent no-op classification without claiming a live run.",
+);
+
+const wa07 = controls.find((control) => control.id === "WA-07");
+const managedRestoreDrillFilesValid = MANAGED_RESTORE_DRILL_FILES.every(
+  (file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  },
+);
+const managedRestoreWorkflowSource = readRepositorySource(
+  ".github/workflows/cockroach-restore-drill.yml",
+);
+const managedRestoreScriptSource = readRepositorySource(
+  "scripts/cockroach-managed-restore-drill.ts",
+);
+const managedRestoreTestSource = readRepositorySource(
+  "tests/cockroach-managed-restore-drill.test.ts",
+);
+const managedRestoreSemanticsValid =
+  /^\s{2}workflow_dispatch:/mu.test(managedRestoreWorkflowSource) &&
+  /name:\s*operations-drill/u.test(managedRestoreWorkflowSource) &&
+  /name:\s*production-db/u.test(managedRestoreWorkflowSource) &&
+  /test "\$RPO_OBJECTIVE_MINUTES" -ge 1440/u.test(
+    managedRestoreWorkflowSource,
+  ) &&
+  /Attest the sanitized exact-SHA restore receipt/u.test(
+    managedRestoreWorkflowSource,
+  ) &&
+  /pointInTimeRestore:\s*false/u.test(managedRestoreScriptSource) &&
+  /cutoverPerformed:\s*false/u.test(managedRestoreScriptSource) &&
+  /provisioningPerformed:\s*false/u.test(managedRestoreScriptSource) &&
+  /const EXPECTED_REGION = "eu-west-1"/u.test(managedRestoreScriptSource) &&
+  /regions\.some\(\(region\) => region\.name === "us-west-2"\)/u.test(
+    managedRestoreScriptSource,
+  ) &&
+  /post-restore proof covers schema, grants, roles, RLS, C-SPANN, and canonical memory/u.test(
+    managedRestoreTestSource,
+  );
+check(
+  "wa07-managed-backup-restore-source",
+  managedRestoreDrillFilesValid &&
+    managedRestoreSemanticsValid &&
+    wa07?.state === "repository-prepared-live-restore-required" &&
+    wa07?.requiresExternalApproval === true &&
+    wa07?.activatedByThisContract === false &&
+    wa07?.evidenceWorkflow ===
+      ".github/workflows/cockroach-restore-drill.yml" &&
+    wa07?.drillScript === "scripts/cockroach-managed-restore-drill.ts" &&
+    wa07?.runbook === "docs/runbooks/database-restore.md" &&
+    wa07?.protectedAuthorizationEnvironment === "operations-drill" &&
+    wa07?.protectedMutationEnvironment === "production-db" &&
+    wa07?.pointInTimeRestoreClaimed === false &&
+    wa07?.additionalRegionActivated === false,
+  "WA-07 binds a protected exact-backup restore into an existing isolated destination, verifies database evidence, and makes no PITR, cutover, provisioning, or additional-region claim.",
+);
+
+const wa08 = controls.find((control) => control.id === "WA-08");
+const hostedPerformanceEvidenceFilesValid =
+  HOSTED_PERFORMANCE_EVIDENCE_FILES.every((file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  });
+const hostedPerformanceWorkflowSource = readRepositorySource(
+  ".github/workflows/hosted-load-evidence.yml",
+);
+const hostedPerformanceWorkloadSource = readRepositorySource(
+  "load/hosted-recall.js",
+);
+const hostedPerformanceContractSource = readRepositorySource(
+  "load/hosted-recall-contract.js",
+);
+const hostedPerformanceTestSource = readRepositorySource(
+  "tests/hosted-load-evidence.test.ts",
+);
+const hostedPerformanceSemanticsValid =
+  /^\s{2}workflow_dispatch:/mu.test(hostedPerformanceWorkflowSource) &&
+  /test "\$TOTAL_ITERATIONS" -ge 20/u.test(
+    hostedPerformanceWorkflowSource,
+  ) &&
+  /test "\$TOTAL_ITERATIONS" -le 200/u.test(
+    hostedPerformanceWorkflowSource,
+  ) &&
+  /test "\$VUS" -ge 2/u.test(hostedPerformanceWorkflowSource) &&
+  /test "\$VUS" -le 10/u.test(hostedPerformanceWorkflowSource) &&
+  /--new-machine-readable-summary/u.test(hostedPerformanceWorkflowSource) &&
+  /\.version == "1\.0\.0"/u.test(hostedPerformanceWorkflowSource) &&
+  /\.results\.metrics/u.test(hostedPerformanceWorkflowSource) &&
+  /executor:\s*"shared-iterations"/u.test(hostedPerformanceWorkloadSource) &&
+  /hosted_recall_contract:\s*\["rate>=1"\]/u.test(
+    hostedPerformanceWorkloadSource,
+  ) &&
+  /HOSTED_RECALL_KIND = "payroll_event"/u.test(
+    hostedPerformanceContractSource,
+  ) &&
+  /retrieval\.requestedKind === HOSTED_RECALL_KIND/u.test(
+    hostedPerformanceContractSource,
+  ) &&
+  /citation\.kind === HOSTED_RECALL_KIND/u.test(
+    hostedPerformanceContractSource,
+  ) &&
+  /wrongRequestedKind/u.test(hostedPerformanceTestSource) &&
+  /wrongKind/u.test(hostedPerformanceTestSource);
+check(
+  "wa08-hosted-performance-evidence-source",
+  hostedPerformanceEvidenceFilesValid &&
+    hostedPerformanceSemanticsValid &&
+    wa08?.state ===
+      "repository-prepared-hosted-measurement-required" &&
+    wa08?.requiresExternalApproval === true &&
+    wa08?.activatedByThisContract === false &&
+    wa08?.evidenceWorkflow ===
+      ".github/workflows/hosted-load-evidence.yml" &&
+    wa08?.workload === "load/hosted-recall.js" &&
+    wa08?.responseContract === "load/hosted-recall-contract.js" &&
+    wa08?.mutationPermitted === false &&
+    wa08?.productionScaleClaimPermitted === false,
+  "WA-08 binds an approval-gated bounded hosted measurement to the exact deployed green release, machine-readable k6 evidence, and the same fail-closed response validator used by the workload.",
+);
+
+const wa09 = controls.find((control) => control.id === "WA-09");
+const finopsControlFilesValid = FINOPS_CONTROL_FILES.every((file) => {
+  const absolutePath = resolve(ROOT, file);
+  return (
+    existsSync(absolutePath) &&
+    statSync(absolutePath).isFile() &&
+    statSync(absolutePath).size > 0
+  );
+});
+const finopsWorkflowSource = readRepositorySource(
+  ".github/workflows/finops-controls.yml",
+);
+const finopsTemplateSource = readRepositorySource("aws/finops.yaml");
+const finopsTestSource = readRepositorySource("tests/finops-controls.test.ts");
+const finopsSemanticsValid =
+  /^\s{2}workflow_dispatch:/mu.test(finopsWorkflowSource) &&
+  /environment:\s*finops-controls/u.test(finopsWorkflowSource) &&
+  /-\s+plan[\s\S]*?-\s+apply[\s\S]*?-\s+verify/u.test(
+    finopsWorkflowSource,
+  ) &&
+  /APPLY-WORKLOAD-FINOPS-CONTROLS-AND-ROUTING-TEST/u.test(
+    finopsWorkflowSource,
+  ) &&
+  /AWS_REGION:\s*us-east-1/u.test(finopsWorkflowSource) &&
+  /AWS::Budgets::Budget/u.test(finopsTemplateSource) &&
+  /AWS::CE::AnomalyMonitor/u.test(finopsTemplateSource) &&
+  /AWS::CE::AnomalySubscription/u.test(finopsTemplateSource) &&
+  /not an application workload region/u.test(finopsTemplateSource) &&
+  !/us-west-2/u.test(finopsTemplateSource) &&
+  /plan and apply bind one immutable non-replacement change set/u.test(
+    finopsTestSource,
+  ) &&
+  /apply-only routing test/u.test(finopsTestSource);
+check(
+  "wa09-finops-controls-source",
+  finopsControlFilesValid &&
+    finopsSemanticsValid &&
+    wa09?.state === "repository-prepared-activation-required" &&
+    wa09?.requiresExternalApproval === true &&
+    wa09?.activatedByThisContract === false &&
+    wa09?.evidenceWorkflow === ".github/workflows/finops-controls.yml" &&
+    wa09?.controlPlaneTemplate === "aws/finops.yaml" &&
+    wa09?.runbook === "docs/runbooks/cost-anomaly.md" &&
+    wa09?.costModel === "docs/finops/COST_MODEL.md" &&
+    wa09?.protectedEnvironment === "finops-controls" &&
+    wa09?.operations === "plan|apply|verify" &&
+    wa09?.controlPlaneRegion === "us-east-1" &&
+    wa09?.applicationWorkloadRegion === false &&
+    wa09?.humanApprovedInputsRequired === true,
+  "WA-09 binds human-approved plan/apply/verify FinOps controls, immutable change-set identity, encrypted notification-route proof, and the billing-only us-east-1 boundary.",
+);
+
+const wa10 = controls.find((control) => control.id === "WA-10");
+const sustainabilityIntensityFilesValid =
+  SUSTAINABILITY_INTENSITY_FILES.every((file) => {
+    const absolutePath = resolve(ROOT, file);
+    return (
+      existsSync(absolutePath) &&
+      statSync(absolutePath).isFile() &&
+      statSync(absolutePath).size > 0
+    );
+  });
+check(
+  "wa10-sustainability-intensity-source",
+  sustainabilityIntensityFilesValid &&
+    wa10?.state === "repository-prepared-live-measurement-required" &&
+    wa10?.requiresExternalApproval === true &&
+    wa10?.activatedByThisContract === false &&
+    wa10?.evidenceWorkflow ===
+      ".github/workflows/sustainability-intensity-evidence.yml" &&
+    wa10?.auditScript === "aws/measure-sustainability-intensity.sh" &&
+    wa10?.referencePolicy ===
+      "aws/sustainability-intensity-audit-policy.json" &&
+    wa10?.runbook === "docs/runbooks/sustainability-intensity.md" &&
+    wa10?.protectedEnvironment === "sustainability-audit" &&
+    wa10?.roleVariable === "AWS_SUSTAINABILITY_AUDIT_ROLE_ARN" &&
+    wa10?.mutationPermitted === false &&
+    wa10?.emissionsClaimPermitted === false,
+  "WA-10 binds a protected read-only intensity workflow, exact hosted-load denominator, least-privilege reference policy, and honest non-emissions boundary without claiming live evidence.",
+);
+
 const approvalGates = contract.approvalGates ?? [];
 check(
   "approval-gates",
   sameStrings(
     approvalGates.map((gate) => gate.id).sort(),
     [
+      "account-security-baseline-audit",
       "additional-region",
       "billable-or-account-wide-control-activation",
       "live-read-only-audit",
+      "staging-fault-injected-recovery",
+      "sustainability-intensity-measurement",
     ],
   ) &&
     approvalGates.every(
       (gate) =>
         gate.required === true &&
-        gate.mutationAllowed === false &&
         Array.isArray(gate.conditions) &&
         gate.conditions.length > 0,
-    ),
-  "Live audit, billable/account-wide activation, and additional-region decisions have explicit non-mutating gates.",
+    ) &&
+    sameStrings(
+      approvalGates
+        .filter((gate) => gate.mutationAllowed === true)
+        .map((gate) => gate.id),
+      ["staging-fault-injected-recovery"],
+    ) &&
+    approvalGates
+      .filter((gate) => gate.id !== "staging-fault-injected-recovery")
+      .every((gate) => gate.mutationAllowed === false),
+  "Live inventory, WA-03 account security, WA-10 intensity evidence, billable/account-wide activation, and additional-region decisions stay non-mutating; only the protected staging fault drill has bounded mutation authority.",
 );
 
 const requiredDocuments = contract.requiredDocuments ?? [];

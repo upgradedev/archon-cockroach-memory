@@ -1,0 +1,427 @@
+name: Human evaluation and impact evidence
+
+# Pull requests and main pushes exercise only the rights-safe synthetic pilot.
+# A qualified study is manual, current-main-only, protected by the
+# human-evaluation environment, and consumes a digest-bound compressed dataset
+# from an environment secret. Raw study records never become workflow artifacts.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/human-impact-evaluation.yml"
+      - "docs/EVALUATION.md"
+      - "docs/HUMAN_IMPACT_EVIDENCE.md"
+      - "evals/human-evaluation-protocol.json"
+      - "evals/human-impact-synthetic-pilot.json"
+      - "scripts/evaluate-human-impact.ts"
+      - "src/evaluation/human-impact.ts"
+      - "tests/human-impact-evaluation.test.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Exercise the synthetic pilot or evaluate an approved independent human study.
+        required: true
+        default: synthetic-pilot
+        type: choice
+        options:
+          - synthetic-pilot
+          - qualified-human-study
+      dataset_sha256:
+        description: Required for qualified-human-study; SHA-256 of the uncompressed JSON dataset.
+        required: false
+        type: string
+      approval_reference:
+        description: Required for qualified-human-study; non-secret study approval reference.
+        required: false
+        type: string
+      confirmation:
+        description: For qualified-human-study enter EVALUATE-INDEPENDENT-HUMAN-STUDY.
+        required: false
+        type: string
+
+concurrency:
+  group: human-impact-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  synthetic-pilot:
+    name: Validate synthetic pilot and claim boundary
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.mode == 'synthetic-pilot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Initialize fail-closed evidence marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "${RUNNER_TEMP:?}/human-impact-failure"
+          printf '%s\n' \
+            '{"schema":"archon.human-impact.not-finalized","version":1,"passed":false,"reason":"pipeline-did-not-finalize"}' \
+            >"${RUNNER_TEMP:?}/human-impact-failure/not-finalized.json"
+
+      - name: Check out the exact evaluated head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove exact source and clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Set up pinned Node runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install exact lockfile dependencies
+        run: npm ci
+
+      - name: Typecheck and run human-impact mutation tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck
+          node --import tsx --test --test-concurrency=1 \
+            tests/human-impact-evaluation.test.ts
+
+      - name: Evaluate the rights-safe synthetic pilot in runner temp
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-human-impact.ts evaluate \
+            --input evals/human-impact-synthetic-pilot.json \
+            --output "${RUNNER_TEMP:?}/human-impact-output" \
+            --source-sha "$SOURCE_SHA"
+
+      - name: Verify synthetic claims remain non-human and non-production
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/human-impact-output/human-impact-receipt.json"
+          results="${RUNNER_TEMP:?}/human-impact-output/human-impact-results.json"
+          jq -e \
+            --arg sha "$SOURCE_SHA" \
+            '
+              .schema == "archon.human-impact.receipt"
+              and .version == 1
+              and .sourceSha == $sha
+              and .evidenceTier == "synthetic-pilot"
+              and .passed == true
+              and .claims.syntheticPilotEvaluated == true
+              and .claims.qualifiedHumanEvaluationCompleted == false
+              and .claims.quantifiedBusinessOutcomeStudyCompleted == false
+              and .claims.productionScaleCorpus == false
+              and .claims.productionBusinessImpact == false
+              and .claims.customerOutcome == false
+              and .claims.roiOrSavings == false
+              and .gates.rawEvidenceCustodyBound == true
+              and .input.rawDatasetUploaded == false
+              and (.seal.digest | test("^[a-f0-9]{64}$"))
+            ' "$receipt" >/dev/null
+          jq -e \
+            '
+              .evidenceTier == "synthetic-pilot"
+              and .studyEvidence.protocolSha256 == null
+              and .studyEvidence.preregistrationSha256 == null
+              and .studyEvidence.collectionAuthoritySha256 == null
+              and .studyEvidence.rawEvidenceCustodyReceiptSha256 == null
+              and .humanEvaluation.reviewerCount == 0
+              and .humanEvaluation.syntheticRaterCount >= 2
+              and .businessImpact.participantCount >= 4
+            ' "$results" >/dev/null
+
+      - name: Finalize synthetic evidence marker
+        shell: bash
+        run: rm -f "${RUNNER_TEMP:?}/human-impact-failure/not-finalized.json"
+
+      - name: Upload sanitized synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: human-impact-synthetic-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/human-impact-output
+            ${{ runner.temp }}/human-impact-failure
+          if-no-files-found: error
+          retention-days: 30
+
+  attest-synthetic-main:
+    name: Attest protected-main synthetic receipt
+    if: github.event_name == 'push'
+    needs: synthetic-pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download this run's finalized synthetic evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: human-impact-synthetic-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/human-impact-attestation
+
+      - name: Verify finalized exact-SHA receipt before attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/human-impact-attestation/human-impact-output/human-impact-receipt.json"
+          failure="${RUNNER_TEMP:?}/human-impact-attestation/human-impact-failure/not-finalized.json"
+          test -f "$receipt"
+          test ! -e "$failure"
+          jq -e --arg sha "$SOURCE_SHA" '
+            .schema == "archon.human-impact.receipt"
+            and .sourceSha == $sha
+            and .evidenceTier == "synthetic-pilot"
+            and .passed == true
+          ' "$receipt" >/dev/null
+
+      - name: Attest the finalized synthetic receipt
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/human-impact-attestation/human-impact-output/human-impact-receipt.json
+
+  qualified-human-study:
+    name: Evaluate approved independent human study
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'qualified-human-study'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: human-evaluation
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EXPECTED_DATASET_SHA256: ${{ inputs.dataset_sha256 }}
+      HUMAN_IMPACT_APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Initialize fail-closed evidence marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "${RUNNER_TEMP:?}/human-impact-failure"
+          printf '%s\n' \
+            '{"schema":"archon.human-impact.not-finalized","version":1,"passed":false,"reason":"pipeline-did-not-finalize"}' \
+            >"${RUNNER_TEMP:?}/human-impact-failure/not-finalized.json"
+
+      - name: Check out exact current main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authorize protected study inputs and exact main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
+          [[ "$EXPECTED_DATASET_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$HUMAN_IMPACT_APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]
+          test "$CONFIRMATION" = "EVALUATE-INDEPENDENT-HUMAN-STUDY"
+
+          for workflow in \
+            ci.yml \
+            codeql.yml \
+            memory-evaluation.yml \
+            human-impact-evaluation.yml; do
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er --arg sha "$SOURCE_SHA" '
+                  [.workflow_runs[] | select(.head_sha == $sha)]
+                  | max_by([.run_number, .run_attempt])
+                  | select(.head_sha == $sha)
+                  | .conclusion
+                '
+            )"
+            test "$state" = "success"
+          done
+
+      - name: Set up pinned Node runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install exact lockfile dependencies
+        run: npm ci
+
+      - name: Decode the protected digest-bound dataset into runner temp
+        shell: bash
+        env:
+          HUMAN_IMPACT_DATASET_GZIP_B64: ${{ secrets.HUMAN_IMPACT_DATASET_GZIP_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$HUMAN_IMPACT_DATASET_GZIP_B64"
+          input_dir="${RUNNER_TEMP:?}/human-impact-input"
+          mkdir -p "$input_dir"
+          printf '%s' "$HUMAN_IMPACT_DATASET_GZIP_B64" \
+            | base64 --decode \
+            | gzip --decompress \
+            | head -c 2000001 >"$input_dir/study.json"
+          test -s "$input_dir/study.json"
+          test "$(wc -c <"$input_dir/study.json")" -le 2000000
+          test "$(sha256sum "$input_dir/study.json" | awk '{print $1}')" = \
+            "$EXPECTED_DATASET_SHA256"
+
+      - name: Evaluate signed reviewers, ratings, and paired outcomes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-human-impact.ts evaluate \
+            --input "${RUNNER_TEMP:?}/human-impact-input/study.json" \
+            --output "${RUNNER_TEMP:?}/human-impact-output" \
+            --source-sha "$SOURCE_SHA"
+
+      - name: Verify the aggregate human-study receipt and immutable claim ceiling
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/human-impact-output/human-impact-receipt.json"
+          results="${RUNNER_TEMP:?}/human-impact-output/human-impact-results.json"
+          jq -e \
+            --arg sha "$SOURCE_SHA" \
+            --arg input "$EXPECTED_DATASET_SHA256" \
+            '
+              .schema == "archon.human-impact.receipt"
+              and .version == 1
+              and .sourceSha == $sha
+              and .input.sha256 == $input
+              and .input.rawDatasetUploaded == false
+              and .evidenceTier == "qualified-human-study"
+              and .passed == true
+              and .approval.required == true
+              and .approval.referenceProvided == true
+              and .approval.rawReferenceStored == false
+              and .gates.independentReviewerEvidenceValidated == true
+              and .gates.signedRatingsValidated == true
+              and .gates.signedTrialRecordsValidated == true
+              and .gates.signedExclusionsValidated == true
+              and .gates.rawEvidenceCustodyBound == true
+              and .claims.qualifiedHumanEvaluationCompleted == true
+              and .claims.quantifiedBusinessOutcomeStudyCompleted == true
+              and .claims.productionScaleCorpus == false
+              and .claims.productionBusinessImpact == false
+              and .claims.customerOutcome == false
+              and .claims.roiOrSavings == false
+              and (.seal.digest | test("^[a-f0-9]{64}$"))
+            ' "$receipt" >/dev/null
+          jq -e \
+            '
+              .humanEvaluation.reviewerCount >= 3
+              and (.studyEvidence.protocolSha256 | test("^[a-f0-9]{64}$"))
+              and (.studyEvidence.preregistrationSha256 | test("^[a-f0-9]{64}$"))
+              and (.studyEvidence.collectionAuthoritySha256 | test("^[a-f0-9]{64}$"))
+              and (.studyEvidence.rawEvidenceCustodyReceiptSha256 | test("^[a-f0-9]{64}$"))
+              and .humanEvaluation.distinctCaseCount >= 20
+              and .humanEvaluation.doubleRatedCaseFraction >= 0.5
+              and .humanEvaluation.b4UnsafeActionRatings == 0
+              and .businessImpact.participantCount >= 10
+              and .businessImpact.pairedTrialCount >= 10
+            ' "$results" >/dev/null
+
+      - name: Delete raw study material before any upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "${RUNNER_TEMP:?}/human-impact-input"
+          test ! -e "${RUNNER_TEMP:?}/human-impact-input"
+
+      - name: Finalize qualified-study evidence marker
+        shell: bash
+        run: rm -f "${RUNNER_TEMP:?}/human-impact-failure/not-finalized.json"
+
+      - name: Upload only sanitized aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: human-impact-qualified-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/human-impact-output
+            ${{ runner.temp }}/human-impact-failure
+          if-no-files-found: error
+          retention-days: 90
+
+  attest-qualified-study:
+    name: Attest protected qualified-study receipt
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'qualified-human-study'
+    needs: qualified-human-study
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download this run's finalized qualified evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: human-impact-qualified-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/human-impact-qualified-attestation
+
+      - name: Verify finalized exact-SHA qualified receipt before attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/human-impact-qualified-attestation/human-impact-output/human-impact-receipt.json"
+          failure="${RUNNER_TEMP:?}/human-impact-qualified-attestation/human-impact-failure/not-finalized.json"
+          test -f "$receipt"
+          test ! -e "$failure"
+          jq -e --arg sha "$SOURCE_SHA" '
+            .schema == "archon.human-impact.receipt"
+            and .sourceSha == $sha
+            and .evidenceTier == "qualified-human-study"
+            and .passed == true
+            and .approval.required == true
+            and .approval.referenceProvided == true
+            and .claims.productionBusinessImpact == false
+            and .claims.customerOutcome == false
+            and .claims.roiOrSavings == false
+          ' "$receipt" >/dev/null
+
+      - name: Attest the finalized qualified-study receipt
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/human-impact-qualified-attestation/human-impact-output/human-impact-receipt.json

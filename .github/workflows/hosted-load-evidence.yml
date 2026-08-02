@@ -1,0 +1,535 @@
+name: Hosted Load Evidence
+
+# This workflow is intentionally manual and protected: it creates bounded,
+# billable traffic against an already-deployed CloudFront application. It never
+# seeds, changes, or deletes application data or AWS resources.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Approved deployed environment to measure.
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      target_sha:
+        description: Exact 40-character current main SHA deployed to the target.
+        required: true
+        type: string
+      total_iterations:
+        description: Total hosted recall requests; integer from 20 through 200.
+        required: true
+        default: "60"
+        type: string
+      virtual_users:
+        description: Concurrent users; integer from 2 through 10.
+        required: true
+        default: "3"
+        type: string
+      p95_latency_ms:
+        description: Explicit evaluation objective; integer from 500 through 30000 ms.
+        required: true
+        default: "5000"
+        type: string
+      max_error_rate_bps:
+        description: Explicit error-rate objective in basis points; integer from 0 through 500.
+        required: true
+        default: "100"
+        type: string
+      confirmation:
+        description: Enter RUN-STAGING-HOSTED-LOAD-EVIDENCE or RUN-PRODUCTION-HOSTED-LOAD-EVIDENCE.
+        required: true
+        type: string
+
+concurrency:
+  group: hosted-load-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  TARGET_SHA: ${{ inputs.target_sha }}
+  TARGET_ENVIRONMENT: ${{ inputs.environment }}
+  TOTAL_ITERATIONS: ${{ inputs.total_iterations }}
+  VUS: ${{ inputs.virtual_users }}
+  P95_LATENCY_MS: ${{ inputs.p95_latency_ms }}
+  MAX_ERROR_RATE_BPS: ${{ inputs.max_error_rate_bps }}
+  STAGING_APPLICATION_URL: ${{ vars.AWS_STAGING_APPLICATION_URL }}
+  PRODUCTION_APPLICATION_URL: ${{ vars.AWS_PRODUCTION_APPLICATION_URL || 'https://d2s5v0o0eg2aaw.cloudfront.net' }}
+
+jobs:
+  authorize:
+    name: Authorize exact deployed green main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      target_url: ${{ steps.target.outputs.target_url }}
+      deploy_run_id: ${{ steps.source.outputs.deploy_run_id }}
+      deploy_run_attempt: ${{ steps.source.outputs.deploy_run_attempt }}
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind bounded inputs and an owned CloudFront origin
+        id: target
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TOTAL_ITERATIONS" =~ ^[0-9]+$ ]]
+          test "$TOTAL_ITERATIONS" -ge 20
+          test "$TOTAL_ITERATIONS" -le 200
+          [[ "$VUS" =~ ^[0-9]+$ ]]
+          test "$VUS" -ge 2
+          test "$VUS" -le 10
+          test "$VUS" -le "$TOTAL_ITERATIONS"
+          [[ "$P95_LATENCY_MS" =~ ^[0-9]+$ ]]
+          test "$P95_LATENCY_MS" -ge 500
+          test "$P95_LATENCY_MS" -le 30000
+          [[ "$MAX_ERROR_RATE_BPS" =~ ^[0-9]+$ ]]
+          test "$MAX_ERROR_RATE_BPS" -le 500
+
+          expected_confirmation="$(
+            printf 'RUN-%s-HOSTED-LOAD-EVIDENCE' \
+              "$(tr '[:lower:]' '[:upper:]' <<<"$TARGET_ENVIRONMENT")"
+          )"
+          test "$CONFIRMATION" = "$expected_confirmation"
+          case "$TARGET_ENVIRONMENT" in
+            staging) target_url="$STAGING_APPLICATION_URL" ;;
+            production) target_url="$PRODUCTION_APPLICATION_URL" ;;
+            *) exit 1 ;;
+          esac
+          [[ "$target_url" =~ ^https://[a-z0-9-]+\.cloudfront\.net$ ]]
+          test "$target_url" != "https://d111111abcdef8.cloudfront.net"
+          echo "target_url=$target_url" >>"$GITHUB_OUTPUT"
+
+      - name: Require current green main and its successful deployment
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          prove_workflow() {
+            local expected_name expected_path state workflow
+            workflow="$1"
+            expected_name="$2"
+            expected_path="$3"
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er \
+                  --arg sha "$TARGET_SHA" \
+                  --arg name "$expected_name" \
+                  --arg path "$expected_path" \
+                  '
+                    [
+                      .workflow_runs[]
+                      | select(
+                          .head_sha == $sha
+                          and .head_branch == "main"
+                          and .event == "push"
+                          and .name == $name
+                          and .path == $path
+                        )
+                    ]
+                    | sort_by(.run_number, .run_attempt)
+                    | last
+                    | select(.conclusion == "success")
+                  '
+            )"
+            test "$(jq -r '.conclusion' <<<"$state")" = "success"
+            printf '%s\n' "$state"
+          }
+
+          prove_workflow ci.yml CI .github/workflows/ci.yml >/dev/null
+          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml \
+            >/dev/null
+          prove_workflow \
+            supply-chain.yml "Supply Chain (enforced)" \
+            .github/workflows/supply-chain.yml >/dev/null
+          deploy="$(
+            prove_workflow \
+              deploy-aws.yml "Deploy AWS" \
+              .github/workflows/deploy-aws.yml
+          )"
+          {
+            echo "deploy_run_id=$(jq -er '.id' <<<"$deploy")"
+            echo "deploy_run_attempt=$(jq -er '.run_attempt' <<<"$deploy")"
+          } >>"$GITHUB_OUTPUT"
+
+  measure:
+    name: Measure bounded hosted recall
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment == 'production' && 'production-audit' || 'staging' }}
+    env:
+      BASE_URL: ${{ needs.authorize.outputs.target_url }}
+      DEPLOY_RUN_ID: ${{ needs.authorize.outputs.deploy_run_id }}
+      DEPLOY_RUN_ATTEMPT: ${{ needs.authorize.outputs.deploy_run_attempt }}
+      MAX_DURATION_SECONDS: "600"
+    steps:
+      - name: Initialize fail-closed evidence receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="${RUNNER_TEMP:?}/hosted-load-receipt.json"
+          printf '%s\n' \
+            '{"schema":"archon.hosted-load-evidence","version":2,"ok":false,"result":"not-finalized"}' \
+            >"$receipt"
+          echo "RECEIPT_FILE=$receipt" >>"$GITHUB_ENV"
+          echo "SUMMARY_FILE=${RUNNER_TEMP:?}/hosted-k6-summary.json" \
+            >>"$GITHUB_ENV"
+          echo "CONTRACT_MANIFEST_FILE=${RUNNER_TEMP:?}/hosted-load-contract.sha256" \
+            >>"$GITHUB_ENV"
+
+      - name: Check out the authorized source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Re-prove source and exact deployed release without redirects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+          [[ "$BASE_URL" =~ ^https://[a-z0-9-]+\.cloudfront\.net$ ]]
+          proof="${RUNNER_TEMP:?}/hosted-proof.json"
+          health="${RUNNER_TEMP:?}/hosted-health.json"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --max-redirs 0 --max-time 30 \
+            "$BASE_URL/api/proof" >"$proof"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --max-redirs 0 --max-time 30 \
+            "$BASE_URL/api/health" >"$health"
+          jq -e \
+            --arg sha "$TARGET_SHA" \
+            '
+              .release.commitSha == $sha
+              and .release.evidence
+                == "server-configured Lambda environment"
+              and .database.engine == "CockroachDB"
+              and .database.region == "eu-west-1"
+              and .database.regionEvidence
+                == "cockroach-cloud-api-release-gate"
+              and .vectorIndex.engine == "native CockroachDB C-SPANN"
+              and .vectorIndex.enabled == true
+            ' "$proof" >/dev/null
+          jq -e \
+            '.ok == true and .service == "archon-cockroach-memory"' \
+            "$health" >/dev/null
+
+      - name: Install pinned k6 runtime
+        uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+        with:
+          k6-version: "2.0.0"
+
+      - name: Run bounded hosted recall evidence
+        id: k6
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_error_rate="$(
+            jq -nr --arg bps "$MAX_ERROR_RATE_BPS" \
+              '$bps | tonumber / 10000'
+          )"
+          # Start in a fresh CloudWatch minute so the earlier proof/health
+          # requests cannot contaminate a later resource-intensity receipt.
+          current_second="$((10#$(date -u +%S)))"
+          alignment_wait="$((62 - current_second))"
+          sleep "$alignment_wait"
+          measurement_started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          set +e
+          k6 run \
+            --new-machine-readable-summary \
+            --summary-export="$SUMMARY_FILE" \
+            -e BASE_URL="$BASE_URL" \
+            -e RELEASE_SHA="$TARGET_SHA" \
+            -e TOTAL_ITERATIONS="$TOTAL_ITERATIONS" \
+            -e VUS="$VUS" \
+            -e MAX_DURATION_SECONDS="$MAX_DURATION_SECONDS" \
+            -e P95_LATENCY_MS="$P95_LATENCY_MS" \
+            -e MAX_ERROR_RATE="$max_error_rate" \
+            load/hosted-recall.js
+          k6_exit="$?"
+          set -e
+          measurement_completed_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "k6_exit=$k6_exit" >>"$GITHUB_OUTPUT"
+          echo "measurement_started_at=$measurement_started_at" \
+            >>"$GITHUB_OUTPUT"
+          echo "measurement_completed_at=$measurement_completed_at" \
+            >>"$GITHUB_OUTPUT"
+          test -s "$SUMMARY_FILE"
+
+      - name: Finalize sanitized machine-verifiable receipt
+        if: always()
+        shell: bash
+        env:
+          K6_EXIT: ${{ steps.k6.outputs.k6_exit || '127' }}
+          MEASUREMENT_STARTED_AT: ${{ steps.k6.outputs.measurement_started_at || '' }}
+          MEASUREMENT_COMPLETED_AT: ${{ steps.k6.outputs.measurement_completed_at || '' }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$SUMMARY_FILE" ]; then
+            exit 0
+          fi
+          started_epoch="$(date -u -d "$MEASUREMENT_STARTED_AT" +%s)"
+          completed_epoch="$(date -u -d "$MEASUREMENT_COMPLETED_AT" +%s)"
+          measurement_duration="$((completed_epoch - started_epoch))"
+          test "$measurement_duration" -ge 1
+          test "$measurement_duration" -le 660
+          summary_sha256="$(sha256sum "$SUMMARY_FILE" | awk '{print $1}')"
+          contract_sources=(
+            load/hosted-recall-contract.js
+            load/hosted-recall.js
+          )
+          : >"$CONTRACT_MANIFEST_FILE"
+          for source in "${contract_sources[@]}"; do
+            source_sha256="$(sha256sum "$source" | awk '{print $1}')"
+            printf '%s  %s\n' "$source_sha256" "$source" \
+              >>"$CONTRACT_MANIFEST_FILE"
+          done
+          workload_contract_sha256="$(
+            sha256sum "$CONTRACT_MANIFEST_FILE" | awk '{print $1}'
+          )"
+          generated_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          target_host="${BASE_URL#https://}"
+          max_error_rate="$(
+            jq -nr --arg bps "$MAX_ERROR_RATE_BPS" \
+              '$bps | tonumber / 10000'
+          )"
+          finalized="${RUNNER_TEMP:?}/hosted-load-finalized.json"
+          jq -n \
+            --arg generatedAt "$generated_at" \
+            --arg measurementStartedAt "$MEASUREMENT_STARTED_AT" \
+            --arg measurementCompletedAt "$MEASUREMENT_COMPLETED_AT" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$TARGET_SHA" \
+            --arg environment "$TARGET_ENVIRONMENT" \
+            --arg targetHost "$target_host" \
+            --arg deployRunId "$DEPLOY_RUN_ID" \
+            --arg deployRunAttempt "$DEPLOY_RUN_ATTEMPT" \
+            --arg workflowRunId "$GITHUB_RUN_ID" \
+            --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg summarySha256 "$summary_sha256" \
+            --arg workloadContractSha256 "$workload_contract_sha256" \
+            --argjson k6Exit "$K6_EXIT" \
+            --argjson iterations "$TOTAL_ITERATIONS" \
+            --argjson vus "$VUS" \
+            --argjson p95Objective "$P95_LATENCY_MS" \
+            --argjson maxErrorRate "$max_error_rate" \
+            --argjson measurementDuration "$measurement_duration" \
+            --slurpfile summary "$SUMMARY_FILE" \
+            '
+              ($summary[0]) as $document
+              | (
+                  if ($document.results.metrics | type) == "array"
+                  then $document.results.metrics
+                  else []
+                  end
+                ) as $metricList
+              | ($metricList | map(.name)) as $metricNames
+              | (
+                  $metricList
+                  | map(
+                      select((.name | type) == "string")
+                      | {key: .name, value: .}
+                    )
+                  | from_entries
+                ) as $metrics
+              | (
+                  $document.version == "1.0.0"
+                  and ($document.results | type) == "object"
+                  and ($document.results.metrics | type) == "array"
+                  and ($metricNames | length)
+                    == ($metricNames | unique | length)
+                  and $metrics.iterations.type == "counter"
+                  and $metrics.http_reqs.type == "counter"
+                  and $metrics.hosted_recall_duration_ms.type == "trend"
+                  and $metrics.hosted_recall_http_failure.type == "rate"
+                  and $metrics.hosted_recall_contract.type == "rate"
+                  and $metrics.hosted_grounded_citations.type == "rate"
+                  and $metrics.hosted_scope_isolation.type == "rate"
+                  and $metrics.hosted_successful_recalls.type == "counter"
+                  and $metrics.iterations.values.count == $iterations
+                  and $metrics.http_reqs.values.count
+                    == ($iterations + 1)
+                  and $metrics.hosted_recall_duration_ms.values["p(95)"]
+                    < $p95Objective
+                  and $metrics.hosted_recall_http_failure.values.rate
+                    <= $maxErrorRate
+                  and $metrics.hosted_recall_contract.values.rate == 1
+                  and $metrics.hosted_grounded_citations.values.rate == 1
+                  and $metrics.hosted_scope_isolation.values.rate == 1
+                  and $metrics.hosted_successful_recalls.values.count
+                    == $iterations
+                ) as $evidenceContractSatisfied
+              | {
+                  schema: "archon.hosted-load-evidence",
+                  version: 2,
+                  ok: (
+                    $k6Exit == 0 and $evidenceContractSatisfied
+                  ),
+                  result: (
+                    if $k6Exit == 0 and $evidenceContractSatisfied
+                    then "thresholds-satisfied"
+                    else "thresholds-breached-or-evidence-invalid"
+                    end
+                  ),
+                  generatedAt: $generatedAt,
+                  repository: $repository,
+                  commitSha: $commit,
+                  environment: $environment,
+                  target: {
+                    scheme: "https",
+                    host: $targetHost,
+                    path: "/api/recall",
+                    redirectsAllowed: false
+                  },
+                  sourceDeployment: {
+                    runId: ($deployRunId | tonumber),
+                    runAttempt: ($deployRunAttempt | tonumber)
+                  },
+                  workflow: {
+                    runId: ($workflowRunId | tonumber),
+                    runAttempt: ($workflowRunAttempt | tonumber)
+                  },
+                  measurementWindow: {
+                    startedAt: $measurementStartedAt,
+                    completedAt: $measurementCompletedAt,
+                    durationSeconds: $measurementDuration
+                  },
+                  workload: {
+                    iterations: $iterations,
+                    virtualUsers: $vus,
+                    dataMutation: false,
+                    corpus: "synthetic-public-demo",
+                    contractSource: "load/hosted-recall.js",
+                    contractSources: [
+                      "load/hosted-recall-contract.js",
+                      "load/hosted-recall.js"
+                    ],
+                    contractDigestAlgorithm:
+                      "sha256(canonical-sha256sum-manifest)",
+                    contractSourceSha256: $workloadContractSha256
+                  },
+                  objectives: {
+                    p95LatencyMsExclusive: $p95Objective,
+                    maxErrorRateInclusive: $maxErrorRate,
+                    contractRateMinimumInclusive: 1,
+                    groundingRateMinimumInclusive: 1,
+                    isolationRate: 1
+                  },
+                  observed: {
+                    p95LatencyMs:
+                      $metrics.hosted_recall_duration_ms.values["p(95)"],
+                    errorRate:
+                      $metrics.hosted_recall_http_failure.values.rate,
+                    contractRate:
+                      $metrics.hosted_recall_contract.values.rate,
+                    groundingRate:
+                      $metrics.hosted_grounded_citations.values.rate,
+                    isolationRate:
+                      $metrics.hosted_scope_isolation.values.rate,
+                    completedIterations: $metrics.iterations.values.count,
+                    httpRequests: $metrics.http_reqs.values.count,
+                    successfulRecalls:
+                      $metrics.hosted_successful_recalls.values.count
+                  },
+                  rawSummary: {
+                    schemaVersion: $document.version,
+                    layout: "k6-machine-readable-results-metrics-array",
+                    sha256: $summarySha256
+                  },
+                  limitations: [
+                    "This is a bounded hosted-path measurement, not a production traffic claim.",
+                    "The corpus is synthetic and rights-safe.",
+                    "The supplied thresholds are evaluation objectives, not an inferred business SLA."
+                  ]
+                }
+            ' >"$finalized"
+          mv "$finalized" "$RECEIPT_FILE"
+
+      - name: Upload hosted load evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hosted-load-${{ inputs.environment }}-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/hosted-load-receipt.json
+            ${{ runner.temp }}/hosted-k6-summary.json
+            ${{ runner.temp }}/hosted-load-contract.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce finalized evidence result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$CONTRACT_MANIFEST_FILE"
+          test "$(wc -l <"$CONTRACT_MANIFEST_FILE")" -eq 2
+          test "$(awk 'NR == 1 {print $2}' "$CONTRACT_MANIFEST_FILE")" = \
+            "load/hosted-recall-contract.js"
+          test "$(awk 'NR == 2 {print $2}' "$CONTRACT_MANIFEST_FILE")" = \
+            "load/hosted-recall.js"
+          sha256sum --check --strict "$CONTRACT_MANIFEST_FILE" >/dev/null
+          contract_digest="$(
+            sha256sum "$CONTRACT_MANIFEST_FILE" | awk '{print $1}'
+          )"
+          test -s "$SUMMARY_FILE"
+          summary_digest="$(sha256sum "$SUMMARY_FILE" | awk '{print $1}')"
+          jq -e \
+            --arg sha "$TARGET_SHA" \
+            --arg environment "$TARGET_ENVIRONMENT" \
+            --arg contractDigest "$contract_digest" \
+            --arg summaryDigest "$summary_digest" \
+            '
+              .schema == "archon.hosted-load-evidence"
+              and .version == 2
+              and .ok == true
+              and .result == "thresholds-satisfied"
+              and .commitSha == $sha
+              and .environment == $environment
+              and .measurementWindow.durationSeconds >= 1
+              and .measurementWindow.durationSeconds <= 660
+              and .observed.successfulRecalls
+                == .workload.iterations
+              and .workload.dataMutation == false
+              and .workload.contractSource == "load/hosted-recall.js"
+              and .workload.contractSources == [
+                "load/hosted-recall-contract.js",
+                "load/hosted-recall.js"
+              ]
+              and .workload.contractDigestAlgorithm
+                == "sha256(canonical-sha256sum-manifest)"
+              and .workload.contractSourceSha256 == $contractDigest
+              and .rawSummary.sha256 == $summaryDigest
+              and (.limitations | length) == 3
+            ' "$RECEIPT_FILE" >/dev/null

@@ -1,0 +1,1387 @@
+name: Foundation Storage Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Create an inspected plan or apply that exact existing plan.
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - verify
+          - retire
+      target_sha:
+        description: Exact 40-character current main SHA proven by CI, CodeQL, and Supply Chain.
+        required: true
+        type: string
+      confirmation:
+        description: For apply, enter APPLY-PROTECTED-FOUNDATION-STORAGE-MIGRATION.
+        required: false
+        type: string
+
+concurrency:
+  group: aws-foundation-migration
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  APP_NAME: ${{ vars.AWS_APP_NAME || 'archon-memory' }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_FOUNDATION_MIGRATION_ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ vars.AWS_APP_NAME || 'archon-memory' }}-github-foundation-migration
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+  GITHUB_OIDC_PROVIDER_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com
+  GITHUB_ORGANIZATION: upgradedev
+  GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+  GITHUB_REPOSITORY_NAME: archon-cockroach-memory
+  GITHUB_REPOSITORY_OWNER_ID: ${{ github.repository_owner_id }}
+  OPERATION: ${{ inputs.operation }}
+  TARGET_SHA: ${{ inputs.target_sha }}
+
+jobs:
+  authorize:
+    name: Authorize exact green main SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail closed unless the dispatch targets current green main
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          test "$AWS_REGION" = "eu-west-1"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_SHA" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+
+          if [ "$OPERATION" = "apply" ]; then
+            test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = \
+              "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration"
+            test "$CONFIRMATION" = \
+              "APPLY-PROTECTED-FOUNDATION-STORAGE-MIGRATION"
+          elif [ "$OPERATION" = "plan" ]; then
+            test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = \
+              "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration"
+            test -z "$CONFIRMATION"
+          elif [ "$OPERATION" = "retire" ]; then
+            test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = \
+              "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration"
+            test "$CONFIRMATION" = \
+              "RETIRE-FOUNDATION-MIGRATION-AUTHORITY"
+          else
+            test "$OPERATION" = "verify"
+            test -z "$CONFIRMATION"
+          fi
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          prove_workflow() {
+            local expected_name expected_path state workflow
+            workflow="$1"
+            expected_name="$2"
+            expected_path="$3"
+            state="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+                jq -er \
+                  --arg sha "$TARGET_SHA" \
+                  --arg name "$expected_name" \
+                  --arg path "$expected_path" \
+                  '
+                    [
+                      .workflow_runs[]
+                      | select(
+                          .head_sha == $sha
+                          and .head_branch == "main"
+                          and .event == "push"
+                          and .name == $name
+                          and .path == $path
+                        )
+                    ]
+                    | sort_by(.run_number, .run_attempt)
+                    | last
+                    | select(.conclusion == "success")
+                    | .conclusion
+                  '
+            )"
+            test "$state" = "success"
+          }
+          prove_workflow ci.yml CI .github/workflows/ci.yml
+          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml
+          prove_workflow \
+            supply-chain.yml "Supply Chain (enforced)" \
+            .github/workflows/supply-chain.yml
+
+  migrate:
+    name: ${{ inputs.operation == 'plan' && 'Plan protected foundation migration' || inputs.operation == 'apply' && 'Apply protected foundation migration' || 'Verify protected foundation migration' }}
+    needs: authorize
+    if: inputs.operation != 'retire'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: bootstrap
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure pre-existing initial migration authority
+        if: inputs.operation != 'verify'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_FOUNDATION_MIGRATION_ROLE_ARN }}
+          role-session-name: archon-foundation-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Configure permanent narrow foundation authority
+        if: inputs.operation == 'verify'
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.APP_NAME }}-github-foundation-promotion
+          role-session-name: archon-foundation-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Capture exact pre-migration state and policies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AWS_REGION" = "eu-west-1"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          identity="${RUNNER_TEMP:?}/foundation-migration-identity.json"
+          aws sts get-caller-identity --output json >"$identity"
+          expected_role="${APP_NAME}-github-foundation-migration"
+          if [ "$OPERATION" = "verify" ]; then
+            expected_role="${APP_NAME}-github-foundation-promotion"
+          else
+            test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = \
+              "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${expected_role}"
+          fi
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg role "$expected_role" \
+            '
+              .Account == $account
+              and (.Arn | contains(":assumed-role/" + $role + "/"))
+            ' "$identity" >/dev/null
+
+          current_stack="${RUNNER_TEMP:?}/foundation-current-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$current_stack"
+          jq -e \
+            --arg stack "${APP_NAME}-delivery-bootstrap" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and (
+                .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and ((.Stacks[0].RoleARN // null) == null)
+            ' "$current_stack" >/dev/null
+
+          current_policy="${RUNNER_TEMP:?}/foundation-current-stack-policy.json"
+          current_policy_body="${RUNNER_TEMP:?}/foundation-current-stack-policy-body.json"
+          aws cloudformation get-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$current_policy"
+          jq -e '.StackPolicyBody | fromjson' \
+            "$current_policy" >"$current_policy_body"
+          jq -e \
+            --slurpfile legacy \
+              aws/bootstrap-stack-policy.pre-storage-migration.json \
+            --slurpfile target aws/bootstrap-stack-policy.json \
+            '
+              . == $legacy[0] or . == $target[0]
+            ' "$current_policy_body" >/dev/null
+
+          current_template_response="${RUNNER_TEMP:?}/foundation-current-template-response.json"
+          current_template="${RUNNER_TEMP:?}/foundation-current-template.yaml"
+          aws cloudformation get-template \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$current_template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$current_template_response" |
+            base64 --decode >"$current_template"
+
+          current_resources="${RUNNER_TEMP:?}/foundation-current-resources.json"
+          aws cloudformation list-stack-resources \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$current_resources"
+          jq -e '
+            all(
+              .StackResourceSummaries[];
+              .ResourceStatus
+              | IN(
+                  "CREATE_COMPLETE",
+                  "UPDATE_COMPLETE",
+                  "UPDATE_ROLLBACK_COMPLETE"
+                )
+            )
+          ' "$current_resources" >/dev/null
+
+          receipt="${RUNNER_TEMP:?}/foundation-storage-migration-receipt.json"
+          current_digest="$(sha256sum "$current_template" | awk '{print $1}')"
+          candidate_digest="$(
+            sha256sum aws/bootstrap-oidc.yaml | awk '{print $1}'
+          )"
+          policy_before_digest="$(
+            sha256sum "$current_policy_body" | awk '{print $1}'
+          )"
+          policy_target_digest="$(
+            sha256sum aws/bootstrap-stack-policy.json | awk '{print $1}'
+          )"
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg commit "$TARGET_SHA" \
+            --arg currentDigest "$current_digest" \
+            --arg candidateDigest "$candidate_digest" \
+            --arg policyBeforeDigest "$policy_before_digest" \
+            --arg policyTargetDigest "$policy_target_digest" \
+            '{
+              schema: "archon.aws.foundation-storage-migration",
+              schemaVersion: 1,
+              ok: false,
+              operation: $operation,
+              result: ($operation + "-pending"),
+              commit: $commit,
+              templates: {
+                beforeSha256: $currentDigest,
+                candidateSha256: $candidateDigest
+              },
+              stackPolicy: {
+                beforeSha256: $policyBeforeDigest,
+                targetSha256: $policyTargetDigest
+              }
+            }' >"$receipt"
+          {
+            echo "CANDIDATE_TEMPLATE_DIGEST=$candidate_digest"
+            echo "CURRENT_RESOURCES_FILE=$current_resources"
+            echo "CURRENT_STACK_FILE=$current_stack"
+            echo "CURRENT_STACK_POLICY_BODY_FILE=$current_policy_body"
+            echo "CURRENT_TEMPLATE_DIGEST=$current_digest"
+            echo "CURRENT_TEMPLATE_FILE=$current_template"
+            echo "RECEIPT_FILE=$receipt"
+            echo "TARGET_STACK_POLICY_DIGEST=$policy_target_digest"
+          } >>"$GITHUB_ENV"
+
+      - name: Prove exact one-time migration authority
+        if: inputs.operation != 'verify'
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority_proof="${RUNNER_TEMP:?}/foundation-migration-authority-proof.json"
+          bash aws/foundation-migration-authority.sh verify \
+            >"$authority_proof"
+          jq -e '
+            .ok == true
+            and .oneTime == true
+            and .liveContractExact == true
+            and .cloudFormationCreationContractExact == true
+            and .retirementRequired == true
+          ' "$authority_proof" >/dev/null
+          receipt_next="${RUNNER_TEMP:?}/foundation-authority-bound-receipt.json"
+          jq \
+            --slurpfile authority "$authority_proof" \
+            '. + {authority:$authority[0]}' \
+            "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Stage immutable candidate with explicit bootstrap encryption
+        if: inputs.operation != 'verify'
+        shell: bash
+        run: |
+          set -euo pipefail
+          template="aws/bootstrap-oidc.yaml"
+          bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          digest="$CANDIDATE_TEMPLATE_DIGEST"
+          checksum="$(
+            openssl dgst -sha256 -binary "$template" | base64 -w0
+          )"
+          head="${RUNNER_TEMP:?}/foundation-template-head.json"
+          alias_error="${RUNNER_TEMP:?}/foundation-storage-alias.err"
+          encryption="aws:kms"
+          encryption_mode="kms"
+          put_encryption=(
+            --server-side-encryption aws:kms
+            --ssekms-key-id
+            "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
+          )
+
+          if ! aws kms describe-key \
+              --key-id "alias/${APP_NAME}-storage" \
+              --region "$AWS_REGION" \
+              --output json \
+              >"${RUNNER_TEMP:?}/foundation-storage-alias.json" \
+              2>"$alias_error"; then
+            grep -Fq "NotFoundException" "$alias_error"
+            encryption="AES256-bootstrap"
+            encryption_mode="bootstrap-aes256"
+            put_encryption=(--server-side-encryption AES256)
+          fi
+          key="foundation/storage-migrations/${encryption_mode}/${TARGET_SHA}/${digest}.yaml"
+
+          if ! aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head" 2>/dev/null; then
+            aws s3api put-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --body "$template" \
+              "${put_encryption[@]}" \
+              --checksum-algorithm SHA256 \
+              --checksum-sha256 "$checksum" \
+              --metadata \
+                "commit=$TARGET_SHA,sha256=$digest,purpose=foundation-storage-migration" \
+              --if-none-match "*" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >/dev/null
+            aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head"
+          fi
+
+          size="$(wc -c <"$template" | tr -d ' ')"
+          jq -e \
+            --arg commit "$TARGET_SHA" \
+            --arg digest "$digest" \
+            --arg checksum "$checksum" \
+            --arg encryption "$encryption" \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg region "$AWS_REGION" \
+            --argjson size "$size" \
+            '
+              .ContentLength == $size
+              and .ChecksumSHA256 == $checksum
+              and .Metadata == {
+                commit: $commit,
+                sha256: $digest,
+                purpose: "foundation-storage-migration"
+              }
+              and (.VersionId | type == "string" and length > 0)
+              and (
+                if $encryption == "AES256-bootstrap"
+                then .ServerSideEncryption == "AES256"
+                else (
+                  .ServerSideEncryption == "aws:kms"
+                  and (
+                    .SSEKMSKeyId
+                    | type == "string"
+                    and test(
+                      "^arn:aws:kms:" + $region + ":" + $account
+                      + ":key/[0-9a-f-]+$"
+                    )
+                  )
+                  and .BucketKeyEnabled == true
+                )
+                end
+              )
+            ' "$head" >/dev/null
+
+          version_id="$(jq -er '.VersionId' "$head")"
+          encoded_version="$(
+            jq -nr --arg value "$version_id" '$value | @uri'
+          )"
+          template_url="https://${bucket}.s3.${AWS_REGION}.amazonaws.com/${key}?versionId=${encoded_version}"
+          change_set="foundation-storage-${TARGET_SHA:0:12}-${digest:0:12}"
+          description="operation=foundation-storage-migration commit=${TARGET_SHA} template_sha256=${digest} version_id=${version_id}"
+          {
+            echo "BOOTSTRAP_TEMPLATE_ENCRYPTION=$encryption"
+            echo "CHANGE_SET_DESCRIPTION=$description"
+            echo "CHANGE_SET_NAME=$change_set"
+            echo "TEMPLATE_CHECKSUM=$checksum"
+            echo "TEMPLATE_URL=$template_url"
+            echo "TEMPLATE_VERSION_ID=$version_id"
+          } >>"$GITHUB_ENV"
+
+      - name: Detect an already-current foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CURRENT_TEMPLATE_DIGEST" = "$CANDIDATE_TEMPLATE_DIGEST" ]; then
+            echo "ALREADY_CURRENT=true" >>"$GITHUB_ENV"
+          else
+            echo "ALREADY_CURRENT=false" >>"$GITHUB_ENV"
+          fi
+
+      - name: Persist immutable encrypted pre-migration recovery anchor
+        if: inputs.operation == 'plan' || inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          anchor_dir="${RUNNER_TEMP:?}/foundation-prestate"
+          bundle="${RUNNER_TEMP:?}/foundation-prestate.tar"
+          manifest="$anchor_dir/manifest.json"
+          parameters="$anchor_dir/parameters.json"
+          mkdir -p "$anchor_dir"
+          cp "$CURRENT_TEMPLATE_FILE" "$anchor_dir/template.yaml"
+          cp "$CURRENT_STACK_POLICY_BODY_FILE" \
+            "$anchor_dir/stack-policy.json"
+          jq '
+            .Stacks[0].Parameters
+            | map({key:.ParameterKey, value:.ParameterValue})
+            | from_entries
+            | to_entries
+            | sort_by(.key)
+            | from_entries
+          ' "$CURRENT_STACK_FILE" >"$parameters"
+          template_sha256="$(
+            sha256sum "$anchor_dir/template.yaml" | awk '{print $1}'
+          )"
+          policy_sha256="$(
+            jq -Sc . "$anchor_dir/stack-policy.json" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          parameters_sha256="$(
+            jq -Sc . "$parameters" | sha256sum | awk '{print $1}'
+          )"
+          jq -n \
+            --arg commit "$TARGET_SHA" \
+            --arg candidateSha256 "$CANDIDATE_TEMPLATE_DIGEST" \
+            --arg templateSha256 "$template_sha256" \
+            --arg policySha256 "$policy_sha256" \
+            --arg parametersSha256 "$parameters_sha256" \
+            '{
+              schema:
+                "archon.aws.foundation-migration-prestate",
+              schemaVersion: 1,
+              commit: $commit,
+              candidateTemplateSha256: $candidateSha256,
+              files: {
+                "template.yaml": $templateSha256,
+                "stack-policy.json": $policySha256,
+                "parameters.json": $parametersSha256
+              },
+              recovery: {
+                automaticDestructiveRollback: false,
+                separatelyApprovedRecoveryRequired: true
+              }
+            }' >"$manifest"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf "$bundle" \
+            -C "$anchor_dir" \
+            manifest.json parameters.json stack-policy.json template.yaml
+          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          checksum="$(
+            openssl dgst -sha256 -binary "$bundle" | base64 -w0
+          )"
+          bytes="$(wc -c <"$bundle" | tr -d ' ')"
+          bucket="${APP_NAME}-artifacts-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          key="foundation/storage-migrations/prestate/${TARGET_SHA}/${template_sha256}/${bundle_sha256}.tar"
+          head="${RUNNER_TEMP:?}/foundation-prestate-head.json"
+          encryption_args=(--server-side-encryption AES256)
+          if [ "$BOOTSTRAP_TEMPLATE_ENCRYPTION" = "aws:kms" ]; then
+            encryption_args=(
+              --server-side-encryption aws:kms
+              --ssekms-key-id
+              "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
+            )
+          else
+            test "$BOOTSTRAP_TEMPLATE_ENCRYPTION" = \
+              "AES256-bootstrap"
+          fi
+          if ! aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head" 2>/dev/null; then
+            aws s3api put-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --body "$bundle" \
+              "${encryption_args[@]}" \
+              --checksum-algorithm SHA256 \
+              --checksum-sha256 "$checksum" \
+              --content-type application/x-tar \
+              --metadata \
+                "commit=$TARGET_SHA,sha256=$bundle_sha256,purpose=foundation-prestate" \
+              --if-none-match "*" \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >/dev/null
+            aws s3api head-object \
+              --bucket "$bucket" \
+              --key "$key" \
+              --checksum-mode ENABLED \
+              --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$head"
+          fi
+          jq -e \
+            --arg commit "$TARGET_SHA" \
+            --arg digest "$bundle_sha256" \
+            --arg checksum "$checksum" \
+            --arg encryption "$BOOTSTRAP_TEMPLATE_ENCRYPTION" \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg region "$AWS_REGION" \
+            --argjson bytes "$bytes" \
+            '
+              .ContentLength == $bytes
+              and .ContentType == "application/x-tar"
+              and .ChecksumSHA256 == $checksum
+              and .Metadata == {
+                commit: $commit,
+                sha256: $digest,
+                purpose: "foundation-prestate"
+              }
+              and (.VersionId | type == "string" and length > 0)
+              and (
+                if $encryption == "AES256-bootstrap"
+                then .ServerSideEncryption == "AES256"
+                else (
+                  .ServerSideEncryption == "aws:kms"
+                  and (
+                    .SSEKMSKeyId
+                    | type == "string"
+                    and test(
+                      "^arn:aws:kms:" + $region + ":" + $account
+                      + ":key/[0-9a-f-]+$"
+                    )
+                  )
+                  and .BucketKeyEnabled == true
+                )
+                end
+              )
+            ' "$head" >/dev/null
+          version_id="$(jq -er '.VersionId' "$head")"
+          receipt_next="${RUNNER_TEMP:?}/foundation-prestate-receipt.json"
+          jq \
+            --arg key "$key" \
+            --arg versionId "$version_id" \
+            --arg sha256 "$bundle_sha256" \
+            --arg checksum "$checksum" \
+            --arg encryption "$BOOTSTRAP_TEMPLATE_ENCRYPTION" \
+            '
+              . + {
+                recoveryAnchor: {
+                  key: $key,
+                  versionId: $versionId,
+                  sha256: $sha256,
+                  checksumSha256Base64: $checksum,
+                  encryption: $encryption,
+                  automaticDestructiveRollback: false,
+                  separatelyApprovedRecoveryRequired: true
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Refuse post-migration verification before migration
+        if: inputs.operation == 'verify' && env.ALREADY_CURRENT != 'true'
+        shell: bash
+        run: |
+          echo "The protected foundation migration is not deployed." >&2
+          exit 1
+
+      - name: Create or reuse the inspected migration plan
+        if: env.ALREADY_CURRENT != 'true' && inputs.operation == 'plan'
+        shell: bash
+        run: |
+          set -euo pipefail
+          parameters="${RUNNER_TEMP:?}/foundation-migration-parameters.json"
+          jq -e '
+            ([.Stacks[0].Parameters[].ParameterKey] | sort) as $keys
+            | $keys == [
+                "AppName",
+                "ArtifactAccessLoggingEnabled",
+                "ExistingGitHubOidcProviderArn",
+                "GitHubOrganization",
+                "GitHubRepository",
+                "GitHubRepositoryId",
+                "GitHubRepositoryOwnerId"
+              ]
+              or $keys == [
+                "AlarmRoutingEnabled",
+                "AppName",
+                "ArtifactAccessLoggingEnabled",
+                "ExistingGitHubOidcProviderArn",
+                "GitHubOrganization",
+                "GitHubRepository",
+                "GitHubRepositoryId",
+                "GitHubRepositoryOwnerId"
+              ]
+          ' "$CURRENT_STACK_FILE" >/dev/null
+          jq '
+            (.Stacks[0].Parameters | map(.ParameterKey)) as $keys
+            | [
+                .Stacks[0].Parameters[]
+                | if .ParameterKey == "ArtifactAccessLoggingEnabled"
+                  then {
+                    ParameterKey: .ParameterKey,
+                    ParameterValue: "true"
+                  }
+                  else {
+                    ParameterKey: .ParameterKey,
+                    UsePreviousValue: true
+                  }
+                  end
+              ]
+              + if $keys | index("AlarmRoutingEnabled")
+                then []
+                else [{
+                  ParameterKey: "AlarmRoutingEnabled",
+                  ParameterValue: "false"
+                }]
+                end
+          ' "$CURRENT_STACK_FILE" >"$parameters"
+
+          existing="${RUNNER_TEMP:?}/foundation-existing-change-set.json"
+          if aws cloudformation describe-change-set \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --include-property-values \
+              --region "$AWS_REGION" \
+              --output json >"$existing" 2>/dev/null; then
+            test "$(jq -er '.Description' "$existing")" = \
+              "$CHANGE_SET_DESCRIPTION"
+            jq -e '
+              .Status == "CREATE_COMPLETE"
+              and .ExecutionStatus == "AVAILABLE"
+            ' "$existing" >/dev/null
+            change_set_id="$(jq -er '.ChangeSetId' "$existing")"
+          else
+            created="${RUNNER_TEMP:?}/foundation-change-set-created.json"
+            aws cloudformation create-change-set \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --change-set-type UPDATE \
+              --description "$CHANGE_SET_DESCRIPTION" \
+              --template-url "$TEMPLATE_URL" \
+              --parameters "file://$parameters" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --region "$AWS_REGION" \
+              --output json >"$created"
+            change_set_id="$(jq -er '.Id' "$created")"
+            ready=false
+            for attempt in $(seq 1 90); do
+              probe="${RUNNER_TEMP:?}/foundation-change-set-probe.json"
+              if aws cloudformation describe-change-set \
+                  --stack-name "${APP_NAME}-delivery-bootstrap" \
+                  --change-set-name "$change_set_id" \
+                  --include-property-values \
+                  --region "$AWS_REGION" \
+                  --output json >"$probe" 2>/dev/null; then
+                state="$(
+                  jq -r '.Status + ":" + .ExecutionStatus' "$probe"
+                )"
+                case "$state" in
+                  CREATE_COMPLETE:AVAILABLE)
+                    ready=true
+                    break
+                    ;;
+                  CREATE_PENDING:*|CREATE_IN_PROGRESS:*) ;;
+                  *) exit 1 ;;
+                esac
+              fi
+              test "$attempt" -lt 90
+              sleep 5
+            done
+            test "$ready" = "true"
+          fi
+          [[ "$change_set_id" == \
+            arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/* ]]
+          echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
+
+      - name: Load the exact existing migration plan
+        if: env.ALREADY_CURRENT != 'true' && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          change_set="${RUNNER_TEMP:?}/foundation-change-set-for-apply.json"
+          aws cloudformation describe-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$change_set"
+          test "$(jq -er '.Description' "$change_set")" = \
+            "$CHANGE_SET_DESCRIPTION"
+          jq -e '
+            .Status == "CREATE_COMPLETE"
+            and .ExecutionStatus == "AVAILABLE"
+          ' "$change_set" >/dev/null
+          change_set_id="$(jq -er '.ChangeSetId' "$change_set")"
+          [[ "$change_set_id" == \
+            arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:changeSet/${CHANGE_SET_NAME}/* ]]
+          echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
+
+      - name: Require the exact additive non-replacement migration
+        if: env.ALREADY_CURRENT != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          change_set="${RUNNER_TEMP:?}/foundation-inspected-change-set.json"
+          template_response="${RUNNER_TEMP:?}/foundation-change-set-template.json"
+          template="${RUNNER_TEMP:?}/foundation-change-set-template.yaml"
+          canonical_changes="${RUNNER_TEMP:?}/foundation-canonical-changes.json"
+          canonical_parameters="${RUNNER_TEMP:?}/foundation-canonical-parameters.json"
+          expected_additions="${RUNNER_TEMP:?}/foundation-expected-additions.json"
+
+          aws cloudformation describe-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$change_set"
+          aws cloudformation get-template \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$template_response" |
+            base64 --decode >"$template"
+          test "$(sha256sum "$template" | awk '{print $1}')" = \
+            "$CANDIDATE_TEMPLATE_DIGEST"
+
+          jq -e \
+            --arg id "$CHANGE_SET_ID" \
+            --arg name "$CHANGE_SET_NAME" \
+            --arg description "$CHANGE_SET_DESCRIPTION" \
+            --slurpfile current "$CURRENT_STACK_FILE" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              (
+                $current[0].Stacks[0].Parameters
+                | parameter_map
+                | .ArtifactAccessLoggingEnabled = "true"
+                | .AlarmRoutingEnabled = (
+                    .AlarmRoutingEnabled // "false"
+                  )
+              ) as $expectedParameters
+              | .ChangeSetId == $id
+              and .StackId == $current[0].Stacks[0].StackId
+              and .ChangeSetName == $name
+              and .Description == $description
+              and .ChangeSetType == "UPDATE"
+              and .Status == "CREATE_COMPLETE"
+              and .ExecutionStatus == "AVAILABLE"
+              and ((.IncludeNestedStacks // false) == false)
+              and .Capabilities == ["CAPABILITY_NAMED_IAM"]
+              and ((.RoleARN // null) == null)
+              and ((.NotificationARNs // []) == [])
+              and (
+                (.RollbackConfiguration.RollbackTriggers // [])
+                == []
+              )
+              and (
+                (.RollbackConfiguration.MonitoringTimeInMinutes // 0)
+                == 0
+              )
+              and ((.ImportExistingResources // false) == false)
+              and (
+                (.Tags // [] | sort_by(.Key))
+                == (
+                  ($current[0].Stacks[0].Tags // [])
+                  | sort_by(.Key)
+                )
+              )
+              and (.Parameters | parameter_map) == $expectedParameters
+              and (.Changes | length) > 0
+            ' "$change_set" >/dev/null
+
+          jq '
+            .Parameters
+            | map({key:.ParameterKey, value:.ParameterValue})
+            | from_entries
+            | to_entries
+            | sort_by(.key)
+            | from_entries
+          ' "$change_set" >"$canonical_parameters"
+          parameters_sha256="$(
+            jq -Sc . "$canonical_parameters" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+
+          jq -e \
+            --slurpfile policy aws/foundation-storage-migration-policy.json \
+            '
+              $policy[0] as $policy
+              | all(
+                  .Changes[];
+                  .ResourceChange as $change
+                  | ($policy.forbiddenActions | index($change.Action)) == null
+                  and ($change.Replacement // "False") == "False"
+                  and all(
+                    ($change.Details // [])[];
+                    .Target.RequiresRecreation == "Never"
+                  )
+                  and (
+                    if $change.Action == "Add"
+                    then any(
+                      $policy.requiredNewResources[];
+                      .logicalResourceId == $change.LogicalResourceId
+                      and .resourceType == $change.ResourceType
+                    )
+                    elif $change.Action == "Modify"
+                    then any(
+                      $policy.allowedModifications[];
+                      .logicalResourceId == $change.LogicalResourceId
+                      and .resourceType == $change.ResourceType
+                    )
+                    else false
+                    end
+                  )
+                )
+            ' "$change_set" >/dev/null
+
+          jq -n \
+            --slurpfile resources "$CURRENT_RESOURCES_FILE" \
+            --slurpfile policy aws/foundation-storage-migration-policy.json \
+            '
+              ($resources[0].StackResourceSummaries // []) as $current
+              | [
+                  $policy[0].requiredNewResources[]
+                  | . as $required
+                  | (
+                      [
+                        $current[]
+                        | select(
+                            .LogicalResourceId
+                              == $required.logicalResourceId
+                          )
+                      ]
+                    ) as $matches
+                  | if ($matches | length) == 0
+                    then $required
+                    elif (
+                      ($matches | length) == 1
+                      and $matches[0].ResourceType
+                        == $required.resourceType
+                    )
+                    then empty
+                    else error("existing resource type mismatch")
+                    end
+                ]
+              | sort_by(.logicalResourceId)
+            ' >"$expected_additions"
+          jq -e \
+            --slurpfile expected "$expected_additions" \
+            '
+              [
+                .Changes[]
+                | select(.ResourceChange.Action == "Add")
+                | {
+                    logicalResourceId:
+                      .ResourceChange.LogicalResourceId,
+                    resourceType: .ResourceChange.ResourceType
+                  }
+              ]
+              | sort_by(.logicalResourceId)
+              | . == $expected[0]
+            ' "$change_set" >/dev/null
+
+          jq '
+            [
+              .Changes[]
+              | {
+                  action: .ResourceChange.Action,
+                  logicalResourceId:
+                    .ResourceChange.LogicalResourceId,
+                  resourceType: .ResourceChange.ResourceType,
+                  replacement:
+                    ((.ResourceChange.Replacement // "False") == "True")
+                }
+            ]
+            | sort_by(.logicalResourceId, .action)
+          ' "$change_set" >"$canonical_changes"
+
+          receipt_next="${RUNNER_TEMP:?}/foundation-plan-receipt.json"
+          jq \
+            --arg result \
+              "$([ "$OPERATION" = "plan" ] && printf inspected-plan || printf apply-pending)" \
+            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg changeSetName "$CHANGE_SET_NAME" \
+            --arg templateVersionId "$TEMPLATE_VERSION_ID" \
+            --arg templateChecksum "$TEMPLATE_CHECKSUM" \
+            --arg bootstrapEncryption "$BOOTSTRAP_TEMPLATE_ENCRYPTION" \
+            --arg parametersSha256 "$parameters_sha256" \
+            --slurpfile changes "$canonical_changes" \
+            '
+              . + {
+                ok: (.operation == "plan"),
+                result: $result,
+                templateObject: {
+                  versionId: $templateVersionId,
+                  checksumSha256Base64: $templateChecksum,
+                  encryption: $bootstrapEncryption
+                },
+                changeSet: {
+                  id: $changeSetId,
+                  name: $changeSetName,
+                  status: "CREATE_COMPLETE",
+                  executionStatus: "AVAILABLE",
+                  changeSetType: "UPDATE",
+                  parametersSha256: $parametersSha256,
+                  roleArnPresent: false,
+                  notificationArns: 0,
+                  rollbackTriggers: 0,
+                  changes: $changes[0]
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Apply target stack policy and execute the inspected plan
+        if: env.ALREADY_CURRENT != 'true' && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          policy_transitioned=false
+          restore_previous_policy() {
+            local status="$?"
+            trap - ERR
+            if [ "$policy_transitioned" = "true" ]; then
+              aws cloudformation set-stack-policy \
+                --stack-name "${APP_NAME}-delivery-bootstrap" \
+                --stack-policy-body \
+                  "file://$CURRENT_STACK_POLICY_BODY_FILE" \
+                --region "$AWS_REGION" || true
+            fi
+            exit "$status"
+          }
+          trap restore_previous_policy ERR
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+          aws cloudformation set-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --stack-policy-body file://aws/bootstrap-stack-policy.json \
+            --region "$AWS_REGION"
+          policy_transitioned=true
+          policy_after="${RUNNER_TEMP:?}/foundation-stack-policy-after-set.json"
+          aws cloudformation get-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$policy_after"
+          jq -e \
+            --slurpfile expected aws/bootstrap-stack-policy.json \
+            '(.StackPolicyBody | fromjson) == $expected[0]' \
+            "$policy_after" >/dev/null
+
+          client_token="foundation-storage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA:0:12}"
+          aws cloudformation execute-change-set \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --change-set-name "$CHANGE_SET_ID" \
+            --client-request-token "$client_token" \
+            --region "$AWS_REGION"
+
+          terminal=false
+          saw_progress=false
+          stack_status=UNKNOWN
+          for attempt in $(seq 1 120); do
+            state="${RUNNER_TEMP:?}/foundation-migration-state.json"
+            aws cloudformation describe-stacks \
+              --stack-name "${APP_NAME}-delivery-bootstrap" \
+              --region "$AWS_REGION" \
+              --output json >"$state"
+            stack_status="$(jq -er '.Stacks[0].StackStatus' "$state")"
+            case "$stack_status" in
+              UPDATE_COMPLETE)
+                execution_status="$(
+                  aws cloudformation describe-change-set \
+                    --stack-name "${APP_NAME}-delivery-bootstrap" \
+                    --change-set-name "$CHANGE_SET_ID" \
+                    --region "$AWS_REGION" \
+                    --query ExecutionStatus \
+                    --output text
+                )"
+                if [ "$saw_progress" = "true" ] ||
+                    [ "$execution_status" = "EXECUTE_COMPLETE" ]; then
+                  terminal=true
+                  break
+                fi
+                test "$attempt" -lt 12
+                ;;
+              UPDATE_ROLLBACK_COMPLETE)
+                aws cloudformation set-stack-policy \
+                  --stack-name "${APP_NAME}-delivery-bootstrap" \
+                  --stack-policy-body \
+                    "file://$CURRENT_STACK_POLICY_BODY_FILE" \
+                  --region "$AWS_REGION"
+                policy_transitioned=false
+                echo "Foundation migration rolled back." >&2
+                exit 1
+                ;;
+              UPDATE_FAILED|UPDATE_ROLLBACK_FAILED)
+                echo "Foundation migration reached $stack_status." >&2
+                false
+                ;;
+              UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+              UPDATE_ROLLBACK_IN_PROGRESS|\
+              UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
+                saw_progress=true
+                ;;
+              *)
+                echo "Unexpected foundation stack state: $stack_status" >&2
+                false
+                ;;
+            esac
+            test "$attempt" -lt 120
+            sleep 10
+          done
+          test "$terminal" = "true"
+          trap - ERR
+          echo "EXECUTION_CLIENT_TOKEN=$client_token" >>"$GITHUB_ENV"
+
+      - name: Prove exact deployed template and live storage controls
+        if: inputs.operation == 'apply' || env.ALREADY_CURRENT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployed_response="${RUNNER_TEMP:?}/foundation-deployed-template-response.json"
+          deployed_template="${RUNNER_TEMP:?}/foundation-deployed-template.yaml"
+          live_policy="${RUNNER_TEMP:?}/foundation-live-target-policy.json"
+          storage_proof="${RUNNER_TEMP:?}/foundation-storage-proof.json"
+          access_logging_proof="${RUNNER_TEMP:?}/foundation-access-logging-proof.json"
+
+          aws cloudformation get-template \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$deployed_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$deployed_response" |
+            base64 --decode >"$deployed_template"
+          test "$(sha256sum "$deployed_template" | awk '{print $1}')" = \
+            "$CANDIDATE_TEMPLATE_DIGEST"
+
+          aws cloudformation get-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$live_policy"
+          jq -e \
+            --slurpfile expected aws/bootstrap-stack-policy.json \
+            '(.StackPolicyBody | fromjson) == $expected[0]' \
+            "$live_policy" >/dev/null
+
+          authority_state=ignore
+          if [ "$OPERATION" = "verify" ]; then
+            authority_state=retired
+          fi
+          bash aws/prove-foundation-storage-controls.sh \
+            "$authority_state" >"$storage_proof"
+          bash aws/prove-s3-access-logging.sh verify \
+            >"$access_logging_proof"
+          jq -e \
+            --arg operation "$OPERATION" \
+            '
+              .ok == true
+              and (
+                if $operation == "verify"
+                then .migrationAuthority.retired == true
+                else true
+                end
+              )
+            ' "$storage_proof" >/dev/null
+          jq -e '.ok == true' "$access_logging_proof" >/dev/null
+
+          result="already-current"
+          if [ "$ALREADY_CURRENT" != "true" ]; then
+            result="applied-and-proved"
+          fi
+          receipt_next="${RUNNER_TEMP:?}/foundation-proved-receipt.json"
+          jq \
+            --arg result "$result" \
+            --arg clientToken "${EXECUTION_CLIENT_TOKEN:-}" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" \
+            --arg policySha256 "$TARGET_STACK_POLICY_DIGEST" \
+            --slurpfile storage "$storage_proof" \
+            --slurpfile accessLogging "$access_logging_proof" \
+            '
+              . + {
+                ok: true,
+                result: $result,
+                run: {
+                  id: ($runId | tonumber),
+                  attempt: ($runAttempt | tonumber),
+                  workflowRef: $workflowRef
+                },
+                stackPolicy: (
+                  .stackPolicy + {
+                    deployedSha256: $policySha256
+                  }
+                ),
+                execution: {
+                  clientRequestToken: (
+                    if $clientToken == ""
+                    then null
+                    else $clientToken
+                    end
+                  ),
+                  terminalStackStatus: "UPDATE_COMPLETE"
+                },
+                proof: {
+                  storage: $storage[0],
+                  accessLogging: $accessLogging[0]
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Mark an already-current plan as proved
+        if: env.ALREADY_CURRENT == 'true' && inputs.operation == 'plan'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.ok == true and .result == "already-current"' \
+            "$RECEIPT_FILE" >/dev/null
+
+      - name: Upload sanitized migration receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: foundation-storage-migration-${{ inputs.operation }}-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/foundation-storage-migration-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  prove-retirement-readiness:
+    name: Prove permanent authority before retirement
+    needs: authorize
+    if: inputs.operation == 'retire'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: bootstrap
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      proof-sha256: ${{ steps.proof.outputs.sha256 }}
+    steps:
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure permanent narrow foundation authority
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.APP_NAME }}-github-foundation-promotion
+          role-session-name: archon-foundation-retirement-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Prove candidate foundation and permanent controls
+        id: proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          proof="${RUNNER_TEMP:?}/foundation-retirement-readiness.json"
+          template_response="${RUNNER_TEMP:?}/foundation-retirement-template.json"
+          template="${RUNNER_TEMP:?}/foundation-retirement-template.yaml"
+          stack_policy="${RUNNER_TEMP:?}/foundation-retirement-policy.json"
+          bash aws/prove-foundation-storage-controls.sh >"$proof"
+          jq -e '.ok == true' "$proof" >/dev/null
+          aws cloudformation get-template \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$template_response" |
+            base64 --decode >"$template"
+          test "$(sha256sum "$template" | awk '{print $1}')" = \
+            "$(sha256sum aws/bootstrap-oidc.yaml | awk '{print $1}')"
+          aws cloudformation get-stack-policy \
+            --stack-name "${APP_NAME}-delivery-bootstrap" \
+            --region "$AWS_REGION" \
+            --output json >"$stack_policy"
+          jq -e \
+            --slurpfile expected aws/bootstrap-stack-policy.json \
+            '(.StackPolicyBody | fromjson) == $expected[0]' \
+            "$stack_policy" >/dev/null
+          sha256="$(jq -Sc . "$proof" | sha256sum | awk '{print $1}')"
+          [[ "$sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+
+  retire-authority:
+    name: Retire one-time migration authority
+    needs:
+      - authorize
+      - prove-retirement-readiness
+    if: inputs.operation == 'retire'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: bootstrap
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the authorized main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure exact one-time migration authority
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_FOUNDATION_MIGRATION_ROLE_ARN }}
+          role-session-name: archon-foundation-retire-${{ github.run_id }}-${{ github.run_attempt }}
+          mask-aws-account-id: true
+
+      - name: Verify and retire the exact authority stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority_proof="${RUNNER_TEMP:?}/foundation-retired-authority-proof.json"
+          receipt="${RUNNER_TEMP:?}/foundation-storage-migration-receipt.json"
+          bash aws/foundation-migration-authority.sh verify \
+            >"$authority_proof"
+          jq -e '.ok == true and .retirementRequired == true' \
+            "$authority_proof" >/dev/null
+          stack="${APP_NAME}-foundation-migration-authority"
+          client_token="retire-foundation-authority-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws cloudformation delete-stack \
+            --stack-name "$stack" \
+            --client-request-token "$client_token" \
+            --region "$AWS_REGION"
+          deleted=false
+          for attempt in $(seq 1 90); do
+            error="${RUNNER_TEMP:?}/foundation-authority-delete.err"
+            if aws cloudformation describe-stacks \
+                --stack-name "$stack" \
+                --region "$AWS_REGION" \
+                --output json >/dev/null 2>"$error"; then
+              :
+            elif grep -Fq "ValidationError" "$error" &&
+                grep -Fq "does not exist" "$error"; then
+              deleted=true
+              break
+            fi
+            test "$attempt" -lt 90
+            sleep 5
+          done
+          test "$deleted" = "true"
+          role_error="${RUNNER_TEMP:?}/foundation-authority-role.err"
+          if aws iam get-role \
+              --role-name "${APP_NAME}-github-foundation-migration" \
+              --output json >/dev/null 2>"$role_error"; then
+            echo "The one-time migration role still exists." >&2
+            exit 1
+          fi
+          grep -Fq "NoSuchEntity" "$role_error"
+          jq -n \
+            --arg commit "$TARGET_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" \
+            --arg clientToken "$client_token" \
+            --arg permanentProofSha256 \
+              "${{ needs.prove-retirement-readiness.outputs.proof-sha256 }}" \
+            --slurpfile authority "$authority_proof" \
+            '{
+              schema: "archon.aws.foundation-storage-migration",
+              schemaVersion: 1,
+              ok: true,
+              operation: "retire",
+              result: "one-time-authority-retired",
+              commit: $commit,
+              run: {
+                id: ($runId | tonumber),
+                attempt: ($runAttempt | tonumber),
+                workflowRef: $workflowRef
+              },
+              execution: {
+                clientRequestToken: $clientToken
+              },
+              permanentAuthorityProofSha256:
+                $permanentProofSha256,
+              retiredAuthority: (
+                $authority[0] + {
+                  stackDeleted: true,
+                  roleDeleted: true,
+                  retired: true
+                }
+              )
+            }' >"$receipt"
+
+      - name: Upload sanitized retirement receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: foundation-storage-migration-retire-${{ inputs.target_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/foundation-storage-migration-receipt.json
+          if-no-files-found: error
+          retention-days: 90

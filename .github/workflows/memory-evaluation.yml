@@ -1,8 +1,9 @@
 name: Memory architecture evaluation
 
 # Pipeline-owned evidence for longitudinal behavior, B0-B4 baselines, lifecycle
-# ablations, a generated 100k-event rehearsal, and real C-SPANN recall versus exact
-# ground truth. No corpus or build artifact is written to a developer workstation.
+# ablations, supported production-runtime parity, a generated 100k-event rehearsal,
+# and provenance-derived real C-SPANN recall versus exact ground truth. No corpus or
+# build artifact is written to a developer workstation.
 
 on:
   workflow_dispatch:
@@ -63,6 +64,14 @@ jobs:
       - name: Install lockfile dependencies
         run: npm ci
 
+      - name: Typecheck and run evaluator mutation/meta tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck
+          node --import tsx --test --test-concurrency=1 \
+            tests/memory-evaluation.test.ts
+
       - name: Evaluate B0-B4, lifecycle ablations, and 100k-event rehearsal
         env:
           SCALE_RECORDS: ${{ inputs.scale_records || '100000' }}
@@ -86,7 +95,7 @@ jobs:
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 \
             start-single-node --insecure
           ready=0
-          for attempt in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec memory-eval-crdb cockroach sql --insecure \
               -e "SELECT 1" >/dev/null 2>&1; then
               ready=1
@@ -100,6 +109,15 @@ jobs:
 
       - name: Apply schema with native distributed vector index
         run: npm run db:schema
+
+      - name: Prove supported runtime parity across fresh production instances
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-runtime-longitudinal.ts runtime \
+            --output "$EVALUATION_DIR" \
+            --source-sha "$SOURCE_SHA"
+          test -s "$EVALUATION_DIR/runtime-longitudinal-results.json"
 
       - name: Compare C-SPANN recall with exact cosine ground truth
         shell: bash
@@ -115,6 +133,18 @@ jobs:
             npm run --silent benchmark |
             tee "$EVALUATION_DIR/vector-benchmark.log"
 
+      - name: Derive vector provenance from the completed benchmark and CockroachDB
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/evaluate-runtime-longitudinal.ts \
+            vector-provenance \
+            --output "$EVALUATION_DIR" \
+            --source-sha "$SOURCE_SHA" \
+            --vector-log "$EVALUATION_DIR/vector-benchmark.log" \
+            --benchmark-source scripts/benchmark.ts
+          test -s "$EVALUATION_DIR/vector-provenance.json"
+
       - name: Finalize SHA-bound evaluation receipt
         env:
           VECTOR_RECALL_FLOOR: "0.80"
@@ -124,7 +154,9 @@ jobs:
           node --import tsx scripts/evaluate-memory-architecture.ts finalize \
             --output "$EVALUATION_DIR" \
             --source-sha "$SOURCE_SHA" \
-            --vector-log "$EVALUATION_DIR/vector-benchmark.log"
+            --vector-log "$EVALUATION_DIR/vector-benchmark.log" \
+            --vector-provenance "$EVALUATION_DIR/vector-provenance.json" \
+            --runtime-result "$EVALUATION_DIR/runtime-longitudinal-results.json"
           node - "$EVALUATION_DIR/memory-evaluation-receipt.json" "$SOURCE_SHA" <<'NODE'
           const crypto = require("node:crypto");
           const fs = require("node:fs");
@@ -166,6 +198,40 @@ jobs:
             .digest("hex");
           if (bodyDigest !== seal.digest) {
             throw new Error("evaluation receipt body digest mismatch");
+          }
+          const evaluationDir = path.dirname(receiptPath);
+          const policy = JSON.parse(
+            fs.readFileSync(path.join(evaluationDir, "policy-results.json"), "utf8")
+          );
+          const runtime = fs.readFileSync(
+            path.join(evaluationDir, "runtime-longitudinal-results.json")
+          );
+          const runtimeDigest = crypto
+            .createHash("sha256")
+            .update(runtime)
+            .digest("hex");
+          if (
+            policy.runtimeParityEvidence?.artifact?.file !==
+              "runtime-longitudinal-results.json" ||
+            policy.runtimeParityEvidence?.artifact?.sha256 !== runtimeDigest
+          ) {
+            throw new Error("runtime parity evidence is not transitively SHA-bound");
+          }
+          const vector = JSON.parse(
+            fs.readFileSync(path.join(evaluationDir, "vector-results.json"), "utf8")
+          );
+          const provenance = fs.readFileSync(
+            path.join(evaluationDir, "vector-provenance.json")
+          );
+          const provenanceDigest = crypto
+            .createHash("sha256")
+            .update(provenance)
+            .digest("hex");
+          if (
+            vector.provenance?.artifact?.file !== "vector-provenance.json" ||
+            vector.provenance?.artifact?.sha256 !== provenanceDigest
+          ) {
+            throw new Error("vector provenance is not transitively SHA-bound");
           }
           NODE
 

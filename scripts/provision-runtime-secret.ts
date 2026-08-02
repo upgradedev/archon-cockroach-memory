@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   }
   const rotationId = randomBytes(5).toString("hex");
   const appName = process.env.APP_NAME?.trim() || "archon-memory";
-  if (!/^[a-z][a-z0-9-]{2,24}$/u.test(appName)) {
+  if (!/^[a-z][a-z0-9-]{2,16}$/u.test(appName)) {
     throw new Error("APP_NAME has an invalid format.");
   }
   const readerRole = identifier("archon_public_reader", "reader role");

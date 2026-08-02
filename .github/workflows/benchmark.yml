@@ -46,7 +46,7 @@ jobs:
           docker run -d --name crdb -p 26257:26257 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 \
             start-single-node --insecure
-          for i in $(seq 1 30); do docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+          for _ in $(seq 1 30); do docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
           docker exec crdb cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
       - run: npm run db:schema
 
@@ -72,7 +72,7 @@ jobs:
           docker compose -f docker-compose.cluster.yml up -d
           sleep 15
           docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach init --insecure || true
-          for i in $(seq 1 30); do docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+          for _ in $(seq 1 30); do docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
           docker compose -f docker-compose.cluster.yml exec -T roach1 cockroach sql --insecure -e "CREATE DATABASE IF NOT EXISTS archon_memory"
           npm run db:schema
 

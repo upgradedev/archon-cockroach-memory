@@ -67,7 +67,7 @@ fi
 if ! [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
   die "AWS_ACCOUNT_ID must be an exact 12-digit account id."
 fi
-if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,24}$ ]]; then
+if ! [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{2,16}$ ]]; then
   die "APP_NAME is invalid."
 fi
 case "$ENVIRONMENT" in

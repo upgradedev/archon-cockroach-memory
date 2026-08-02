@@ -1,7 +1,7 @@
 # Sustainability baseline and targets
 
-Status: measurement contract defined; owner, baseline, and target are pending
-human decisions.
+Status: repository-prepared; owner assignment, protected execution, live
+baseline, and improvement evidence remain pending human decisions.
 
 The project does not convert cost, architecture choice, or a short CI benchmark
 into a carbon claim. It first measures workload intensity for an equivalent
@@ -19,17 +19,51 @@ service objective are equivalent.
 
 | Metric per successful recall | Evidence source | Current baseline |
 |---|---|---|
-| Lambda GB-seconds | CloudWatch/Lambda | Pending |
+| Lambda configured-memory GB-seconds | CloudWatch/Lambda Duration × configured memory | Pending |
 | Lambda invocation and retry count | CloudWatch/Lambda | Pending |
 | Bedrock model calls and input/output usage | Bedrock telemetry or billing dimensions | Pending |
-| S3 GB-days and request count | S3/CloudWatch/Inventory | Pending |
-| CloudFront/API transfer bytes | CloudFront/API telemetry | Pending |
-| Retained log and recovery-evidence GB-days | S3/CloudWatch Logs | Pending |
+| API Gateway processed bytes and request/error count | CloudWatch/API Gateway | Pending |
+| CloudFront uploaded/downloaded bytes and requests | CloudWatch/CloudFront | Pending |
+| Retained Lambda/API log bytes and retention | CloudWatch Logs metadata | Pending |
 | CockroachDB provisioned/consumed capacity | Provider evidence | Pending |
 
-These are engineering intensity proxies. They must not be described as
-measured emissions without the corresponding AWS sustainability data and
-methodology.
+These are engineering intensity proxies. Configured-memory GB-seconds use
+Lambda `Duration`, not billed-duration rounding or extension duration. None may
+be described as measured emissions without an applicable AWS sustainability
+methodology and evidence source.
+
+## Pipeline-owned measurement
+
+The protected `Sustainability Intensity Evidence` workflow consumes an exact
+successful version-2 Hosted Load Evidence receipt. That receipt provides the
+bounded workload timestamps, synthetic-corpus contract, concurrency and
+objectives, exact source deployment, the hosted workload contract-bundle digest
+(covering `load/hosted-recall.js` and its imported runtime-neutral validator),
+and a custom successful-recall counter that must equal the requested iterations.
+Recall p95 and error rate are custom recall-only k6 metrics; the setup proof
+request remains in the total request-integrity count but cannot distort the
+recall p95/error objectives.
+
+The read-only audit then queries the one-minute CloudWatch bins enclosing that
+window. It records Lambda invocation/error/Duration values, API Gateway
+`DataProcessed` and request/error values, CloudFront request/transfer values,
+and point-in-time Lambda/API log storage metadata. All numerators and the exact
+successful-recall denominator are retained in the sanitized receipt. Hosted
+load begins in a fresh CloudWatch minute, and Lambda, API, and CloudFront
+request counts must each equal the exact workload request count; detected
+concurrent traffic fails the evidence run.
+
+AWS application telemetry and the live stack are fixed to `eu-west-1`.
+CloudFront metrics are read from its `us-east-1` global telemetry/control plane;
+that read does not create an application workload there. The workflow creates,
+updates, invokes, or deletes no AWS resource.
+
+See [`sustainability-intensity.md`](../runbooks/sustainability-intensity.md) for
+the approval, baseline, comparison, and raw-evidence handling procedure.
+Metric definitions follow the official AWS documentation for
+[Lambda metrics](https://docs.aws.amazon.com/lambda/latest/dg/monitoring-metrics-types.html),
+[HTTP API metrics](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-metrics.html),
+and [CloudFront metrics](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/programming-cloudwatch-metrics.html).
 
 ## Candidate improvements
 
@@ -46,7 +80,7 @@ None is selected until pipeline evidence exists:
   resilience remain intact.
 
 The representative hosted comparison must run through CI/CD. No local load,
-build, or tuning artifact is acceptable evidence.
+build, telemetry query, or tuning artifact is acceptable evidence.
 
 ## Human decisions required
 
@@ -69,9 +103,15 @@ For the same functional unit and workload profile, the record must show:
 1. exact before/after release SHAs and workflow runs;
 2. correctness and SLO results;
 3. every proxy numerator and successful-recall denominator;
-4. at least one statistically meaningful intensity reduction;
-5. absence or explicit acceptance of regressions;
-6. owner review and next measurement date.
+4. the human-selected primary proxy and approved reduction target;
+5. a target-meeting before/after reduction for that proxy;
+6. absence or explicit acceptance of regressions;
+7. owner review and next measurement date.
+
+The repository has the measurement source only. Until both protected live
+runs exist and the comparison succeeds, baseline values remain pending and no
+improvement, carbon, emissions, production-scale, or business-impact claim is
+permitted.
 
 Use the current [AWS Sustainability service](https://docs.aws.amazon.com/sustainability/)
 and the

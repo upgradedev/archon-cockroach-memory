@@ -1,17 +1,33 @@
 name: Deploy AWS
 
 # Third-party actions and runtime inputs are immutable. The deployment checks
-# out only the exact successful CI SHA at the current main head, builds once,
-# verifies the receipt in every environment, then promotes that same candidate.
+# starts from a trusted main push, waits for the exact same-SHA CI run, builds
+# once, verifies the receipt in every environment, then promotes that candidate.
 
 on:
-  workflow_run:
-    workflows:
-      - CI
+  push:
     branches:
       - main
-    types:
-      - completed
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: The only manual mode is the protected staging recovery drill.
+        required: true
+        type: choice
+        options:
+          - staging-recovery-drill
+      target_sha:
+        description: Exact current main SHA already green in required pipelines.
+        required: true
+        type: string
+      approval_reference:
+        description: Non-secret approved drill/change reference; retained only as SHA-256.
+        required: true
+        type: string
+      confirmation:
+        description: Enter FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG.
+        required: true
+        type: string
 
 concurrency:
   group: aws-production-delivery
@@ -28,6 +44,8 @@ env:
   BEDROCK_REGION: ${{ vars.BEDROCK_REGION || 'eu-west-1' }}
   BEDROCK_EMBED_MODEL_ID: ${{ vars.BEDROCK_EMBED_MODEL_ID || 'amazon.titan-embed-text-v2:0' }}
   BEDROCK_NARRATOR_MODEL_ID: ${{ vars.BEDROCK_NARRATOR_MODEL_ID || 'eu.anthropic.claude-sonnet-4-6' }}
+  DEPLOY_OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'release' }}
+  RECOVERY_DRILL_TOKEN: ${{ github.event_name == 'workflow_dispatch' && format('drill-{0}-{1}', github.run_id, github.run_attempt) || 'disabled' }}
 
 jobs:
   source-gate:
@@ -38,6 +56,8 @@ jobs:
       actions: read
       contents: read
     outputs:
+      ci_run_id: ${{ steps.source_ci.outputs.run_id }}
+      ci_run_attempt: ${{ steps.source_ci.outputs.run_attempt }}
       memory_evaluation_receipt_base64: ${{ steps.memory_evaluation.outputs.receipt_base64 }}
       memory_evaluation_run_id: ${{ steps.memory_evaluation.outputs.run_id }}
       memory_evaluation_run_attempt: ${{ steps.memory_evaluation.outputs.run_attempt }}
@@ -45,33 +65,108 @@ jobs:
       supply_chain_run_attempt: ${{ steps.supply_chain.outputs.run_attempt }}
     steps:
       - name: Require successful exact-main push CI source
+        id: source_ci
         shell: bash
         env:
-          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
-          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
-          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference || '' }}
+          DEPLOY_TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.sha }}
+          DRILL_CONFIRMATION: ${{ inputs.confirmation || '' }}
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$SOURCE_CONCLUSION" = "success"
-          test "$SOURCE_EVENT" = "push"
-          test "$SOURCE_BRANCH" = "main"
-          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_REPOSITORY" = \
+            "upgradedev/archon-cockroach-memory"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$DEPLOY_TARGET_SHA" = "$EXPECTED_SHA"
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              test "$DEPLOY_OPERATION" = "release"
+              test "$RECOVERY_DRILL_TOKEN" = "disabled"
+              test -z "$APPROVAL_REFERENCE"
+              test -z "$DRILL_CONFIRMATION"
+              ;;
+            workflow_dispatch)
+              test "$DEPLOY_OPERATION" = "staging-recovery-drill"
+              test "$DRILL_CONFIRMATION" = \
+                "FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG"
+              [[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]
+              test "$RECOVERY_DRILL_TOKEN" = \
+                "drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
+            *)
+              echo "Deploy AWS accepts only a main push or its exact protected staging drill dispatch." >&2
+              exit 1
+              ;;
+          esac
+          for _ in {1..180}; do
+            run="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=20" |
+                jq -cer --arg sha "$EXPECTED_SHA" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .head_sha == $sha and
+                      .head_branch == "main" and
+                      .event == "push" and
+                      .name == "CI" and
+                      .path == ".github/workflows/ci.yml"
+                    )
+                  ] |
+                  sort_by(.run_number, .run_attempt) |
+                  last // {}
+                '
+            )"
+            state="$(
+              jq -r '
+                if .id == null then "missing"
+                elif .conclusion != null then .conclusion
+                else .status
+                end
+              ' <<<"$run"
+            )"
+            case "$state" in
+              success)
+                run_id="$(jq -er '.id' <<<"$run")"
+                run_attempt="$(jq -er '.run_attempt' <<<"$run")"
+                [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+                [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+                {
+                  echo "run_id=$run_id"
+                  echo "run_attempt=$run_attempt"
+                } >>"$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required|startup_failure|stale|neutral|skipped)
+                echo "CI did not pass for release SHA $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+              missing|queued|in_progress|pending|requested|waiting)
+                sleep 15
+                ;;
+              *)
+                echo "Unexpected CI state for release SHA $EXPECTED_SHA: $state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "CI did not complete for release SHA $EXPECTED_SHA." >&2
+          exit 1
 
       - name: Require successful exact-SHA Supply Chain evidence
         id: supply_chain
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          for attempt in {1..180}; do
+          for _ in {1..180}; do
             run="$(
               gh api \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/supply-chain.yml/runs?branch=main&event=push&per_page=20" |
@@ -127,12 +222,12 @@ jobs:
         id: memory_evaluation
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          for attempt in {1..160}; do
+          for _ in {1..160}; do
             run="$(
               gh api \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/memory-evaluation.yml/runs?branch=main&event=push&per_page=20" |
@@ -285,6 +380,221 @@ jobs:
           echo "Memory architecture evaluation did not complete for $EXPECTED_SHA." >&2
           exit 1
 
+      - name: Require exact-SHA foundation and edge-control receipts
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          evidence_root="${RUNNER_TEMP:?}/aws-control-plane-prerequisites"
+          mkdir -p "$evidence_root"
+
+          prove_foundation_receipt() {
+            local artifact artifacts destination expected_name id receipt
+            local run_attempt runs
+            runs="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/foundation-migration.yml/runs?branch=main&event=workflow_dispatch&per_page=100"
+            )"
+            while IFS=$'\t' read -r id run_attempt; do
+              [[ "$id" =~ ^[1-9][0-9]*$ ]]
+              [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+              expected_name="foundation-storage-migration-verify-${EXPECTED_SHA}-${id}-${run_attempt}"
+              artifacts="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/${id}/artifacts?per_page=100"
+              )"
+              artifact="$(
+                jq -er \
+                  --arg name "$expected_name" \
+                  '
+                    [
+                      .artifacts[]
+                      | select(
+                          .name == $name
+                          and .expired == false
+                        )
+                    ]
+                    | select(length == 1)
+                    | .[0].name
+                  ' <<<"$artifacts" 2>/dev/null || true
+              )"
+              if [ "$artifact" != "$expected_name" ]; then
+                continue
+              fi
+              destination="$evidence_root/foundation-${id}-${run_attempt}"
+              mkdir -p "$destination"
+              gh run download "$id" \
+                --name "$artifact" \
+                --dir "$destination"
+              receipt="$destination/foundation-storage-migration-receipt.json"
+              jq -e \
+                --arg sha "$EXPECTED_SHA" \
+                '
+                  .schema
+                    == "archon.aws.foundation-storage-migration"
+                  and .schemaVersion == 1
+                  and .ok == true
+                  and .operation == "verify"
+                  and .result == "already-current"
+                  and .commit == $sha
+                  and .proof.storage.ok == true
+                  and .proof.storage.migrationAuthority.retired
+                    == true
+                  and .proof.accessLogging.ok == true
+                ' "$receipt" >/dev/null
+              return 0
+            done < <(
+              jq -r \
+                --arg sha "$EXPECTED_SHA" \
+                '
+                  [
+                    .workflow_runs[]
+                    | select(
+                        .head_sha == $sha
+                        and .head_branch == "main"
+                        and .event == "workflow_dispatch"
+                        and .name
+                          == "Foundation Storage Migration"
+                        and .path
+                          == ".github/workflows/foundation-migration.yml"
+                        and .conclusion == "success"
+                      )
+                  ]
+                  | sort_by(.run_number, .run_attempt)
+                  | reverse[]
+                  | [.id, .run_attempt]
+                  | @tsv
+                ' <<<"$runs"
+            )
+            return 1
+          }
+
+          prove_edge_receipt() {
+            local artifact artifacts destination environment expected_name
+            local id operation receipt run_attempt runs
+            environment="$1"
+            runs="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/edge-controls.yml/runs?branch=main&event=workflow_dispatch&per_page=100"
+            )"
+            while IFS=$'\t' read -r id run_attempt; do
+              [[ "$id" =~ ^[1-9][0-9]*$ ]]
+              [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
+              artifacts="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/${id}/artifacts?per_page=100"
+              )"
+              for operation in verify apply; do
+                expected_name="edge-controls-${environment}-${operation}-${EXPECTED_SHA}-${id}-${run_attempt}"
+                artifact="$(
+                  jq -er \
+                    --arg name "$expected_name" \
+                    '
+                      [
+                        .artifacts[]
+                        | select(
+                            .name == $name
+                            and .expired == false
+                          )
+                      ]
+                      | select(length == 1)
+                      | .[0].name
+                    ' <<<"$artifacts" 2>/dev/null || true
+                )"
+                if [ "$artifact" != "$expected_name" ]; then
+                  continue
+                fi
+                destination="$evidence_root/edge-${environment}-${id}-${run_attempt}"
+                mkdir -p "$destination"
+                gh run download "$id" \
+                  --name "$artifact" \
+                  --dir "$destination"
+                receipt="$destination/edge-controls-receipt.json"
+                jq -e \
+                  --arg sha "$EXPECTED_SHA" \
+                  --arg environment "$environment" \
+                  --arg operation "$operation" \
+                  '
+                    .schema == "archon.aws.edge-controls"
+                    and .schemaVersion == 1
+                    and .ok == true
+                    and .operation == $operation
+                    and (
+                      .result == "verified"
+                      or .result == "applied-and-proved"
+                    )
+                    and .environment == $environment
+                    and .commit == $sha
+                    and .proof.live == true
+                    and .proof.scope == "CLOUDFRONT"
+                    and .proof.controlPlaneRegion == "us-east-1"
+                    and .proof.accountBound == true
+                    and .proof.nameBound == true
+                    and .proof.tagsBound == true
+                    and (
+                      .proof.webAclArnSha256
+                      | test("^[0-9a-f]{64}$")
+                    )
+                    and (
+                      .proof.webAclIdSha256
+                      | test("^[0-9a-f]{64}$")
+                    )
+                    and (has("webAclArn") | not)
+                    and (has("webAclId") | not)
+                  ' "$receipt" >/dev/null
+                return 0
+              done
+            done < <(
+              jq -r \
+                --arg sha "$EXPECTED_SHA" \
+                '
+                  [
+                    .workflow_runs[]
+                    | select(
+                        .head_sha == $sha
+                        and .head_branch == "main"
+                        and .event == "workflow_dispatch"
+                        and .name == "Manage AWS Edge Controls"
+                        and .path
+                          == ".github/workflows/edge-controls.yml"
+                        and .conclusion == "success"
+                      )
+                  ]
+                  | sort_by(.run_number, .run_attempt)
+                  | reverse[]
+                  | [.id, .run_attempt]
+                  | @tsv
+                ' <<<"$runs"
+            )
+            return 1
+          }
+
+          for _ in {1..180}; do
+            foundation_ready=false
+            staging_ready=false
+            production_ready=false
+            if prove_foundation_receipt; then
+              foundation_ready=true
+            fi
+            if prove_edge_receipt staging; then
+              staging_ready=true
+            fi
+            if prove_edge_receipt production; then
+              production_ready=true
+            fi
+            if [ "$foundation_ready" = "true" ] &&
+                [ "$staging_ready" = "true" ] &&
+                [ "$production_ready" = "true" ]; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Foundation and edge-control receipts are incomplete for $EXPECTED_SHA." >&2
+          exit 1
+
   build-once:
     name: Verify CI SHA and build once
     needs:
@@ -300,14 +610,14 @@ jobs:
       - name: Check out the exact successful CI commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Prove the CI SHA is still the main branch head
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin main
@@ -318,7 +628,7 @@ jobs:
       - name: Download the exact-SHA Supply Chain release evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: supply-chain-release-${{ github.event.workflow_run.head_sha }}-${{ needs.source-gate.outputs.supply_chain_run_id }}-${{ needs.source-gate.outputs.supply_chain_run_attempt }}
+          name: supply-chain-release-${{ github.sha }}-${{ needs.source-gate.outputs.supply_chain_run_id }}-${{ needs.source-gate.outputs.supply_chain_run_attempt }}
           path: ${{ runner.temp }}/supply-chain-release
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -327,7 +637,7 @@ jobs:
       - name: Verify exact-SHA Supply Chain receipt and attestation
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           EXPECTED_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
           EXPECTED_RUN_ATTEMPT: ${{ needs.source-gate.outputs.supply_chain_run_attempt }}
           GH_TOKEN: ${{ github.token }}
@@ -423,7 +733,7 @@ jobs:
       - name: Bind exact-SHA Memory architecture evaluation receipt
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           EXPECTED_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
           EXPECTED_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
           RECEIPT_BASE64: ${{ needs.source-gate.outputs.memory_evaluation_receipt_base64 }}
@@ -460,11 +770,11 @@ jobs:
       - name: Prove CodeQL succeeded for the exact release SHA
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for attempt in {1..20}; do
+          for _ in {1..20}; do
             CODEQL_STATE="$(
               gh api \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/codeql.yml/runs?branch=main&event=push&per_page=20" |
@@ -547,7 +857,7 @@ jobs:
 
       - name: Create sanitized build receipt
         env:
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           node aws/create-deployment-receipt.mjs \
             --commit "$COMMIT_SHA" \
@@ -562,7 +872,7 @@ jobs:
       - name: Create exact-SHA candidate evidence binding
         shell: bash
         env:
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMMIT_SHA: ${{ github.sha }}
           MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
           MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
           SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
@@ -638,7 +948,7 @@ jobs:
       - name: Upload immutable candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: aws-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .aws-sam/build/
             web/dist/
@@ -652,6 +962,7 @@ jobs:
 
   database-release:
     name: Reconcile CockroachDB memory release
+    if: github.event_name == 'push'
     needs:
       - build-once
     permissions:
@@ -659,11 +970,30 @@ jobs:
       id-token: write
     uses: ./.github/workflows/database-release.yml
     with:
-      target_sha: ${{ github.event.workflow_run.head_sha }}
-    secrets: inherit
+      target_sha: ${{ github.sha }}
+    secrets:
+      CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
 
   deploy-staging:
     name: Deploy and smoke staging
+    if: >-
+      always() &&
+      !cancelled() &&
+      needs.source-gate.result == 'success' &&
+      needs.build-once.result == 'success' &&
+      (
+        (
+          github.event_name == 'push' &&
+          needs.database-release.result == 'success' &&
+          needs.managed-mcp-production-audit.result == 'success'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'staging-recovery-drill' &&
+          needs.database-release.result == 'skipped' &&
+          needs.managed-mcp-production-audit.result == 'skipped'
+        )
+      )
     needs:
       - source-gate
       - build-once
@@ -675,7 +1005,7 @@ jobs:
       url: ${{ steps.stack.outputs.application_url }}
     permissions:
       actions: read
-      attestations: read
+      attestations: write
       contents: read
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
@@ -688,11 +1018,12 @@ jobs:
       AWS_SAM_ARTIFACT_BUCKET: ${{ vars.AWS_SAM_ARTIFACT_BUCKET }}
       AWS_LAMBDA_EXECUTION_ROLE_ARN: ${{ vars.AWS_LAMBDA_EXECUTION_ROLE_ARN }}
       AWS_CODEDEPLOY_SERVICE_ROLE_ARN: ${{ vars.AWS_CODEDEPLOY_SERVICE_ROLE_ARN }}
+      COCKROACH_SQL_DNS: ${{ needs.database-release.outputs.cockroach_sql_dns || '' }}
     steps:
       - name: Check out the exact promoted source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -706,12 +1037,12 @@ jobs:
       - name: Download the CI-proven candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: aws-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify candidate, Supply Chain, and memory-evaluation provenance
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           EXPECTED_MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
           EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
           EXPECTED_SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
@@ -816,7 +1147,7 @@ jobs:
           test -n "$AWS_ACCOUNT_ID"
           node aws/create-deployment-receipt.mjs \
             --verify deployment-receipt.json \
-            --commit "${{ github.event.workflow_run.head_sha }}" \
+            --commit "${{ github.sha }}" \
             --sam .aws-sam/build \
             --web web/dist
 
@@ -857,7 +1188,7 @@ jobs:
 
       - name: Reconcile an interrupted same-run staging greenfield recovery
         env:
-          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
           ENVIRONMENT: staging
           GH_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -913,13 +1244,14 @@ jobs:
               >"$current_run"
             current_started_at="$(
               jq -er \
+                --arg event "$GITHUB_EVENT_NAME" \
                 --argjson id "$GITHUB_RUN_ID" \
                 --arg sha "$CANDIDATE_SHA" \
                 '
                   select(
                     .id == $id
                     and .head_sha == $sha
-                    and .event == "workflow_run"
+                    and .event == $event
                     and (
                       .path == ".github/workflows/deploy-aws.yml"
                       or .path == ".github/workflows/deploy-aws.yml@main"
@@ -937,7 +1269,7 @@ jobs:
                 ' "$current_run"
             )"
             gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=workflow_run&head_sha=${CANDIDATE_SHA}&per_page=100" \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=push&head_sha=${CANDIDATE_SHA}&per_page=100" \
               >"$candidate_runs"
             while IFS= read -r later_run_id; do
               [[ "$later_run_id" =~ ^[0-9]+$ ]]
@@ -968,7 +1300,7 @@ jobs:
                     | select(
                         .id != $currentRunId
                         and .head_sha == $sha
-                        and .event == "workflow_run"
+                        and .event == "push"
                         and (
                           .path == ".github/workflows/deploy-aws.yml"
                           or .path == ".github/workflows/deploy-aws.yml@main"
@@ -1408,7 +1740,7 @@ jobs:
           PREVIOUS_FUNCTION_NAME="$FUNCTION_NAME" \
           PREVIOUS_FUNCTION_VERSION="$FUNCTION_VERSION" \
           PREVIOUS_APPLICATION_URL="$APPLICATION_URL" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$snapshot"
           jq -e \
             --arg environment staging \
@@ -1439,6 +1771,160 @@ jobs:
             echo "tags_sha256=$(jq -r '.tagsSha256 // ""' "$snapshot")"
             echo "greenfield_owner=$(jq -r '.greenfieldOwner // ""' "$snapshot")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Authorize the exact existing staging release for fault injection
+        id: drill_gate
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'staging-recovery-drill'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$DEPLOY_OPERATION" = "staging-recovery-drill"
+          test "$HAS_PREVIOUS_STACK" = "true"
+          test -s previous-stack-parameters.json
+          test ! -L previous-stack-parameters.json
+
+          prior_cockroach_sql_dns="$(jq -er '
+            [.[]
+              | select(.ParameterKey == "CockroachSqlDns")
+              | .ParameterValue]
+            | if length == 1 then .[0]
+              else error("exact prior Cockroach SQL DNS not proved")
+              end
+          ' previous-stack-parameters.json)"
+          [[ "$prior_cockroach_sql_dns" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+          test "${#prior_cockroach_sql_dns}" -le 253
+
+          jq -e \
+            --arg app "$APP_NAME" \
+            --arg cockroachSqlDns "$prior_cockroach_sql_dns" \
+            --arg databaseSecretId "$DATABASE_SECRET_ID" \
+            --arg release "$GITHUB_SHA" '
+              def exact_parameter($key; $value):
+                ([.[] | select(.ParameterKey == $key) | .ParameterValue] == [$value]);
+              exact_parameter("AppName"; $app)
+              and exact_parameter("Environment"; "staging")
+              and exact_parameter("CockroachSqlDns"; $cockroachSqlDns)
+              and exact_parameter("DatabaseSecretId"; $databaseSecretId)
+              and exact_parameter("ReleaseCommitSha"; $release)
+              and exact_parameter("RecoveryDrillToken"; "disabled")
+            ' previous-stack-parameters.json >/dev/null
+          echo "COCKROACH_SQL_DNS=$prior_cockroach_sql_dns" >>"$GITHUB_ENV"
+
+          source_run="$({
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-aws.yml/runs?branch=main&event=push&status=success&per_page=100"
+          } | jq -cer --arg sha "$GITHUB_SHA" '
+            [
+              .workflow_runs[]
+              | select(
+                  .name == "Deploy AWS"
+                  and .path == ".github/workflows/deploy-aws.yml"
+                  and .event == "push"
+                  and .status == "completed"
+                  and .conclusion == "success"
+                  and .head_branch == "main"
+                  and .head_sha == $sha
+                  and .head_repository.full_name ==
+                    "upgradedev/archon-cockroach-memory"
+                )
+            ]
+            | sort_by(.run_number, .run_attempt)
+            | last
+            | select(
+                (.id | type == "number" and . > 0)
+                and (.run_attempt | type == "number" and . > 0)
+              )
+          ')"
+          source_run_id="$(jq -er '.id | tostring' <<<"$source_run")"
+          source_run_attempt="$(jq -er '.run_attempt | tostring' <<<"$source_run")"
+          [[ "$source_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$source_run_attempt" =~ ^[1-9][0-9]*$ ]]
+
+          expected_artifact="staging-deployment-receipt-${GITHUB_SHA}-${source_run_id}-${source_run_attempt}"
+          artifact="$({
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/${source_run_id}/artifacts?per_page=100"
+          } | jq -cer \
+            --arg expected "$expected_artifact" \
+            --arg sha "$GITHUB_SHA" \
+            --argjson runId "$source_run_id" '
+              [
+                .artifacts[]
+                | select(
+                    .name == $expected
+                    and .expired == false
+                    and (.size_in_bytes | type == "number" and . > 0)
+                    and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                    and .workflow_run.id == $runId
+                    and .workflow_run.head_branch == "main"
+                    and .workflow_run.head_sha == $sha
+                  )
+              ]
+              | if length == 1 then .[0]
+                else error("exact successful staging receipt artifact not proved")
+                end
+            ')"
+          artifact_digest="$(jq -er '.digest' <<<"$artifact")"
+          artifact_id="$(jq -er '.id | tostring' <<<"$artifact")"
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          source_proof="${RUNNER_TEMP:?}/staging-recovery-drill-source.json"
+          jq -n \
+            --arg artifactDigest "$artifact_digest" \
+            --arg artifactIdSha256 "$(printf '%s' "$artifact_id" | sha256sum | awk '{print $1}')" \
+            --arg commitSha "$GITHUB_SHA" \
+            --arg runAttempt "$source_run_attempt" \
+            --arg runId "$source_run_id" '
+              {
+                schema: "archon.staging-recovery-drill.source",
+                version: 1,
+                commitSha: $commitSha,
+                releaseState: {
+                  existingStack: true,
+                  releaseCommitMatched: true,
+                  recoveryDrillTokenDisabled: true,
+                  runtimeDatabaseSecretMatched: true
+                },
+                successfulPushDeployment: {
+                  workflow: "Deploy AWS",
+                  event: "push",
+                  conclusion: "success",
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  stagingReceiptArtifactDigest: $artifactDigest,
+                  stagingReceiptArtifactIdSha256: $artifactIdSha256
+                }
+              }
+            ' >"$source_proof"
+          jq -e \
+            --arg sha "$GITHUB_SHA" '
+              .schema == "archon.staging-recovery-drill.source"
+              and .version == 1
+              and .commitSha == $sha
+              and .releaseState.existingStack == true
+              and .releaseState.releaseCommitMatched == true
+              and .releaseState.recoveryDrillTokenDisabled == true
+              and .releaseState.runtimeDatabaseSecretMatched == true
+              and .successfulPushDeployment.event == "push"
+              and .successfulPushDeployment.conclusion == "success"
+              and (.successfulPushDeployment.runId | test("^[1-9][0-9]*$"))
+              and (.successfulPushDeployment.runAttempt | test("^[1-9][0-9]*$"))
+              and (.successfulPushDeployment.stagingReceiptArtifactDigest
+                | test("^sha256:[0-9a-f]{64}$"))
+              and (.successfulPushDeployment.stagingReceiptArtifactIdSha256
+                | test("^[0-9a-f]{64}$"))
+            ' "$source_proof" >/dev/null
+          {
+            echo "source_run_id=$source_run_id"
+            echo "source_run_attempt=$source_run_attempt"
+            echo "source_receipt_artifact_digest=$artifact_digest"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Enforce staging stack protection and fresh pre-deploy drift gate
         env:
@@ -1504,7 +1990,7 @@ jobs:
           set -euo pipefail
           snapshot_recheck="${RUNNER_TEMP:?}/staging-recovery-snapshot-recheck.json"
           STACK_STATE="$EXPECTED_STACK_STATE" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$snapshot_recheck"
           jq -e \
             --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
@@ -1636,7 +2122,7 @@ jobs:
         id: durable_recovery
         env:
           ARTIFACT_BUCKET: ${{ env.AWS_SAM_ARTIFACT_BUCKET }}
-          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
           ENVIRONMENT: staging
           EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
@@ -1655,8 +2141,8 @@ jobs:
           PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
           RECOVERY_ENVIRONMENT: staging
           RECOVERY_SNAPSHOT_PROOF_FILE: ${{ runner.temp }}/staging-recovery-snapshot-recheck.json
-          SOURCE_CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          SOURCE_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_CI_RUN_ATTEMPT: ${{ needs.source-gate.outputs.ci_run_attempt }}
+          SOURCE_CI_RUN_ID: ${{ needs.source-gate.outputs.ci_run_id }}
           SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
           STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
@@ -1787,11 +2273,82 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
+      - name: Resolve the exact staging edge-stack handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AWS_REGION" = "eu-west-1"
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          edge_stack="${APP_NAME}-staging-edge"
+          stack="${RUNNER_TEMP:?}/staging-edge-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$edge_stack" \
+            --region us-east-1 \
+            --output json >"$stack"
+          web_acl_arn="$(
+            jq -er \
+              --arg account "$AWS_ACCOUNT_ID" \
+              --arg app "$APP_NAME" \
+              --arg stack "$edge_stack" \
+              '
+                .Stacks[0] as $current
+                | (
+                    (.Stacks | length) == 1
+                    and $current.StackName == $stack
+                    and (
+                      $current.StackStatus == "CREATE_COMPLETE"
+                      or $current.StackStatus == "UPDATE_COMPLETE"
+                    )
+                    and $current.EnableTerminationProtection == true
+                    and (($current.RoleARN // null) == null)
+                    and (
+                      [
+                        $current.Parameters[]
+                        | {key:.ParameterKey, value:.ParameterValue}
+                      ]
+                      | from_entries
+                    ) == {
+                      AppName: $app,
+                      Environment: "staging",
+                      ApiAggregateRateLimit: "1000",
+                      ResolutionCreateRateLimit: "100"
+                    }
+                    and (
+                      [
+                        $current.Outputs[]
+                        | select(.OutputKey == "ControlPlaneRegion")
+                        | .OutputValue
+                      ]
+                    ) == ["us-east-1"]
+                  ) as $valid
+                | if $valid
+                  then [
+                    $current.Outputs[]
+                    | select(.OutputKey == "WebAclArn")
+                    | .OutputValue
+                    | select(
+                        test(
+                          "^arn:aws:wafv2:us-east-1:" + $account
+                          + ":global/webacl/" + $app
+                          + "-staging-cloudfront/[0-9a-f-]+$"
+                        )
+                      )
+                  ]
+                  | select(length == 1)
+                  | .[0]
+                  else error("invalid staging edge-stack handoff")
+                  end
+              ' "$stack"
+          )"
+          echo "CLOUDFRONT_WEB_ACL_ARN=$web_acl_arn" >>"$GITHUB_ENV"
+
       - name: Deploy staging with recovery-safe SAM canary
         id: deploy
         env:
           ALARM_TOPIC_ARN: ${{ steps.alarm_routing.outputs.topic_arn }}
           CANARY_URL: ${{ steps.previous.outputs.application_url }}
+          DRILL_GATE_OUTCOME: ${{ steps.drill_gate.outcome }}
+          DRILL_SOURCE_ARTIFACT_DIGEST: ${{ steps.drill_gate.outputs.source_receipt_artifact_digest }}
           ENVIRONMENT: staging
           EXPECTED_STACK_STATE: ${{ steps.api_preflight.outputs.stack_state }}
           GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
@@ -1809,6 +2366,22 @@ jobs:
           test -n "$AWS_SAM_ARTIFACT_BUCKET"
           test -n "$AWS_LAMBDA_EXECUTION_ROLE_ARN"
           test -n "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
+          [[ "$COCKROACH_SQL_DNS" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+          test "${#COCKROACH_SQL_DNS}" -le 253
+          [[ "$CLOUDFRONT_WEB_ACL_ARN" =~ ^arn:aws:wafv2:us-east-1:${AWS_ACCOUNT_ID}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$ ]]
+          candidate_database_secret_id="$DATABASE_SECRET_ID"
+          if [ "$DEPLOY_OPERATION" = "staging-recovery-drill" ]; then
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            test "$DRILL_GATE_OUTCOME" = "success"
+            [[ "$DRILL_SOURCE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$HAS_PREVIOUS_STACK" = "true"
+            candidate_database_secret_id="${APP_NAME}/staging/recovery-drill-inaccessible-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test "$candidate_database_secret_id" != "$DATABASE_SECRET_ID"
+          else
+            test "$DEPLOY_OPERATION" = "release"
+            test "$GITHUB_EVENT_NAME" = "push"
+            test "$RECOVERY_DRILL_TOKEN" = "disabled"
+          fi
           # SAM CLI 1.164.0 accepts file-backed overrides only through its
           # TOML/YAML readers; JSON support is intentionally disabled upstream.
           # JSON is valid YAML 1.2, so jq still gives us an exact, typed mapping
@@ -1818,18 +2391,21 @@ jobs:
           jq -n \
             --arg appName "$APP_NAME" \
             --arg environment "staging" \
-            --arg databaseSecretId "$DATABASE_SECRET_ID" \
+            --arg databaseSecretId "$candidate_database_secret_id" \
             --arg lambdaRole "$AWS_LAMBDA_EXECUTION_ROLE_ARN" \
             --arg codeDeployRole "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg releaseCommitSha "${{ github.sha }}" \
+            --arg recoveryDrillToken "$RECOVERY_DRILL_TOKEN" \
             --arg bedrockRegion "$BEDROCK_REGION" \
             --arg embeddingModel "$BEDROCK_EMBED_MODEL_ID" \
             --arg narratorModel "$BEDROCK_NARRATOR_MODEL_ID" \
             --arg cockroachRegion "eu-west-1" \
             --arg cockroachEvidence \
               "cockroach-cloud-api-release-gate" \
+            --arg cockroachSqlDns "$COCKROACH_SQL_DNS" \
             --arg reservedConcurrency "5" \
             --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            --arg cloudFrontWebAclArn "$CLOUDFRONT_WEB_ACL_ARN" \
             '{
               AppName: $appName,
               Environment: $environment,
@@ -1837,19 +2413,25 @@ jobs:
               LambdaExecutionRoleArn: $lambdaRole,
               CodeDeployServiceRoleArn: $codeDeployRole,
               ReleaseCommitSha: $releaseCommitSha,
+              RecoveryDrillToken: $recoveryDrillToken,
               BedrockRegion: $bedrockRegion,
               BedrockEmbeddingModelId: $embeddingModel,
               BedrockNarratorModelId: $narratorModel,
               CockroachRegion: $cockroachRegion,
               CockroachRegionEvidence: $cockroachEvidence,
+              CockroachSqlDns: $cockroachSqlDns,
               ReservedConcurrency: $reservedConcurrency,
-              AlarmTopicArn: $alarmTopicArn
+              AlarmTopicArn: $alarmTopicArn,
+              CloudFrontWebAclArn: $cloudFrontWebAclArn
             }' >"$parameter_overrides_file"
           jq -e \
             --arg environment "staging" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg databaseSecretId "$candidate_database_secret_id" \
+            --arg releaseCommitSha "${{ github.sha }}" \
+            --arg recoveryDrillToken "$RECOVERY_DRILL_TOKEN" \
             --arg reservedConcurrency "5" \
             --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            --arg cloudFrontWebAclArn "$CLOUDFRONT_WEB_ACL_ARN" \
             '
               (keys | sort) == (
                 [
@@ -1860,19 +2442,26 @@ jobs:
                   "BedrockRegion",
                   "CockroachRegion",
                   "CockroachRegionEvidence",
+                  "CockroachSqlDns",
+                  "CloudFrontWebAclArn",
                   "CodeDeployServiceRoleArn",
                   "DatabaseSecretId",
                   "Environment",
                   "LambdaExecutionRoleArn",
                   "ReleaseCommitSha",
+                  "RecoveryDrillToken",
                   "ReservedConcurrency"
                 ] | sort
               )
               and all(.[]; type == "string")
               and .Environment == $environment
+              and .DatabaseSecretId == $databaseSecretId
               and .ReleaseCommitSha == $releaseCommitSha
+              and .RecoveryDrillToken == $recoveryDrillToken
               and .ReservedConcurrency == $reservedConcurrency
               and .AlarmTopicArn == $alarmTopicArn
+              and .CloudFrontWebAclArn == $cloudFrontWebAclArn
+              and .CockroachSqlDns == env.COCKROACH_SQL_DNS
             ' "$parameter_overrides_file" >/dev/null
           target_tags="${RUNNER_TEMP:?}/staging-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
@@ -1902,14 +2491,84 @@ jobs:
           )"
           [[ "$target_tags_sha256" =~ ^[0-9a-f]{64}$ ]]
           echo "target_tags_sha256=$target_tags_sha256" >>"$GITHUB_OUTPUT"
+          DRILL_OBSERVER_PID=""
           CANARY_PROBE_PID=""
           stop_canary_probe() {
             if [ -n "$CANARY_PROBE_PID" ]; then
               kill "$CANARY_PROBE_PID" 2>/dev/null || true
               wait "$CANARY_PROBE_PID" 2>/dev/null || true
+              CANARY_PROBE_PID=""
             fi
           }
-          trap stop_canary_probe EXIT
+          stop_drill_observer() {
+            if [ -n "$DRILL_OBSERVER_PID" ]; then
+              kill "$DRILL_OBSERVER_PID" 2>/dev/null || true
+              wait "$DRILL_OBSERVER_PID" 2>/dev/null || true
+              DRILL_OBSERVER_PID=""
+            fi
+          }
+          cleanup_deploy_background() {
+            stop_canary_probe
+            stop_drill_observer
+          }
+          trap cleanup_deploy_background EXIT
+
+          if [ "$DEPLOY_OPERATION" = "staging-recovery-drill" ]; then
+            drill_resources="${RUNNER_TEMP:?}/staging-recovery-drill-codedeploy-resources.json"
+            drill_group_before="${RUNNER_TEMP:?}/staging-recovery-drill-group-before.json"
+            drill_deployments_before="${RUNNER_TEMP:?}/staging-recovery-drill-deployments-before.json"
+            drill_started_epoch_file="${RUNNER_TEMP:?}/staging-recovery-drill-started-epoch"
+            aws cloudformation describe-stack-resources \
+              --stack-name "$PREVIOUS_STACK_ID" \
+              --region "$AWS_REGION" \
+              --output json >"$drill_resources"
+            jq -e '
+              ([.StackResources[]
+                | select(.ResourceType == "AWS::CodeDeploy::Application")]
+                | length) == 1
+              and ([.StackResources[]
+                | select(.ResourceType == "AWS::CodeDeploy::DeploymentGroup")]
+                | length) == 1
+            ' "$drill_resources" >/dev/null
+            drill_codedeploy_application="$(jq -er '
+              .StackResources[]
+              | select(.ResourceType == "AWS::CodeDeploy::Application")
+              | .PhysicalResourceId
+            ' "$drill_resources")"
+            drill_codedeploy_group="$(jq -er '
+              .StackResources[]
+              | select(.ResourceType == "AWS::CodeDeploy::DeploymentGroup")
+              | .PhysicalResourceId
+            ' "$drill_resources")"
+            [[ "$drill_codedeploy_application" =~ ^[A-Za-z0-9._+=,@-]{1,100}$ ]]
+            [[ "$drill_codedeploy_group" =~ ^[A-Za-z0-9._+=,@-]{1,100}$ ]]
+            aws deploy get-deployment-group \
+              --application-name "$drill_codedeploy_application" \
+              --deployment-group-name "$drill_codedeploy_group" \
+              --region "$AWS_REGION" \
+              --output json >"$drill_group_before"
+            jq -e \
+              --arg application "$drill_codedeploy_application" \
+              --arg group "$drill_codedeploy_group" '
+                .deploymentGroupInfo.applicationName == $application
+                and .deploymentGroupInfo.deploymentGroupName == $group
+                and .deploymentGroupInfo.computePlatform == "Lambda"
+              ' "$drill_group_before" >/dev/null
+            date -u +%s >"$drill_started_epoch_file"
+            grep -Eq '^[1-9][0-9]{8,}$' "$drill_started_epoch_file"
+            aws deploy list-deployments \
+              --application-name "$drill_codedeploy_application" \
+              --deployment-group-name "$drill_codedeploy_group" \
+              --region "$AWS_REGION" \
+              --output json >"$drill_deployments_before"
+            jq -e '
+              keys == ["deployments"]
+              and (.deployments | type == "array")
+              and all(.deployments[]; test("^d-[A-Z0-9]+$"))
+              and ((.deployments | unique | length) == (.deployments | length))
+            ' "$drill_deployments_before" >/dev/null
+          fi
+
           if [ -n "$CANARY_URL" ] && [ "$CANARY_URL" != "None" ]; then
             (
               # Exercise both the live proof boundary and the critical recall
@@ -1925,13 +2584,117 @@ jobs:
                   curl --fail --silent --max-time 45 \
                     -X POST "$CANARY_URL/api/recall" \
                     -H 'content-type: application/json' \
-                    --data '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}' \
+                    --data '{"question":"What was the true employer cost and the off-bank wedge?","kind":"payroll_event","limit":5}' \
                     >/dev/null 2>&1 || true
                 fi
                 sleep 2
               done
             ) &
             CANARY_PROBE_PID=$!
+          fi
+          if [ "$DEPLOY_OPERATION" = "staging-recovery-drill" ]; then
+            (
+              set -euo pipefail
+              observation="${RUNNER_TEMP:?}/staging-recovery-drill-live-observation.json"
+              for _ in {1..300}; do
+                alias_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-alias-observed.tmp"
+                alarm_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-alarm-observed.tmp"
+                group_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-group-observed.tmp"
+                if aws lambda get-alias \
+                    --function-name "$PREVIOUS_FUNCTION_NAME" \
+                    --name live \
+                    --region "$AWS_REGION" \
+                    --output json >"$alias_tmp" 2>/dev/null; then
+                  candidate_version=""
+                  candidate_version="$(jq -er \
+                    --arg previous "$PREVIOUS_FUNCTION_VERSION" '
+                      (.RoutingConfig.AdditionalVersionWeights // {}) as $weights
+                      | select(
+                          .Name == "live"
+                          and .FunctionVersion == $previous
+                          and ($weights | length) == 1
+                        )
+                      | ($weights | to_entries[0])
+                      | select(
+                          (.key | test("^[1-9][0-9]*$"))
+                          and .key != $previous
+                          and .value >= 0.099
+                          and .value <= 0.101
+                        )
+                      | .key
+                    ' "$alias_tmp" 2>/dev/null || true)"
+                  if [[ "$candidate_version" =~ ^[1-9][0-9]*$ ]]; then
+                    alarm_name="${APP_NAME}-staging-lambda-canary-errors-v${candidate_version}"
+                    if aws cloudwatch describe-alarms \
+                        --alarm-names "$alarm_name" \
+                        --region "$AWS_REGION" \
+                        --output json >"$alarm_tmp" 2>/dev/null &&
+                       aws deploy get-deployment-group \
+                        --application-name "$drill_codedeploy_application" \
+                        --deployment-group-name "$drill_codedeploy_group" \
+                        --region "$AWS_REGION" \
+                        --output json >"$group_tmp" 2>/dev/null &&
+                       jq -e \
+                        --arg alarm "$alarm_name" \
+                        --arg function "$PREVIOUS_FUNCTION_NAME" \
+                        --arg version "$candidate_version" '
+                          (.MetricAlarms | length) == 1
+                          and .MetricAlarms[0].AlarmName == $alarm
+                          and .MetricAlarms[0].StateValue == "ALARM"
+                          and .MetricAlarms[0].Namespace == "AWS/Lambda"
+                          and .MetricAlarms[0].MetricName == "Errors"
+                          and .MetricAlarms[0].Threshold == 1
+                          and .MetricAlarms[0].ComparisonOperator ==
+                            "GreaterThanOrEqualToThreshold"
+                          and .MetricAlarms[0].TreatMissingData == "notBreaching"
+                          and ([.MetricAlarms[0].Dimensions[]
+                            | {Name, Value}] | sort_by(.Name)) == ([
+                              {Name: "ExecutedVersion", Value: $version},
+                              {Name: "FunctionName", Value: $function},
+                              {Name: "Resource", Value: ($function + ":live")}
+                            ] | sort_by(.Name))
+                        ' "$alarm_tmp" >/dev/null &&
+                       jq -e \
+                        --arg alarm "$alarm_name" \
+                        --arg application "$drill_codedeploy_application" \
+                        --arg group "$drill_codedeploy_group" '
+                          .deploymentGroupInfo.applicationName == $application
+                          and .deploymentGroupInfo.deploymentGroupName == $group
+                          and .deploymentGroupInfo.computePlatform == "Lambda"
+                          and .deploymentGroupInfo.deploymentConfigName ==
+                            "CodeDeployDefault.LambdaCanary10Percent5Minutes"
+                          and .deploymentGroupInfo.alarmConfiguration.enabled == true
+                          and .deploymentGroupInfo.alarmConfiguration.ignorePollAlarmFailure == false
+                          and ([.deploymentGroupInfo.alarmConfiguration.alarms[].name] == [$alarm])
+                          and .deploymentGroupInfo.autoRollbackConfiguration.enabled == true
+                          and (.deploymentGroupInfo.autoRollbackConfiguration.events
+                            | index("DEPLOYMENT_STOP_ON_ALARM")) != null
+                        ' "$group_tmp" >/dev/null; then
+                      jq -n \
+                        --slurpfile alias "$alias_tmp" \
+                        --slurpfile alarm "$alarm_tmp" \
+                        --slurpfile group "$group_tmp" \
+                        --arg candidateVersion "$candidate_version" \
+                        --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                          {
+                            observedAt: $observedAt,
+                            candidateVersion: $candidateVersion,
+                            alias: $alias[0],
+                            alarm: $alarm[0],
+                            deploymentGroup: $group[0]
+                          }
+                        ' >"${observation}.tmp"
+                      mv "${observation}.tmp" "$observation"
+                      exit 0
+                    fi
+                  fi
+                fi
+                sleep 2
+              done
+              echo "The protected drill never observed the exact ALARM canary boundary." >&2
+              exit 1
+            ) &
+            DRILL_OBSERVER_PID=$!
           fi
           if [ "$EXPECTED_STACK_STATE:$HAS_PREVIOUS_STACK" = "existing:true" ]; then
             final_stack="${RUNNER_TEMP:?}/staging-stack-final-before-sam.json"
@@ -1992,19 +2755,54 @@ jobs:
             exit 1
           fi
           echo "started=true" >> "$GITHUB_OUTPUT"
+          set +e
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/deployments/staging/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/staging/${{ github.sha }}" \
+            --kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "file://${parameter_overrides_file}" \
             "${SAM_TAGS[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --no-progressbar
+          sam_status=$?
+          set -e
           stop_canary_probe
+          if [ "$DEPLOY_OPERATION" = "staging-recovery-drill" ]; then
+            observer_status=1
+            for _ in {1..30}; do
+              if [ -s "${RUNNER_TEMP:?}/staging-recovery-drill-live-observation.json" ]; then
+                break
+              fi
+              if ! kill -0 "$DRILL_OBSERVER_PID" 2>/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            set +e
+            if [ -s "${RUNNER_TEMP:?}/staging-recovery-drill-live-observation.json" ]; then
+              wait "$DRILL_OBSERVER_PID"
+              observer_status=$?
+            else
+              if kill -0 "$DRILL_OBSERVER_PID" 2>/dev/null; then
+                kill "$DRILL_OBSERVER_PID" 2>/dev/null
+              fi
+              wait "$DRILL_OBSERVER_PID"
+              observer_status=$?
+            fi
+            set -e
+            DRILL_OBSERVER_PID=""
+            test "$sam_status" -ne 0
+            test "$observer_status" -eq 0
+            test -s "${RUNNER_TEMP:?}/staging-recovery-drill-live-observation.json"
+            trap - EXIT
+            exit "$sam_status"
+          fi
+          test "$sam_status" -eq 0
           trap - EXIT
 
       - name: Refresh short-lived AWS credentials after staging SAM deployment
@@ -2043,8 +2841,9 @@ jobs:
             --arg previousStackId "$PREVIOUS_STACK_ID" \
             --arg app "$APP_NAME" \
             --arg environment "$ENVIRONMENT" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg releaseCommitSha "${{ github.sha }}" \
             --arg reservedConcurrency "5" \
+            --arg cockroachSqlDns "$COCKROACH_SQL_DNS" \
             '
               (.Stacks | length) == 1
               and .Stacks[0].StackName == $stack
@@ -2059,6 +2858,11 @@ jobs:
                 [.Stacks[0].Parameters[]?
                   | select(.ParameterKey == "ReservedConcurrency")
                   | .ParameterValue] == [$reservedConcurrency]
+              )
+              and (
+                [.Stacks[0].Parameters[]?
+                  | select(.ParameterKey == "CockroachSqlDns")
+                  | .ParameterValue] == [$cockroachSqlDns]
               )
               and (
                 [.Stacks[0].Tags[]?
@@ -2278,6 +3082,428 @@ jobs:
              .accessLogEvent == "GET /api/health 200"' \
             api-stage-proof.json >/dev/null
 
+      - name: Prove alarm-triggered CodeDeploy and CloudFormation rollback
+        id: fault_injection
+        if: >-
+          always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'staging-recovery-drill' &&
+          steps.deploy.outcome == 'failure'
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          DRILL_SOURCE_ARTIFACT_DIGEST: ${{ steps.drill_gate.outputs.source_receipt_artifact_digest }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$DEPLOY_OPERATION" = "staging-recovery-drill"
+          test "$DEPLOY_OUTCOME" = "failure"
+          test "$CONFIRMATION" = \
+            "FAULT-INJECT-STAGING-RECOVERY-AND-REQUIRE-WATCHDOG"
+          [[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]{7,127}$ ]]
+          test "$RECOVERY_DRILL_TOKEN" = \
+            "drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$DRILL_SOURCE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test -n "$PREVIOUS_FUNCTION_NAME"
+          [[ "$PREVIOUS_FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PREVIOUS_STACK_ID" =~ ^arn:aws:cloudformation:eu-west-1:[0-9]{12}:stack/${STACK_NAME}/[0-9a-f-]+$ ]]
+          [[ "$RECOVERY_INTENT_ID" =~ ^[0-9a-f]{64}$ ]]
+
+          source_proof="${RUNNER_TEMP:?}/staging-recovery-drill-source.json"
+          observation="${RUNNER_TEMP:?}/staging-recovery-drill-live-observation.json"
+          resources="${RUNNER_TEMP:?}/staging-recovery-drill-codedeploy-resources.json"
+          deployments_before="${RUNNER_TEMP:?}/staging-recovery-drill-deployments-before.json"
+          drill_started_epoch_file="${RUNNER_TEMP:?}/staging-recovery-drill-started-epoch"
+          deployments_after="${RUNNER_TEMP:?}/staging-recovery-drill-deployments-after.json"
+          deployment_details="${RUNNER_TEMP:?}/staging-recovery-drill-deployment-details.json"
+          codedeploy_proof="${RUNNER_TEMP:?}/staging-recovery-drill-codedeploy-proof.json"
+          stack_state="${RUNNER_TEMP:?}/staging-recovery-drill-stack-automatic-rollback.json"
+          stack_template="${RUNNER_TEMP:?}/staging-recovery-drill-template-automatic-rollback.yaml"
+          alias_state="${RUNNER_TEMP:?}/staging-recovery-drill-alias-automatic-rollback.json"
+          health="${RUNNER_TEMP:?}/staging-recovery-drill-health-automatic-rollback.json"
+          proof="${RUNNER_TEMP:?}/staging-recovery-drill-memory-proof-automatic-rollback.json"
+          receipt="${RUNNER_TEMP:?}/staging-recovery-drill-receipt.json"
+          for required in \
+            "$source_proof" \
+            "$observation" \
+            "$resources" \
+            "$deployments_before" \
+            "$drill_started_epoch_file" \
+            previous-stack-parameters.json \
+            previous-stack-tags.json \
+            previous-stack-template.yaml \
+            "${RUNNER_TEMP:?}/staging-stack-before.json"; do
+            test -s "$required"
+            test ! -L "$required"
+          done
+          read -r drill_started_epoch <"$drill_started_epoch_file"
+          [[ "$drill_started_epoch" =~ ^[1-9][0-9]{8,}$ ]]
+
+          codedeploy_application="$(jq -er '
+            .StackResources[]
+            | select(.ResourceType == "AWS::CodeDeploy::Application")
+            | .PhysicalResourceId
+          ' "$resources")"
+          codedeploy_group="$(jq -er '
+            .StackResources[]
+            | select(.ResourceType == "AWS::CodeDeploy::DeploymentGroup")
+            | .PhysicalResourceId
+          ' "$resources")"
+          [[ "$codedeploy_application" =~ ^[A-Za-z0-9._+=,@-]{1,100}$ ]]
+          [[ "$codedeploy_group" =~ ^[A-Za-z0-9._+=,@-]{1,100}$ ]]
+
+          candidate_version="$(jq -er '
+            .candidateVersion
+            | select(test("^[1-9][0-9]*$"))
+          ' "$observation")"
+          test "$candidate_version" != "$PREVIOUS_FUNCTION_VERSION"
+          candidate_alarm="${APP_NAME}-staging-lambda-canary-errors-v${candidate_version}"
+          jq -e \
+            --arg alarm "$candidate_alarm" \
+            --arg application "$codedeploy_application" \
+            --arg candidate "$candidate_version" \
+            --arg function "$PREVIOUS_FUNCTION_NAME" \
+            --arg group "$codedeploy_group" \
+            --arg previous "$PREVIOUS_FUNCTION_VERSION" '
+              .candidateVersion == $candidate
+              and .alias.Name == "live"
+              and .alias.FunctionVersion == $previous
+              and (.alias.RoutingConfig.AdditionalVersionWeights
+                | keys == [$candidate])
+              and (.alias.RoutingConfig.AdditionalVersionWeights[$candidate]
+                >= 0.099)
+              and (.alias.RoutingConfig.AdditionalVersionWeights[$candidate]
+                <= 0.101)
+              and (.alarm.MetricAlarms | length) == 1
+              and .alarm.MetricAlarms[0].AlarmName == $alarm
+              and .alarm.MetricAlarms[0].StateValue == "ALARM"
+              and .deploymentGroup.deploymentGroupInfo.applicationName ==
+                $application
+              and .deploymentGroup.deploymentGroupInfo.deploymentGroupName ==
+                $group
+              and .deploymentGroup.deploymentGroupInfo.computePlatform == "Lambda"
+              and .deploymentGroup.deploymentGroupInfo.deploymentConfigName ==
+                "CodeDeployDefault.LambdaCanary10Percent5Minutes"
+              and .deploymentGroup.deploymentGroupInfo.alarmConfiguration.enabled == true
+              and .deploymentGroup.deploymentGroupInfo.alarmConfiguration.ignorePollAlarmFailure == false
+              and ([.deploymentGroup.deploymentGroupInfo.alarmConfiguration.alarms[].name]
+                == [$alarm])
+              and .deploymentGroup.deploymentGroupInfo.autoRollbackConfiguration.enabled == true
+              and (.deploymentGroup.deploymentGroupInfo.autoRollbackConfiguration.events
+                | index("DEPLOYMENT_STOP_ON_ALARM")) != null
+              and (.observedAt | test("Z$"))
+            ' "$observation" >/dev/null
+
+          codedeploy_proved=false
+          for _ in {1..60}; do
+            aws deploy list-deployments \
+              --application-name "$codedeploy_application" \
+              --deployment-group-name "$codedeploy_group" \
+              --region "$AWS_REGION" \
+              --output json >"$deployments_after"
+            jq -n '[]' >"$deployment_details"
+            mapfile -t new_deployment_ids < <(jq -er \
+              --slurpfile before "$deployments_before" '
+                [
+                  .deployments[] as $deploymentId
+                  | select(
+                      ($before[0].deployments | index($deploymentId)) == null
+                    )
+                  | $deploymentId
+                ]
+                | unique[]
+              ' "$deployments_after")
+            for deployment_id in "${new_deployment_ids[@]}"; do
+              [[ "$deployment_id" =~ ^d-[A-Z0-9]+$ ]]
+              detail_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-deployment-${deployment_id}.json"
+              revision_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-revision-${deployment_id}.json"
+              record_tmp="${RUNNER_TEMP:?}/staging-recovery-drill-record-${deployment_id}.json"
+              aws deploy get-deployment \
+                --deployment-id "$deployment_id" \
+                --region "$AWS_REGION" \
+                --output json >"$detail_tmp"
+              if jq -e '
+                  .deploymentInfo.revision.revisionType == "AppSpecContent"
+                  and (.deploymentInfo.revision.appSpecContent.sha256
+                    | type == "string"
+                    and test("^[0-9a-f]{64}$"))
+                ' "$detail_tmp" >/dev/null; then
+                bash aws/fetch-codedeploy-appspec-revision.sh \
+                  "$detail_tmp" \
+                  "$codedeploy_application" \
+                  "$revision_tmp"
+              else
+                jq -n 'null' >"$revision_tmp"
+              fi
+              jq -n \
+                --slurpfile detail "$detail_tmp" \
+                --slurpfile revision "$revision_tmp" '
+                  {
+                    deploymentInfo: $detail[0].deploymentInfo,
+                    applicationRevision: $revision[0]
+                  }
+                ' >"$record_tmp"
+              jq -s '.[0] + [.[1]]' \
+                "$deployment_details" "$record_tmp" \
+                >"${deployment_details}.tmp"
+              mv "${deployment_details}.tmp" "$deployment_details"
+            done
+            drill_ended_epoch="$(date -u +%s)"
+            [[ "$drill_ended_epoch" =~ ^[1-9][0-9]{8,}$ ]]
+            candidate_observed_at="$(jq -er '.observedAt' "$observation")"
+            if EXPECTED_CODEDEPLOY_APPLICATION="$codedeploy_application" \
+              EXPECTED_CODEDEPLOY_GROUP="$codedeploy_group" \
+              EXPECTED_LAMBDA_FUNCTION_NAME="$PREVIOUS_FUNCTION_NAME" \
+              EXPECTED_LAMBDA_ALIAS="live" \
+              EXPECTED_PREVIOUS_VERSION="$PREVIOUS_FUNCTION_VERSION" \
+              EXPECTED_CANDIDATE_VERSION="$candidate_version" \
+              EXPECTED_CLOUDFORMATION_STACK_ID="$PREVIOUS_STACK_ID" \
+              EXPECTED_DRILL_STARTED_EPOCH="$drill_started_epoch" \
+              EXPECTED_CANDIDATE_OBSERVED_AT="$candidate_observed_at" \
+              EXPECTED_DRILL_ENDED_EPOCH="$drill_ended_epoch" \
+              node aws/select-staging-codedeploy-rollback.mjs \
+                "$deployment_details" >"$codedeploy_proof"; then
+              codedeploy_proved=true
+              break
+            fi
+            sleep 5
+          done
+          test "$codedeploy_proved" = "true"
+          jq -e '
+            .relationProved == true
+            and .source.status == "Stopped"
+            and .source.errorInformation.code == "ALARM_ACTIVE"
+            and .rollback.status == "Succeeded"
+            and .sourceBinding.externalStackIdMatched == true
+            and .sourceBinding.createTimeWithinDrillWindow == true
+            and .sourceBinding.functionNameMatched == true
+            and .sourceBinding.functionAliasMatched == true
+            and .sourceBinding.previousVersionMatched == true
+            and .sourceBinding.candidateVersionMatched == true
+            and (.sourceBinding.appSpecSha256
+              | test("^[0-9a-f]{64}$"))
+            and (
+              .rollback.creator == "CloudFormationRollback"
+              or .rollback.creator == "codeDeployRollback"
+            )
+          ' "$codedeploy_proof" >/dev/null
+
+          aws cloudformation describe-stacks \
+            --stack-name "$PREVIOUS_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$stack_state"
+          jq -e \
+            --slurpfile before "${RUNNER_TEMP:?}/staging-stack-before.json" \
+            --slurpfile parameters previous-stack-parameters.json \
+            --slurpfile tags previous-stack-tags.json \
+            --arg role "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
+            --arg stackId "$PREVIOUS_STACK_ID" '
+              (.Stacks | length) == 1
+              and ($before | length) == 1
+              and ($before[0].Stacks | length) == 1
+              and (.Stacks[0].StackId == $stackId)
+              and (.Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE")
+              and (.Stacks[0].RoleARN == $role)
+              and ((.Stacks[0].Parameters
+                | map({ParameterKey, ParameterValue})
+                | sort_by(.ParameterKey)) == $parameters[0])
+              and ((.Stacks[0].Tags // []
+                | map({Key, Value})
+                | sort_by(.Key)) == $tags[0])
+              and ((.Stacks[0].Outputs // []) | sort_by(.OutputKey)) ==
+                (($before[0].Stacks[0].Outputs // []) | sort_by(.OutputKey))
+            ' "$stack_state" >/dev/null
+          aws cloudformation get-template \
+            --stack-name "$PREVIOUS_STACK_ID" \
+            --region "$AWS_REGION" \
+            --template-stage Original \
+            --output json \
+            | jq -er '.TemplateBody | if type == "string" then . else tojson end' \
+              >"$stack_template"
+          cmp --silent previous-stack-template.yaml "$stack_template"
+          aws lambda get-alias \
+            --function-name "$PREVIOUS_FUNCTION_NAME" \
+            --name live \
+            --region "$AWS_REGION" \
+            --output json >"$alias_state"
+          jq -e \
+            --arg version "$PREVIOUS_FUNCTION_VERSION" '
+              .Name == "live"
+              and .FunctionVersion == $version
+              and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+            ' "$alias_state" >/dev/null
+          application_url="$(jq -er '
+            .Stacks[0].Outputs[]
+            | select(.OutputKey == "ApplicationUrl")
+            | .OutputValue
+          ' "$stack_state")"
+          test "$application_url" = "${{ steps.previous.outputs.application_url }}"
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            --max-time 30 "$application_url/api/health" >"$health"
+          jq -e '.ok == true and .status == "reachable"' "$health" >/dev/null
+          curl --fail --silent --show-error \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            --max-time 30 "$application_url/api/proof" >"$proof"
+          jq -e \
+            '.memory.storeVerified == true and .memory.persisted == 9' \
+            "$proof" >/dev/null
+
+          approval_digest="$(printf '%s' "$APPROVAL_REFERENCE" | sha256sum | awk '{print $1}')"
+          token_digest="$(printf '%s' "$RECOVERY_DRILL_TOKEN" | sha256sum | awk '{print $1}')"
+          previous_version_digest="$(printf '%s' "$PREVIOUS_FUNCTION_VERSION" | sha256sum | awk '{print $1}')"
+          candidate_version_digest="$(printf '%s' "$candidate_version" | sha256sum | awk '{print $1}')"
+          candidate_alarm_digest="$(printf '%s' "$candidate_alarm" | sha256sum | awk '{print $1}')"
+          inaccessible_secret="${APP_NAME}/staging/recovery-drill-inaccessible-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          inaccessible_secret_digest="$(printf '%s' "$inaccessible_secret" | sha256sum | awk '{print $1}')"
+          source_deployment_id="$(jq -er '.source.deploymentId' "$codedeploy_proof")"
+          rollback_deployment_id="$(jq -er '.rollback.deploymentId' "$codedeploy_proof")"
+          rollback_creator="$(jq -er '.rollback.creator' "$codedeploy_proof")"
+          source_appspec_sha256="$(jq -er '.sourceBinding.appSpecSha256' "$codedeploy_proof")"
+          [[ "$source_deployment_id" =~ ^d-[A-Z0-9]+$ ]]
+          [[ "$rollback_deployment_id" =~ ^d-[A-Z0-9]+$ ]]
+          [[ "$source_appspec_sha256" =~ ^[0-9a-f]{64}$ ]]
+          jq -n \
+            --slurpfile source "$source_proof" \
+            --arg approvalReferenceSha256 "$approval_digest" \
+            --arg alarmNameSha256 "$candidate_alarm_digest" \
+            --arg candidateVersionSha256 "$candidate_version_digest" \
+            --arg commitSha "$GITHUB_SHA" \
+            --arg drillTokenSha256 "$token_digest" \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg inaccessibleSecretNameSha256 "$inaccessible_secret_digest" \
+            --arg intentId "$RECOVERY_INTENT_ID" \
+            --arg previousVersionSha256 "$previous_version_digest" \
+            --arg rollbackCreator "$rollback_creator" \
+            --arg rollbackDeploymentIdSha256 "$(printf '%s' "$rollback_deployment_id" | sha256sum | awk '{print $1}')" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg sourceAppSpecSha256 "$source_appspec_sha256" \
+            --arg sourceDeploymentIdSha256 "$(printf '%s' "$source_deployment_id" | sha256sum | awk '{print $1}')" '
+              {
+                schema: "archon.staging-recovery-drill",
+                version: 2,
+                generatedAt: $generatedAt,
+                commitSha: $commitSha,
+                sourceRun: {id: $runId, attempt: $runAttempt},
+                releaseSource: $source[0],
+                approval: {
+                  protectedEnvironment: "staging",
+                  confirmationMatched: true,
+                  referenceSha256: $approvalReferenceSha256
+                },
+                mutation: {
+                  environment: "staging",
+                  region: "eu-west-1",
+                  recoveryDrillTokenSha256: $drillTokenSha256,
+                  previousVersionSha256: $previousVersionSha256,
+                  candidateVersionSha256: $candidateVersionSha256,
+                  lambdaVersionChanged: true,
+                  codeDeployCanaryConfigured: true,
+                  observedCanaryWeight: 0.1,
+                  behaviorFaultInjected: true,
+                  faultBoundary: "candidate-database-secret-inaccessible",
+                  inaccessibleSecretNameSha256: $inaccessibleSecretNameSha256,
+                  secretMaterialCreated: false,
+                  productionMutationPermitted: false
+                },
+                alarm: {
+                  nameSha256: $alarmNameSha256,
+                  stateObserved: "ALARM",
+                  metric: "AWS/Lambda Errors",
+                  candidateExecutedVersionScoped: true
+                },
+                codeDeploy: {
+                  sourceDeploymentIdSha256: $sourceDeploymentIdSha256,
+                  sourceStatus: "Stopped",
+                  sourceErrorCode: "ALARM_ACTIVE",
+                  sourceAppSpecSha256: $sourceAppSpecSha256,
+                  sourceExternalStackIdMatched: true,
+                  sourceCreateTimeWithinDrillWindow: true,
+                  sourceFunctionNameMatched: true,
+                  sourceFunctionAliasMatched: true,
+                  sourcePreviousVersionMatched: true,
+                  sourceCandidateVersionMatched: true,
+                  rollbackDeploymentIdSha256: $rollbackDeploymentIdSha256,
+                  rollbackStatus: "Succeeded",
+                  rollbackCreator: $rollbackCreator,
+                  rollbackRelationProved: true
+                },
+                automaticRollback: {
+                  stackStatus: "UPDATE_ROLLBACK_COMPLETE",
+                  previousTemplateRestored: true,
+                  previousParametersRestored: true,
+                  previousTagsRestored: true,
+                  previousOutputsRestored: true,
+                  previousAliasRestored: true,
+                  additionalVersionWeightsCleared: true,
+                  applicationHealthProved: true,
+                  memoryProofProved: true
+                },
+                durableRecovery: {
+                  intentId: $intentId,
+                  armedBeforeMutation: true,
+                  inlineRecoveryProved: false,
+                  ledgerStateAfterInlineRecovery: null,
+                  watchdogTerminalRecoveryPending: true,
+                  terminalRecoveryClaimed: false
+                },
+                rawAwsIdentifiersStored: false,
+                secretValuesRead: false,
+                completed: false,
+                result: "alarm-triggered-automatic-rollback-proved-watchdog-terminalization-required"
+              }
+            ' >"$receipt"
+          jq -e \
+            --arg sha "$GITHUB_SHA" '
+              .schema == "archon.staging-recovery-drill"
+              and .version == 2
+              and .commitSha == $sha
+              and .releaseSource.commitSha == $sha
+              and .releaseSource.releaseState.existingStack == true
+              and .releaseSource.releaseState.recoveryDrillTokenDisabled == true
+              and .mutation.environment == "staging"
+              and .mutation.region == "eu-west-1"
+              and .mutation.observedCanaryWeight == 0.1
+              and .mutation.behaviorFaultInjected == true
+              and .mutation.faultBoundary ==
+                "candidate-database-secret-inaccessible"
+              and .mutation.secretMaterialCreated == false
+              and .mutation.productionMutationPermitted == false
+              and .alarm.stateObserved == "ALARM"
+              and .alarm.candidateExecutedVersionScoped == true
+              and .codeDeploy.sourceStatus == "Stopped"
+              and .codeDeploy.sourceErrorCode == "ALARM_ACTIVE"
+              and (.codeDeploy.sourceAppSpecSha256
+                | test("^[0-9a-f]{64}$"))
+              and .codeDeploy.sourceExternalStackIdMatched == true
+              and .codeDeploy.sourceCreateTimeWithinDrillWindow == true
+              and .codeDeploy.sourceFunctionNameMatched == true
+              and .codeDeploy.sourceFunctionAliasMatched == true
+              and .codeDeploy.sourcePreviousVersionMatched == true
+              and .codeDeploy.sourceCandidateVersionMatched == true
+              and .codeDeploy.rollbackStatus == "Succeeded"
+              and .codeDeploy.rollbackRelationProved == true
+              and .automaticRollback.stackStatus ==
+                "UPDATE_ROLLBACK_COMPLETE"
+              and .automaticRollback.previousTemplateRestored == true
+              and .automaticRollback.previousParametersRestored == true
+              and .automaticRollback.previousAliasRestored == true
+              and .automaticRollback.additionalVersionWeightsCleared == true
+              and .automaticRollback.applicationHealthProved == true
+              and .automaticRollback.memoryProofProved == true
+              and .durableRecovery.armedBeforeMutation == true
+              and .durableRecovery.terminalRecoveryClaimed == false
+              and .completed == false
+              and .rawAwsIdentifiersStored == false
+              and .secretValuesRead == false
+            ' "$receipt" >/dev/null
+
       - name: Publish the frontend and invalidate CloudFront
         id: frontend
         env:
@@ -2348,9 +3574,13 @@ jobs:
           aws s3 sync web/dist "s3://$BUCKET_NAME" \
             --region "$AWS_REGION" \
             --exclude index.html \
+            --sse aws:kms \
+            --sse-kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --cache-control "public,max-age=31536000,immutable"
           aws s3 cp web/dist/index.html "s3://$BUCKET_NAME/index.html" \
             --region "$AWS_REGION" \
+            --sse aws:kms \
+            --sse-kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --content-type "text/html; charset=utf-8" \
             --cache-control "no-cache,no-store,must-revalidate"
           INVALIDATION_ID="$(aws cloudfront create-invalidation \
@@ -2395,7 +3625,7 @@ jobs:
                .access == "read-only" and
                .dataClassification == "synthetic-public-demo" and
                .source == "server-configured")' <<<"$HEALTH"
-          RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+          RELEASE_COMMIT_SHA="${{ github.sha }}"
           [[ "$RELEASE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
           PROOF="$(curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
@@ -2471,7 +3701,7 @@ jobs:
             --max-time 45 \
             -X POST "$APPLICATION_URL/api/recall" \
             -H 'content-type: application/json' \
-            --data '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}')"
+            --data '{"question":"What was the true employer cost and the off-bank wedge?","kind":"payroll_event","limit":5}')"
           jq -e \
             --arg question "What was the true employer cost and the off-bank wedge?" \
             --arg embed "$BEDROCK_EMBED_MODEL_ID" \
@@ -2491,6 +3721,7 @@ jobs:
              .trace.retrieval.index == "native C-SPANN vector index" and
              .trace.retrieval.metric == "cosine" and
              .trace.retrieval.embeddingModel == $embed and
+             .trace.retrieval.requestedKind == "payroll_event" and
              .trace.retrieval.requestedTopK == 5 and
              .trace.retrieval.recalled == .recalled and
              .trace.narration.model == $narrator and
@@ -2509,7 +3740,7 @@ jobs:
                (.memoryId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
                (.sourceRef | type == "string" and length > 0) and
                .company == "Helios SA" and
-               (.kind == "document" or .kind == "payroll_event" or .kind == "validation" or .kind == "insight") and
+               .kind == "payroll_event" and
                .period == "2026-04" and
                (.score | type == "number" and . >= 0.15 and . <= 1)) and
              (.answer as $answer |
@@ -2648,7 +3879,7 @@ jobs:
           terminal_snapshot="${RUNNER_TEMP:?}/staging-recovery-snapshot-terminal.json"
           STACK_STATE="$EXPECTED_STACK_STATE" \
           EXPECTED_PREVIOUS_RELEASE_SHA256="$PREVIOUS_RELEASE_SHA256" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$terminal_snapshot"
           jq -e \
             --arg expected "$PREVIOUS_RELEASE_SHA256" \
@@ -2857,6 +4088,7 @@ jobs:
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Restore the previous staging release on verification failure
+        id: inline_recovery
         if: (failure() || cancelled()) && steps.deploy.outputs.started == 'true'
         env:
           BUCKET_NAME: ${{ steps.stack.outputs.bucket_name }}
@@ -2909,7 +4141,7 @@ jobs:
           EXPECTED_TEMPLATE_SHA256="$EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256" \
           EXPECTED_PARAMETERS_SHA256="$EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256" \
           EXPECTED_TAGS_SHA256="$EXPECTED_PREVIOUS_STACK_TAGS_SHA256" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$recovery_snapshot"
           jq -e \
             --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
@@ -2940,6 +4172,7 @@ jobs:
           fi
 
           RECOVERY_FAILED=0
+          storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
           prove_application_s3_recovery() {
             if ! test "$(
               sha256sum application-s3-access-logging-preflight.json |
@@ -3093,6 +4326,8 @@ jobs:
               --expected-source-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
+              --server-side-encryption aws:kms \
+              --ssekms-key-id "$storage_key_alias" \
               --metadata-directive REPLACE \
               --annotation-directive EXCLUDE \
               --content-type "text/html; charset=utf-8" \
@@ -3219,21 +4454,175 @@ jobs:
           fi
           test "$RECOVERY_FAILED" -eq 0
 
+      - name: Finalize the sanitized staging recovery drill handoff
+        id: drill_handoff
+        if: >-
+          always() &&
+          steps.deploy.outcome == 'failure' &&
+          steps.fault_injection.outcome == 'success'
+        env:
+          APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
+          INLINE_RECOVERY_OUTCOME: ${{ steps.inline_recovery.outcome }}
+          PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
+          PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
+          RECOVERY_ENVIRONMENT: staging
+          RECOVERY_INTENT_ID: ${{ steps.durable_recovery.outputs.intent_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="${RUNNER_TEMP:?}/staging-recovery-drill-receipt.json"
+          ledger="${RUNNER_TEMP:?}/staging-recovery-drill-ledger.json"
+          alias_state="${RUNNER_TEMP:?}/staging-recovery-drill-restored-alias.json"
+          health="${RUNNER_TEMP:?}/staging-recovery-drill-health.json"
+          proof="${RUNNER_TEMP:?}/staging-recovery-drill-proof.json"
+          test -f "$receipt"
+          test ! -L "$receipt"
+          test "$INLINE_RECOVERY_OUTCOME" = "success"
+          [[ "$RECOVERY_INTENT_ID" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PREVIOUS_FUNCTION_VERSION" =~ ^[1-9][0-9]*$ ]]
+          [[ "$APPLICATION_URL" =~ ^https://[a-z0-9-]+\.cloudfront\.net$ ]]
+
+          bash aws/recovery-intent-ledger.sh read >"$ledger"
+          jq -e \
+            --arg intent "$RECOVERY_INTENT_ID" '
+              .schema == "archon.recovery-intent.ledger"
+              and .version == 1
+              and .environment == "staging"
+              and .intentId == $intent
+              and .state == "ARMED"
+              and .receiptSha256 == null
+            ' "$ledger" >/dev/null
+          aws lambda get-alias \
+            --function-name "$PREVIOUS_FUNCTION_NAME" \
+            --name live \
+            --region "$AWS_REGION" \
+            --output json >"$alias_state"
+          jq -e \
+            --arg version "$PREVIOUS_FUNCTION_VERSION" '
+              .Name == "live"
+              and .FunctionVersion == $version
+              and ((.RoutingConfig.AdditionalVersionWeights // {}) == {})
+            ' "$alias_state" >/dev/null
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            --max-time 30 "$APPLICATION_URL/api/health" >"$health"
+          jq -e '.ok == true and .status == "reachable"' "$health" >/dev/null
+          curl --fail --silent --show-error \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            --max-time 30 "$APPLICATION_URL/api/proof" >"$proof"
+          jq -e \
+            '.memory.storeVerified == true and .memory.persisted == 9' \
+            "$proof" >/dev/null
+
+          updated="${RUNNER_TEMP:?}/staging-recovery-drill-receipt-final.json"
+          jq \
+            --arg finalizedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+              . + {
+                finalizedAt: $finalizedAt,
+                inlineRecovery: {
+                  previousAliasRestored: true,
+                  additionalVersionWeightsCleared: true,
+                  applicationHealthProved: true,
+                  memoryProofProved: true
+                },
+                durableRecovery: (
+                  .durableRecovery + {
+                    inlineRecoveryProved: true,
+                    ledgerStateAfterInlineRecovery: "ARMED",
+                    watchdogTerminalRecoveryPending: true,
+                    terminalRecoveryClaimed: false
+                  }
+                ),
+                completed: false,
+                result: "inline-recovered-watchdog-terminalization-required"
+              }
+            ' "$receipt" >"$updated"
+          mv "$updated" "$receipt"
+          jq -e '
+            .schema == "archon.staging-recovery-drill"
+            and .version == 2
+            and .mutation.environment == "staging"
+            and .mutation.region == "eu-west-1"
+            and .mutation.lambdaVersionChanged == true
+            and .mutation.observedCanaryWeight == 0.1
+            and .mutation.behaviorFaultInjected == true
+            and .mutation.faultBoundary ==
+              "candidate-database-secret-inaccessible"
+            and .mutation.productionMutationPermitted == false
+            and .alarm.stateObserved == "ALARM"
+            and .codeDeploy.sourceStatus == "Stopped"
+            and .codeDeploy.sourceErrorCode == "ALARM_ACTIVE"
+            and (.codeDeploy.sourceAppSpecSha256
+              | test("^[0-9a-f]{64}$"))
+            and .codeDeploy.sourceExternalStackIdMatched == true
+            and .codeDeploy.sourceCreateTimeWithinDrillWindow == true
+            and .codeDeploy.sourceFunctionNameMatched == true
+            and .codeDeploy.sourceFunctionAliasMatched == true
+            and .codeDeploy.sourcePreviousVersionMatched == true
+            and .codeDeploy.sourceCandidateVersionMatched == true
+            and .codeDeploy.rollbackStatus == "Succeeded"
+            and .codeDeploy.rollbackRelationProved == true
+            and .automaticRollback.stackStatus ==
+              "UPDATE_ROLLBACK_COMPLETE"
+            and .automaticRollback.previousAliasRestored == true
+            and .automaticRollback.applicationHealthProved == true
+            and .automaticRollback.memoryProofProved == true
+            and .inlineRecovery.previousAliasRestored == true
+            and .inlineRecovery.applicationHealthProved == true
+            and .inlineRecovery.memoryProofProved == true
+            and .durableRecovery.ledgerStateAfterInlineRecovery == "ARMED"
+            and .durableRecovery.watchdogTerminalRecoveryPending == true
+            and .durableRecovery.terminalRecoveryClaimed == false
+            and .completed == false
+            and .rawAwsIdentifiersStored == false
+            and .secretValuesRead == false
+          ' "$receipt" >/dev/null
+
+      - name: Attest the staging recovery drill handoff receipt
+        if: >-
+          always() &&
+          steps.drill_handoff.outcome == 'success'
+        uses: actions/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/staging-recovery-drill-receipt.json
+
+      - name: Upload the staging recovery drill handoff receipt
+        if: >-
+          always() &&
+          steps.drill_handoff.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-recovery-drill-handoff-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-recovery-drill-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove staging recovery drill runner material
+        if: >-
+          always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'staging-recovery-drill'
+        run: |
+          set -euo pipefail
+          rm -f -- "${RUNNER_TEMP:?}"/staging-recovery-drill-*
+
       - name: Upload staging receipt
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: staging-deployment-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: staging-deployment-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: staging-deployment-receipt.json
           if-no-files-found: error
           retention-days: 30
 
   deploy-production:
     name: Promote identical candidate to production
+    if: success() && github.event_name == 'push'
     needs:
       - source-gate
       - build-once
       - deploy-staging
+      - database-release
       - managed-mcp-production-audit
     runs-on: ubuntu-latest
     environment:
@@ -3254,18 +4643,19 @@ jobs:
       AWS_SAM_ARTIFACT_BUCKET: ${{ vars.AWS_SAM_ARTIFACT_BUCKET }}
       AWS_LAMBDA_EXECUTION_ROLE_ARN: ${{ vars.AWS_LAMBDA_EXECUTION_ROLE_ARN }}
       AWS_CODEDEPLOY_SERVICE_ROLE_ARN: ${{ vars.AWS_CODEDEPLOY_SERVICE_ROLE_ARN }}
+      COCKROACH_SQL_DNS: ${{ needs.database-release.outputs.cockroach_sql_dns }}
     steps:
       - name: Check out the exact promoted source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Prove the candidate is still the main branch head
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin main
@@ -3282,12 +4672,12 @@ jobs:
       - name: Download the same CI-proven candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: aws-candidate-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: aws-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify candidate, Supply Chain, and memory-evaluation provenance
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.sha }}
           EXPECTED_MEMORY_EVALUATION_RUN_ID: ${{ needs.source-gate.outputs.memory_evaluation_run_id }}
           EXPECTED_MEMORY_EVALUATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.memory_evaluation_run_attempt }}
           EXPECTED_SUPPLY_CHAIN_RUN_ID: ${{ needs.source-gate.outputs.supply_chain_run_id }}
@@ -3392,7 +4782,7 @@ jobs:
           test -n "$AWS_ACCOUNT_ID"
           node aws/create-deployment-receipt.mjs \
             --verify deployment-receipt.json \
-            --commit "${{ github.event.workflow_run.head_sha }}" \
+            --commit "${{ github.sha }}" \
             --sam .aws-sam/build \
             --web web/dist
 
@@ -3433,7 +4823,7 @@ jobs:
 
       - name: Reconcile an interrupted same-run production greenfield recovery
         env:
-          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
           ENVIRONMENT: production
           GH_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -3495,7 +4885,7 @@ jobs:
                   select(
                     .id == $id
                     and .head_sha == $sha
-                    and .event == "workflow_run"
+                    and .event == "push"
                     and (
                       .path == ".github/workflows/deploy-aws.yml"
                       or .path == ".github/workflows/deploy-aws.yml@main"
@@ -3513,7 +4903,7 @@ jobs:
                 ' "$current_run"
             )"
             gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=workflow_run&head_sha=${CANDIDATE_SHA}&per_page=100" \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-aws.yml/runs?event=push&head_sha=${CANDIDATE_SHA}&per_page=100" \
               >"$candidate_runs"
             while IFS= read -r later_run_id; do
               [[ "$later_run_id" =~ ^[0-9]+$ ]]
@@ -3544,7 +4934,7 @@ jobs:
                     | select(
                         .id != $currentRunId
                         and .head_sha == $sha
-                        and .event == "workflow_run"
+                        and .event == "push"
                         and (
                           .path == ".github/workflows/deploy-aws.yml"
                           or .path == ".github/workflows/deploy-aws.yml@main"
@@ -3984,7 +5374,7 @@ jobs:
           PREVIOUS_FUNCTION_NAME="$FUNCTION_NAME" \
           PREVIOUS_FUNCTION_VERSION="$FUNCTION_VERSION" \
           PREVIOUS_APPLICATION_URL="$APPLICATION_URL" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$snapshot"
           jq -e \
             --arg environment production \
@@ -4080,7 +5470,7 @@ jobs:
           set -euo pipefail
           snapshot_recheck="${RUNNER_TEMP:?}/production-recovery-snapshot-recheck.json"
           STACK_STATE="$EXPECTED_STACK_STATE" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$snapshot_recheck"
           jq -e \
             --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
@@ -4212,7 +5602,7 @@ jobs:
         id: durable_recovery
         env:
           ARTIFACT_BUCKET: ${{ env.AWS_SAM_ARTIFACT_BUCKET }}
-          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
           ENVIRONMENT: production
           EXPECTED_GREENFIELD_OWNER: ${{ steps.previous.outputs.greenfield_owner }}
           EXPECTED_PARAMETERS_SHA256: ${{ steps.previous.outputs.parameters_sha256 }}
@@ -4231,8 +5621,8 @@ jobs:
           PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
           RECOVERY_ENVIRONMENT: production
           RECOVERY_SNAPSHOT_PROOF_FILE: ${{ runner.temp }}/production-recovery-snapshot-recheck.json
-          SOURCE_CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          SOURCE_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_CI_RUN_ATTEMPT: ${{ needs.source-gate.outputs.ci_run_attempt }}
+          SOURCE_CI_RUN_ID: ${{ needs.source-gate.outputs.ci_run_id }}
           SOURCE_DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_DEPLOY_RUN_ID: ${{ github.run_id }}
           STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
@@ -4363,6 +5753,75 @@ jobs:
           mask-aws-account-id: true
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
+      - name: Resolve the exact production edge-stack handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AWS_REGION" = "eu-west-1"
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          edge_stack="${APP_NAME}-production-edge"
+          stack="${RUNNER_TEMP:?}/production-edge-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$edge_stack" \
+            --region us-east-1 \
+            --output json >"$stack"
+          web_acl_arn="$(
+            jq -er \
+              --arg account "$AWS_ACCOUNT_ID" \
+              --arg app "$APP_NAME" \
+              --arg stack "$edge_stack" \
+              '
+                .Stacks[0] as $current
+                | (
+                    (.Stacks | length) == 1
+                    and $current.StackName == $stack
+                    and (
+                      $current.StackStatus == "CREATE_COMPLETE"
+                      or $current.StackStatus == "UPDATE_COMPLETE"
+                    )
+                    and $current.EnableTerminationProtection == true
+                    and (($current.RoleARN // null) == null)
+                    and (
+                      [
+                        $current.Parameters[]
+                        | {key:.ParameterKey, value:.ParameterValue}
+                      ]
+                      | from_entries
+                    ) == {
+                      AppName: $app,
+                      Environment: "production",
+                      ApiAggregateRateLimit: "1000",
+                      ResolutionCreateRateLimit: "100"
+                    }
+                    and (
+                      [
+                        $current.Outputs[]
+                        | select(.OutputKey == "ControlPlaneRegion")
+                        | .OutputValue
+                      ]
+                    ) == ["us-east-1"]
+                  ) as $valid
+                | if $valid
+                  then [
+                    $current.Outputs[]
+                    | select(.OutputKey == "WebAclArn")
+                    | .OutputValue
+                    | select(
+                        test(
+                          "^arn:aws:wafv2:us-east-1:" + $account
+                          + ":global/webacl/" + $app
+                          + "-production-cloudfront/[0-9a-f-]+$"
+                        )
+                      )
+                  ]
+                  | select(length == 1)
+                  | .[0]
+                  else error("invalid production edge-stack handoff")
+                  end
+              ' "$stack"
+          )"
+          echo "CLOUDFRONT_WEB_ACL_ARN=$web_acl_arn" >>"$GITHUB_ENV"
+
       - name: Deploy production with recovery-safe SAM canary
         id: deploy
         env:
@@ -4385,6 +5844,9 @@ jobs:
           test -n "$AWS_SAM_ARTIFACT_BUCKET"
           test -n "$AWS_LAMBDA_EXECUTION_ROLE_ARN"
           test -n "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN"
+          [[ "$COCKROACH_SQL_DNS" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+          test "${#COCKROACH_SQL_DNS}" -le 253
+          [[ "$CLOUDFRONT_WEB_ACL_ARN" =~ ^arn:aws:wafv2:us-east-1:${AWS_ACCOUNT_ID}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$ ]]
           # Keep this identical to staging: SAM's supported YAML file interface
           # is required to carry the explicit dormant AlarmTopicArn value.
           parameter_overrides_file="${RUNNER_TEMP:?}/production-sam-parameters.yaml"
@@ -4394,15 +5856,18 @@ jobs:
             --arg databaseSecretId "$DATABASE_SECRET_ID" \
             --arg lambdaRole "$AWS_LAMBDA_EXECUTION_ROLE_ARN" \
             --arg codeDeployRole "$AWS_CODEDEPLOY_SERVICE_ROLE_ARN" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg releaseCommitSha "${{ github.sha }}" \
+            --arg recoveryDrillToken "disabled" \
             --arg bedrockRegion "$BEDROCK_REGION" \
             --arg embeddingModel "$BEDROCK_EMBED_MODEL_ID" \
             --arg narratorModel "$BEDROCK_NARRATOR_MODEL_ID" \
             --arg cockroachRegion "eu-west-1" \
             --arg cockroachEvidence \
               "cockroach-cloud-api-release-gate" \
+            --arg cockroachSqlDns "$COCKROACH_SQL_DNS" \
             --arg reservedConcurrency "5" \
             --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            --arg cloudFrontWebAclArn "$CLOUDFRONT_WEB_ACL_ARN" \
             '{
               AppName: $appName,
               Environment: $environment,
@@ -4410,19 +5875,24 @@ jobs:
               LambdaExecutionRoleArn: $lambdaRole,
               CodeDeployServiceRoleArn: $codeDeployRole,
               ReleaseCommitSha: $releaseCommitSha,
+              RecoveryDrillToken: $recoveryDrillToken,
               BedrockRegion: $bedrockRegion,
               BedrockEmbeddingModelId: $embeddingModel,
               BedrockNarratorModelId: $narratorModel,
               CockroachRegion: $cockroachRegion,
               CockroachRegionEvidence: $cockroachEvidence,
+              CockroachSqlDns: $cockroachSqlDns,
               ReservedConcurrency: $reservedConcurrency,
-              AlarmTopicArn: $alarmTopicArn
+              AlarmTopicArn: $alarmTopicArn,
+              CloudFrontWebAclArn: $cloudFrontWebAclArn
             }' >"$parameter_overrides_file"
           jq -e \
             --arg environment "production" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg releaseCommitSha "${{ github.sha }}" \
+            --arg recoveryDrillToken "disabled" \
             --arg reservedConcurrency "5" \
             --arg alarmTopicArn "$ALARM_TOPIC_ARN" \
+            --arg cloudFrontWebAclArn "$CLOUDFRONT_WEB_ACL_ARN" \
             '
               (keys | sort) == (
                 [
@@ -4433,19 +5903,25 @@ jobs:
                   "BedrockRegion",
                   "CockroachRegion",
                   "CockroachRegionEvidence",
+                  "CockroachSqlDns",
+                  "CloudFrontWebAclArn",
                   "CodeDeployServiceRoleArn",
                   "DatabaseSecretId",
                   "Environment",
                   "LambdaExecutionRoleArn",
                   "ReleaseCommitSha",
+                  "RecoveryDrillToken",
                   "ReservedConcurrency"
                 ] | sort
               )
               and all(.[]; type == "string")
               and .Environment == $environment
               and .ReleaseCommitSha == $releaseCommitSha
+              and .RecoveryDrillToken == $recoveryDrillToken
               and .ReservedConcurrency == $reservedConcurrency
               and .AlarmTopicArn == $alarmTopicArn
+              and .CloudFrontWebAclArn == $cloudFrontWebAclArn
+              and .CockroachSqlDns == env.COCKROACH_SQL_DNS
             ' "$parameter_overrides_file" >/dev/null
           target_tags="${RUNNER_TEMP:?}/production-sam-stack-tags.json"
           if [ "$EXPECTED_STACK_STATE" = "greenfield" ]; then
@@ -4498,7 +5974,7 @@ jobs:
                   curl --fail --silent --max-time 45 \
                     -X POST "$CANARY_URL/api/recall" \
                     -H 'content-type: application/json' \
-                    --data '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}' \
+                    --data '{"question":"What was the true employer cost and the off-bank wedge?","kind":"payroll_event","limit":5}' \
                     >/dev/null 2>&1 || true
                 fi
                 sleep 2
@@ -4570,7 +6046,8 @@ jobs:
             --stack-name "$STACK_NAME" \
             --region "$AWS_REGION" \
             --s3-bucket "$AWS_SAM_ARTIFACT_BUCKET" \
-            --s3-prefix "candidates/deployments/production/${{ github.event.workflow_run.head_sha }}" \
+            --s3-prefix "candidates/deployments/production/${{ github.sha }}" \
+            --kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --role-arn "$AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN" \
             --parameter-overrides "file://${parameter_overrides_file}" \
             "${SAM_TAGS[@]}" \
@@ -4616,8 +6093,9 @@ jobs:
             --arg previousStackId "$PREVIOUS_STACK_ID" \
             --arg app "$APP_NAME" \
             --arg environment "$ENVIRONMENT" \
-            --arg releaseCommitSha "${{ github.event.workflow_run.head_sha }}" \
+            --arg releaseCommitSha "${{ github.sha }}" \
             --arg reservedConcurrency "5" \
+            --arg cockroachSqlDns "$COCKROACH_SQL_DNS" \
             '
               (.Stacks | length) == 1
               and .Stacks[0].StackName == $stack
@@ -4632,6 +6110,11 @@ jobs:
                 [.Stacks[0].Parameters[]?
                   | select(.ParameterKey == "ReservedConcurrency")
                   | .ParameterValue] == [$reservedConcurrency]
+              )
+              and (
+                [.Stacks[0].Parameters[]?
+                  | select(.ParameterKey == "CockroachSqlDns")
+                  | .ParameterValue] == [$cockroachSqlDns]
               )
               and (
                 [.Stacks[0].Tags[]?
@@ -4921,9 +6404,13 @@ jobs:
           aws s3 sync web/dist "s3://$BUCKET_NAME" \
             --region "$AWS_REGION" \
             --exclude index.html \
+            --sse aws:kms \
+            --sse-kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --cache-control "public,max-age=31536000,immutable"
           aws s3 cp web/dist/index.html "s3://$BUCKET_NAME/index.html" \
             --region "$AWS_REGION" \
+            --sse aws:kms \
+            --sse-kms-key-id "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
             --content-type "text/html; charset=utf-8" \
             --cache-control "no-cache,no-store,must-revalidate"
           INVALIDATION_ID="$(aws cloudfront create-invalidation \
@@ -4968,7 +6455,7 @@ jobs:
                .access == "read-only" and
                .dataClassification == "synthetic-public-demo" and
                .source == "server-configured")' <<<"$HEALTH"
-          RELEASE_COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+          RELEASE_COMMIT_SHA="${{ github.sha }}"
           [[ "$RELEASE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
           PROOF="$(curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
@@ -5044,7 +6531,7 @@ jobs:
             --max-time 45 \
             -X POST "$APPLICATION_URL/api/recall" \
             -H 'content-type: application/json' \
-            --data '{"question":"What was the true employer cost and the off-bank wedge?","limit":5}')"
+            --data '{"question":"What was the true employer cost and the off-bank wedge?","kind":"payroll_event","limit":5}')"
           jq -e \
             --arg question "What was the true employer cost and the off-bank wedge?" \
             --arg embed "$BEDROCK_EMBED_MODEL_ID" \
@@ -5064,6 +6551,7 @@ jobs:
              .trace.retrieval.index == "native C-SPANN vector index" and
              .trace.retrieval.metric == "cosine" and
              .trace.retrieval.embeddingModel == $embed and
+             .trace.retrieval.requestedKind == "payroll_event" and
              .trace.retrieval.requestedTopK == 5 and
              .trace.retrieval.recalled == .recalled and
              .trace.narration.model == $narrator and
@@ -5082,7 +6570,7 @@ jobs:
                (.memoryId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
                (.sourceRef | type == "string" and length > 0) and
                .company == "Helios SA" and
-               (.kind == "document" or .kind == "payroll_event" or .kind == "validation" or .kind == "insight") and
+               .kind == "payroll_event" and
                .period == "2026-04" and
                (.score | type == "number" and . >= 0.15 and . <= 1)) and
              (.answer as $answer |
@@ -5221,7 +6709,7 @@ jobs:
           terminal_snapshot="${RUNNER_TEMP:?}/production-recovery-snapshot-terminal.json"
           STACK_STATE="$EXPECTED_STACK_STATE" \
           EXPECTED_PREVIOUS_RELEASE_SHA256="$PREVIOUS_RELEASE_SHA256" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$terminal_snapshot"
           jq -e \
             --arg expected "$PREVIOUS_RELEASE_SHA256" \
@@ -5482,7 +6970,7 @@ jobs:
           EXPECTED_TEMPLATE_SHA256="$EXPECTED_PREVIOUS_STACK_TEMPLATE_SHA256" \
           EXPECTED_PARAMETERS_SHA256="$EXPECTED_PREVIOUS_STACK_PARAMETERS_SHA256" \
           EXPECTED_TAGS_SHA256="$EXPECTED_PREVIOUS_STACK_TAGS_SHA256" \
-          CANDIDATE_SHA="${{ github.event.workflow_run.head_sha }}" \
+          CANDIDATE_SHA="${{ github.sha }}" \
             bash aws/prove-recovery-snapshot.sh >"$recovery_snapshot"
           jq -e \
             --arg expected "$EXPECTED_PREVIOUS_RELEASE_SHA256" \
@@ -5513,6 +7001,7 @@ jobs:
           fi
 
           RECOVERY_FAILED=0
+          storage_key_alias="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
           prove_application_s3_recovery() {
             if ! test "$(
               sha256sum application-s3-access-logging-preflight.json |
@@ -5666,6 +7155,8 @@ jobs:
               --expected-source-bucket-owner "$AWS_ACCOUNT_ID" \
               --key index.html \
               --copy-source "${BUCKET_NAME}/index.html?versionId=${PREVIOUS_INDEX_VERSION}" \
+              --server-side-encryption aws:kms \
+              --ssekms-key-id "$storage_key_alias" \
               --metadata-directive REPLACE \
               --annotation-directive EXCLUDE \
               --content-type "text/html; charset=utf-8" \
@@ -5796,13 +7287,14 @@ jobs:
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: production-deployment-receipt-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: production-deployment-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-deployment-receipt.json
           if-no-files-found: error
           retention-days: 90
 
   managed-mcp-production-audit:
     name: Prove production memory through CockroachDB Managed MCP
+    if: github.event_name == 'push'
     needs:
       - database-release
     runs-on: ubuntu-latest
@@ -5822,19 +7314,19 @@ jobs:
       - name: Check out the exact deployed source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Download the exact database C-SPANN release receipt
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: database-release-${{ github.event.workflow_run.head_sha }}
+          name: database-release-${{ github.sha }}
           path: ${{ runner.temp }}/managed-mcp-cspann-release
       - name: Bind the exact release C-SPANN receipt digest
         id: cspann
         shell: bash
         env:
-          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           receipt="${RUNNER_TEMP:?}/managed-mcp-cspann-release/database-release-receipt.json"
@@ -5867,7 +7359,7 @@ jobs:
         env:
           CCLOUD_API_KEY: ${{ secrets.CCLOUD_API_KEY }}
           COCKROACH_CLUSTER_ID: ${{ vars.COCKROACH_CLUSTER_ID }}
-          MANAGED_MCP_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANAGED_MCP_RELEASE_SHA: ${{ github.sha }}
           MANAGED_MCP_CSPANN_RECEIPT_SHA256: ${{ steps.cspann.outputs.sha256 }}
         run: |
           set -euo pipefail
@@ -5966,11 +7458,11 @@ jobs:
             sha256sum managed-mcp-production-receipt.json | awk '{print $1}'
           )"
           [[ "$receipt_sha256" =~ ^[a-f0-9]{64}$ ]]
-          echo "receipt_sha256=$receipt_sha256" >>"$GITHUB_OUTPUT"
-          echo "checked_at=$(jq -er '.checkedAt' managed-mcp-production-receipt.json)" \
-            >>"$GITHUB_OUTPUT"
-          echo "explain_status=$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-production-receipt.json)" \
-            >>"$GITHUB_OUTPUT"
+          {
+            echo "receipt_sha256=$receipt_sha256"
+            echo "checked_at=$(jq -er '.checkedAt' managed-mcp-production-receipt.json)"
+            echo "explain_status=$(jq -er '.cspannLinkage.explainQuery.status' managed-mcp-production-receipt.json)"
+          } >>"$GITHUB_OUTPUT"
           {
             echo "### CockroachDB tool-chain release gate"
             echo
@@ -5984,7 +7476,21 @@ jobs:
       - name: Upload sanitized Managed MCP receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: managed-mcp-production-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: managed-mcp-production-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: managed-mcp-production-receipt.json
           if-no-files-found: error
           retention-days: 90
+
+  hosted-dast-production:
+    name: Run hosted DAST against exact production release
+    needs:
+      - deploy-production
+      - managed-mcp-production-audit
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/security-dast.yml
+    with:
+      exact_sha: ${{ github.sha }}
+      deploy_run_id: ${{ github.run_id }}
+      deploy_run_attempt: ${{ github.run_attempt }}

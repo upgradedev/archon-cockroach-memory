@@ -1,21 +1,19 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Approval-gated AWS billing control plane for Archon Memory. This template
-  defines a monthly cost budget and immediate service-level anomaly alerts.
-  It has no deployment workflow and must not be activated until the FinOps
-  owner, thresholds, SNS destination, cost, rollback, and approval reference
-  have been reviewed.
+  defines one application-scoped monthly cost budget and one customer-managed
+  application cost monitor with immediate anomaly alerts.
+  Its protected manual workflow supports exact-SHA plan, apply, and verify,
+  but must not be activated until the FinOps owner, thresholds, encrypted SNS
+  destination, cost, rollback, and approval reference have been reviewed.
 
 Parameters:
   AppName:
     Type: String
     Default: archon-memory
-    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
-  Environment:
-    Type: String
-    AllowedValues:
-      - staging
-      - production
+    MinLength: 3
+    MaxLength: 17
+    AllowedPattern: "^[a-z][a-z0-9-]{2,16}$"
   MonthlyBudgetUsd:
     Type: Number
     MinValue: 1
@@ -66,11 +64,18 @@ Resources:
     Type: AWS::Budgets::Budget
     Properties:
       Budget:
-        BudgetName: !Sub "${AppName}-${Environment}-monthly-total"
+        BudgetName: !Sub "${AppName}-workload-monthly-total"
         BudgetLimit:
           Amount: !Ref MonthlyBudgetUsd
           Unit: USD
         BudgetType: COST
+        FilterExpression:
+          Tags:
+            Key: Application
+            Values:
+              - !Ref AppName
+            MatchOptions:
+              - EQUALS
         TimeUnit: MONTHLY
       NotificationsWithSubscribers:
         - Notification:
@@ -108,8 +113,8 @@ Resources:
       ResourceTags:
         - Key: Application
           Value: !Ref AppName
-        - Key: Environment
-          Value: !Ref Environment
+        - Key: FinOpsScope
+          Value: workload
         - Key: FinOpsOwner
           Value: !Ref FinOpsOwnerReference
         - Key: ActivationApproval
@@ -117,17 +122,24 @@ Resources:
         - Key: ApprovalBoundary
           Value: explicit-live-activation-required
 
-  ServiceCostAnomalyMonitor:
+  WorkloadCostAnomalyMonitor:
     Type: AWS::CE::AnomalyMonitor
     Properties:
-      MonitorName: !Sub "${AppName}-${Environment}-services"
-      MonitorType: DIMENSIONAL
-      MonitorDimension: SERVICE
+      MonitorName: !Sub "${AppName}-workload-cost"
+      MonitorType: CUSTOM
+      MonitorSpecification: !Sub >-
+        {
+          "Tags": {
+            "Key": "Application",
+            "Values": ["${AppName}"],
+            "MatchOptions": ["EQUALS"]
+          }
+        }
       ResourceTags:
         - Key: Application
           Value: !Ref AppName
-        - Key: Environment
-          Value: !Ref Environment
+        - Key: FinOpsScope
+          Value: workload
         - Key: FinOpsOwner
           Value: !Ref FinOpsOwnerReference
         - Key: ActivationApproval
@@ -138,10 +150,10 @@ Resources:
   ImmediateCostAnomalySubscription:
     Type: AWS::CE::AnomalySubscription
     Properties:
-      SubscriptionName: !Sub "${AppName}-${Environment}-immediate"
+      SubscriptionName: !Sub "${AppName}-workload-immediate"
       Frequency: IMMEDIATE
       MonitorArnList:
-        - !Ref ServiceCostAnomalyMonitor
+        - !Ref WorkloadCostAnomalyMonitor
       Subscribers:
         - Address: !Ref FinOpsNotificationTopicArn
           Type: SNS
@@ -167,8 +179,8 @@ Resources:
       ResourceTags:
         - Key: Application
           Value: !Ref AppName
-        - Key: Environment
-          Value: !Ref Environment
+        - Key: FinOpsScope
+          Value: workload
         - Key: FinOpsOwner
           Value: !Ref FinOpsOwnerReference
         - Key: ActivationApproval
@@ -181,8 +193,8 @@ Outputs:
     Description: Name of the approval-gated monthly workload budget.
     Value: !Ref MonthlyWorkloadBudget
   AnomalyMonitorArn:
-    Description: ARN of the approval-gated service cost anomaly monitor.
-    Value: !Ref ServiceCostAnomalyMonitor
+    Description: ARN of the approval-gated application cost anomaly monitor.
+    Value: !Ref WorkloadCostAnomalyMonitor
   AnomalySubscriptionArn:
     Description: ARN of the approval-gated immediate anomaly subscription.
     Value: !Ref ImmediateCostAnomalySubscription
