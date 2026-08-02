@@ -438,7 +438,7 @@ async function runRuntime(cli: Cli, output: string): Promise<void> {
         approvalPending.sessionId
       ),
     }));
-    const conflictingDecisionRejected = await withFreshPool(async () => {
+    const conflictingFinalDecisionRejected = await withFreshPool(async () => {
       try {
         await new CockroachResolutionStore().decide(
           resolutionTokenHash(approvalToken),

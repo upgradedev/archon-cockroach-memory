@@ -489,7 +489,7 @@ jobs:
               and $metrics.archon_schema_rate.type == "rate"
               and $metrics.archon_schema_rate.values.rate == 1
               and $metrics.archon_schema_trend_ms.type == "trend"
-              and $metrics.archon_schema_trend_ms.values["p(95)"] == 42
+              and $metrics.archon_schema_trend_ms.values.p95 == 42
           ' "$summary" >/dev/null
           rm -f -- "$summary"
       - name: Start CockroachDB

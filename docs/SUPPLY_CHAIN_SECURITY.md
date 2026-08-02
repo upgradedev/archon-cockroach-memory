@@ -46,7 +46,11 @@ The SBOM is intentionally split:
 - backend and frontend component SBOMs describe the resolved JavaScript package
   dependency graphs, including development dependencies. Their cataloger set is
   fail-closed to Syft's `javascript-lock-cataloger` and
-  `javascript-package-cataloger`;
+  explicitly added `javascript-package-cataloger`, plus the four mandatory
+  `file-content-cataloger`, `file-digest-cataloger`,
+  `file-executable-cataloger`, and `file-metadata-cataloger` helpers recorded by
+  Syft for directory sources. The workflow requires this exact six-cataloger
+  allow-list;
 - the Lambda ZIP-content SBOM and content manifest describe what SAM packaged.
 
 An esbuild bundle may not retain every package manifest. Therefore the
@@ -105,20 +109,19 @@ predates that schema field and emits a `syntax-check` diagnostic even though
 GitHub accepts the workflow.
 
 The pipeline does not remove `queue: max`, apply a regular-expression ignore,
-or treat arbitrary syntax diagnostics as acceptable. It permits exactly seven
-known source locations represented by six anchor contracts in these files and
+or treat arbitrary syntax diagnostics as acceptable. It permits exactly six
+known source locations represented by five anchor contracts in these files and
 nowhere else:
 
 - `.github/workflows/bootstrap-aws.yml`;
 - `.github/workflows/deploy-aws.yml`;
-- `.github/workflows/edge-controls.yml`;
 - `.github/workflows/foundation-migration.yml`;
 - `.github/workflows/recover-aws.yml` (one recovery-watchdog anchor and two
   recovery-mutation anchors).
 
 The analyzer must still be version 1.7.12; its raw exit code must be 1; all
-seven diagnostics must have the exact message, kind, indentation-derived
-column/indicator, and file-specific line. Four workflows remain bound to the
+six diagnostics must have the exact message, kind, indentation-derived
+column/indicator, and file-specific line. Three workflows remain bound to the
 original delivery anchor:
 
 ```yaml
@@ -147,12 +150,12 @@ jobs:
 ```
 
 The raw JSON and normalized compatibility records are retained. After removing
-only those seven source-validated parser diagnostics, the effective actionlint
+only those six source-validated parser diagnostics, the effective actionlint
 finding count must be zero. An additional diagnostic, changed path, duplicate
 or missing diagnostic, source drift, analyzer upgrade, malformed JSON, or
 unexpected exit code fails closed. This is a versioned tool/schema
 compatibility boundary, not an entry in the vulnerability waiver ledger. The
-exact-main receipt records both the seven raw diagnostics and zero effective
+exact-main receipt records both the six raw diagnostics and zero effective
 findings.
 
 ### Exact Trivy CloudFront certificate compatibility boundary

@@ -195,7 +195,7 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
   assert.match(script, /ALTER USER \$\{user\} NOLOGIN/u);
   assert.match(script, /SHOW CLUSTER SESSIONS/u);
   assert.doesNotMatch(
-    script.match(/async function oldRuntimeSessions[\s\S]*?^}/mu)?.[0] ?? "",
+    script.match(/async function oldRuntimeSessions[\s\S]*?^\}/mu)?.[0] ?? "",
     /application_name/u
   );
   assert.match(script, /disabledOptions\.includes\("NOLOGIN"\)/u);

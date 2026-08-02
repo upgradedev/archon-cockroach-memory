@@ -123,10 +123,11 @@ jobs:
       id-token: write
     env:
       AWS_SECURITY_AUDIT_ROLE_ARN: ${{ vars.AWS_SECURITY_AUDIT_ROLE_ARN }}
-      RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
     steps:
       - name: Initialize the sanitized fail-closed receipt
         shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
         run: |
           set -euo pipefail
           umask 077
@@ -197,10 +198,14 @@ jobs:
 
       - name: Inspect account security controls without mutation
         shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
         run: bash aws/audit-account-security-baseline.sh
 
       - name: Require the exact sanitized all-pass receipt
         shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/aws-account-security-baseline-receipt.json
         run: |
           set -euo pipefail
           test -f "$RECEIPT_PATH"

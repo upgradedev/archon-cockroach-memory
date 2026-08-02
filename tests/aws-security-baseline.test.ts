@@ -110,6 +110,14 @@ test("AWS account baseline workflow is manual, protected, and exact-green-main",
 });
 
 test("workflow actions and sanitized exact-SHA artifact are immutable", () => {
+  const auditJobStart = workflow.indexOf("  audit:");
+  const auditStepsStart = workflow.indexOf("    steps:", auditJobStart);
+  assert.ok(auditJobStart >= 0);
+  assert.ok(auditStepsStart > auditJobStart);
+  assert.doesNotMatch(
+    workflow.slice(auditJobStart, auditStepsStart),
+    /\$\{\{\s*runner\./u
+  );
   const uses = [...workflow.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map(
     (match) => match[1]
   );

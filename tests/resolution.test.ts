@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  isExpectedResolutionRoutineBody,
   isExpectedResolutionRoutineCreateStatement,
 } from "../src/db/routine-proof.js";
 import { closePool, query } from "../src/db/client.js";
@@ -156,6 +158,94 @@ test("resolution routine catalog gate trusts only descriptor-backed definer meta
       false
     );
   }
+});
+
+test("resolution routine body proof tolerates only Cockroach canonicalization of built-ins", () => {
+  const createBody = `BEGIN
+    IF p_max_active_sessions > 500 THEN RETURN 'invalid'; END IF;
+    SELECT count(*) FROM archon.public.memory_demo_sessions WHERE expires_at > pg_catalog . NOW ( );
+    INSERT INTO archon.public.memory_resolution_observations DEFAULT VALUES;
+    INSERT INTO archon.public.memory_resolution_proposals DEFAULT VALUES;
+    RETURN 'created';
+  END;`;
+  const decideBody = `BEGIN
+    SELECT id FROM archon.public.memory_demo_sessions WHERE expires_at > pg_catalog.now();
+    UPDATE archon.public.memory_resolution_observations SET status = status;
+    UPDATE archon.public.memory_resolution_proposals SET status = status;
+    INSERT INTO archon.public.memory_resolution_decisions DEFAULT VALUES;
+    INSERT INTO archon.public.memory_resolution_consolidations DEFAULT VALUES;
+    v_receipt_canonical := '{"actorRole":"financial-controller"}';
+    v_receipt_hash := pg_catalog . SHA256 (v_receipt_canonical:::STRING);
+    IF false THEN RETURN 'replayed'; END IF;
+    IF false THEN RETURN 'conflict'; END IF;
+    RETURN 'applied';
+  END;`;
+
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      createBody,
+      "archon_resolution_create_session"
+    ),
+    true
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(decideBody, "archon_resolution_decide"),
+    true
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      decideBody.replace(
+        "archon.public.memory_resolution_decisions",
+        "memory_resolution_decisions"
+      ),
+      "archon_resolution_decide"
+    ),
+    false
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      decideBody.replace(
+        "archon.public.memory_resolution_decisions DEFAULT VALUES",
+        "archon.public.unrelated DEFAULT VALUES; -- memory_resolution_decisions\n"
+      ),
+      "archon_resolution_decide"
+    ),
+    false
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      decideBody.replace(
+        "SHA256 (v_receipt_canonical:::STRING)",
+        "SHA256 ('v_receipt_canonical')"
+      ),
+      "archon_resolution_decide"
+    ),
+    false
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      decideBody.replace(
+        "RETURN 'applied';",
+        "EXECUTE 'SELECT 1'; RETURN 'applied';"
+      ),
+      "archon_resolution_decide"
+    ),
+    false
+  );
+  assert.equal(
+    isExpectedResolutionRoutineBody(
+      `${decideBody}\n-- EXECUTE and memory_resolution_decisions in comments are inert`,
+      "archon_resolution_decide"
+    ),
+    true
+  );
+
+  const source = readFileSync(
+    new URL("../src/db/schema.sql", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /pg_catalog\.sha256\(v_receipt_canonical\)/u);
+  assert.match(source, /expires_at\s*>\s*pg_catalog\.now\(\)/u);
 });
 
 test("resolution tokens are high-entropy bearer values and only hashes reach stores", async () => {

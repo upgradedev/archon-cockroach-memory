@@ -256,7 +256,9 @@ function sha256Text(value: string): string {
 async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");
   const input = createReadStream(path);
-  input.on("data", (chunk: Buffer) => hash.update(chunk));
+  input.on("data", (chunk) => {
+    hash.update(chunk);
+  });
   await finished(input);
   return hash.digest("hex");
 }

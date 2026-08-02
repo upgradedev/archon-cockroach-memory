@@ -37,6 +37,7 @@ import {
   type SystemGrant,
 } from "../src/db/system-grants.js";
 import {
+  isExpectedResolutionRoutineBody,
   isExpectedResolutionRoutineCreateStatement,
 } from "../src/db/routine-proof.js";
 import {
@@ -1814,10 +1815,9 @@ async function verifyResolutionTransitionFunctions(
       volatileMatches: routine?.provolatile === "v",
       languageMatches:
         routine?.lanname.toLowerCase() === "plpgsql",
-      dynamicSqlAbsent:
-        routine !== undefined && !/\bexecute\b/iu.test(routine.prosrc),
-      boundedBodyPresent:
-        routine?.prosrc.includes("public.memory_demo_sessions") === true,
+      bodyContractMatches:
+        routine !== undefined &&
+        isExpectedResolutionRoutineBody(routine.prosrc, expected.name),
     };
   });
   if (
@@ -1830,48 +1830,13 @@ async function verifyResolutionTransitionFunctions(
         !evidence.securityDefinerMatches ||
         !evidence.volatileMatches ||
         !evidence.languageMatches ||
-        !evidence.dynamicSqlAbsent ||
-        !evidence.boundedBodyPresent
+        !evidence.bodyContractMatches
     )
   ) {
     throw new ReleaseGateError(
       `Resolution SECURITY DEFINER routine ownership or body contract drifted: ${JSON.stringify(
         routineEvidence
       )}`
-    );
-  }
-
-  const createBody = routines.rows.find(
-    (routine) => routine.proname === "archon_resolution_create_session"
-  )?.prosrc;
-  const decideBody = routines.rows.find(
-    (routine) => routine.proname === "archon_resolution_decide"
-  )?.prosrc;
-  if (
-    !createBody ||
-    !decideBody ||
-    ![
-      "public.memory_demo_sessions",
-      "public.memory_resolution_observations",
-      "public.memory_resolution_proposals",
-      "pg_catalog.now()",
-      "p_max_active_sessions > 500",
-    ].every((fragment) => createBody.includes(fragment)) ||
-    ![
-      "public.memory_demo_sessions",
-      "public.memory_resolution_observations",
-      "public.memory_resolution_proposals",
-      "public.memory_resolution_decisions",
-      "public.memory_resolution_consolidations",
-      "pg_catalog.now()",
-      "pg_catalog.sha256(v_receipt_canonical)",
-      '"actorRole":"financial-controller"',
-      "RETURN 'replayed'",
-      "RETURN 'conflict'",
-    ].every((fragment) => decideBody.includes(fragment))
-  ) {
-    throw new ReleaseGateError(
-      "Resolution transition routines are not fully qualified and fail closed."
     );
   }
 

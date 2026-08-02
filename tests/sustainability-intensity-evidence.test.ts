@@ -101,6 +101,14 @@ test("sustainability workflow is manual, protected, read-only, and exact-green-m
 });
 
 test("workflow binds exact hosted and baseline receipts and uploads no raw AWS response", () => {
+  const measureJobStart = workflow.indexOf("  measure:");
+  const measureStepsStart = workflow.indexOf("    steps:", measureJobStart);
+  assert.ok(measureJobStart >= 0);
+  assert.ok(measureStepsStart > measureJobStart);
+  assert.doesNotMatch(
+    workflow.slice(measureJobStart, measureStepsStart),
+    /\$\{\{\s*runner\./u
+  );
   assert.match(workflow, /Hosted Load Evidence/u);
   assert.match(workflow, /\.github\/workflows\/hosted-load-evidence\.yml/u);
   assert.match(workflow, /hosted-load-\$\{\{ inputs\.environment \}\}/u);

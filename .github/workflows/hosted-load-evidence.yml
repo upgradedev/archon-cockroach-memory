@@ -380,7 +380,7 @@ jobs:
                   and $metrics.iterations.values.count == $iterations
                   and $metrics.http_reqs.values.count
                     == ($iterations + 1)
-                  and $metrics.hosted_recall_duration_ms.values["p(95)"]
+                  and $metrics.hosted_recall_duration_ms.values.p95
                     < $p95Objective
                   and $metrics.hosted_recall_http_failure.values.rate
                     <= $maxErrorRate
@@ -448,7 +448,7 @@ jobs:
                   },
                   observed: {
                     p95LatencyMs:
-                      $metrics.hosted_recall_duration_ms.values["p(95)"],
+                      $metrics.hosted_recall_duration_ms.values.p95,
                     errorRate:
                       $metrics.hosted_recall_http_failure.values.rate,
                     contractRate:

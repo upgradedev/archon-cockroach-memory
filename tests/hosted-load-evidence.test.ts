@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 // The runtime-neutral module is the exact implementation imported by k6.
-// @ts-ignore TypeScript does not emit declarations for the shipped JS module.
 import {
   HOSTED_RECALL_KIND,
   HOSTED_RECALL_QUESTION,

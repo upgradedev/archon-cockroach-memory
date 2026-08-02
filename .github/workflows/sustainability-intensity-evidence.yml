@@ -294,23 +294,20 @@ jobs:
     env:
       APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
       BASELINE_COMMIT_SHA: ${{ inputs.baseline_commit_sha }}
-      BASELINE_RECEIPT_PATH: ${{ runner.temp }}/baseline-artifact/sustainability-intensity-receipt.json
       BASELINE_RECEIPT_SHA256: ${{ inputs.baseline_receipt_sha256 }}
       BASELINE_RUN_ATTEMPT: ${{ inputs.baseline_run_attempt }}
       BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
       COMPARISON_MODE: ${{ inputs.comparison_mode }}
-      HOSTED_LOAD_CONTRACT_MANIFEST_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-contract.sha256
-      HOSTED_LOAD_RECEIPT_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-receipt.json
       HOSTED_LOAD_RECEIPT_SHA256: ${{ inputs.hosted_load_receipt_sha256 }}
       HOSTED_LOAD_RUN_ATTEMPT: ${{ inputs.hosted_load_run_attempt }}
       HOSTED_LOAD_RUN_ID: ${{ inputs.hosted_load_run_id }}
-      HOSTED_LOAD_SUMMARY_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-k6-summary.json
       PRIMARY_PROXY: ${{ inputs.primary_proxy }}
-      RECEIPT_PATH: ${{ runner.temp }}/sustainability-intensity-receipt.json
       TARGET_REDUCTION_BPS: ${{ inputs.approved_target_reduction_bps }}
     steps:
       - name: Initialize fail-closed sanitized receipt
         shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/sustainability-intensity-receipt.json
         run: |
           set -euo pipefail
           umask 077
@@ -384,6 +381,12 @@ jobs:
 
       - name: Measure bounded engineering intensity without mutation
         shell: bash
+        env:
+          BASELINE_RECEIPT_PATH: ${{ runner.temp }}/baseline-artifact/sustainability-intensity-receipt.json
+          HOSTED_LOAD_CONTRACT_MANIFEST_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-contract.sha256
+          HOSTED_LOAD_RECEIPT_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-load-receipt.json
+          HOSTED_LOAD_SUMMARY_PATH: ${{ runner.temp }}/hosted-load-artifact/hosted-k6-summary.json
+          RECEIPT_PATH: ${{ runner.temp }}/sustainability-intensity-receipt.json
         run: bash aws/measure-sustainability-intensity.sh
 
       - name: Upload only the sanitized receipt
@@ -398,6 +401,8 @@ jobs:
       - name: Enforce sanitized successful evidence
         if: always()
         shell: bash
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/sustainability-intensity-receipt.json
         run: |
           set -euo pipefail
           test -f "$RECEIPT_PATH"
