@@ -769,6 +769,11 @@ jobs:
           PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
         run: |
           set -euo pipefail
+          cleanup_candidate_metadata() {
+            rm -f -- \
+              "$PREDEPLOY_ZAP_PID_FILE" "$PREDEPLOY_ZAP_LOG_FILE" || true
+          }
+          trap cleanup_candidate_metadata EXIT
           if [ ! -f "$PREDEPLOY_ZAP_PID_FILE" ]; then
             exit 0
           fi
@@ -776,21 +781,88 @@ jobs:
           [[ "$server_pid" =~ ^[1-9][0-9]*$ ]]
           alive=false
           healthy=false
+          candidate_identity=false
           shutdown_clean=false
+          forced_cleanup=false
+          process_absent=false
           if kill -0 "$server_pid" 2>/dev/null; then
             alive=true
+            candidate_cmdline=""
+            if candidate_cmdline="$(
+                tr '\0' ' ' 2>/dev/null \
+                  <"/proc/$server_pid/cmdline"
+              )" && [[ "$candidate_cmdline" == \
+                *"node scripts/predeploy-zap-server.mjs"* ]]; then
+              candidate_identity=true
+            fi
             if curl --fail --silent --show-error --max-time 2 \
                 "$DAST_CANDIDATE_URL/" >/dev/null; then
               healthy=true
             fi
-            if kill -TERM "$server_pid" && wait "$server_pid"; then
-              shutdown_clean=true
+            if [ "$candidate_identity" = "true" ]; then
+              if kill -TERM "$server_pid"; then
+                for _ in $(seq 1 40); do
+                  if ! kill -0 "$server_pid" 2>/dev/null; then
+                    shutdown_clean=true
+                    process_absent=true
+                    break
+                  fi
+                  poll_cmdline=""
+                  if poll_cmdline="$(
+                      tr '\0' ' ' 2>/dev/null \
+                        <"/proc/$server_pid/cmdline"
+                    )" && [[ "$poll_cmdline" != \
+                      *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                    shutdown_clean=true
+                    process_absent=true
+                    break
+                  fi
+                  sleep 0.25
+                done
+              elif ! kill -0 "$server_pid" 2>/dev/null; then
+                shutdown_clean=true
+                process_absent=true
+              fi
+              if kill -0 "$server_pid" 2>/dev/null; then
+                forced_cmdline=""
+                if forced_cmdline="$(
+                    tr '\0' ' ' 2>/dev/null \
+                      <"/proc/$server_pid/cmdline"
+                  )" && [[ "$forced_cmdline" == \
+                    *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                  forced_cleanup=true
+                  kill -KILL "$server_pid" || true
+                  for _ in $(seq 1 20); do
+                    if ! kill -0 "$server_pid" 2>/dev/null; then
+                      process_absent=true
+                      break
+                    fi
+                    post_kill_cmdline=""
+                    if post_kill_cmdline="$(
+                        tr '\0' ' ' 2>/dev/null \
+                          <"/proc/$server_pid/cmdline"
+                      )" && [[ "$post_kill_cmdline" != \
+                        *"node scripts/predeploy-zap-server.mjs"* ]]; then
+                      process_absent=true
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                elif ! kill -0 "$server_pid" 2>/dev/null ||
+                    [ -n "$forced_cmdline" ]; then
+                  shutdown_clean=true
+                  process_absent=true
+                fi
+              fi
             fi
           fi
-          rm -f -- "$PREDEPLOY_ZAP_PID_FILE" "$PREDEPLOY_ZAP_LOG_FILE"
+          cleanup_candidate_metadata
           test "$alive" = "true"
           test "$healthy" = "true"
+          test "$candidate_identity" = "true"
           test "$shutdown_clean" = "true"
+          test "$forced_cleanup" = "false"
+          test "$process_absent" = "true"
 
   # Stage 2h — guard the media guard. Tiny runner-temp fixtures prove that the
   # final-video verifier accepts a correct package and rejects scene, A/V,

@@ -2363,16 +2363,29 @@ function sourceChecks(): SourceCheck[] {
       /name: Refresh short-lived AWS credentials for (?:staging|production) SAM deployment/gu
     ),
   ].map((match) => match.index ?? -1);
+  const edgeStackHandoffPositions = [
+    ...deploy.matchAll(
+      /name: Resolve the exact (?:staging|production) edge-stack handoff/gu
+    ),
+  ].map((match) => match.index ?? -1);
   const samCredentialsRefreshImmediatelyBeforeDeploy =
     samCredentialRefreshPositions.length === 2 &&
+    edgeStackHandoffPositions.length === 2 &&
     applicationDeployPositions.length === 2 &&
     samCredentialRefreshPositions.every((position, index) => {
+      const handoffPosition = edgeStackHandoffPositions[index];
       const deployPosition = applicationDeployPositions[index];
       return (
-        position < deployPosition &&
+        position < handoffPosition &&
+        handoffPosition < deployPosition &&
         (
           deploy
-            .slice(position, deployPosition)
+            .slice(position, handoffPosition)
+            .match(/\r?\n      - name:/gu) ?? []
+        ).length === 0 &&
+        (
+          deploy
+            .slice(handoffPosition, deployPosition)
             .match(/\r?\n      - name:/gu) ?? []
         ).length === 0
       );
@@ -5525,12 +5538,21 @@ function sourceChecks(): SourceCheck[] {
         /target:\s*\$\{\{\s*env\.DAST_CANDIDATE_URL\s*\}\}/u.test(
           hostedDastCiJob
         ) &&
-        /Require the candidate server to remain healthy and clean up[\s\S]*?kill -TERM "\$server_pid"[\s\S]*?rm -f -- "\$PREDEPLOY_ZAP_PID_FILE" "\$PREDEPLOY_ZAP_LOG_FILE"/u.test(
+        /cleanup_candidate_metadata\(\) \{[\s\S]*?rm -f --[\s\S]*?"\$PREDEPLOY_ZAP_PID_FILE" "\$PREDEPLOY_ZAP_LOG_FILE" \|\| true[\s\S]*?trap cleanup_candidate_metadata EXIT/u.test(
           hostedDastCiJob
         ) &&
+        /Require the candidate server to remain healthy and clean up[\s\S]*?\/proc\/\$server_pid\/cmdline[\s\S]*?kill -TERM "\$server_pid"[\s\S]*?kill -KILL "\$server_pid"[\s\S]*?cleanup_candidate_metadata/u.test(
+          hostedDastCiJob
+        ) &&
+        !hostedDastCiJob.includes('wait "$server_pid"') &&
         hostedDastCiJob.includes('test "$alive" = "true"') &&
         hostedDastCiJob.includes('test "$healthy" = "true"') &&
+        hostedDastCiJob.includes(
+          'test "$candidate_identity" = "true"'
+        ) &&
         hostedDastCiJob.includes('test "$shutdown_clean" = "true"') &&
+        hostedDastCiJob.includes('test "$forced_cleanup" = "false"') &&
+        hostedDastCiJob.includes('test "$process_absent" = "true"') &&
         /retention-days:\s*90/u.test(hostedDastCiJob) &&
         /zaproxy\/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874/u.test(
           hostedDastCiJob

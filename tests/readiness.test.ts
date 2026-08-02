@@ -239,7 +239,16 @@ test("readiness: candidate DAST blocks CI and live DAST is exact-release bound",
   );
   assert.match(ci, /test "\$alive" = "true"/u);
   assert.match(ci, /test "\$healthy" = "true"/u);
+  assert.match(ci, /test "\$candidate_identity" = "true"/u);
   assert.match(ci, /test "\$shutdown_clean" = "true"/u);
+  assert.match(ci, /test "\$forced_cleanup" = "false"/u);
+  assert.match(ci, /test "\$process_absent" = "true"/u);
+  assert.match(ci, /trap cleanup_candidate_metadata EXIT/u);
+  assert.match(
+    ci,
+    /forced_cmdline[\s\S]*?\/proc\/\$server_pid\/cmdline[\s\S]*?kill -KILL "\$server_pid"/u
+  );
+  assert.doesNotMatch(ci, /wait "\$server_pid"/u);
   assert.doesNotMatch(
     ci.match(/(?:^|\r?\n)  hosted-dast:\r?\n[\s\S]*?(?=\r?\n  video-gate:\r?\n|$)/u)?.[0] ?? "",
     /d2s5v0o0eg2aaw\.cloudfront\.net|DAST_EXPECTED_RELEASE_SHA/u
@@ -731,13 +740,29 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
       /name: Refresh short-lived AWS credentials for (?:staging|production) SAM deployment/gu
     ),
   ].map((match) => match.index ?? -1);
+  const edgeStackHandoffPositions = [
+    ...deploy.matchAll(
+      /name: Resolve the exact (?:staging|production) edge-stack handoff/gu
+    ),
+  ].map((match) => match.index ?? -1);
   assert.equal(samCredentialRefreshPositions.length, 2);
+  assert.equal(edgeStackHandoffPositions.length, 2);
   for (const [index, refreshPosition] of samCredentialRefreshPositions.entries()) {
-    assert.ok(refreshPosition < samPositions[index]);
+    const handoffPosition = edgeStackHandoffPositions[index];
+    assert.ok(refreshPosition < handoffPosition);
+    assert.ok(handoffPosition < samPositions[index]);
     assert.equal(
       (
         deploy
-          .slice(refreshPosition, samPositions[index])
+          .slice(refreshPosition, handoffPosition)
+          .match(/\r?\n      - name:/gu) ?? []
+      ).length,
+      0
+    );
+    assert.equal(
+      (
+        deploy
+          .slice(handoffPosition, samPositions[index])
           .match(/\r?\n      - name:/gu) ?? []
       ).length,
       0
