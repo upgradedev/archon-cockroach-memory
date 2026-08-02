@@ -677,17 +677,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Stage 2g — independent hosted-surface evidence. The bounded active probes
-  # bind their receipt to the release SHA reported by production itself; ZAP
-  # independently spiders the same owned HTTPS origin and fails on findings.
-  # A second exact-release scan runs automatically after every AWS deployment.
+  # Stage 2g — deterministic pre-deploy DAST. The complete 21-check adversarial
+  # contract runs against controlled responses, while digest-pinned ZAP spiders
+  # the exact candidate SPA built by this SHA. Live active probes and release-
+  # policy ZAP remain a blocking causal tail of every production deployment.
   hosted-dast:
+    name: Pre-deploy DAST contract and candidate SPA
     needs: secret-scan
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net
-      DAST_SCANNER_SHA: ${{ github.sha }}
+      DAST_CANDIDATE_URL: http://127.0.0.1:4173
+      DAST_CONTRACT_TAP: ${{ runner.temp }}/hosted-dast-contract.tap
+      PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
+      PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -695,29 +698,94 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22.23.1
-      - name: Run bounded active production probes
-        env:
-          DAST_RECEIPT_PATH: ${{ runner.temp }}/hosted-dast.json
-        run: node scripts/hosted-dast.mjs
-      - name: Upload sanitized hosted DAST receipt
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Install locked DAST and candidate dependencies
+        run: |
+          npm ci
+          npm ci --prefix web
+      - name: Prove the complete 21-check adversarial DAST contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --test --test-concurrency=1 \
+            tests/hosted-dast.test.ts | tee "$DAST_CONTRACT_TAP"
+      - name: Upload SHA-bound pre-deploy DAST contract evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: hosted-dast-ci-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/hosted-dast.json
+          name: dast-contract-ci-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.DAST_CONTRACT_TAP }}
           if-no-files-found: error
           retention-days: 90
-      - name: OWASP ZAP passive and AJAX-spider baseline
-        if: always()
+      - name: Build the exact candidate SPA
+        run: npm run build --prefix web
+      - name: Start the loopback-only transport-aware candidate server
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREDEPLOY_WEB_ROOT="$GITHUB_WORKSPACE/web/dist" \
+          PREDEPLOY_ZAP_PORT=4173 \
+            node scripts/predeploy-zap-server.mjs \
+              >"$PREDEPLOY_ZAP_LOG_FILE" 2>&1 &
+          server_pid=$!
+          printf '%s\n' "$server_pid" >"$PREDEPLOY_ZAP_PID_FILE"
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              sed -n '1,80p' -- "$PREDEPLOY_ZAP_LOG_FILE" >&2
+              exit 1
+            fi
+            candidate_body="$(
+              curl --fail --silent --show-error --max-time 2 \
+                "$DAST_CANDIDATE_URL/"
+            )" || true
+            if grep -Fq '<div id="root"></div>' <<<"$candidate_body"; then
+              kill -0 "$server_pid"
+              exit 0
+            fi
+            sleep 1
+          done
+          sed -n '1,80p' -- "$PREDEPLOY_ZAP_LOG_FILE" >&2
+          exit 1
+      - name: OWASP ZAP passive and AJAX-spider candidate baseline
         uses: zaproxy/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874 # v0.15.0
         with:
-          target: https://d2s5v0o0eg2aaw.cloudfront.net
+          target: ${{ env.DAST_CANDIDATE_URL }}
           rules_file_name: .zap/predeploy.tsv
           docker_name: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
           cmd_options: "-a -j -m 2"
           fail_action: true
           allow_issue_writing: false
           artifact_name: zap-baseline-ci-${{ github.sha }}-${{ github.run_attempt }}
+      - name: Require the candidate server to remain healthy and clean up
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PREDEPLOY_ZAP_PID_FILE" ]; then
+            exit 0
+          fi
+          server_pid="$(cat "$PREDEPLOY_ZAP_PID_FILE")"
+          [[ "$server_pid" =~ ^[1-9][0-9]*$ ]]
+          alive=false
+          healthy=false
+          shutdown_clean=false
+          if kill -0 "$server_pid" 2>/dev/null; then
+            alive=true
+            if curl --fail --silent --show-error --max-time 2 \
+                "$DAST_CANDIDATE_URL/" >/dev/null; then
+              healthy=true
+            fi
+            if kill -TERM "$server_pid" && wait "$server_pid"; then
+              shutdown_clean=true
+            fi
+          fi
+          rm -f -- "$PREDEPLOY_ZAP_PID_FILE" "$PREDEPLOY_ZAP_LOG_FILE"
+          test "$alive" = "true"
+          test "$healthy" = "true"
+          test "$shutdown_clean" = "true"
 
   # Stage 2h — guard the media guard. Tiny runner-temp fixtures prove that the
   # final-video verifier accepts a correct package and rejects scene, A/V,

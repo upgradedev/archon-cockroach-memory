@@ -339,9 +339,15 @@ checks, uploading only sanitized audit receipts with GitHub-bound digests.
 
 For new releases, `Deploy AWS` is a direct `main` push workflow whose source
 gate waits for the successful same-SHA `CI` push run and records its exact
-run/attempt. The exact-release `Hosted DAST` workflow is then called from that
-same deploy run only after production promotion and Managed MCP proof; its
-receipt and ZAP artifacts are SHA/run/attempt-bound deployment evidence.
+run/attempt. CI blocks on the complete 21-check adversarial DAST contract and a
+digest-pinned ZAP scan of the exact candidate SPA over runner loopback. The
+candidate server mirrors transport-safe production headers but correctly omits
+HSTS and CSP transport upgrades on plain HTTP; both remain blocking evidence in
+the exact-release HTTPS scan. This means repairing production can never be
+blocked by the release it is meant to replace. The exact-release
+`Hosted DAST` workflow is then called from the same deploy run only after
+production promotion and Managed MCP proof; its receipt and ZAP artifacts are
+SHA/run/attempt-bound deployment evidence.
 Scheduled and manual DAST executions remain standalone production audits.
 
 Infrastructure and delivery proof live in:

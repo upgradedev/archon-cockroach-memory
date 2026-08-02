@@ -688,6 +688,7 @@ export function hasExactDependabotReleaseFreeze(
     const ecosystem = update.get("package-ecosystem");
     const directory = update.get("directory");
     const schedule = update.get("schedule");
+    const cooldown = update.get("cooldown");
     if (
       typeof ecosystem !== "string" ||
       typeof directory !== "string" ||
@@ -696,7 +697,10 @@ export function hasExactDependabotReleaseFreeze(
       !(schedule instanceof Map) ||
       schedule.size !== 2 ||
       schedule.get("interval") !== "weekly" ||
-      schedule.get("day") !== "monday"
+      schedule.get("day") !== "monday" ||
+      !(cooldown instanceof Map) ||
+      cooldown.size !== 1 ||
+      cooldown.get("default-days") !== 7
     ) {
       return false;
     }
@@ -704,16 +708,16 @@ export function hasExactDependabotReleaseFreeze(
     const pair = `${ecosystem}\u0000${directory}`;
     pairs.push(pair);
     if (ecosystem === "npm" && directory === "/") {
-      if (update.size !== 5) return false;
+      if (update.size !== 6) return false;
       if (!exactDependabotGroup(update.get("groups"), "backend-runtime")) {
         return false;
       }
     } else if (ecosystem === "npm" && directory === "/web") {
-      if (update.size !== 5) return false;
+      if (update.size !== 6) return false;
       if (!exactDependabotGroup(update.get("groups"), "control-room")) {
         return false;
       }
-    } else if (update.size !== 4 || update.has("groups")) {
+    } else if (update.size !== 5 || update.has("groups")) {
       return false;
     }
   }
@@ -2129,6 +2133,7 @@ function sourceChecks(): SourceCheck[] {
   const hostedDast = read("scripts/hosted-dast.mjs");
   const hostedDastTypes = read("scripts/hosted-dast.d.mts");
   const hostedDastTests = read("tests/hosted-dast.test.ts");
+  const predeployZapServer = read("scripts/predeploy-zap-server.mjs");
   const zapPredeployRules = read(".zap/predeploy.tsv");
   const zapReleaseRules = read(".zap/release.tsv");
   const narrator = read("src/agents/narrator.ts");
@@ -3657,10 +3662,13 @@ function sourceChecks(): SourceCheck[] {
       ) ?? []
     ).length >= 4 &&
     (
-      recoveryWorkflow.match(
+      recoveryAuditJob.match(
         /bash aws\/enforce-cloudformation-controls\.sh audit/gu
       ) ?? []
-    ).length === 2 &&
+    ).length === 1 &&
+    /strategy:\r?\n\s+fail-fast: false\r?\n\s+matrix:\r?\n\s+include:\r?\n\s+- environment: staging\r?\n\s+stack_name: archon-memory-staging\r?\n\s+terminal_job_name: Deploy and smoke staging\r?\n\s+- environment: production\r?\n\s+stack_name: archon-memory-production\r?\n\s+terminal_job_name: Promote identical candidate to production/u.test(
+      recoveryAuditJob
+    ) &&
     (
       recoveryWorkflow.match(
         /bash aws\/enforce-cloudformation-controls\.sh recover/gu
@@ -5496,15 +5504,33 @@ function sourceChecks(): SourceCheck[] {
       hasExactHostedDastTrigger(securityDastWorkflow) &&
         hostedDastCiJob.length > 0 &&
         hostedDastCiJob.includes(
-          "DAST_TARGET_URL: https://d2s5v0o0eg2aaw.cloudfront.net"
+          "DAST_CANDIDATE_URL: http://127.0.0.1:4173"
         ) &&
-        /DAST_RECEIPT_PATH:\s*\$\{\{\s*runner\.temp\s*\}\}\/hosted-dast\.json/u.test(
+        !hostedDastCiJob.includes("d2s5v0o0eg2aaw.cloudfront.net") &&
+        !/DAST_EXPECTED_RELEASE_SHA/u.test(hostedDastCiJob) &&
+        /npm ci\s+npm ci --prefix web/u.test(hostedDastCiJob) &&
+        /node --import tsx --test --test-concurrency=1[\s\S]*?tests\/hosted-dast\.test\.ts \| tee "\$DAST_CONTRACT_TAP"/u.test(
           hostedDastCiJob
         ) &&
-        /node scripts\/hosted-dast\.mjs/u.test(hostedDastCiJob) &&
-        /name:\s*hosted-dast-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+        /npm run build --prefix web/u.test(hostedDastCiJob) &&
+        /PREDEPLOY_WEB_ROOT="\$GITHUB_WORKSPACE\/web\/dist"[\s\S]*?node scripts\/predeploy-zap-server\.mjs/u.test(
           hostedDastCiJob
         ) &&
+        /const LOOPBACK_HOST = "127\.0\.0\.1"/u.test(predeployZapServer) &&
+        /server\.listen\(port, LOOPBACK_HOST/u.test(predeployZapServer) &&
+        /tests\/predeploy-zap-server\.test\.ts/u.test(packageSource) &&
+        /name:\s*dast-contract-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
+          hostedDastCiJob
+        ) &&
+        /target:\s*\$\{\{\s*env\.DAST_CANDIDATE_URL\s*\}\}/u.test(
+          hostedDastCiJob
+        ) &&
+        /Require the candidate server to remain healthy and clean up[\s\S]*?kill -TERM "\$server_pid"[\s\S]*?rm -f -- "\$PREDEPLOY_ZAP_PID_FILE" "\$PREDEPLOY_ZAP_LOG_FILE"/u.test(
+          hostedDastCiJob
+        ) &&
+        hostedDastCiJob.includes('test "$alive" = "true"') &&
+        hostedDastCiJob.includes('test "$healthy" = "true"') &&
+        hostedDastCiJob.includes('test "$shutdown_clean" = "true"') &&
         /retention-days:\s*90/u.test(hostedDastCiJob) &&
         /zaproxy\/action-baseline@6c5a007541891231cd9e0ddec25d4f25c59c9874/u.test(
           hostedDastCiJob
@@ -5649,10 +5675,8 @@ function sourceChecks(): SourceCheck[] {
           "10036",
           "10049",
           "10050",
-          "10055",
           "10094",
           "10109",
-          "90004",
           "90005",
         ]) &&
         hasExactZapIgnorePolicy(zapReleaseRules, [
@@ -5794,8 +5818,8 @@ function sourceChecks(): SourceCheck[] {
         /terminalHostedDastArtifact\.digest !== hostedDastArtifact\.digest/u.test(
           finalSubmissionGate
         ),
-      "CI requires release-bound active API probes plus a SHA- and digest-pinned OWASP ZAP baseline; every successful AWS deployment receives the same exact-release scan, sanitized evidence, and final-submission revalidation.",
-      "The hosted DAST gate, exact deployed-release binding, immutable ZAP policy, final-submission revalidation, or adversarial regression coverage is incomplete."
+      "CI blocks on the complete adversarial DAST contract and a digest-pinned ZAP scan of the exact candidate SPA; every successful AWS deployment then receives an exact-release live scan, sanitized evidence, and final-submission revalidation.",
+      "The candidate DAST gate, exact deployed-release binding, immutable ZAP policy, final-submission revalidation, or adversarial regression coverage is incomplete."
     ),
     sourceCheck(
       "product.demo-concurrency-headroom",

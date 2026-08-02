@@ -296,7 +296,7 @@ test("measurement script uses bounded read APIs and conservative per-successful-
   assert.match(script, /mv -f -- "\$final_receipt" "\$RECEIPT_PATH"/u);
   assert.doesNotMatch(
     script,
-    /\b(?:create|put|update|delete|enable|disable|start|stop|invoke)-[a-z0-9-]+\b/u
+    /(?<!-)\b(?:create|put|update|delete|enable|disable|start|stop|invoke)-[a-z0-9-]+\b/u
   );
 });
 

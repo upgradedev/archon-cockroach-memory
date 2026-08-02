@@ -118,7 +118,7 @@ test("readiness: judge-facing concurrency has bounded in-flight headroom", () =>
   assert.equal(check.status, "pass", check.detail);
 });
 
-test("readiness: hosted DAST is release-bound and required by CI", () => {
+test("readiness: candidate DAST blocks CI and live DAST is exact-release bound", () => {
   const check = evaluate().checks.find(
     (candidate) =>
       candidate.id === "product.hosted-dast-release-gate"
@@ -137,6 +137,14 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   );
   const deploy = readFileSync(
     new URL("../.github/workflows/deploy-aws.yml", import.meta.url),
+    "utf8"
+  );
+  const packageSource = readFileSync(
+    new URL("../package.json", import.meta.url),
+    "utf8"
+  );
+  const predeployZapServer = readFileSync(
+    new URL("../scripts/predeploy-zap-server.mjs", import.meta.url),
     "utf8"
   );
   const hostedDastScript = readFileSync(
@@ -213,7 +221,28 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
   assert.match(hostedDast, /rules_file_name:\s*\.zap\/release\.tsv/u);
   assert.match(
     ci,
-    /name:\s*hosted-dast-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+    /name:\s*dast-contract-ci-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u
+  );
+  assert.match(ci, /DAST_CANDIDATE_URL:\s*http:\/\/127\.0\.0\.1:4173/u);
+  assert.match(
+    ci,
+    /node --import tsx --test --test-concurrency=1[\s\S]*?tests\/hosted-dast\.test\.ts \| tee "\$DAST_CONTRACT_TAP"/u
+  );
+  assert.match(ci, /npm run build --prefix web/u);
+  assert.match(ci, /node scripts\/predeploy-zap-server\.mjs/u);
+  assert.match(predeployZapServer, /const LOOPBACK_HOST = "127\.0\.0\.1"/u);
+  assert.match(predeployZapServer, /server\.listen\(port, LOOPBACK_HOST/u);
+  assert.match(packageSource, /tests\/predeploy-zap-server\.test\.ts/u);
+  assert.match(
+    ci,
+    /target:\s*\$\{\{\s*env\.DAST_CANDIDATE_URL\s*\}\}/u
+  );
+  assert.match(ci, /test "\$alive" = "true"/u);
+  assert.match(ci, /test "\$healthy" = "true"/u);
+  assert.match(ci, /test "\$shutdown_clean" = "true"/u);
+  assert.doesNotMatch(
+    ci.match(/(?:^|\r?\n)  hosted-dast:\r?\n[\s\S]*?(?=\r?\n  video-gate:\r?\n|$)/u)?.[0] ?? "",
+    /d2s5v0o0eg2aaw\.cloudfront\.net|DAST_EXPECTED_RELEASE_SHA/u
   );
   assert.match(
     ci,
@@ -244,10 +273,8 @@ test("readiness: hosted DAST is release-bound and required by CI", () => {
       "10036",
       "10049",
       "10050",
-      "10055",
       "10094",
       "10109",
-      "90004",
       "90005",
     ]),
     true
@@ -495,6 +522,18 @@ test("readiness: durable S3 CAS recovery is armed before mutation and closed by 
   assert.match(githubPreflight, /successful-recovery-receipt-proved/u);
   assert.match(githubPreflight, /die "Recovery artifact history exceeded/u);
   assert.ok(auditJob.length > 0);
+  assert.equal(
+    (
+      auditJob.match(
+        /bash aws\/enforce-cloudformation-controls\.sh audit/gu
+      ) ?? []
+    ).length,
+    1
+  );
+  assert.match(
+    auditJob,
+    /strategy:\r?\n\s+fail-fast: false\r?\n\s+matrix:\r?\n\s+include:\r?\n\s+- environment: staging\r?\n\s+stack_name: archon-memory-staging\r?\n\s+terminal_job_name: Deploy and smoke staging\r?\n\s+- environment: production\r?\n\s+stack_name: archon-memory-production\r?\n\s+terminal_job_name: Promote identical candidate to production/u
+  );
   assert.match(
     auditJob,
     /needs\.classify-recovery\.outputs\.staging_action == 'noop'/u
@@ -1801,6 +1840,12 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   assert.equal(
     EXPECTED_DEPENDABOT_RELEASE_FREEZE.length,
     4
+  );
+  assert.equal(
+    hasExactDependabotReleaseFreeze(
+      dependabot.replace("default-days: 7", "default-days: 0")
+    ),
+    false
   );
   assert.equal(
     hasExactDependabotReleaseFreeze(

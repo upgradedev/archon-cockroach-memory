@@ -122,7 +122,8 @@ Required hosted evidence:
 - backend and frontend line/branch/function coverage receipts;
 - three-node cluster survival and multi-range fan-out;
 - k6 correctness, error-rate, concurrency, and p95 thresholds;
-- hosted active checks plus passive/AJAX-spider ZAP DAST;
+- the complete adversarial DAST contract plus passive/AJAX-spider ZAP against
+  the exact candidate SPA with transport-correct loopback headers;
 - blocking CodeQL and blocking zero-waiver supply-chain results;
 - CloudFormation/SAM/WAF/FinOps policy validation;
 - longitudinal, scale, baseline, ablation, and C-SPANN evaluation receipts;
@@ -151,7 +152,8 @@ After review and all required PR checks:
 4. run the Managed MCP causal integrity audit;
 5. build one immutable AWS candidate;
 6. promote the same candidate through protected staging and production;
-7. run hosted health, proof, recall, resolution approve/replay, and DAST gates;
+7. run exact-release hosted health, proof, recall, resolution approve/replay,
+   and production DAST gates;
 8. retain only sanitized, SHA-bound receipts and attestations.
 
 The production page must visibly prove both eligible CockroachDB tools and the
