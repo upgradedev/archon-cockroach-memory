@@ -17,9 +17,9 @@ permissions:
 
 jobs:
   # Stage 1 — fail fast on any secret in the exact candidate tree (ADR-005).
-  # Protected-main pushes additionally scan the full reachable history. Pull
-  # requests scan the merge candidate tree so a removed synthetic fixture in an
-  # unmerged intermediate commit cannot permanently block a clean squash merge.
+  # Protected-main pushes additionally scan only the checked-out HEAD and its
+  # reachable ancestry. Pull requests scan the merge candidate tree so a removed
+  # synthetic fixture in an unmerged commit cannot block a clean squash merge.
   secret-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -76,8 +76,11 @@ jobs:
           GITLEAKS_HISTORY_STATUS=0
           if [[ "$GITHUB_EVENT_NAME" = "push" &&
                 "$GITHUB_REF" = "refs/heads/main" ]]; then
+            HISTORY_HEAD="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+            test "$HISTORY_HEAD" = "$(git rev-parse --verify HEAD)"
             set +e
             "$GITLEAKS_DIR/gitleaks" git . \
+              --log-opts="$HISTORY_HEAD" \
               --redact \
               --no-banner \
               --report-format json \

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string): string =>
   readFileSync(join(root, path), "utf8");
+const hasExactTrimmedLine = (source: string, expected: string): boolean =>
+  source.split(/\r?\n/u).some((line) => line.trim() === expected);
 
 test("CloudFront WAF IaC is explicit, bounded, and us-east-1 control-plane only", () => {
   const template = read("aws/edge-waf.yaml");
@@ -96,7 +98,11 @@ test("WAF evidence is BLOCK-only, redacted, encrypted, durable, and alarmed", ()
     "cloudwatch.amazonaws.com",
     "sns.amazonaws.com",
   ]) {
-    assert.match(template, new RegExp(`Service:\\s*${service}`, "u"));
+    assert.equal(
+      hasExactTrimmedLine(template, `Service: ${service}`),
+      true,
+      `missing exact service principal ${service}`
+    );
   }
   assert.match(
     template,
@@ -106,10 +112,32 @@ test("WAF evidence is BLOCK-only, redacted, encrypted, durable, and alarmed", ()
     template,
     /EdgeAlarmArchiveQueue:[\s\S]*?Type:\s*AWS::SQS::Queue[\s\S]*?KmsMasterKeyId:\s*!GetAtt EdgeEvidenceKey.Arn[\s\S]*?MessageRetentionPeriod:\s*1209600/u
   );
-  assert.match(
-    template,
-    /AllowOnlyExactAlarmTopic[\s\S]*?Service:\s*sns.amazonaws.com[\s\S]*?Action:\s*sqs:SendMessage[\s\S]*?aws:SourceAccount/u
+  const allowAlarmTopicStart = template.indexOf(
+    "          - Sid: AllowOnlyExactAlarmTopic"
   );
+  const denyAlarmInjectionStart = template.indexOf(
+    "          - Sid: DenyUnexpectedAlarmInjection"
+  );
+  assert.ok(
+    allowAlarmTopicStart >= 0 &&
+      denyAlarmInjectionStart > allowAlarmTopicStart,
+    "exact alarm-topic allow statement must precede the deny statement"
+  );
+  const exactAlarmTopicStatement = template.slice(
+    allowAlarmTopicStart,
+    denyAlarmInjectionStart
+  );
+  for (const expectedLine of [
+    "Service: sns.amazonaws.com",
+    "Action: sqs:SendMessage",
+    "aws:SourceAccount: !Ref AWS::AccountId",
+  ]) {
+    assert.equal(
+      hasExactTrimmedLine(exactAlarmTopicStatement, expectedLine),
+      true,
+      `exact alarm-topic statement is missing ${expectedLine}`
+    );
+  }
   assert.match(
     template,
     /EdgeAlarmArchiveSubscription:[\s\S]*?Protocol:\s*sqs[\s\S]*?RawMessageDelivery:\s*false/u

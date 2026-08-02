@@ -176,7 +176,7 @@ test("receipt and documentation are honest about RTO, RPO, PITR, and side effect
   ]) {
     assert.ok(implementation.includes(fragment), fragment);
   }
-  assert.match(workflow, /actions\/attest-build-provenance@508db95/u);
+  assert.match(workflow, /actions\/attest-build-provenance@0f67c3f/u);
   assert.match(
     workflow,
     /tsx scripts\/cockroach-managed-restore-drill\.ts \\\s*\n\s*>"\$RECEIPT_PATH"/u

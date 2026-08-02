@@ -220,6 +220,22 @@ test(
   }
 );
 
+test("serves only the immutable startup snapshot after an asset swap", async (t) => {
+  const { baseUrl, fixture, webRoot } = await startFixture(t);
+  const indexedAsset = join(webRoot, "assets", "app-abcdef12.js");
+  const outside = join(fixture, "replacement.js");
+  await writeFile(outside, "globalThis.__replacement = true;", "utf8");
+  await rm(indexedAsset);
+  await symlink(outside, indexedAsset, "file");
+
+  const response = await fetch(`${baseUrl}/assets/app-abcdef12.js`);
+  assert.equal(response.status, 200);
+  assert.equal(
+    await response.text(),
+    "globalThis.__candidate = true;"
+  );
+});
+
 test("requires an existing root and parses only bounded non-privileged ports", async () => {
   const source = await readFile(
     new URL("../scripts/predeploy-zap-server.mjs", import.meta.url),

@@ -170,6 +170,7 @@ export const DURABLE_RECOVERY_SCRIPT_PATHS = [
 ] as const;
 const CANONICAL_DEMO_URL =
   "https://d2s5v0o0eg2aaw.cloudfront.net";
+const CANONICAL_DEMO_HOSTNAME = new URL(CANONICAL_DEMO_URL).hostname;
 export const SUBMISSION_THUMBNAIL_PATH =
   "demo/assets/devpost-thumbnail.png";
 export const MAX_SUBMISSION_THUMBNAIL_BYTES = 5_000_000;
@@ -1872,6 +1873,13 @@ function hasExactTrimmedLine(source: string, expected: string): boolean {
     .some((line) => line.trim() === expected);
 }
 
+function containsExactHostnameToken(source: string, hostname: string): boolean {
+  const normalizedHostname = hostname.toLowerCase();
+  return source
+    .split(/[^A-Za-z0-9.-]+/u)
+    .some((token) => token.toLowerCase() === normalizedHostname);
+}
+
 function sourceCheck(
   id: string,
   criterion: OfficialCriterion,
@@ -2001,6 +2009,10 @@ function sourceChecks(): SourceCheck[] {
   const foundationPromotionRole =
     deliveryBootstrap.match(
       /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u
+    )?.[0] ?? "";
+  const finOpsCloudFormationExecutionRole =
+    deliveryBootstrap.match(
+      /(?:^|\r?\n)  FinOpsCloudFormationExecutionRole:\r?\n[\s\S]*?(?=\r?\n  FinOpsControlRole:\r?\n|$)/u
     )?.[0] ?? "";
   const environmentDeployTrustBlocks = [
     {
@@ -4291,13 +4303,13 @@ function sourceChecks(): SourceCheck[] {
         /acceptedWaivers:\s*0/u.test(supplyChainReleaseJob) &&
         /unwaivedFindings:\s*0/u.test(supplyChainReleaseJob) &&
         /"aws\/finops\.yaml"/u.test(supplyChainReleaseJob) &&
-        /actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u.test(
+        /actions\/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373/u.test(
           supplyChainReleaseJob
         ) &&
         /supply-chain-release-\$\{\{\s*github\.sha\s*\}\}-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/u.test(
           supplyChainReleaseJob
         ) &&
-        /"attest":\s*\{[\s\S]*"version":\s*"v4\.2\.1"[\s\S]*"sha":\s*"508db95dd578ae2727ebd6217d5ba78e4fbda05d"/u.test(
+        /"attest":\s*\{[\s\S]*"version":\s*"v4\.1\.1"[\s\S]*"sha":\s*"0f67c3f4856b2e3261c31976d6725780e5e4c373"/u.test(
           supplyChainToolLock
         ) &&
         /name:\s*Require successful exact-SHA Supply Chain evidence/u.test(
@@ -4330,7 +4342,7 @@ function sourceChecks(): SourceCheck[] {
         /name:\s*Attest immutable candidate tree and evidence binding/u.test(
           deployBuildOnceJob
         ) &&
-        /actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u.test(
+        /actions\/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373/u.test(
           deployBuildOnceJob
         ) &&
         /subject-path:\s*candidate-evidence-binding\.json/u.test(
@@ -4945,12 +4957,18 @@ function sourceChecks(): SourceCheck[] {
         /AWS::Budgets::Budget/u.test(finOpsTemplate) &&
         /AWS::CE::AnomalyMonitor/u.test(finOpsTemplate) &&
         /AWS::CE::AnomalySubscription/u.test(finOpsTemplate) &&
-        /FinOpsCloudFormationExecutionRole:/u.test(deliveryBootstrap) &&
-        /RoleName:\s*!Sub "\$\{AppName\}-finops-cloudformation-execution"/u.test(
-          deliveryBootstrap
+        finOpsCloudFormationExecutionRole.length > 0 &&
+        hasExactTrimmedLine(
+          finOpsCloudFormationExecutionRole,
+          'RoleName: !Sub "${AppName}-finops-cloudformation-execution"'
         ) &&
-        /Principal:[\s\S]*?Service:\s*cloudformation\.amazonaws\.com/u.test(
-          deliveryBootstrap
+        hasExactTrimmedLine(
+          finOpsCloudFormationExecutionRole,
+          "Principal:"
+        ) &&
+        hasExactTrimmedLine(
+          finOpsCloudFormationExecutionRole,
+          "Service: cloudformation.amazonaws.com"
         ) &&
         /FinOpsControlRole:/u.test(deliveryBootstrap) &&
         /RoleName:\s*!Sub "\$\{AppName\}-github-finops-controls"/u.test(
@@ -5519,7 +5537,10 @@ function sourceChecks(): SourceCheck[] {
         hostedDastCiJob.includes(
           "DAST_CANDIDATE_URL: http://127.0.0.1:4173"
         ) &&
-        !hostedDastCiJob.includes("d2s5v0o0eg2aaw.cloudfront.net") &&
+        !containsExactHostnameToken(
+          hostedDastCiJob,
+          CANONICAL_DEMO_HOSTNAME
+        ) &&
         !/DAST_EXPECTED_RELEASE_SHA/u.test(hostedDastCiJob) &&
         /npm ci\s+npm ci --prefix web/u.test(hostedDastCiJob) &&
         /node --import tsx --test --test-concurrency=1[\s\S]*?tests\/hosted-dast\.test\.ts \| tee "\$DAST_CONTRACT_TAP"/u.test(
