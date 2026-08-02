@@ -243,7 +243,11 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
     /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}[\s\S]*?databaseGrants\.rows\.length !== 1[\s\S]*?grant\.database_name !== databaseName[\s\S]*?grant\.grantee !== principal/u
   );
   assert.match(clusterGrantProof, /const proofClient = new Client\(\{/u);
-  assert.match(clusterGrantProof, /SET database = ''/u);
+  assert.doesNotMatch(clusterGrantProof, /SET database = ''/u);
+  assert.match(
+    clusterGrantProof,
+    /const databaseNames = await enumerateDatabases\(proofClient\)[\s\S]*?for \(const databaseName of databaseNames\)[\s\S]*?SET DATABASE = \$\{databaseSql\}/u
+  );
   assert.match(
     clusterGrantProof,
     /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u
@@ -251,7 +255,11 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
   assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
   assert.match(
     clusterGrantProof,
-    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u
+    /selectedDatabase\.rows\[0\]\?\.database_name !== databaseName/u
+  );
+  assert.match(
+    clusterGrantProof,
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?scopedGrants\.rows\.filter\([\s\S]*?grant\.object_type === "routine"[\s\S]*?routineGrants\.push/u
   );
   assert.match(
     clusterGrantProof,

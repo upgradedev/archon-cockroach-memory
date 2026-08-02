@@ -2755,15 +2755,19 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     );
   }
   assert.match(clusterGrantProof, /const proofClient = new Client\(\{/u);
-  assert.match(clusterGrantProof, /SET database = ''/u);
+  assert.doesNotMatch(clusterGrantProof, /SET database = ''/u);
+  assert.match(
+    clusterGrantProof,
+    /const databaseNames = await enumerateDatabases\(proofClient\)[\s\S]*?for \(const databaseName of databaseNames\)[\s\S]*?SET DATABASE = \$\{databaseSql\}/u
+  );
   assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
   assert.match(
     clusterGrantProof,
-    /database\.rows\[0\]\?\.database_name !== null/u
+    /selectedDatabase\.rows\[0\]\?\.database_name !== databaseName/u
   );
   assert.match(
     clusterGrantProof,
-    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?scopedGrants\.rows\.filter\([\s\S]*?grant\.object_type === "routine"[\s\S]*?routineGrants\.push/u
   );
   assert.match(
     clusterGrantProof,

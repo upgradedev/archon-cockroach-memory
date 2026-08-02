@@ -49,17 +49,15 @@ principal would expose disposable public fixtures, not customer or canonical
 memory, but remains an incident requiring credential rotation.
 
 Schema, migration, database-release, and credential-rotation pipelines also
-open a standalone, short-lived admin connection, set CockroachDB's current
-database to the anonymous database, assert the pinned-v26.2 SQL `NULL` session
-state, and run
-principal-focused `SHOW GRANTS`. The gate compares database, schema, canonical
-identity signature, granting role, `EXECUTE`, and grant-option fields and
-accepts exactly the two transition routines anywhere in the cluster. The
-proof deliberately executes direct `SHOW GRANTS` and `SHOW DATABASES`
-statements, then filters and sorts their typed rows in-process; CockroachDB
-v26.2.3 does not allow virtual-table wrappers in anonymous-database mode. The
-connection is always destroyed so anonymous-database state cannot return to a
-pool. In the shared build-test cluster, migration and reconciliation databases
+open a standalone, short-lived admin connection, enumerate the complete
+CockroachDB database inventory, switch explicitly into every database, assert
+the selected `current_database()`, and run principal-focused `SHOW GRANTS`.
+The gate compares database, schema, canonical identity signature, granting
+role, `EXECUTE`, and grant-option fields and accepts exactly the two transition
+routines anywhere in the cluster. A second inventory snapshot rejects TOCTOU
+database drift. The connection is always destroyed so its final database
+selection cannot return to a pool. In the shared build-test cluster, migration
+and reconciliation databases
 are created sequentially and dropped after their rehearsal, and the migration
 login is dropped with its role memberships; the next proof therefore cannot
 inherit duplicate fixture routines or a rehearsal principal from an earlier

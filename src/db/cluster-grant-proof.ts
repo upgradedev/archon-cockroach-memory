@@ -304,9 +304,9 @@ export async function verifyClusterWideResolutionGrants(input: {
       );
     }
   }
-  // This connection is deliberately not borrowed from a pool. CockroachDB's
-  // anonymous-database mode makes targetless SHOW GRANTS cluster-wide, so the
-  // session must be destroyed rather than returned with mutated state.
+  // This connection is deliberately not borrowed from a pool. The proof
+  // switches through every enumerated database and must destroy, rather than
+  // return, the session with its final database selection.
   const proofClient = new Client({
     connectionString: input.adminConnectionString,
     application_name: "archon.cluster-wide-grant-proof",
@@ -315,44 +315,48 @@ export async function verifyClusterWideResolutionGrants(input: {
   });
   try {
     await proofClient.connect();
-    await proofClient.query("SET database = ''");
-    const database = await proofClient.query<{
-      database_name: string | null;
-    }>("SELECT current_database() AS database_name");
-    // CockroachDB v26.2 returns SQL NULL when SessionData.Database is empty;
-    // node-postgres preserves that value as JavaScript null.
-    if (
-      database.rows.length !== 1 ||
-      database.rows[0]?.database_name !== null
-    ) {
-      throw new Error(
-        "Cluster-wide grant proof did not enter the anonymous database."
-      );
-    }
-    // Direct SHOW statements remain valid in CockroachDB's anonymous-database
-    // mode. Wrapping them as virtual-table sources does not, so filtering and
-    // canonical ordering deliberately happen in typed application code.
-    const clusterGrants = await proofClient.query<ClusterGrantRow>(
-      `SHOW GRANTS FOR ${principalSql}`
-    );
-    const routineGrants = clusterGrants.rows
-      .filter((grant) => grant.object_type === "routine")
-      .sort((left, right) => {
-        const leftKey = routineGrantKey(left);
-        const rightKey = routineGrantKey(right);
-        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
-      });
-
+    const databaseNames = await enumerateDatabases(proofClient);
+    const routineGrants: ClusterGrantRow[] = [];
     const databaseGrants: ClusterGrantRow[] = [];
-    let databaseInventory: readonly string[] = [];
-    if (input.expectedDatabaseGrants !== undefined) {
-      const databaseNames = await enumerateDatabases(proofClient);
-      databaseInventory = databaseNames;
-      for (const databaseName of databaseNames) {
-        const databaseSql = quoteIdentifier(
-          databaseName,
-          "enumerated database"
+    for (const databaseName of databaseNames) {
+      const databaseSql = quoteIdentifier(
+        databaseName,
+        "enumerated database"
+      );
+      await proofClient.query(`SET DATABASE = ${databaseSql}`);
+      const selectedDatabase = await proofClient.query<{
+        database_name: string | null;
+      }>("SELECT current_database() AS database_name");
+      if (
+        selectedDatabase.rows.length !== 1 ||
+        selectedDatabase.rows[0]?.database_name !== databaseName
+      ) {
+        throw new Error(
+          "Cluster-wide grant proof could not select an enumerated database."
         );
+      }
+
+      // SHOW GRANTS without an object target is scoped to the selected
+      // database. Iterating the immutable inventory makes the union
+      // cluster-wide without relying on anonymous virtual-schema behavior.
+      const scopedGrants = await proofClient.query<ClusterGrantRow>(
+        `SHOW GRANTS FOR ${principalSql}`
+      );
+      const scopedRoutineGrants = scopedGrants.rows.filter(
+        (grant) => grant.object_type === "routine"
+      );
+      if (
+        scopedRoutineGrants.some(
+          (grant) => grant.database_name !== databaseName
+        )
+      ) {
+        throw new Error(
+          "Scoped routine grant proof returned a mismatched database identity."
+        );
+      }
+      routineGrants.push(...scopedRoutineGrants);
+
+      if (input.expectedDatabaseGrants !== undefined) {
         const grants = await proofClient.query<{
           database_name: string;
           grantee: string;
@@ -380,21 +384,26 @@ export async function verifyClusterWideResolutionGrants(input: {
           }))
         );
       }
-      const finalDatabaseInventory = await enumerateDatabases(proofClient);
-      if (
-        JSON.stringify(finalDatabaseInventory) !==
-        JSON.stringify(databaseNames)
-      ) {
-        throw new Error(
-          "Database inventory changed during the cluster-wide grant proof."
-        );
-      }
+    }
+    routineGrants.sort((left, right) => {
+      const leftKey = routineGrantKey(left);
+      const rightKey = routineGrantKey(right);
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
+    const finalDatabaseInventory = await enumerateDatabases(proofClient);
+    if (
+      JSON.stringify(finalDatabaseInventory) !==
+      JSON.stringify(databaseNames)
+    ) {
+      throw new Error(
+        "Database inventory changed during the cluster-wide grant proof."
+      );
     }
     return validateClusterWideResolutionGrants(
       [...routineGrants, ...databaseGrants],
       input.applicationDatabase,
       input.expectedDatabaseGrants,
-      databaseInventory
+      databaseNames
     );
   } finally {
     await proofClient.end().catch(() => undefined);

@@ -5129,14 +5129,21 @@ function sourceChecks(): SourceCheck[] {
         ) &&
         /verifyClusterWideResolutionGrants/u.test(databaseRelease) &&
         /const proofClient = new Client\(\{/u.test(clusterGrantProof) &&
-        /SET database = ''/u.test(clusterGrantProof) &&
+        !/SET database = ''/u.test(clusterGrantProof) &&
+        /const databaseNames = await enumerateDatabases\(proofClient\)/u.test(
+          clusterGrantProof
+        ) &&
+        /for \(const databaseName of databaseNames\)/u.test(
+          clusterGrantProof
+        ) &&
+        /SET DATABASE = \$\{databaseSql\}/u.test(clusterGrantProof) &&
         /SELECT current_database\(\) AS database_name/u.test(
           clusterGrantProof
         ) &&
-        /database\.rows\[0\]\?\.database_name !== null/u.test(
+        /selectedDatabase\.rows\[0\]\?\.database_name !== databaseName/u.test(
           clusterGrantProof
         ) &&
-        /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u.test(
+        /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?scopedGrants\.rows\.filter\([\s\S]*?grant\.object_type === "routine"[\s\S]*?routineGrants\.push/u.test(
           clusterGrantProof
         ) &&
         /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u.test(
