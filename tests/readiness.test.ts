@@ -1398,6 +1398,37 @@ test("readiness: aggregate CI gate fails closed over every prerequisite", () => 
   );
 });
 
+test("readiness: gitleaks scans the exact tree and only protected-main HEAD ancestry", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/ci.yml", import.meta.url),
+    "utf8"
+  );
+  const secretScanJob = workflow.match(
+    /(?:^|\r?\n)  secret-scan:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
+  )?.[0];
+  assert.ok(secretScanJob);
+  assert.match(secretScanJob, /"\$GITLEAKS_DIR\/gitleaks" dir \. \\/u);
+  assert.match(
+    secretScanJob,
+    /"\$GITHUB_EVENT_NAME" = "push"[\s\S]*?"\$GITHUB_REF" = "refs\/heads\/main"/u
+  );
+  assert.ok(
+    secretScanJob.includes(
+      'HISTORY_HEAD="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"'
+    )
+  );
+  assert.ok(
+    secretScanJob.includes(
+      'test "$HISTORY_HEAD" = "$(git rev-parse --verify HEAD)"'
+    )
+  );
+  assert.match(
+    secretScanJob,
+    /"\$GITLEAKS_DIR\/gitleaks" git \. \\\r?\n\s+--log-opts="\$HISTORY_HEAD"/u
+  );
+  assert.doesNotMatch(secretScanJob, /--all/u);
+});
+
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
@@ -3565,7 +3596,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     supplyChain,
-    /name: Attest exact-SHA supply-chain release receipt[\s\S]*?actions\/attest-build-provenance@508db95dd578ae2727ebd6217d5ba78e4fbda05d/u
+    /name: Attest exact-SHA supply-chain release receipt[\s\S]*?actions\/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373/u
   );
   assert.match(
     supplyChain,

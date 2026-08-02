@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -126,6 +127,17 @@ function isWithinRoot(root, candidate) {
   );
 }
 
+function isSkippableAssetRace(error) {
+  if (error === null || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+  return (
+    error.code === "ELOOP" ||
+    error.code === "ENOENT" ||
+    error.code === "ENOTDIR"
+  );
+}
+
 function isApiPath(pathname) {
   return pathname === "/api" || pathname.startsWith("/api/");
 }
@@ -136,39 +148,54 @@ function isVersionedAsset(pathname) {
   );
 }
 
-async function resolveStaticFile(canonicalRoot, pathname) {
-  const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
-  if (relativePath.length === 0 || relativePath.endsWith("/")) {
-    return undefined;
+async function indexStaticAssets(canonicalRoot) {
+  const assets = new Map();
+
+  async function visit(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+
+      const entryPath = resolve(directory, entry.name);
+      if (!isWithinRoot(canonicalRoot, entryPath)) continue;
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      const relativePath = relative(canonicalRoot, entryPath)
+        .split(sep)
+        .join("/");
+      const contentType = MIME_TYPES.get(extname(relativePath).toLowerCase());
+      if (relativePath.length === 0 || contentType === undefined) continue;
+
+      let fileHandle;
+      try {
+        fileHandle = await open(
+          entryPath,
+          constants.O_RDONLY | constants.O_NOFOLLOW
+        );
+        const metadata = await fileHandle.stat();
+        if (!metadata.isFile()) continue;
+        const body = await fileHandle.readFile();
+        if (body.length !== metadata.size) {
+          throw new Error("webRoot changed while static assets were indexed");
+        }
+        assets.set(
+          `/${relativePath}`,
+          Object.freeze({ body, contentType })
+        );
+      } catch (error) {
+        if (!isSkippableAssetRace(error)) throw error;
+      } finally {
+        await fileHandle?.close();
+      }
+    }
   }
 
-  const lexicalPath = resolve(canonicalRoot, relativePath);
-  if (!isWithinRoot(canonicalRoot, lexicalPath)) {
-    return undefined;
-  }
-
-  let canonicalPath;
-  try {
-    canonicalPath = await realpath(lexicalPath);
-  } catch {
-    return undefined;
-  }
-  if (!isWithinRoot(canonicalRoot, canonicalPath)) {
-    return undefined;
-  }
-  const canonicalRelativePath = relative(canonicalRoot, canonicalPath)
-    .split(sep)
-    .join("/");
-  if (canonicalRelativePath !== relativePath) {
-    return undefined;
-  }
-
-  try {
-    const metadata = await stat(canonicalPath);
-    return metadata.isFile() ? canonicalPath : undefined;
-  } catch {
-    return undefined;
-  }
+  await visit(canonicalRoot);
+  return assets;
 }
 
 /**
@@ -195,6 +222,7 @@ export async function createPredeployZapServer({ webRoot } = {}) {
   if (!rootMetadata.isDirectory()) {
     throw new Error("webRoot must resolve to an existing directory");
   }
+  const staticAssets = await indexStaticAssets(canonicalRoot);
 
   return createServer((request, response) => {
     void (async () => {
@@ -212,30 +240,15 @@ export async function createPredeployZapServer({ webRoot } = {}) {
         return;
       }
 
-      const extension = extname(pathname === "/" ? "index.html" : pathname)
-        .toLowerCase();
-      const contentType = MIME_TYPES.get(extension);
-      if (contentType === undefined) {
-        sendJson(response, method, 404, { error: "not_found" });
-        return;
-      }
-
-      const filePath = await resolveStaticFile(canonicalRoot, pathname);
-      if (filePath === undefined) {
-        sendJson(response, method, 404, { error: "not_found" });
-        return;
-      }
-
-      let body;
-      try {
-        body = await readFile(filePath);
-      } catch {
+      const assetPath = pathname === "/" ? "/index.html" : pathname;
+      const asset = staticAssets.get(assetPath);
+      if (asset === undefined) {
         sendJson(response, method, 404, { error: "not_found" });
         return;
       }
 
       const cacheControl =
-        extension === ".html"
+        extname(assetPath).toLowerCase() === ".html"
           ? "no-cache,no-store,must-revalidate"
           : isVersionedAsset(pathname)
             ? "public,max-age=31536000,immutable"
@@ -244,11 +257,11 @@ export async function createPredeployZapServer({ webRoot } = {}) {
         200,
         responseHeaders({
           "Cache-Control": cacheControl,
-          "Content-Length": String(body.byteLength),
-          "Content-Type": contentType,
+          "Content-Length": String(asset.body.byteLength),
+          "Content-Type": asset.contentType,
         })
       );
-      response.end(method === "HEAD" ? undefined : body);
+      response.end(method === "HEAD" ? undefined : asset.body);
     })().catch(() => {
       if (!response.headersSent) {
         sendJson(response, request.method ?? "", 500, {

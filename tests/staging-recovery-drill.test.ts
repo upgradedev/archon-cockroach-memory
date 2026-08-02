@@ -578,7 +578,7 @@ test("receipt requires Stopped ALARM_ACTIVE, related successful rollback, and au
   assert.match(handoff, /ledgerStateAfterInlineRecovery: "ARMED"/u);
   assert.match(handoff, /watchdogTerminalRecoveryPending: true/u);
   assert.match(handoff, /terminalRecoveryClaimed: false/u);
-  assert.match(handoff, /actions\/attest-build-provenance@508db95/u);
+  assert.match(handoff, /actions\/attest-build-provenance@0f67c3f/u);
   assert.match(handoff, /retention-days: 90/u);
   assert.match(handoff, /rm -f -- "\$\{RUNNER_TEMP:\?\}"\/staging-recovery-drill-\*/u);
 });

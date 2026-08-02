@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { basename, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -105,11 +105,24 @@ export async function runHumanImpactEvaluation(
   if (!/^[a-f0-9]{40}$/u.test(args.sourceSha)) fail("source SHA is invalid.");
   const output = assertRunnerOwnedOutput(args.output, runnerTemp);
   const input = resolve(args.input);
-  const inputMetadata = await stat(input);
-  if (!inputMetadata.isFile() || inputMetadata.size < 2 || inputMetadata.size > 2_000_000) {
-    fail("Human-impact input must be a bounded regular JSON file.");
+  const inputHandle = await open(input, "r");
+  let inputBytes: Buffer;
+  try {
+    const inputMetadata = await inputHandle.stat();
+    if (
+      !inputMetadata.isFile() ||
+      inputMetadata.size < 2 ||
+      inputMetadata.size > 2_000_000
+    ) {
+      fail("Human-impact input must be a bounded regular JSON file.");
+    }
+    inputBytes = await inputHandle.readFile();
+    if (inputBytes.length !== inputMetadata.size) {
+      fail("Human-impact input changed while it was being read.");
+    }
+  } finally {
+    await inputHandle.close();
   }
-  const inputBytes = await readFile(input);
   const inputSha256 = sha256(inputBytes);
   let raw: unknown;
   try {
