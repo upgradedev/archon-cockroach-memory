@@ -323,9 +323,11 @@ jobs:
           jq -e \
             --arg message "$queue_message" \
             --argjson expected "$expected_queue_diagnostics" '
+              . as $findings |
               length == ($expected | length)
-              and all($expected[] as $site;
-                any(.[];
+              and all($expected[];
+                . as $site |
+                any($findings[];
                   .kind == "syntax-check"
                   and .message == $message
                   and .filepath == $site.filepath
@@ -1561,7 +1563,8 @@ jobs:
             (.[0] | type) == "array" and
             (.[0] | length) == 6 and
             (.[0] as $findings |
-              all($status[0].compatibility.expectedDiagnostics[] as $site;
+              all($status[0].compatibility.expectedDiagnostics[];
+                . as $site |
                 any($findings[];
                   .kind == "syntax-check" and
                   .message == $status[0].compatibility.diagnostic and
@@ -1577,9 +1580,11 @@ jobs:
           jq -e \
             --slurpfile status \
               "$EVIDENCE_ROOT/static/actionlint-status.json" '
+            . as $findings |
             length == 6 and
-            all($status[0].compatibility.expectedDiagnostics[] as $site;
-              any(.[];
+            all($status[0].compatibility.expectedDiagnostics[];
+              . as $site |
+              any($findings[];
                 .kind == "syntax-check" and
                 .message == $status[0].compatibility.diagnostic and
                 .filepath == $site.filepath and
@@ -1716,7 +1721,8 @@ jobs:
                 ($run.results | length) == 3 and
                 ([$run.results[].ruleId] | sort) ==
                   ["AWS-0011","AWS-0013","AWS-0132"] and
-                all($run.results[] as $result;
+                all($run.results[];
+                  . as $result |
                   ($status[0].compatibilities |
                     map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
                   $result.level == "error" and

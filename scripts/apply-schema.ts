@@ -681,6 +681,12 @@ async function verifyResolutionFunctions(
       bodyContractMissingRuleIds: bodyEvidence.missingRuleIds,
       bodyContractDiagnostics:
         "diagnostics" in bodyEvidence ? bodyEvidence.diagnostics : null,
+      // The routine body is checked-in, non-secret source. Emit the exact
+      // CockroachDB descriptor rendering only when the fail-closed body gate
+      // rejects it, so CI can prove formatter compatibility without local
+      // database execution or persistent diagnostic artifacts.
+      runtimeBodyForDiagnostics:
+        bodyEvidence.matches ? null : (routine?.prosrc ?? null),
     };
   });
   if (
