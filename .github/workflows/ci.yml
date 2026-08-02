@@ -688,9 +688,6 @@ jobs:
     timeout-minutes: 25
     env:
       DAST_CANDIDATE_URL: http://127.0.0.1:4173
-      DAST_CONTRACT_TAP: ${{ runner.temp }}/hosted-dast-contract.tap
-      PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
-      PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -708,6 +705,8 @@ jobs:
           npm ci --prefix web
       - name: Prove the complete 21-check adversarial DAST contract
         shell: bash
+        env:
+          DAST_CONTRACT_TAP: ${{ runner.temp }}/hosted-dast-contract.tap
         run: |
           set -euo pipefail
           node --import tsx --test --test-concurrency=1 \
@@ -717,13 +716,16 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dast-contract-ci-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ env.DAST_CONTRACT_TAP }}
+          path: ${{ runner.temp }}/hosted-dast-contract.tap
           if-no-files-found: error
           retention-days: 90
       - name: Build the exact candidate SPA
         run: npm run build --prefix web
       - name: Start the loopback-only transport-aware candidate server
         shell: bash
+        env:
+          PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
+          PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
         run: |
           set -euo pipefail
           PREDEPLOY_WEB_ROOT="$GITHUB_WORKSPACE/web/dist" \
@@ -762,6 +764,9 @@ jobs:
       - name: Require the candidate server to remain healthy and clean up
         if: always()
         shell: bash
+        env:
+          PREDEPLOY_ZAP_PID_FILE: ${{ runner.temp }}/predeploy-zap-server.pid
+          PREDEPLOY_ZAP_LOG_FILE: ${{ runner.temp }}/predeploy-zap-server.log
         run: |
           set -euo pipefail
           if [ ! -f "$PREDEPLOY_ZAP_PID_FILE" ]; then
