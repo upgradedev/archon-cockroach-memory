@@ -1,7 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import pg, { type QueryResult, type QueryResultRow } from "pg";
 import {
   GetSecretValueCommand,
@@ -37,8 +35,9 @@ import {
   type SystemGrant,
 } from "../src/db/system-grants.js";
 import {
-  isExpectedResolutionRoutineBody,
   isExpectedResolutionRoutineCreateStatement,
+  resolutionRoutineRuntimeEvidence,
+  resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
 import {
   assertCockroachEndpointBinding,
@@ -55,6 +54,10 @@ import type { ResolutionSnapshot } from "../src/memory/resolution.js";
 
 const { Client } = pg;
 type PgClient = InstanceType<typeof Client>;
+const schemaSource = readFileSync(
+  new URL("../src/db/schema.sql", import.meta.url),
+  "utf8"
+);
 
 class ReleaseGateError extends Error {
   override readonly name = "ReleaseGateError";
@@ -126,6 +129,27 @@ const RESOLUTION_FUNCTIONS = [
       "public.archon_resolution_decide(STRING, STRING, UUID, UUID, UUID, TIMESTAMPTZ)",
   },
 ] as const;
+
+function assertResolutionRoutineSourceContracts(): void {
+  const evidence = RESOLUTION_FUNCTIONS.map((routine) => {
+    const source = resolutionRoutineSourceEvidence(
+      schemaSource,
+      routine.name
+    );
+    return {
+      name: routine.name,
+      sourceContractMatches: source.matches,
+      sourceContractMissingRuleIds: source.missingRuleIds,
+    };
+  });
+  if (evidence.some((routine) => !routine.sourceContractMatches)) {
+    throw new ReleaseGateError(
+      `Resolution routine source qualification contract drifted: ${JSON.stringify(
+        evidence
+      )}`
+    );
+  }
+}
 
 const CANONICAL_MANIFEST = {
   schemaVersion: 1,
@@ -1740,7 +1764,8 @@ async function verifyExactResolutionRelationGrants(
 }
 
 async function verifyResolutionTransitionFunctions(
-  client: PgClient
+  client: PgClient,
+  databaseName: string
 ): Promise<{
   transitionFunctionCount: 2;
   writerFunctionExecuteCount: 2;
@@ -1800,6 +1825,18 @@ async function verifyResolutionTransitionFunctions(
     );
     const routine = matchingRows[0];
     const createStatement = createStatements.get(expected.name);
+    const bodyEvidence =
+      routine === undefined
+        ? {
+            matches: false,
+            missingRuleIds: ["catalog.body.available"],
+          }
+        : resolutionRoutineRuntimeEvidence(
+            routine.prosrc,
+            schemaSource,
+            expected.name,
+            databaseName
+          );
     return {
       name: expected.name,
       catalogRows: matchingRows.length,
@@ -1815,9 +1852,10 @@ async function verifyResolutionTransitionFunctions(
       volatileMatches: routine?.provolatile === "v",
       languageMatches:
         routine?.lanname.toLowerCase() === "plpgsql",
-      bodyContractMatches:
-        routine !== undefined &&
-        isExpectedResolutionRoutineBody(routine.prosrc, expected.name),
+      bodyContractMatches: bodyEvidence.matches,
+      bodyContractMissingRuleIds: bodyEvidence.missingRuleIds,
+      bodyContractDiagnostics:
+        "diagnostics" in bodyEvidence ? bodyEvidence.diagnostics : null,
     };
   });
   if (
@@ -1915,7 +1953,8 @@ async function verifyResolutionTransitionFunctions(
 }
 
 async function verifyResolutionSandboxSecurity(
-  client: PgClient
+  client: PgClient,
+  databaseName: string
 ): Promise<{
   tables: 5;
   rlsPolicies: 15;
@@ -2147,7 +2186,7 @@ async function verifyResolutionSandboxSecurity(
       RESOLUTION_TRANSITION_OWNER_GRANTS
     );
   const transitionFunctions =
-    await verifyResolutionTransitionFunctions(client);
+    await verifyResolutionTransitionFunctions(client, databaseName);
 
   return {
     tables: 5,
@@ -2449,8 +2488,14 @@ async function verifyAdmin(
       databaseRow.database_name
     );
     await verifyServingViewSecurity(client, databaseRow.database_name);
-    const resolutionSandbox = await verifyResolutionSandboxSecurity(client);
     await verifyRuntimeRoles(client, runtimePrincipals);
+    // The runtime body proof accepts CockroachDB's canonical unqualified
+    // built-ins only after the SECURITY DEFINER owner's pg_catalog-only
+    // search_path and isolation have been proven.
+    const resolutionSandbox = await verifyResolutionSandboxSecurity(
+      client,
+      databaseRow.database_name
+    );
     return {
       version: databaseRow.version.split(" ").slice(0, 3).join(" "),
       databaseName: databaseRow.database_name,
@@ -2469,13 +2514,10 @@ function releaseDigests(): {
   schemaSha256: string;
   fixtureManifestSha256: string;
 } {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const schema = readFileSync(
-    join(here, "..", "src", "db", "schema.sql"),
-    "utf8"
-  );
   return {
-    schemaSha256: createHash("sha256").update(schema, "utf8").digest("hex"),
+    schemaSha256: createHash("sha256")
+      .update(schemaSource, "utf8")
+      .digest("hex"),
     fixtureManifestSha256: createHash("sha256")
       .update(JSON.stringify(CANONICAL_MANIFEST), "utf8")
       .digest("hex"),
@@ -2483,6 +2525,7 @@ function releaseDigests(): {
 }
 
 async function main(): Promise<void> {
+  assertResolutionRoutineSourceContracts();
   if (region !== "eu-west-1") {
     throw new ReleaseGateError(
       "Database release is restricted to eu-west-1."

@@ -717,7 +717,7 @@ BEGIN
        OR p_proposal_id IS NULL
        OR p_expires_at IS NULL
        OR p_expires_at <= pg_catalog.now()
-       OR p_expires_at > pg_catalog.now() + INTERVAL '61 minutes'
+       OR p_expires_at > pg_catalog.now() + '61 minutes'::INTERVAL
        OR p_max_active_sessions IS NULL
        OR p_max_active_sessions < 10
        OR p_max_active_sessions > 500
@@ -725,10 +725,10 @@ BEGIN
         RETURN 'invalid';
     END IF;
 
-    SELECT count(*)
-      INTO v_active_sessions
+    SELECT pg_catalog.count(*)
       FROM public.memory_demo_sessions
-     WHERE expires_at > pg_catalog.now();
+     WHERE expires_at > pg_catalog.now()
+      INTO v_active_sessions;
 
     IF v_active_sessions >= p_max_active_sessions THEN
         RETURN 'capacity';
@@ -836,27 +836,27 @@ BEGIN
        OR p_decision_id IS NULL
        OR p_consolidation_id IS NULL
        OR p_decided_at IS NULL
-       OR p_decided_at < pg_catalog.now() - INTERVAL '5 minutes'
-       OR p_decided_at > pg_catalog.now() + INTERVAL '5 minutes'
+       OR p_decided_at < pg_catalog.now() - '5 minutes'::INTERVAL
+       OR p_decided_at > pg_catalog.now() + '5 minutes'::INTERVAL
     THEN
         RETURN 'invalid';
     END IF;
 
     SELECT id, state, expires_at
-      INTO v_session_id, v_session_state, v_expires_at
       FROM public.memory_demo_sessions
      WHERE token_hash = p_token_hash
        AND expires_at > pg_catalog.now()
-     FOR UPDATE;
+     FOR UPDATE
+      INTO v_session_id, v_session_state, v_expires_at;
 
     IF v_session_id IS NULL THEN
         RETURN 'not_found';
     END IF;
 
     SELECT decision, idempotency_key
-      INTO v_existing_decision, v_existing_idempotency_key
       FROM public.memory_resolution_decisions
-     WHERE session_id = v_session_id;
+     WHERE session_id = v_session_id
+      INTO v_existing_decision, v_existing_idempotency_key;
 
     IF v_existing_decision IS NOT NULL THEN
         IF v_existing_decision = p_decision
@@ -867,7 +867,7 @@ BEGIN
         RETURN 'conflict';
     END IF;
 
-    IF v_session_state <> 'pending' THEN
+    IF v_session_state != 'pending' THEN
         RETURN 'conflict';
     END IF;
 
@@ -876,16 +876,16 @@ BEGIN
         status,
         proposed_observation_id,
         supersedes_observation_id
+      FROM public.memory_resolution_proposals
+     WHERE session_id = v_session_id
+     FOR UPDATE
       INTO
         v_proposal_id,
         v_proposal_state,
         v_corrected_observation_id,
-        v_prior_observation_id
-      FROM public.memory_resolution_proposals
-     WHERE session_id = v_session_id
-     FOR UPDATE;
+        v_prior_observation_id;
 
-    IF v_proposal_id IS NULL OR v_proposal_state <> 'pending' THEN
+    IF v_proposal_id IS NULL OR v_proposal_state != 'pending' THEN
         RETURN 'conflict';
     END IF;
 

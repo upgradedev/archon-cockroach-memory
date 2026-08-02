@@ -2962,6 +2962,13 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     ),
     "utf8"
   );
+  const trivySbomPolicyValidator = readFileSync(
+    new URL(
+      "../.github/scripts/validate-trivy-sbom-policy.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
   const sourceGate = deploy.match(
     /(?:^|\r?\n)  source-gate:\r?\n[\s\S]*?(?=\r?\n  [A-Za-z0-9_-]+:\r?\n|$)/u
   )?.[0];
@@ -3085,7 +3092,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     supplyChain,
     /for scope in backend frontend lambda-content/u
   );
-  assert.match(supplyChain, /lambdaContentExitCode/u);
+  assert.match(supplyChain, /"lambdaContent":0/u);
   assert.equal((supplyChain.match(/--exit-code 1/gu) ?? []).length, 1);
   assert.equal((supplyChain.match(/--exit-code 0/gu) ?? []).length >= 2, true);
   assert.match(
@@ -3100,12 +3107,17 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     supplyChain,
     /trivy-iac-blocking-findings\.json/u
   );
+  assert.match(supplyChain, /validate-trivy-sbom-policy\.mjs --self-test/u);
+  assert.match(supplyChain, /trivy-sbom-compatibility-findings\.json/u);
+  assert.match(supplyChain, /trivy-sbom-blocking-findings\.json/u);
   assert.match(
     supplyChain,
     /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u
   );
-  assert.match(supplyChain, /rawFindings == 1/u);
-  assert.match(supplyChain, /compatibilityFindings == 1/u);
+  assert.match(supplyChain, /rawFindings == 3/u);
+  assert.match(supplyChain, /compatibilityFindings == 3/u);
+  assert.match(supplyChain, /rawFindings == 4/u);
+  assert.match(supplyChain, /approvedBuildLicenseFindings == 4/u);
   assert.match(supplyChain, /blockingFindings == 0/u);
   assert.match(
     trivyIacCompatibilityValidator,
@@ -3113,19 +3125,19 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     trivyIacCompatibilityValidator,
-    /EXPECTED_RULE_ID = "AWS-0013"/u
+    /ruleId: "AWS-0011"/u
   );
   assert.match(
     trivyIacCompatibilityValidator,
-    /EXPECTED_LEGACY_ALIAS = null/u
+    /ruleId: "AWS-0013"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /ruleId: "AWS-0132"/u
   );
   assert.match(
     trivyIacCompatibilityValidator,
     /EXPECTED_TARGET = "aws\/template\.yaml"/u
-  );
-  assert.match(
-    trivyIacCompatibilityValidator,
-    /EXPECTED_RESOURCE = "Distribution"/u
   );
   assert.match(
     trivyIacCompatibilityValidator,
@@ -3141,7 +3153,20 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     trivyIacCompatibilityValidator,
+    /foundationCustomerManagedKey: true/u
+  );
+  assert.match(trivyIacCompatibilityValidator, /keyRotation: true/u);
+  assert.match(
+    trivyIacCompatibilityValidator,
     /captured Trivy version must be/u
+  );
+  assert.match(trivySbomPolicyValidator, /@csstools\/color-helpers/u);
+  assert.match(trivySbomPolicyValidator, /lightningcss-linux-x64-musl/u);
+  assert.match(trivySbomPolicyValidator, /license: "MIT-0"/u);
+  assert.match(trivySbomPolicyValidator, /license: "MPL-2\.0"/u);
+  assert.match(
+    trivySbomPolicyValidator,
+    /resolve\/test\/resolver\/invalid_main/u
   );
   assert.match(
     supplyChain,

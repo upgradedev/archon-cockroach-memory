@@ -36,7 +36,7 @@ export function MemoryResolutionLoop() {
   const [intent, setIntent] = useState<DecisionIntent | null>(null);
 
   const createMutation = useMutation({
-    mutationFn: createResolutionSession,
+    mutationFn: () => createResolutionSession(),
     onSuccess: (session) => {
       setToken(session.token);
       setSnapshot(session.snapshot);

@@ -3,8 +3,9 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  isExpectedResolutionRoutineBody,
   isExpectedResolutionRoutineCreateStatement,
+  resolutionRoutineRuntimeEvidence,
+  resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
 import { closePool, query } from "../src/db/client.js";
 import {
@@ -152,6 +153,17 @@ test("resolution routine catalog gate trusts only descriptor-backed definer meta
         "RETURN 'created';",
         "RETURN 'body text SECURITY DEFINER must not spoof metadata';"
       ),
+    valid
+      .replace(
+        "p_token_hash STRING",
+        "p_token_hash STRING DEFAULT 'SECURITY DEFINER LANGUAGE plpgsql VOLATILE AS $$'"
+      )
+      .replace(
+        "\n    SECURITY DEFINER\n    LANGUAGE plpgsql",
+        "\n    SECURITY INVOKER\n    LANGUAGE plpgsql"
+      )
+      .replace("AS $$\n    BEGIN", "AS $body$\n    BEGIN")
+      .replace("\n    $$", "\n    $body$"),
   ]) {
     assert.equal(
       isExpectedResolutionRoutineCreateStatement(drifted, routineName),
@@ -160,92 +172,312 @@ test("resolution routine catalog gate trusts only descriptor-backed definer meta
   }
 });
 
-test("resolution routine body proof tolerates only Cockroach canonicalization of built-ins", () => {
-  const createBody = `BEGIN
-    IF p_max_active_sessions > 500 THEN RETURN 'invalid'; END IF;
-    SELECT count(*) FROM archon.public.memory_demo_sessions WHERE expires_at > pg_catalog . NOW ( );
-    INSERT INTO archon.public.memory_resolution_observations DEFAULT VALUES;
-    INSERT INTO archon.public.memory_resolution_proposals DEFAULT VALUES;
-    RETURN 'created';
-  END;`;
-  const decideBody = `BEGIN
-    SELECT id FROM archon.public.memory_demo_sessions WHERE expires_at > pg_catalog.now();
-    UPDATE archon.public.memory_resolution_observations SET status = status;
-    UPDATE archon.public.memory_resolution_proposals SET status = status;
-    INSERT INTO archon.public.memory_resolution_decisions DEFAULT VALUES;
-    INSERT INTO archon.public.memory_resolution_consolidations DEFAULT VALUES;
-    v_receipt_canonical := '{"actorRole":"financial-controller"}';
-    v_receipt_hash := pg_catalog . SHA256 (v_receipt_canonical:::STRING);
-    IF false THEN RETURN 'replayed'; END IF;
-    IF false THEN RETURN 'conflict'; END IF;
-    RETURN 'applied';
-  END;`;
-
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      createBody,
-      "archon_resolution_create_session"
-    ),
-    true
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(decideBody, "archon_resolution_decide"),
-    true
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      decideBody.replace(
-        "archon.public.memory_resolution_decisions",
-        "memory_resolution_decisions"
-      ),
-      "archon_resolution_decide"
-    ),
-    false
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      decideBody.replace(
-        "archon.public.memory_resolution_decisions DEFAULT VALUES",
-        "archon.public.unrelated DEFAULT VALUES; -- memory_resolution_decisions\n"
-      ),
-      "archon_resolution_decide"
-    ),
-    false
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      decideBody.replace(
-        "SHA256 (v_receipt_canonical:::STRING)",
-        "SHA256 ('v_receipt_canonical')"
-      ),
-      "archon_resolution_decide"
-    ),
-    false
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      decideBody.replace(
-        "RETURN 'applied';",
-        "EXECUTE 'SELECT 1'; RETURN 'applied';"
-      ),
-      "archon_resolution_decide"
-    ),
-    false
-  );
-  assert.equal(
-    isExpectedResolutionRoutineBody(
-      `${decideBody}\n-- EXECUTE and memory_resolution_decisions in comments are inert`,
-      "archon_resolution_decide"
-    ),
-    true
-  );
-
+test("resolution routine proof is source-bound and closed under Cockroach canonicalization", () => {
   const source = readFileSync(
     new URL("../src/db/schema.sql", import.meta.url),
     "utf8"
   );
-  assert.match(source, /pg_catalog\.sha256\(v_receipt_canonical\)/u);
-  assert.match(source, /expires_at\s*>\s*pg_catalog\.now\(\)/u);
+  const databaseName = "archon_memory";
+  const routineNames = [
+    "archon_resolution_create_session",
+    "archon_resolution_decide",
+  ] as const;
+
+  function sourceStatement(routineName: (typeof routineNames)[number]): string {
+    const start = source.indexOf(
+      `CREATE OR REPLACE FUNCTION public.${routineName}(`
+    );
+    const bodyStart = source.indexOf("AS $$", start);
+    const end = source.indexOf("$$;", bodyStart);
+    assert.ok(start >= 0 && bodyStart > start && end > bodyStart);
+    return source.slice(start, end + 3);
+  }
+
+  function sourceBody(routineName: (typeof routineNames)[number]): string {
+    const statement = sourceStatement(routineName);
+    const start = statement.indexOf("AS $$") + "AS $$".length;
+    return statement.slice(start, statement.lastIndexOf("$$;"));
+  }
+
+  function canonicalBody(
+    routineName: (typeof routineNames)[number]
+  ): string {
+    let body = sourceBody(routineName)
+      .replace(
+        /\bpublic\.(memory_demo_sessions|memory_resolution_(?:observations|proposals|decisions|consolidations))\b/gu,
+        `${databaseName}.public.$1`
+      )
+      .replace(
+        /\bpg_catalog\.(count|now|sha256|timezone|to_char)\b/gu,
+        "$1"
+      );
+    if (routineName === "archon_resolution_decide") {
+      body = body.replace(
+        "sha256(v_receipt_canonical)",
+        "sha256(v_receipt_canonical:::STRING)"
+      );
+    }
+    return body;
+  }
+
+  for (const routineName of routineNames) {
+    assert.deepEqual(
+      resolutionRoutineSourceEvidence(source, routineName),
+      { matches: true, missingRuleIds: [] }
+    );
+    const runtime = resolutionRoutineRuntimeEvidence(
+      canonicalBody(routineName),
+      source,
+      routineName,
+      databaseName
+    );
+    assert.equal(runtime.matches, true);
+    assert.deepEqual(runtime.missingRuleIds, []);
+    assert.equal(runtime.diagnostics.firstMismatchIndex, null);
+  }
+
+  const fakeDefinition = sourceStatement("archon_resolution_decide");
+  const spoofPrefix = `
+    -- CREATE OR REPLACE FUNCTION public.archon_resolution_decide(
+    /* outer /* nested */ ${fakeDefinition} */
+    SELECT 'CREATE OR REPLACE FUNCTION public.archon_resolution_decide(';
+    SELECT E'prefix \\' ; CREATE OR REPLACE FUNCTION public.archon_resolution_decide(';
+    DO $outer$ ${fakeDefinition} $outer$;
+  `;
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      `${spoofPrefix}\n${source}`,
+      "archon_resolution_decide"
+    ).matches,
+    true
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      `${source}\n${fakeDefinition}`,
+      "archon_resolution_decide"
+    ).missingRuleIds.includes("source.definition.exactly-one"),
+    true
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      `/* ${fakeDefinition} */`,
+      "archon_resolution_decide"
+    ).matches,
+    false
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      `${source}\n/* unterminated`,
+      "archon_resolution_decide"
+    ).missingRuleIds.includes("source.sql.top-level-parseable"),
+    true
+  );
+
+  const unqualifiedSource = source.replace(
+    "pg_catalog.sha256(v_receipt_canonical)",
+    "sha256(v_receipt_canonical)"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      unqualifiedSource,
+      "archon_resolution_decide"
+    ).missingRuleIds.includes("source.calls.closed-exact"),
+    true
+  );
+  const unqualifiedAggregateSource = source.replace(
+    "pg_catalog.count(*)",
+    "count(*)"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      unqualifiedAggregateSource,
+      "archon_resolution_create_session"
+    ).missingRuleIds.includes("source.calls.closed-exact"),
+    true
+  );
+  const nonCanonicalSelectIntoSource = source.replace(
+    /    SELECT pg_catalog\.count\(\*\)\r?\n      FROM public\.memory_demo_sessions\r?\n     WHERE expires_at > pg_catalog\.now\(\)\r?\n      INTO v_active_sessions;/u,
+    "    SELECT pg_catalog.count(*)\n      INTO v_active_sessions\n      FROM public.memory_demo_sessions\n     WHERE expires_at > pg_catalog.now();"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      nonCanonicalSelectIntoSource,
+      "archon_resolution_create_session"
+    ).missingRuleIds.includes(
+      "source.cockroach-fmt-simple.canonical"
+    ),
+    true
+  );
+  const nonCanonicalIntervalSource = source.replace(
+    "'61 minutes'::INTERVAL",
+    "INTERVAL '61 minutes'"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      nonCanonicalIntervalSource,
+      "archon_resolution_create_session"
+    ).missingRuleIds.includes(
+      "source.cockroach-fmt-simple.canonical"
+    ),
+    true
+  );
+  const nonCanonicalComparisonSource = source.replace(
+    "v_session_state != 'pending'",
+    "v_session_state <> 'pending'"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      nonCanonicalComparisonSource,
+      "archon_resolution_decide"
+    ).missingRuleIds.includes(
+      "source.cockroach-fmt-simple.canonical"
+    ),
+    true
+  );
+  const extraSourceStatement = source.replace(
+    /    RETURN 'created';\r?\nEND;/u,
+    "    SELECT 1;\n    RETURN 'created';\nEND;"
+  );
+  assert.equal(
+    resolutionRoutineSourceEvidence(
+      extraSourceStatement,
+      "archon_resolution_create_session"
+    ).missingRuleIds.includes("source.statement-counts.closed-exact"),
+    true
+  );
+
+  const canonicalCreate = canonicalBody(
+    "archon_resolution_create_session"
+  );
+  const canonicalDecide = canonicalBody("archon_resolution_decide");
+  const extraAssignment = canonicalCreate.replace(
+    "    RETURN 'created';",
+    "    v_active_sessions := v_active_sessions;\n    RETURN 'created';"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      extraAssignment,
+      source,
+      "archon_resolution_create_session",
+      databaseName
+    ).missingRuleIds.includes("runtime.reviewed-source-token-binding"),
+    true
+  );
+  const extraRelation = canonicalDecide.replace(
+    "    RETURN 'applied';",
+    "    UPDATE archon_memory.public.unrelated SET value = value;\n    RETURN 'applied';"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      extraRelation,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.relations.closed-exact"),
+    true
+  );
+  const wrongDatabase = canonicalDecide.replace(
+    "archon_memory.public.memory_demo_sessions",
+    "attacker.public.memory_demo_sessions"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      wrongDatabase,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.relations.closed-exact"),
+    true
+  );
+  const quotedSchemaSpoof = canonicalDecide.replace(
+    "archon_memory.public.memory_demo_sessions",
+    'archon_memory."PUBLIC".memory_demo_sessions'
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      quotedSchemaSpoof,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.identifiers.unquoted-only"),
+    true
+  );
+  const quotedBuiltinSpoof = canonicalDecide.replace(
+    "now()",
+    '"PG_CATALOG"."NOW"()'
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      quotedBuiltinSpoof,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.identifiers.unquoted-only"),
+    true
+  );
+  const unexpectedCall = canonicalDecide.replace(
+    "    RETURN 'applied';",
+    "    v_receipt_hash := pg_sleep();\n    RETURN 'applied';"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      unexpectedCall,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.calls.closed-exact"),
+    true
+  );
+  const wrongTimezoneOwner = canonicalDecide.replace(
+    "timezone('UTC', p_decided_at)",
+    "attacker.timezone('UTC', p_decided_at)"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      wrongTimezoneOwner,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.calls.closed-exact"),
+    true
+  );
+  const expressionHash = canonicalDecide.replace(
+    "sha256(v_receipt_canonical:::STRING)",
+    "sha256(v_receipt_canonical || 'suffix')"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      expressionHash,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes(
+      "runtime.receipt.sha256.exact-canonical-input"
+    ),
+    true
+  );
+  const inertMarkerSpoof = canonicalDecide.replace(
+    "    RETURN 'applied';",
+    "    v_existing_decision := 'RETURN ''applied''; pg_sleep();';\n    RETURN 'wrong';"
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      inertMarkerSpoof,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes("runtime.returns.closed-exact"),
+    true
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      `${canonicalDecide}\n-- RETURN 'wrong'; pg_sleep(); unrelated`,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).matches,
+    true
+  );
 });
 
 test("resolution tokens are high-entropy bearer values and only hashes reach stores", async () => {

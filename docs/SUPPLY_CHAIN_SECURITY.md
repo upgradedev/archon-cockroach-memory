@@ -18,11 +18,11 @@ release.
 | CloudFormation syntax | cfn-lint 1.53.1 | Findings block across application, bootstrap, edge WAF, and FinOps templates |
 | SAM validity and packageability | SAM CLI 1.164.0 | `sam validate --lint` and the canonical build must pass |
 | CloudFormation/SAM policy | CloudFormation Guard 3.2.0 | Rule fixtures and every current-template rule must pass |
-| CloudFormation and any reintroduced Dockerfile | Trivy 0.72.0 | Medium, High, and Critical findings block except the exact, source-validated CloudFront default-certificate compatibility boundary below; raw JSON/SARIF is retained |
+| CloudFormation and any reintroduced Dockerfile | Trivy 0.72.0 | Medium, High, and Critical findings block except the three exact, source-validated CloudFormation-expression/platform compatibility boundaries below; raw JSON/SARIF is retained |
 | Dependency changes in pull requests | GitHub Dependency Review v5.0.0 | Blocks new Moderate+ vulnerabilities and invalid licenses |
 | Backend/frontend JavaScript dependency inventory | Syft 1.50.0 SPDX + CycloneDX + native Syft JSON | The lockfile and package catalogers, document schemas, and exact cataloger set are blocking |
 | Canonical Lambda ZIP content | SAM build + Syft file/dependency inventory | Generation and manifest checks block |
-| Backend, frontend, and Lambda-content SBOM vulnerabilities/licenses | Trivy 0.72.0 | Unknown, Medium, High, and Critical policy findings block |
+| Backend, frontend, and Lambda-content SBOM vulnerabilities/licenses | Trivy 0.72.0 + deterministic Syft/lockfile validator | Unknown, Medium, High, and Critical findings block except the four exact build-only license classifications below; raw findings are retained |
 
 The standalone ShellCheck, actionlint, zizmor, Guard, Trivy, and Syft binaries,
 their release URLs and SHA-256 digests, plus every GitHub Action commit, are
@@ -52,6 +52,15 @@ The SBOM is intentionally split:
   Syft for directory sources. The workflow requires this exact six-cataloger
   allow-list;
 - the Lambda ZIP-content SBOM and content manifest describe what SAM packaged.
+
+The frontend source scope excludes only four package manifests below
+`node_modules/resolve/test/resolver/`: `baz`, `browser_field`, `false_main`, and
+`invalid_main`. They are upstream resolver test fixtures that deliberately look
+like packages, not installed dependency nodes. Each exact subtree exclusion is
+source-validated by the hosted policy script; a broad `node_modules` exclusion,
+an extra exclusion, or a fixture artifact that survives into native Syft output
+fails closed. The `resolve` package itself remains inventoried and lockfile
+governed.
 
 An esbuild bundle may not retain every package manifest. Therefore the
 ZIP-content SBOM must be interpreted together with the backend component SBOM,
@@ -85,10 +94,12 @@ The workflow fails when:
   boundary below, or that boundary does not match its pinned version, message,
   count, paths, positions, and source anchors;
 - cfn-lint, SAM lint/build, or Guard rejects current source;
-- Trivy IaC reports anything except the one exact HIGH `AWS-0013`
-  compatibility result below, or its JSON, SARIF, scanner version, source
-  target, resource, location, or compensating-control contract drifts;
-- Trivy reports an in-policy SBOM vulnerability or license finding;
+- Trivy IaC reports anything except the exact HIGH `AWS-0011`, `AWS-0013`, and
+  `AWS-0132` compatibility results below, or their JSON, SARIF, scanner version,
+  source target, resource, location, or compensating-control contracts drift;
+- Trivy reports any SBOM vulnerability, any backend/Lambda-content license
+  finding, or any frontend license finding outside the exact build-only policy
+  below;
 - Guard's own positive/negative policy fixtures fail;
 - Dependency Review rejects a newly introduced dependency;
 - the canonical SAM content cannot be built;
@@ -158,29 +169,51 @@ compatibility boundary, not an entry in the vulnerability waiver ledger. The
 exact-main receipt records both the six raw diagnostics and zero effective
 findings.
 
-### Exact Trivy CloudFront certificate compatibility boundary
+### Exact Trivy IaC parser compatibility boundaries
 
-The public demo intentionally uses only its generated `cloudfront.net`
-hostname. AWS does not permit a selectable `MinimumProtocolVersion` with
-`CloudFrontDefaultCertificate: true`; Aqua's own `AWS-0013` record documents
-that limitation. Adding a custom certificate and domain solely to silence the
-scanner would expand the approved deployment and DNS/certificate lifecycle.
+The application template contains three secure CloudFormation expressions that
+Trivy 0.72.0 cannot resolve statically:
+
+- `AWS-0011`: `CloudFrontWebAclArn` is a mandatory, no-default parameter
+  constrained to a global `us-east-1` WebACL ARN, and `Distribution.WebACLId`
+  directly references it. The deploy workflow obtains that ARN from the
+  approval-gated edge stack; there is no unprotected application-stack mode.
+- `AWS-0013`: the public demo intentionally uses only its generated
+  `cloudfront.net` hostname. AWS does not permit a selectable
+  `MinimumProtocolVersion` with `CloudFrontDefaultCertificate: true`; Aqua's
+  own rule documents this platform limitation. Adding a custom certificate and
+  domain solely to silence the scanner would expand the approved DNS and
+  certificate lifecycle.
+- `AWS-0132`: `SpaBucket` already uses SSE-KMS, `BucketKeyEnabled: true`, and
+  the `Fn::ImportValue` of `${AppName}-storage-kms-key-arn`. The validator
+  follows that exact export into `aws/bootstrap-oidc.yaml`, where
+  `ApplicationStorageKey` is a rotating regional customer-managed KMS key and
+  its alias/export are source-validated. The validator also requires two exact,
+  separately bounded bucket-policy statements with `Effect: Deny`, wildcard
+  principal, `s3:PutObject`, `${SpaBucket.Arn}/*`, and the corresponding
+  encryption/key conditions. They reject non-KMS writes and writes using an
+  unexpected key. Trivy reports the finding because its CloudFormation model
+  treats the unresolved import as empty, not because the deployed bucket lacks
+  a CMK.
 
 Trivy 0.72.0 therefore runs its CloudFormation/Dockerfile evidence passes with
 `--exit-code 0`, preserving the complete raw JSON and SARIF before a
 repository-owned deterministic validator applies policy. The validator permits
-exactly one raw finding only when all of the following remain exact:
+exactly three raw findings only when all of the following remain exact:
 
 - scanner and version: Trivy 0.72.0;
-- rule, severity, and status: `AWS-0013`, HIGH, FAIL;
+- rules, raw type, severity, and status: `AWS-0011`, `AWS-0013`, and
+  `AWS-0132`, each `CloudFormation Security Check`, HIGH, and FAIL;
 - raw schema: Trivy 0.72.0's `AVDID` field must remain absent/null; any
   unexpected legacy alias fails closed;
-- raw rule reference:
-  `https://avd.aquasec.com/misconfig/aws-0013`;
-- target and normalized logical resource: `aws/template.yaml`, `Distribution`;
-- raw Trivy resource: the exact
-  `aws/template.yaml:<Distribution-start>-<Distribution-end>` source range,
-  cross-checked against `CauseMetadata`, SARIF, and the current template block;
+- raw rule references: the canonical Aqua `aws-0011`, `aws-0013`, and
+  `aws-0132` records;
+- target and normalized logical resources: `aws/template.yaml`, with
+  `Distribution` for `AWS-0011`/`AWS-0013` and `SpaBucket` for `AWS-0132`;
+- raw Trivy resources: the exact complete `Distribution` and `SpaBucket`
+  source ranges, cross-checked against `CauseMetadata`, SARIF, and the current
+  template blocks;
+- WAF parameter ARN constraint and direct `WebACLId` binding;
 - source property: exactly one `CloudFrontDefaultCertificate: true`, with no
   `MinimumProtocolVersion` or custom-domain `Aliases`;
 - the default viewer behavior redirects to HTTPS;
@@ -190,22 +223,25 @@ exactly one raw finding only when all of the following remain exact:
   `CloudFrontWebAclArn`;
 - the API origin retains the dynamic Secrets Manager verification header;
 - CloudFront access logging remains enabled with its deterministic archive
-  destination.
+  destination;
+- SpaBucket retains SSE-KMS, its bucket key, and the exact foundation CMK
+  import; the foundation retains key rotation, the matching alias and export;
+- SpaBucketPolicy rejects writes without KMS or with an unexpected key.
 
-The validator also requires the corresponding single SARIF error and exact
-source location, runs positive and adversarial self-tests in the hosted
+The validator also requires the corresponding three SARIF errors and exact
+source locations, runs positive and adversarial self-tests in the hosted
 pipeline, and emits separate compatibility and blocking-finding documents.
 Any extra, missing, duplicated, renamed, relocated, or malformed finding—or
 any source-control drift—fails closed. The status and exact-main receipt
-disclose `rawFindings=1`, `compatibilityFindings=1`, and
+disclose `rawFindings=3`, `compatibilityFindings=3`, and
 `blockingFindings=0`.
 
 No inline Trivy ignore is present, the raw HIGH result remains visible in
 uploaded evidence and code scanning, and the empty security waiver ledger is
 unchanged. The hosted job also fails if any repository Trivy ignore or
 configuration override file appears. This is a narrow scanner/platform
-compatibility disposition, not a claim that the default CloudFront certificate
-provides a configurable TLS minimum and not a security-finding waiver.
+compatibility disposition, not a claim that the scanner resolved those dynamic
+values and not a security-finding waiver.
 
 CodeQL writes its exact-run SARIF to the ephemeral runner, uploads it to code
 scanning, resolves each result to the corresponding rule metadata, and blocks
@@ -215,7 +251,7 @@ misrepresented as threshold failures. Deploy AWS accepts only a successful
 CodeQL push run for the exact release SHA.
 
 A green run means zero blocking/unwaived findings at the thresholds in this
-document, both exact tool/schema compatibility boundaries matched, and zero
+document, all exact tool/schema and build-license compatibility boundaries matched, and zero
 accepted waivers. It does not mean the software is vulnerability-free and does
 not replace penetration testing, legal review, or a production incident
 history.
@@ -237,11 +273,38 @@ licenses before it can issue a release receipt.
 
 ## License policy
 
-Pull requests use an allow-list of permissive SPDX identifiers. Copyleft,
-source-available, non-commercial, unknown, or non-SPDX licenses require manual
-review before introduction. The Dependency Review action does not fail on every
-unknown license, so Trivy's installed-package license inventory is retained as
-an independent report.
+Pull requests use an allow-list of permissive SPDX identifiers, including
+`MIT-0`. Copyleft, source-available, non-commercial, unknown, or non-SPDX
+licenses require manual review before introduction. `MPL-2.0` is deliberately
+not added to the global Dependency Review allow-list.
+
+The installed frontend inventory currently produces four raw Trivy license
+policy findings and zero vulnerability findings:
+
+| Package | Version | License/classification | Enforced boundary |
+| --- | --- | --- | --- |
+| `@csstools/color-helpers` | 5.1.0 | MIT-0, UNKNOWN/unknown | development-only Vite CSS build dependency |
+| `lightningcss` | 1.33.0 | MPL-2.0, MEDIUM/reciprocal | development-only Vite CSS build dependency |
+| `lightningcss-linux-x64-gnu` | 1.33.0 | MPL-2.0, MEDIUM/reciprocal | optional, development-only Linux x64 build binary |
+| `lightningcss-linux-x64-musl` | 1.33.0 | MPL-2.0, MEDIUM/reciprocal | optional, development-only Linux x64 musl build binary |
+
+The deterministic hosted validator requires those four package names,
+licenses, Trivy classifications, empty Trivy file paths, and confidence values.
+Because Trivy's license result omits package version and source location, the
+same disposition is independently bound to native Syft evidence from
+`javascript-package-cataloger`: the exact declared license/SPDX expression,
+evidence type, purl, and `/node_modules/.../package.json` path. The matching
+`web/package-lock.json` entries must retain their exact versions,
+development/optional flags, platforms, npm resolved URLs, and SHA-512 integrity
+values. A missing finding, extra license, any vulnerability, runtime promotion,
+version/location/purl/license/digest drift, malformed evidence, or
+scanner-version drift fails closed. Raw JSON/SARIF remains uploaded, the
+blocking-finding file must be empty, and the waiver ledger remains empty.
+
+The Dependency Review action does not fail on every unknown license, so Trivy's
+installed-package license inventory and the repository-owned disposition are
+retained as independent evidence. Approval here is narrowly about the current
+build inputs and does not weaken the shipped Lambda-content or backend policy.
 
 A scanner classification is not legal advice.
 
@@ -285,7 +348,8 @@ Each run uploads:
   blocking findings, and exact scanner/version status;
 - backend and frontend SPDX/CycloneDX/native-Syft JavaScript dependency SBOMs,
   plus Lambda-content SPDX/CycloneDX SBOMs;
-- Trivy SBOM JSON/SARIF;
+- Trivy SBOM JSON/SARIF, exact build-license compatibility and empty blocking
+  findings, native Syft/lockfile binding, and scanner status;
 - lockfile hashes, the empty waiver-ledger hash, and the Lambda content
   manifest;
 - an exact-SHA release receipt, evidence manifest, and GitHub provenance
@@ -316,7 +380,9 @@ Primary references:
 - [zizmor usage](https://docs.zizmor.sh/usage/)
 - [AWS CloudFormation Guard](https://docs.aws.amazon.com/cfn-guard/latest/ug/what-is-guard.html)
 - [Trivy configuration scanning](https://trivy.dev/docs/latest/references/configuration/cli/trivy_config/)
+- [Aqua AWS-0011 CloudFront WAF constraint](https://avd.aquasec.com/misconfig/aws/cloudfront/aws-0011/)
 - [Aqua AWS-0013 default-certificate constraint](https://avd.aquasec.com/misconfig/aws/cloudfront/aws-0013/)
+- [Aqua AWS-0132 S3 customer-managed-key constraint](https://avd.aquasec.com/misconfig/aws/s3/aws-0132/)
 - [Trivy SBOM](https://trivy.dev/docs/dev/guide/supply-chain/sbom/)
 - [Trivy license scanning](https://www.trivy.dev/docs/latest/scanner/license/)
 - [Syft](https://github.com/anchore/syft)

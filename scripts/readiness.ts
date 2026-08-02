@@ -1895,6 +1895,9 @@ function sourceChecks(): SourceCheck[] {
   const trivyIacCompatibilityValidator = read(
     ".github/scripts/validate-trivy-iac-compatibility.mjs"
   );
+  const trivySbomPolicyValidator = read(
+    ".github/scripts/validate-trivy-sbom-policy.mjs"
+  );
   const supplyChainWaivers = read("security/waivers.yml");
   const memoryEvaluationWorkflow = read(
     ".github/workflows/memory-evaluation.yml"
@@ -4120,7 +4123,7 @@ function sourceChecks(): SourceCheck[] {
         /for scope in backend frontend lambda-content/u.test(
           supplyChainWorkflow
         ) &&
-        /lambdaContentExitCode/u.test(supplyChainWorkflow) &&
+        /"lambdaContent":0/u.test(supplyChainWorkflow) &&
         /cfn-lint==1\.53\.1/u.test(supplyChainWorkflow) &&
         /cfn-lint --format json "\$template"/u.test(
           supplyChainWorkflow
@@ -4155,31 +4158,42 @@ function sourceChecks(): SourceCheck[] {
         /validate-trivy-iac-compatibility\.mjs\s+\\\s*\r?\n\s+--self-test/u.test(
           supplyChainWorkflow
         ) &&
+        /validate-trivy-sbom-policy\.mjs --self-test/u.test(
+          supplyChainWorkflow
+        ) &&
         /trivy-iac-compatibility-findings\.json/u.test(
           supplyChainWorkflow
         ) &&
         /trivy-iac-blocking-findings\.json/u.test(
           supplyChainWorkflow
         ) &&
+        /trivy-sbom-compatibility-findings\.json/u.test(
+          supplyChainWorkflow
+        ) &&
+        /trivy-sbom-blocking-findings\.json/u.test(
+          supplyChainWorkflow
+        ) &&
         /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u.test(
           supplyChainWorkflow
         ) &&
-        /rawFindings == 1/u.test(supplyChainWorkflow) &&
-        /compatibilityFindings == 1/u.test(supplyChainWorkflow) &&
+        /rawFindings == 3/u.test(supplyChainWorkflow) &&
+        /compatibilityFindings == 3/u.test(supplyChainWorkflow) &&
+        /rawFindings == 4/u.test(supplyChainWorkflow) &&
+        /approvedBuildLicenseFindings == 4/u.test(supplyChainWorkflow) &&
         /blockingFindings == 0/u.test(supplyChainWorkflow) &&
         /EXPECTED_SCANNER_VERSION = "0\.72\.0"/u.test(
           trivyIacCompatibilityValidator
         ) &&
-        /EXPECTED_RULE_ID = "AWS-0013"/u.test(
+        /ruleId: "AWS-0011"/u.test(
           trivyIacCompatibilityValidator
         ) &&
-        /EXPECTED_LEGACY_ALIAS = null/u.test(
+        /ruleId: "AWS-0013"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /ruleId: "AWS-0132"/u.test(
           trivyIacCompatibilityValidator
         ) &&
         /EXPECTED_TARGET = "aws\/template\.yaml"/u.test(
-          trivyIacCompatibilityValidator
-        ) &&
-        /EXPECTED_RESOURCE = "Distribution"/u.test(
           trivyIacCompatibilityValidator
         ) &&
         /CloudFrontDefaultCertificate: true/u.test(
@@ -4194,8 +4208,19 @@ function sourceChecks(): SourceCheck[] {
         /accessLogging: true/u.test(
           trivyIacCompatibilityValidator
         ) &&
+        /foundationCustomerManagedKey: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /keyRotation: true/u.test(trivyIacCompatibilityValidator) &&
         /captured Trivy version must be/u.test(
           trivyIacCompatibilityValidator
+        ) &&
+        /@csstools\/color-helpers/u.test(trivySbomPolicyValidator) &&
+        /lightningcss-linux-x64-musl/u.test(trivySbomPolicyValidator) &&
+        /license: "MIT-0"/u.test(trivySbomPolicyValidator) &&
+        /license: "MPL-2\.0"/u.test(trivySbomPolicyValidator) &&
+        /resolve\/test\/resolver\/invalid_main/u.test(
+          trivySbomPolicyValidator
         ) &&
         /"schema_version":\s*1/u.test(supplyChainWaivers) &&
         /"waivers":\s*\[\]/u.test(supplyChainWaivers) &&

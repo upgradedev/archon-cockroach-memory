@@ -344,8 +344,8 @@ jobs:
               "$REPORT_DIR/actionlint-blocking-findings.json"
           )"
           test "$raw_status" -eq 1
-          test "$raw_findings" -eq 7
-          test "$compatibility_diagnostics" -eq 7
+          test "$raw_findings" -eq 6
+          test "$compatibility_diagnostics" -eq 6
           test "$blocking_findings" -eq 0
 
           jq -n \
@@ -725,6 +725,7 @@ jobs:
             --report "$REPORT_DIR/trivy-iac.json" \
             --sarif "$REPORT_DIR/trivy-iac.sarif" \
             --template aws/template.yaml \
+            --bootstrap aws/bootstrap-oidc.yaml \
             --tool-lock .github/toolchain-lock.json \
             --version-file "$REPORT_DIR/trivy-version.txt" \
             --compatibility-output \
@@ -763,9 +764,9 @@ jobs:
           done
           jq -e \
             '.schema == "archon.trivy-iac.compatibility" and
-             .version == 1 and
+             .version == 2 and
              .mode ==
-               "blocking-exact-cloudfront-default-certificate-compatibility" and
+               "blocking-exact-source-validated-parser-compatibilities" and
              .scanner == "Trivy" and
              .scannerVersion == "0.72.0" and
              .versionEvidence == {
@@ -774,33 +775,48 @@ jobs:
                "sarifDriver":"0.72.0"
              } and
              .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
-             .rawFindings == 1 and
-             .compatibilityFindings == 1 and
+             .rawFindings == 3 and
+             .compatibilityFindings == 3 and
              .blockingFindings == 0 and
              .acceptedWaivers == 0 and
              .effectiveExitCode == 0 and
-             .compatibility.ruleId == "AWS-0013" and
-             .compatibility.severity == "HIGH" and
-             .compatibility.target == "aws/template.yaml" and
-             .compatibility.logicalResource == "Distribution" and
-             (.compatibility.scannerResource |
-               test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
-             (.compatibility.sourceRange as $range |
-               ($range.startLine | type) == "number" and
-               ($range.endLine | type) == "number" and
-               $range.startLine > 0 and
-               $range.endLine >= $range.startLine and
-               ($range.startLine | floor) == $range.startLine and
-               ($range.endLine | floor) == $range.endLine and
-               .compatibility.scannerResource ==
-                 ("aws/template.yaml:" +
-                  ($range.startLine | tostring) + "-" +
-                  ($range.endLine | tostring))) and
-             .compatibility.sourceProperty ==
+             .sourceEvidence == {
+               "applicationTemplate":"aws/template.yaml",
+               "foundationTemplate":"aws/bootstrap-oidc.yaml"
+             } and
+             (.compatibilities | length) == 3 and
+             [.compatibilities[].ruleId] ==
+               ["AWS-0011","AWS-0013","AWS-0132"] and
+             all(.compatibilities[];
+               .findingType == "CloudFormation Security Check" and
+               .severity == "HIGH" and
+               .target == "aws/template.yaml" and
+               (.scannerResource |
+                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+               (.sourceRange as $range |
+                 ($range.startLine | type) == "number" and
+                 ($range.endLine | type) == "number" and
+                 $range.startLine > 0 and
+                 $range.endLine >= $range.startLine and
+                 ($range.startLine | floor) == $range.startLine and
+                 ($range.endLine | floor) == $range.endLine and
+                 .scannerResource ==
+                   ("aws/template.yaml:" +
+                    ($range.startLine | tostring) + "-" +
+                    ($range.endLine | tostring)))) and
+             .compatibilities[0].logicalResource == "Distribution" and
+             .compatibilities[0].sourceProperty ==
+               "WebACLId: !Ref CloudFrontWebAclArn" and
+             .compatibilities[0].controls == {
+               "mandatoryWebAclParameter":true,
+               "directWebAclBinding":true,
+               "globalUsEast1ArnConstraint":true,
+               "accessLogging":true
+             } and
+             .compatibilities[1].logicalResource == "Distribution" and
+             .compatibilities[1].sourceProperty ==
                "CloudFrontDefaultCertificate: true" and
-             .compatibility.reason ==
-               "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; the generated cloudfront.net demo hostname is retained while every viewer, API, and custom-origin path enforces HTTPS." and
-             .compatibility.controls == {
+             .compatibilities[1].controls == {
                "defaultViewerHttpsRedirect":true,
                "apiViewerHttpsOnly":true,
                "customOriginHttpsOnly":true,
@@ -808,6 +824,18 @@ jobs:
                "dynamicOriginSecret":true,
                "accessLogging":true,
                "customDomainAliases":false
+             } and
+             .compatibilities[2].logicalResource == "SpaBucket" and
+             .compatibilities[2].sourceProperty ==
+               "KMSMasterKeyID: Fn::ImportValue \"${AppName}-storage-kms-key-arn\"" and
+             .compatibilities[2].controls == {
+               "sseKms":true,
+               "bucketKeyEnabled":true,
+               "foundationCustomerManagedKey":true,
+               "keyRotation":true,
+               "importExportBound":true,
+               "denyUnencryptedWrites":true,
+               "denyUnexpectedKeyWrites":true
              }' \
             "$REPORT_DIR/trivy-iac-status.json" >/dev/null
           test -s "$REPORT_DIR/guard-tests.junit.xml"
@@ -816,39 +844,45 @@ jobs:
           jq -e '.Results | type == "array"' \
             "$REPORT_DIR/trivy-iac.json" >/dev/null
           jq -e '
-            length == 1
-            and .[0].ruleId == "AWS-0013"
-            and .[0].legacyAlias == null
-            and .[0].severity == "HIGH"
-            and .[0].status == "FAIL"
-            and .[0].target == "aws/template.yaml"
-            and .[0].logicalResource == "Distribution"
-            and .[0].namespace == "builtin.aws.cloudfront.aws0013"
-            and .[0].reason ==
-              "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; the generated cloudfront.net demo hostname is retained while every viewer, API, and custom-origin path enforces HTTPS."
-            and (.[0].scannerResource |
-              test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
-            and .[0].scannerResource ==
-              ("aws/template.yaml:" +
-               (.[0].startLine | tostring) + "-" +
-               (.[0].endLine | tostring))
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            all(.[];
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              (.logicalResource == "Distribution" or
+               .logicalResource == "SpaBucket") and
+              (.scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+              .scannerResource ==
+                ("aws/template.yaml:" +
+                 (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
           ' \
             "$REPORT_DIR/trivy-iac-compatibility-findings.json" >/dev/null
           jq -e 'length == 0' \
             "$REPORT_DIR/trivy-iac-blocking-findings.json" >/dev/null
           jq -e '
             .version == "2.1.0" and
-            ([.runs[].results[]] | length) == 1 and
-            [.runs[].results[].ruleId] == ["AWS-0013"]
+            ([.runs[].results[]] | length) == 3 and
+            ([.runs[].results[].ruleId] | sort) ==
+              ["AWS-0011","AWS-0013","AWS-0132"]
           ' "$REPORT_DIR/trivy-iac.sarif" >/dev/null
           test -s "$REPORT_DIR/waiver-ledger.sha256"
           {
             echo "### Enforced Trivy IaC policy"
             echo
-            echo "- Raw findings: **1**"
-            echo "- Exact compatibility findings: **1**"
+            echo "- Raw findings: **3**"
+            echo "- Exact compatibility findings: **3**"
             echo "- Blocking findings: **0**"
-            echo "- Boundary: Trivy 0.72.0 HIGH \`AWS-0013\`, \`aws/template.yaml\` / \`Distribution\`, source-validated \`CloudFrontDefaultCertificate: true\`."
+            echo "- Boundaries: Trivy 0.72.0 HIGH \`AWS-0011\` and \`AWS-0013\` on \`Distribution\`, plus \`AWS-0132\` on \`SpaBucket\`; mandatory WAF, HTTPS-only paths, and the imported rotating foundation CMK are source-validated."
             echo "- Raw JSON and SARIF retain the finding; no Trivy ignore or security waiver is used."
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -1008,6 +1042,10 @@ jobs:
             --output "syft-json=$REPORT_DIR/backend.syft.json"
           "$TOOL_BIN/syft" dir:web \
             --exclude './dist/**' \
+            --exclude './node_modules/resolve/test/resolver/baz/**' \
+            --exclude './node_modules/resolve/test/resolver/browser_field/**' \
+            --exclude './node_modules/resolve/test/resolver/false_main/**' \
+            --exclude './node_modules/resolve/test/resolver/invalid_main/**' \
             --select-catalogers javascript \
             --select-catalogers +javascript-package-cataloger \
             --source-name archon-memory-control-room \
@@ -1097,19 +1135,25 @@ jobs:
                 ;;
             esac
           done
-          jq -n \
-            --argjson backendExitCode "$backend_status" \
-            --argjson frontendExitCode "$frontend_status" \
-            --argjson lambdaContentExitCode "$lambda_content_status" \
-            '{
-              mode:"blocking",
-              scanners:["vuln","license"],
-              severities:["UNKNOWN","MEDIUM","HIGH","CRITICAL"],
-              backendExitCode:$backendExitCode,
-              frontendExitCode:$frontendExitCode,
-              lambdaContentExitCode:$lambdaContentExitCode
-            }' > "$REPORT_DIR/trivy-sbom-status.json"
           "$TOOL_BIN/trivy" --version > "$REPORT_DIR/trivy-version.txt"
+          node .github/scripts/validate-trivy-sbom-policy.mjs --self-test
+          node .github/scripts/validate-trivy-sbom-policy.mjs \
+            --backend-report "$REPORT_DIR/trivy-backend-policy.json" \
+            --frontend-report "$REPORT_DIR/trivy-frontend-policy.json" \
+            --lambda-report "$REPORT_DIR/trivy-lambda-content-policy.json" \
+            --frontend-syft "$REPORT_DIR/frontend.syft.json" \
+            --frontend-lock web/package-lock.json \
+            --workflow .github/workflows/supply-chain.yml \
+            --tool-lock .github/toolchain-lock.json \
+            --version-file "$REPORT_DIR/trivy-version.txt" \
+            --backend-exit-code "$backend_status" \
+            --frontend-exit-code "$frontend_status" \
+            --lambda-exit-code "$lambda_content_status" \
+            --compatibility-output \
+              "$REPORT_DIR/trivy-sbom-compatibility-findings.json" \
+            --blocking-output \
+              "$REPORT_DIR/trivy-sbom-blocking-findings.json" \
+            --status-output "$REPORT_DIR/trivy-sbom-status.json"
 
       - name: Enforce zero-unwaived vulnerability and license findings
         if: always()
@@ -1121,18 +1165,107 @@ jobs:
             (.waivers | type == "array" and length == 0)
           ' security/waivers.yml >/dev/null
           jq -e '
-            .mode == "blocking" and
+            .schema == "archon.trivy-sbom.compatibility" and
+            .version == 1 and
+            .mode == "blocking-exact-build-license-compatibility" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .inventoryScanner == "Syft" and
+            .inventoryScannerVersion == "1.50.0" and
+            .versionEvidence == {
+              "trivyToolLock":"0.72.0",
+              "trivyCapturedCli":"0.72.0",
+              "syftToolLock":"1.50.0"
+            } and
             .scanners == ["vuln","license"] and
             .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
-            .backendExitCode == 0 and
-            .frontendExitCode == 0 and
-            .lambdaContentExitCode == 0
+            .rawExitCodes == {
+              "backend":0,
+              "frontend":1,
+              "lambdaContent":0
+            } and
+            .rawFindings == 4 and
+            .vulnerabilityFindings == 0 and
+            .licenseFindings == 4 and
+            .approvedBuildLicenseFindings == 4 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            .sourceExclusions == [
+              "./node_modules/resolve/test/resolver/baz/**",
+              "./node_modules/resolve/test/resolver/browser_field/**",
+              "./node_modules/resolve/test/resolver/false_main/**",
+              "./node_modules/resolve/test/resolver/invalid_main/**"
+            ] and
+            [.approvedBuildLicenses[].package] == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            [.approvedBuildLicenses[].version] ==
+              ["5.1.0","1.33.0","1.33.0","1.33.0"] and
+            [.approvedBuildLicenses[].license] ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            [.approvedBuildLicenses[].resolved] == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            [.approvedBuildLicenses[].integrity] == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            [.approvedBuildLicenses[].dev] == [true,true,true,true]
           ' "$REPORT_DIR/trivy-sbom-status.json" >/dev/null
           for scope in backend frontend lambda-content; do
             jq -e '.Results | type == "array"' \
               "$REPORT_DIR/trivy-${scope}-policy.json" >/dev/null
           done
+          jq -e '
+            length == 4 and
+            map(.package) == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            map(.license) ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            map(.resolved) == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            map(.integrity) == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            all(.[];
+              .scope == "frontend" and
+              .kind == "build-license" and
+              .cataloger == "javascript-package-cataloger" and
+              .dev == true and
+              (.location | startswith("/node_modules/")))
+          ' "$REPORT_DIR/trivy-sbom-compatibility-findings.json" >/dev/null
+          jq -e 'length == 0' \
+            "$REPORT_DIR/trivy-sbom-blocking-findings.json" >/dev/null
           test -s "$REPORT_DIR/waiver-ledger.sha256"
+          {
+            echo "### Enforced Trivy SBOM policy"
+            echo
+            echo "- Vulnerabilities: **0**"
+            echo "- Exact build-only license compatibility findings: **4**"
+            echo "- Blocking findings: **0**"
+            echo "- Four resolve test-fixture package manifests are excluded by exact source paths; no dependency or broad node_modules scope is excluded."
+            echo "- Raw frontend license evidence is retained and bound to exact Syft licenses/locations plus lockfile versions, resolved URLs, and SHA-512 integrity; the empty waiver ledger is unchanged."
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Record exact run provenance
         shell: bash
@@ -1318,7 +1451,12 @@ jobs:
             iac/trivy-version.txt \
             sbom/provenance.json \
             sbom/trivy-sbom-status.json \
+            sbom/trivy-backend-policy.json \
+            sbom/trivy-frontend-policy.json \
             sbom/trivy-lambda-content-policy.json \
+            sbom/trivy-sbom-compatibility-findings.json \
+            sbom/trivy-sbom-blocking-findings.json \
+            sbom/trivy-version.txt \
             sbom/waiver-ledger.sha256 \
             sbom/lambda-zip-content.sha256 \
             sbom/sbom-inputs-and-documents.sha256 \
@@ -1435,9 +1573,9 @@ jobs:
           done
           jq -e \
             '.schema == "archon.trivy-iac.compatibility" and
-             .version == 1 and
+             .version == 2 and
              .mode ==
-               "blocking-exact-cloudfront-default-certificate-compatibility" and
+               "blocking-exact-source-validated-parser-compatibilities" and
              .scanner == "Trivy" and
              .scannerVersion == "0.72.0" and
              .versionEvidence == {
@@ -1446,41 +1584,29 @@ jobs:
                "sarifDriver":"0.72.0"
              } and
              .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
-             .rawFindings == 1 and
-             .compatibilityFindings == 1 and
+             .rawFindings == 3 and
+             .compatibilityFindings == 3 and
              .blockingFindings == 0 and
              .acceptedWaivers == 0 and
              .effectiveExitCode == 0 and
-             .compatibility.ruleId == "AWS-0013" and
-             .compatibility.severity == "HIGH" and
-             .compatibility.target == "aws/template.yaml" and
-             .compatibility.logicalResource == "Distribution" and
-             (.compatibility.scannerResource |
-               test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
-             (.compatibility.sourceRange as $range |
-               ($range.startLine | type) == "number" and
-               ($range.endLine | type) == "number" and
-               $range.startLine > 0 and
-               $range.endLine >= $range.startLine and
-               ($range.startLine | floor) == $range.startLine and
-               ($range.endLine | floor) == $range.endLine and
-               .compatibility.scannerResource ==
+             .sourceEvidence == {
+               "applicationTemplate":"aws/template.yaml",
+               "foundationTemplate":"aws/bootstrap-oidc.yaml"
+             } and
+             [.compatibilities[].ruleId] ==
+               ["AWS-0011","AWS-0013","AWS-0132"] and
+             [.compatibilities[].logicalResource] ==
+               ["Distribution","Distribution","SpaBucket"] and
+             all(.compatibilities[];
+               .findingType == "CloudFormation Security Check" and
+               .severity == "HIGH" and
+               .target == "aws/template.yaml" and
+               (.scannerResource |
+                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+               .scannerResource ==
                  ("aws/template.yaml:" +
-                  ($range.startLine | tostring) + "-" +
-                  ($range.endLine | tostring))) and
-             .compatibility.sourceProperty ==
-               "CloudFrontDefaultCertificate: true" and
-             .compatibility.reason ==
-               "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; the generated cloudfront.net demo hostname is retained while every viewer, API, and custom-origin path enforces HTTPS." and
-             .compatibility.controls == {
-               "defaultViewerHttpsRedirect":true,
-               "apiViewerHttpsOnly":true,
-               "customOriginHttpsOnly":true,
-               "mandatoryWebAcl":true,
-               "dynamicOriginSecret":true,
-               "accessLogging":true,
-               "customDomainAliases":false
-             }' \
+                  (.sourceRange.startLine | tostring) + "-" +
+                  (.sourceRange.endLine | tostring)))' \
             "$EVIDENCE_ROOT/iac/trivy-iac-status.json" >/dev/null
           jq -e '
             [
@@ -1489,30 +1615,37 @@ jobs:
               | select(.Status == "FAIL")
               | {target:$result.Target, finding:.}
             ] as $findings
-            | ($findings | length) == 1
-              and $findings[0].target == "aws/template.yaml"
-              and $findings[0].finding.ID == "AWS-0013"
-              and ($findings[0].finding.AVDID == null)
-              and $findings[0].finding.Severity == "HIGH"
-              and ($findings[0].finding.CauseMetadata.Resource |
-                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
+            | ($findings | length) == 3 and
+              ([$findings[].finding.ID] | sort) ==
+                ["AWS-0011","AWS-0013","AWS-0132"] and
+              all($findings[];
+                .target == "aws/template.yaml" and
+                .finding.Type == "CloudFormation Security Check" and
+                (.finding.AVDID == null) and
+                .finding.Severity == "HIGH" and
+                (.finding.CauseMetadata.Resource |
+                  test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")))
           ' "$EVIDENCE_ROOT/iac/trivy-iac.json" >/dev/null
           jq -e '
-            length == 1
-            and .[0].ruleId == "AWS-0013"
-            and .[0].legacyAlias == null
-            and .[0].severity == "HIGH"
-            and .[0].target == "aws/template.yaml"
-            and .[0].logicalResource == "Distribution"
-            and .[0].namespace == "builtin.aws.cloudfront.aws0013"
-            and .[0].reason ==
-              "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; the generated cloudfront.net demo hostname is retained while every viewer, API, and custom-origin path enforces HTTPS."
-            and (.[0].scannerResource |
-              test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
-            and .[0].scannerResource ==
-              ("aws/template.yaml:" +
-               (.[0].startLine | tostring) + "-" +
-               (.[0].endLine | tostring))
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.namespace) == [
+              "builtin.aws.cloudfront.aws0011",
+              "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132"
+            ] and
+            all(.[];
+              .findingType == "CloudFormation Security Check" and
+              .legacyAlias == null and
+              .severity == "HIGH" and
+              .status == "FAIL" and
+              .target == "aws/template.yaml" and
+              (.scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+              .scannerResource ==
+                ("aws/template.yaml:" +
+                 (.startLine | tostring) + "-" +
+                 (.endLine | tostring)))
           ' \
             "$EVIDENCE_ROOT/iac/trivy-iac-compatibility-findings.json" \
             >/dev/null
@@ -1524,20 +1657,27 @@ jobs:
               (.runs[0] as $run |
                 $run.tool.driver.name == "Trivy" and
                 $run.tool.driver.version == "0.72.0" and
-                ([$run.tool.driver.rules[] |
-                  select(.id == "AWS-0013")] | length) == 1 and
-                ($run.results | length) == 1 and
-                ($run.results[0] as $result |
-                  $result.ruleId == "AWS-0013" and
+                ($run.tool.driver.rules | length) == 3 and
+                ([$run.tool.driver.rules[].id |
+                  select(. == "AWS-0011" or
+                         . == "AWS-0013" or
+                         . == "AWS-0132")] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                ($run.results | length) == 3 and
+                ([$run.results[].ruleId] | sort) ==
+                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                all($run.results[] as $result;
+                  ($status[0].compatibilities |
+                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
                   $result.level == "error" and
                   ($result.locations | length) == 1 and
                   ($result.locations[0].physicalLocation as $location |
                     $location.artifactLocation.uri ==
                       "aws/template.yaml" and
                     $location.region.startLine ==
-                      $status[0].compatibility.sourceRange.startLine and
+                      $contract.sourceRange.startLine and
                     $location.region.endLine ==
-                      $status[0].compatibility.sourceRange.endLine and
+                      $contract.sourceRange.endLine and
                     $location.region.startColumn == 1 and
                     $location.region.endColumn == 1)))
             ' "$EVIDENCE_ROOT/iac/trivy-iac.sarif" >/dev/null
@@ -1548,13 +1688,84 @@ jobs:
             "$EVIDENCE_ROOT/iac/trivy-iac-blocking-findings.json" \
             >/dev/null
           jq -e '
-            .mode == "blocking" and
+            .schema == "archon.trivy-sbom.compatibility" and
+            .version == 1 and
+            .mode == "blocking-exact-build-license-compatibility" and
+            .scanner == "Trivy" and
+            .scannerVersion == "0.72.0" and
+            .inventoryScanner == "Syft" and
+            .inventoryScannerVersion == "1.50.0" and
             .scanners == ["vuln","license"] and
             .severities == ["UNKNOWN","MEDIUM","HIGH","CRITICAL"] and
-            .backendExitCode == 0 and
-            .frontendExitCode == 0 and
-            .lambdaContentExitCode == 0
+            .rawExitCodes == {
+              "backend":0,
+              "frontend":1,
+              "lambdaContent":0
+            } and
+            .rawFindings == 4 and
+            .vulnerabilityFindings == 0 and
+            .licenseFindings == 4 and
+            .approvedBuildLicenseFindings == 4 and
+            .blockingFindings == 0 and
+            .acceptedWaivers == 0 and
+            .effectiveExitCode == 0 and
+            [.approvedBuildLicenses[].package] == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            [.approvedBuildLicenses[].license] ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            [.approvedBuildLicenses[].resolved] == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            [.approvedBuildLicenses[].integrity] == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ]
           ' "$EVIDENCE_ROOT/sbom/trivy-sbom-status.json" >/dev/null
+          jq -e '
+            length == 4 and
+            map(.package) == [
+              "@csstools/color-helpers",
+              "lightningcss",
+              "lightningcss-linux-x64-gnu",
+              "lightningcss-linux-x64-musl"
+            ] and
+            map(.version) == ["5.1.0","1.33.0","1.33.0","1.33.0"] and
+            map(.license) ==
+              ["MIT-0","MPL-2.0","MPL-2.0","MPL-2.0"] and
+            map(.resolved) == [
+              "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+              "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+              "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+            ] and
+            map(.integrity) == [
+              "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+              "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+              "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+              "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+            ] and
+            all(.[];
+              .scope == "frontend" and
+              .kind == "build-license" and
+              .cataloger == "javascript-package-cataloger" and
+              .dev == true)
+          ' "$EVIDENCE_ROOT/sbom/trivy-sbom-compatibility-findings.json" \
+            >/dev/null
+          jq -e 'length == 0' \
+            "$EVIDENCE_ROOT/sbom/trivy-sbom-blocking-findings.json" \
+            >/dev/null
+          test "$(
+            sed -n '1p' "$EVIDENCE_ROOT/sbom/trivy-version.txt"
+          )" = "Version: 0.72.0"
           cmp \
             "$EVIDENCE_ROOT/static/waiver-ledger.sha256" \
             "$EVIDENCE_ROOT/sbom/waiver-ledger.sha256"
@@ -1598,11 +1809,23 @@ jobs:
             "$sbom_manifest_sha256"; do
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
           done
-          trivy_scanner_resource="$(
-            jq -er '.compatibility.scannerResource' \
+          trivy_scanner_resources="$(
+            jq -ec '[.compatibilities[] | {
+              ruleId,
+              logicalResource,
+              scannerResource
+            }]' \
               "$EVIDENCE_ROOT/iac/trivy-iac-status.json"
           )"
-          [[ "$trivy_scanner_resource" =~ ^aws/template\.yaml:[1-9][0-9]*-[1-9][0-9]*$ ]]
+          jq -e '
+            length == 3 and
+            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            map(.logicalResource) ==
+              ["Distribution","Distribution","SpaBucket"] and
+            all(.[];
+              .scannerResource |
+                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
+          ' <<<"$trivy_scanner_resources" >/dev/null
 
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
@@ -1615,7 +1838,7 @@ jobs:
             --arg evidenceManifestSha256 "$evidence_manifest_sha256" \
             --arg lambdaManifestSha256 "$lambda_manifest_sha256" \
             --arg sbomManifestSha256 "$sbom_manifest_sha256" \
-            --arg trivyScannerResource "$trivy_scanner_resource" \
+            --argjson trivyScannerResources "$trivy_scanner_resources" \
             --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
               {
                 schema: "archon.supply-chain.release-evidence",
@@ -1663,16 +1886,45 @@ jobs:
                   trivyIaCCompatibility: {
                     analyzer: "Trivy",
                     version: "0.72.0",
-                    ruleId: "AWS-0013",
+                    ruleIds: ["AWS-0011", "AWS-0013", "AWS-0132"],
                     severity: "HIGH",
                     target: "aws/template.yaml",
-                    logicalResource: "Distribution",
-                    scannerResource: $trivyScannerResource,
-                    rawFindings: 1,
-                    compatibilityFindings: 1,
+                    scannerResources: $trivyScannerResources,
+                    rawFindings: 3,
+                    compatibilityFindings: 3,
                     blockingFindings: 0,
                     disposition:
-                      "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; raw JSON/SARIF retained and HTTPS, mandatory WAF, dynamic origin secret, and access logging are source-validated; not a waiver."
+                      "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+                  },
+                  trivySbomLicenseCompatibility: {
+                    analyzer: "Trivy",
+                    version: "0.72.0",
+                    inventoryAnalyzer: "Syft",
+                    inventoryVersion: "1.50.0",
+                    packages: [
+                      "@csstools/color-helpers@5.1.0",
+                      "lightningcss@1.33.0",
+                      "lightningcss-linux-x64-gnu@1.33.0",
+                      "lightningcss-linux-x64-musl@1.33.0"
+                    ],
+                    resolvedUrls: [
+                      "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+                      "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+                      "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+                      "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+                    ],
+                    integrity: [
+                      "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+                      "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+                      "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+                      "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+                    ],
+                    rawFindings: 4,
+                    vulnerabilityFindings: 0,
+                    compatibilityFindings: 4,
+                    blockingFindings: 0,
+                    disposition:
+                      "Exact build-only MIT-0/MPL-2.0 license classifications are bound to Syft licenses/locations and lockfile versions, resolved URLs, and SHA-512 integrity; raw evidence is retained and no waiver is accepted."
                   },
                   limitation:
                     "A pass proves zero findings at configured scanner thresholds with an empty waiver ledger; it is not a vulnerability-free, penetration-test, or legal-review claim."
@@ -1699,7 +1951,7 @@ jobs:
             --arg sourceSha "$SOURCE_SHA" \
             --arg runId "$GITHUB_RUN_ID" \
             --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
-            --arg trivyScannerResource "$trivy_scanner_resource" \
+            --argjson trivyScannerResources "$trivy_scanner_resources" \
             --arg waiverLedgerSha256 "$waiver_ledger_sha256" '
               keys == [
                 "enforcement",
@@ -1756,16 +2008,45 @@ jobs:
               .enforcement.trivyIaCCompatibility == {
                 "analyzer":"Trivy",
                 "version":"0.72.0",
-                "ruleId":"AWS-0013",
+                "ruleIds":["AWS-0011","AWS-0013","AWS-0132"],
                 "severity":"HIGH",
                 "target":"aws/template.yaml",
-                "logicalResource":"Distribution",
-                "scannerResource":$trivyScannerResource,
-                "rawFindings":1,
-                "compatibilityFindings":1,
+                "scannerResources":$trivyScannerResources,
+                "rawFindings":3,
+                "compatibilityFindings":3,
                 "blockingFindings":0,
                 "disposition":
-                  "CloudFrontDefaultCertificate cannot declare MinimumProtocolVersion; raw JSON/SARIF retained and HTTPS, mandatory WAF, dynamic origin secret, and access logging are source-validated; not a waiver."
+                  "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+              } and
+              .enforcement.trivySbomLicenseCompatibility == {
+                "analyzer":"Trivy",
+                "version":"0.72.0",
+                "inventoryAnalyzer":"Syft",
+                "inventoryVersion":"1.50.0",
+                "packages":[
+                  "@csstools/color-helpers@5.1.0",
+                  "lightningcss@1.33.0",
+                  "lightningcss-linux-x64-gnu@1.33.0",
+                  "lightningcss-linux-x64-musl@1.33.0"
+                ],
+                "resolvedUrls":[
+                  "https://registry.npmjs.org/@csstools/color-helpers/-/color-helpers-5.1.0.tgz",
+                  "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+                  "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+                  "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+                ],
+                "integrity":[
+                  "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==",
+                  "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+                  "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+                  "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw=="
+                ],
+                "rawFindings":4,
+                "vulnerabilityFindings":0,
+                "compatibilityFindings":4,
+                "blockingFindings":0,
+                "disposition":
+                  "Exact build-only MIT-0/MPL-2.0 license classifications are bound to Syft licenses/locations and lockfile versions, resolved URLs, and SHA-512 integrity; raw evidence is retained and no waiver is accepted."
               } and
               .evidence.cloudFormationTemplates == [
                 "aws/template.yaml",
@@ -1816,6 +2097,7 @@ jobs:
             echo "| Source SHA | \`$GITHUB_SHA\` |"
             echo "| Receipt SHA-256 | \`$RECEIPT_SHA256\` |"
             echo "| Provenance attestation | GitHub artifact attestation |"
-            echo "| Enforcement | Blocking; zero unwaived findings; exact actionlint and Trivy IaC compatibility dispositions retained in raw evidence |"
-            echo "| Trivy IaC | raw=1; compatibility=1; blocking=0; Trivy 0.72.0 HIGH AWS-0013 on aws/template.yaml/Distribution |"
+            echo "| Enforcement | Blocking; zero unwaived findings; exact actionlint, Trivy IaC, and build-license compatibility dispositions retained in raw evidence |"
+            echo "| Trivy IaC | raw=3; compatibility=3; blocking=0; Trivy 0.72.0 HIGH AWS-0011/AWS-0013/AWS-0132 with source-validated WAF, TLS, and CMK contracts |"
+            echo "| Trivy SBOM | vulnerabilities=0; raw licenses=4; exact build-only compatibility=4; blocking=0; Syft and lockfile bound |"
           } >>"$GITHUB_STEP_SUMMARY"

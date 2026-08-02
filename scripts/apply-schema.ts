@@ -26,12 +26,14 @@ import {
   type SystemGrant,
 } from "../src/db/system-grants.js";
 import {
-  isExpectedResolutionRoutineBody,
   isExpectedResolutionRoutineCreateStatement,
+  resolutionRoutineRuntimeEvidence,
+  resolutionRoutineSourceEvidence,
 } from "../src/db/routine-proof.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = join(here, "..", "src", "db", "schema.sql");
+const schemaSource = readFileSync(schemaPath, "utf8");
 const RESOLUTION_TABLES = [
   "memory_demo_sessions",
   "memory_resolution_observations",
@@ -73,7 +75,8 @@ const RESOLUTION_FUNCTIONS = [
 ] as const;
 
 export async function applySchema(): Promise<void> {
-  const sql = readFileSync(schemaPath, "utf8");
+  assertResolutionRoutineSourceContracts();
+  const sql = schemaSource;
   const pool = getPool();
   const client = await pool.connect();
   console.log(`Applying schema → ${redactUrl(process.env.DATABASE_URL!)}`);
@@ -176,7 +179,7 @@ export async function applySchema(): Promise<void> {
     ) {
       throw new Error("agent_memory RLS is not both enabled and forced.");
     }
-    await verifyResolutionSandbox(client);
+    await verifyResolutionSandbox(client, databaseName);
     await verifyPublicRecallViews(client, databaseName);
     console.log(
       "✓ exact C-SPANN views, canonical read boundary, and TTL resolution sandbox verified"
@@ -205,7 +208,10 @@ export async function applySchema(): Promise<void> {
   }
 }
 
-async function verifyResolutionSandbox(client: PoolClient): Promise<void> {
+async function verifyResolutionSandbox(
+  client: PoolClient,
+  databaseName: string
+): Promise<void> {
   const tables = await client.query<{ table_name: string }>(
     `SELECT table_name
        FROM information_schema.tables
@@ -376,8 +382,6 @@ async function verifyResolutionSandbox(client: PoolClient): Promise<void> {
     RESOLUTION_TRANSITION_OWNER,
     RESOLUTION_TRANSITION_OWNER_GRANTS
   );
-  await verifyResolutionFunctions(client);
-
   const canonicalReader = await client.query<{
     table_name: string;
     privilege_type: string;
@@ -520,6 +524,32 @@ async function verifyResolutionSandbox(client: PoolClient): Promise<void> {
       "Resolution writer membership must never include WITH ADMIN OPTION."
     );
   }
+
+  // CockroachDB canonicalizes pg_catalog-qualified built-ins to unqualified
+  // calls in pg_proc.prosrc. Prove the SECURITY DEFINER owner's fixed
+  // pg_catalog search_path before accepting that descriptor-backed form.
+  await verifyResolutionFunctions(client, databaseName);
+}
+
+function assertResolutionRoutineSourceContracts(): void {
+  const evidence = RESOLUTION_FUNCTIONS.map((routine) => {
+    const source = resolutionRoutineSourceEvidence(
+      schemaSource,
+      routine.name
+    );
+    return {
+      name: routine.name,
+      sourceContractMatches: source.matches,
+      sourceContractMissingRuleIds: source.missingRuleIds,
+    };
+  });
+  if (evidence.some((routine) => !routine.sourceContractMatches)) {
+    throw new Error(
+      `Resolution routine source qualification contract drifted: ${JSON.stringify(
+        evidence
+      )}`
+    );
+  }
 }
 
 async function verifyExactRelationGrants(
@@ -560,7 +590,10 @@ async function verifyExactRelationGrants(
   }
 }
 
-async function verifyResolutionFunctions(client: PoolClient): Promise<void> {
+async function verifyResolutionFunctions(
+  client: PoolClient,
+  databaseName: string
+): Promise<void> {
   const routineNames = RESOLUTION_FUNCTIONS.map((routine) => routine.name);
   const routines = await client.query<{
     proname: string;
@@ -617,6 +650,18 @@ async function verifyResolutionFunctions(client: PoolClient): Promise<void> {
     );
     const routine = matchingRows[0];
     const createStatement = createStatements.get(expected.name);
+    const bodyEvidence =
+      routine === undefined
+        ? {
+            matches: false,
+            missingRuleIds: ["catalog.body.available"],
+          }
+        : resolutionRoutineRuntimeEvidence(
+            routine.prosrc,
+            schemaSource,
+            expected.name,
+            databaseName
+          );
     return {
       name: expected.name,
       catalogRows: matchingRows.length,
@@ -632,9 +677,10 @@ async function verifyResolutionFunctions(client: PoolClient): Promise<void> {
       volatileMatches: routine?.provolatile === "v",
       languageMatches:
         routine?.lanname.toLowerCase() === "plpgsql",
-      bodyContractMatches:
-        routine !== undefined &&
-        isExpectedResolutionRoutineBody(routine.prosrc, expected.name),
+      bodyContractMatches: bodyEvidence.matches,
+      bodyContractMissingRuleIds: bodyEvidence.missingRuleIds,
+      bodyContractDiagnostics:
+        "diagnostics" in bodyEvidence ? bodyEvidence.diagnostics : null,
     };
   });
   if (
