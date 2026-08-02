@@ -89,7 +89,7 @@ export type ResolutionRoutineBodyEvidence = {
 export type ResolutionRoutineRuntimeEvidence =
   ResolutionRoutineBodyEvidence & {
     diagnostics: {
-      normalizationVersion: "cockroach-v26.2-fmt-simple-v1";
+      normalizationVersion: "cockroach-v26.2.3-fmt-parsable-exact-v1";
       sourceNormalizedTokenCount: number | null;
       runtimeNormalizedTokenCount: number | null;
       firstMismatchIndex: number | null;
@@ -165,7 +165,15 @@ const BUILTIN_NAMES = new Set([
   "to_char",
 ]);
 
-const NON_CALL_PARENTHESIS_KEYWORDS = new Set(["in", "values"]);
+const NON_CALL_PARENTHESIS_KEYWORDS = new Set([
+  "and",
+  "else",
+  "if",
+  "in",
+  "or",
+  "values",
+  "where",
+]);
 
 const FORBIDDEN_BODY_IDENTIFIERS = new Set([
   "alter",
@@ -708,13 +716,23 @@ function routineCalls(
     if (
       token?.kind !== "identifier" ||
       tokens[index + 1]?.value !== "(" ||
-      relationTerminals.has(index) ||
+      relationTerminals.has(index)
+    ) {
+      continue;
+    }
+    const path = callPathAt(tokens, index);
+    // CockroachDB's FmtParsable output places grouping parentheses directly
+    // after these PL/pgSQL/SQL grammar tokens. Exclude only an unqualified
+    // keyword: attacker.if(...) and every other qualified/unknown call remain
+    // visible to the closed call contract.
+    if (
+      path.length === 1 &&
       NON_CALL_PARENTHESIS_KEYWORDS.has(token.value)
     ) {
       continue;
     }
     calls.push({
-      path: callPathAt(tokens, index),
+      path,
       functionIndex: index,
       argumentTokens: callArguments(tokens, index),
     });
@@ -805,17 +823,37 @@ function exactSha256Argument(
 }
 
 function hasReceiptActorAssignment(tokens: readonly RoutineToken[]): boolean {
-  return tokens.some(
-    (token, index) =>
-      token.kind === "identifier" &&
-      token.value === "v_receipt_canonical" &&
-      tokens[index + 1]?.value === ":" &&
-      tokens[index + 2]?.value === "=" &&
-      tokens[index + 3]?.kind === "string" &&
-      tokens[index + 3]!.value.startsWith(
-        '{"actorRole":"financial-controller","currentObservationId":"'
-      )
+  const assignmentIndexes = tokens.flatMap((token, index) =>
+    token.kind === "identifier" &&
+    token.value === "v_receipt_canonical" &&
+    tokens[index + 1]?.value === ":" &&
+    tokens[index + 2]?.value === "="
+      ? [index]
+      : []
   );
+  if (assignmentIndexes.length !== 1) return false;
+
+  const expressionStart = assignmentIndexes[0]! + 3;
+  let leftmostLeaf = expressionStart;
+  while (tokens[leftmostLeaf]?.value === "(") leftmostLeaf += 1;
+  if (
+    tokens[leftmostLeaf]?.kind !== "string" ||
+    tokens[leftmostLeaf]!.value !==
+      '{"actorRole":"financial-controller","currentObservationId":"'
+  ) {
+    return false;
+  }
+
+  let depth = 0;
+  for (let index = expressionStart; index < tokens.length; index += 1) {
+    if (tokens[index]?.value === "(") depth += 1;
+    if (tokens[index]?.value === ")") {
+      depth -= 1;
+      if (depth < 0) return false;
+    }
+    if (tokens[index]?.value === ";") return depth === 0;
+  }
+  return false;
 }
 
 function hasSequence(
@@ -868,7 +906,7 @@ function usesCockroachCanonicalSelectInto(
   return canonicalSelectStatements === expectedSelectStatements;
 }
 
-function usesCockroachFmtSimpleSyntax(
+function usesCockroachFmtParsableSyntax(
   tokens: readonly RoutineToken[],
   expectedSelectStatements: number
 ): boolean {
@@ -911,8 +949,8 @@ function inspectRoutineBody(
     "identifiers.unquoted-only"
   );
   requireRule(
-    usesCockroachFmtSimpleSyntax(tokens, contract.selectStatements),
-    "cockroach-fmt-simple.canonical"
+    usesCockroachFmtParsableSyntax(tokens, contract.selectStatements),
+    "cockroach-v26.2.3-fmt-parsable.canonical"
   );
   requireRule(
     !tokens.some(
@@ -991,19 +1029,6 @@ function inspectRoutineBody(
   };
 }
 
-function isShaArgumentIdentifier(
-  tokens: readonly RoutineToken[],
-  index: number
-): boolean {
-  return (
-    tokens[index]?.kind === "identifier" &&
-    tokens[index]?.value === "v_receipt_canonical" &&
-    tokens[index - 1]?.value === "(" &&
-    tokens[index - 2]?.kind === "identifier" &&
-    tokens[index - 2]?.value === "sha256"
-  );
-}
-
 function normalizedBindingTokens(
   tokens: readonly RoutineToken[],
   routineName: ResolutionRoutineName,
@@ -1036,34 +1061,6 @@ function normalizedBindingTokens(
     ) {
       index += 2;
       continue;
-    }
-    if (isShaArgumentIdentifier(tokens, index)) {
-      let colonCount = 0;
-      while (tokens[index + 1 + colonCount]?.value === ":") {
-        colonCount += 1;
-      }
-      if (
-        (colonCount === 2 || colonCount === 3) &&
-        tokens[index + 1 + colonCount]?.kind === "identifier" &&
-        tokens[index + 1 + colonCount]?.value === "string"
-      ) {
-        output.push(`identifier:${tokens[index]!.value}`);
-        index += colonCount + 2;
-        continue;
-      }
-    }
-    if (tokens[index]?.value === ":") {
-      let colonCount = 0;
-      while (tokens[index + colonCount]?.value === ":") colonCount += 1;
-      if (
-        (colonCount === 2 || colonCount === 3) &&
-        tokens[index + colonCount]?.kind === "identifier" &&
-        tokens[index + colonCount]?.value === "string"
-      ) {
-        output.push("symbol::", "symbol::");
-        index += colonCount;
-        continue;
-      }
     }
     output.push(`${tokens[index]!.kind}:${tokens[index]!.value}`);
     index += 1;
@@ -1123,7 +1120,8 @@ export function resolutionRoutineRuntimeEvidence(
   databaseName: string
 ): ResolutionRoutineRuntimeEvidence {
   const diagnostics = {
-    normalizationVersion: "cockroach-v26.2-fmt-simple-v1" as const,
+    normalizationVersion:
+      "cockroach-v26.2.3-fmt-parsable-exact-v1" as const,
     sourceNormalizedTokenCount: null as number | null,
     runtimeNormalizedTokenCount: null as number | null,
     firstMismatchIndex: null as number | null,

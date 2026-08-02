@@ -202,7 +202,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
   function canonicalBody(
     routineName: (typeof routineNames)[number]
   ): string {
-    let body = sourceBody(routineName)
+    return sourceBody(routineName)
       .replace(
         /\bpublic\.(memory_demo_sessions|memory_resolution_(?:observations|proposals|decisions|consolidations))\b/gu,
         `${databaseName}.public.$1`
@@ -211,14 +211,12 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
         /\bpg_catalog\.(count|now|sha256|timezone|to_char)\b/gu,
         "$1"
       );
-    if (routineName === "archon_resolution_decide") {
-      body = body.replace(
-        "sha256(v_receipt_canonical)",
-        "sha256(v_receipt_canonical:::STRING)"
-      );
-    }
-    return body;
   }
+
+  const canonicalTokenCounts = {
+    archon_resolution_create_session: 328,
+    archon_resolution_decide: 750,
+  } as const;
 
   for (const routineName of routineNames) {
     assert.deepEqual(
@@ -233,6 +231,18 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     );
     assert.equal(runtime.matches, true);
     assert.deepEqual(runtime.missingRuleIds, []);
+    assert.equal(
+      runtime.diagnostics.normalizationVersion,
+      "cockroach-v26.2.3-fmt-parsable-exact-v1"
+    );
+    assert.equal(
+      runtime.diagnostics.sourceNormalizedTokenCount,
+      canonicalTokenCounts[routineName]
+    );
+    assert.equal(
+      runtime.diagnostics.runtimeNormalizedTokenCount,
+      canonicalTokenCounts[routineName]
+    );
     assert.equal(runtime.diagnostics.firstMismatchIndex, null);
   }
 
@@ -296,7 +306,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     true
   );
   const nonCanonicalSelectIntoSource = source.replace(
-    /    SELECT pg_catalog\.count\(\*\)\r?\n      FROM public\.memory_demo_sessions\r?\n     WHERE expires_at > pg_catalog\.now\(\)\r?\n      INTO v_active_sessions;/u,
+    /    SELECT pg_catalog\.count\(\*\)\r?\n      FROM public\.memory_demo_sessions\r?\n     WHERE expires_at > pg_catalog\.now\(\):::TIMESTAMPTZ\r?\n      INTO v_active_sessions;/u,
     "    SELECT pg_catalog.count(*)\n      INTO v_active_sessions\n      FROM public.memory_demo_sessions\n     WHERE expires_at > pg_catalog.now();"
   );
   assert.equal(
@@ -304,12 +314,12 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       nonCanonicalSelectIntoSource,
       "archon_resolution_create_session"
     ).missingRuleIds.includes(
-      "source.cockroach-fmt-simple.canonical"
+      "source.cockroach-v26.2.3-fmt-parsable.canonical"
     ),
     true
   );
   const nonCanonicalIntervalSource = source.replace(
-    "'61 minutes'::INTERVAL",
+    "'01:01:00':::INTERVAL",
     "INTERVAL '61 minutes'"
   );
   assert.equal(
@@ -317,7 +327,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       nonCanonicalIntervalSource,
       "archon_resolution_create_session"
     ).missingRuleIds.includes(
-      "source.cockroach-fmt-simple.canonical"
+      "source.cockroach-v26.2.3-fmt-parsable.canonical"
     ),
     true
   );
@@ -330,7 +340,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
       nonCanonicalComparisonSource,
       "archon_resolution_decide"
     ).missingRuleIds.includes(
-      "source.cockroach-fmt-simple.canonical"
+      "source.cockroach-v26.2.3-fmt-parsable.canonical"
     ),
     true
   );
@@ -350,6 +360,91 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     "archon_resolution_create_session"
   );
   const canonicalDecide = canonicalBody("archon_resolution_decide");
+  for (const formatterDrift of [
+    canonicalCreate.replace(
+      "(p_session_id IS NULL)",
+      "p_session_id IS NULL"
+    ),
+    canonicalCreate.replace("now():::TIMESTAMPTZ", "now()"),
+    canonicalCreate.replace("'01:01:00':::INTERVAL", "'01:00:59':::INTERVAL"),
+    canonicalCreate.replace("p_expires_at <=", "p_expires_at <"),
+  ]) {
+    assert.equal(
+      resolutionRoutineRuntimeEvidence(
+        formatterDrift,
+        source,
+        "archon_resolution_create_session",
+        databaseName
+      ).missingRuleIds.includes("runtime.reviewed-source-token-binding"),
+      true
+    );
+  }
+  const qualifiedGrammarCall = canonicalCreate.replace(
+    "IF (",
+    "attacker.if("
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      qualifiedGrammarCall,
+      source,
+      "archon_resolution_create_session",
+      databaseName
+    ).missingRuleIds.includes("runtime.calls.closed-exact"),
+    true
+  );
+  const actorDrift = canonicalDecide.replace(
+    '{"actorRole":"financial-controller","currentObservationId":"',
+    '{"actorRole":"administrator","currentObservationId":"'
+  );
+  assert.equal(
+    resolutionRoutineRuntimeEvidence(
+      actorDrift,
+      source,
+      "archon_resolution_decide",
+      databaseName
+    ).missingRuleIds.includes(
+      "runtime.receipt.actor-role-canonical-assignment"
+    ),
+    true
+  );
+  for (const invalidReceiptAssignment of [
+    canonicalDecide.replace(
+      "    v_receipt_hash :=",
+      "    v_receipt_canonical := " +
+        "'{\"actorRole\":\"financial-controller\",\"currentObservationId\":\"';\n" +
+        "    v_receipt_hash :="
+    ),
+    canonicalDecide.replace(") || '}';", " || '}';"),
+  ]) {
+    assert.equal(
+      resolutionRoutineRuntimeEvidence(
+        invalidReceiptAssignment,
+        source,
+        "archon_resolution_decide",
+        databaseName
+      ).missingRuleIds.includes(
+        "runtime.receipt.actor-role-canonical-assignment"
+      ),
+      true
+    );
+  }
+  for (const castDrift of [
+    canonicalDecide.replace("'approve':::STRING", "'approve'::STRING"),
+    canonicalDecide.replace(
+      "sha256(v_receipt_canonical)",
+      "sha256(v_receipt_canonical:::STRING)"
+    ),
+  ]) {
+    assert.equal(
+      resolutionRoutineRuntimeEvidence(
+        castDrift,
+        source,
+        "archon_resolution_decide",
+        databaseName
+      ).missingRuleIds.includes("runtime.reviewed-source-token-binding"),
+      true
+    );
+  }
   const extraAssignment = canonicalCreate.replace(
     "    RETURN 'created';",
     "    v_active_sessions := v_active_sessions;\n    RETURN 'created';"
@@ -442,7 +537,7 @@ test("resolution routine proof is source-bound and closed under Cockroach canoni
     true
   );
   const expressionHash = canonicalDecide.replace(
-    "sha256(v_receipt_canonical:::STRING)",
+    "sha256(v_receipt_canonical)",
     "sha256(v_receipt_canonical || 'suffix')"
   );
   assert.equal(

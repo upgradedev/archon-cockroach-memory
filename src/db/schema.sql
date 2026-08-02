@@ -709,25 +709,13 @@ AS $$
 DECLARE
     v_active_sessions INT8;
 BEGIN
-    IF p_token_hash IS NULL
-       OR p_token_hash !~ '^[a-f0-9]{64}$'
-       OR p_session_id IS NULL
-       OR p_prior_observation_id IS NULL
-       OR p_corrected_observation_id IS NULL
-       OR p_proposal_id IS NULL
-       OR p_expires_at IS NULL
-       OR p_expires_at <= pg_catalog.now()
-       OR p_expires_at > pg_catalog.now() + '61 minutes'::INTERVAL
-       OR p_max_active_sessions IS NULL
-       OR p_max_active_sessions < 10
-       OR p_max_active_sessions > 500
-    THEN
+    IF (((((((((((p_token_hash IS NULL) OR (p_token_hash !~ '^[a-f0-9]{64}$')) OR (p_session_id IS NULL)) OR (p_prior_observation_id IS NULL)) OR (p_corrected_observation_id IS NULL)) OR (p_proposal_id IS NULL)) OR (p_expires_at IS NULL)) OR (p_expires_at <= pg_catalog.now():::TIMESTAMPTZ)) OR (p_expires_at > (pg_catalog.now():::TIMESTAMPTZ + '01:01:00':::INTERVAL))) OR (p_max_active_sessions IS NULL)) OR (p_max_active_sessions < 10)) OR (p_max_active_sessions > 500) THEN
         RETURN 'invalid';
     END IF;
 
     SELECT pg_catalog.count(*)
       FROM public.memory_demo_sessions
-     WHERE expires_at > pg_catalog.now()
+     WHERE expires_at > pg_catalog.now():::TIMESTAMPTZ
       INTO v_active_sessions;
 
     IF v_active_sessions >= p_max_active_sessions THEN
@@ -828,24 +816,14 @@ DECLARE
     v_receipt_canonical STRING;
     v_receipt_hash STRING;
 BEGIN
-    IF p_token_hash IS NULL
-       OR p_token_hash !~ '^[a-f0-9]{64}$'
-       OR p_decision IS NULL
-       OR p_decision NOT IN ('approve', 'reject')
-       OR p_idempotency_key IS NULL
-       OR p_decision_id IS NULL
-       OR p_consolidation_id IS NULL
-       OR p_decided_at IS NULL
-       OR p_decided_at < pg_catalog.now() - '5 minutes'::INTERVAL
-       OR p_decided_at > pg_catalog.now() + '5 minutes'::INTERVAL
-    THEN
+    IF (((((((((p_token_hash IS NULL) OR (p_token_hash !~ '^[a-f0-9]{64}$')) OR (p_decision IS NULL)) OR (p_decision NOT IN ('approve':::STRING, 'reject':::STRING))) OR (p_idempotency_key IS NULL)) OR (p_decision_id IS NULL)) OR (p_consolidation_id IS NULL)) OR (p_decided_at IS NULL)) OR (p_decided_at < (pg_catalog.now():::TIMESTAMPTZ - '00:05:00':::INTERVAL))) OR (p_decided_at > (pg_catalog.now():::TIMESTAMPTZ + '00:05:00':::INTERVAL)) THEN
         RETURN 'invalid';
     END IF;
 
     SELECT id, state, expires_at
       FROM public.memory_demo_sessions
-     WHERE token_hash = p_token_hash
-       AND expires_at > pg_catalog.now()
+     WHERE (token_hash = p_token_hash)
+       AND (expires_at > pg_catalog.now():::TIMESTAMPTZ)
      FOR UPDATE
       INTO v_session_id, v_session_state, v_expires_at;
 
@@ -859,9 +837,8 @@ BEGIN
       INTO v_existing_decision, v_existing_idempotency_key;
 
     IF v_existing_decision IS NOT NULL THEN
-        IF v_existing_decision = p_decision
-           AND v_existing_idempotency_key = p_idempotency_key
-        THEN
+        IF (v_existing_decision = p_decision)
+           AND (v_existing_idempotency_key = p_idempotency_key) THEN
             RETURN 'replayed';
         END IF;
         RETURN 'conflict';
@@ -885,7 +862,7 @@ BEGIN
         v_corrected_observation_id,
         v_prior_observation_id;
 
-    IF v_proposal_id IS NULL OR v_proposal_state != 'pending' THEN
+    IF (v_proposal_id IS NULL) OR (v_proposal_state != 'pending') THEN
         RETURN 'conflict';
     END IF;
 
@@ -901,44 +878,21 @@ BEGIN
         v_consolidation_mode := 'retained-prior';
     END IF;
 
-    v_receipt_canonical :=
-        '{"actorRole":"financial-controller","currentObservationId":"'
-        || v_current_observation_id::STRING
-        || '","decidedAt":"'
-        || pg_catalog.to_char(
-             pg_catalog.timezone('UTC', p_decided_at),
-             'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-           )
-        || '","decision":"'
-        || p_decision
-        || '","decisionId":"'
-        || p_decision_id::STRING
-        || '","idempotencyKey":"'
-        || p_idempotency_key::STRING
-        || '","policyVersion":"resolution-policy-v1","proposalId":"'
-        || v_proposal_id::STRING
-        || '","scenarioId":"helios-payroll-2026-06-correction-v1","sessionId":"'
-        || v_session_id::STRING
-        || '","supersededObservationId":'
-        || CASE
-             WHEN v_superseded_observation_id IS NULL THEN 'null'
-             ELSE '"' || v_superseded_observation_id::STRING || '"'
-           END
-        || '}';
+    v_receipt_canonical := ((((((((((((((('{"actorRole":"financial-controller","currentObservationId":"' || v_current_observation_id::STRING) || '","decidedAt":"') || pg_catalog.to_char(pg_catalog.timezone('UTC', p_decided_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) || '","decision":"') || p_decision) || '","decisionId":"') || p_decision_id::STRING) || '","idempotencyKey":"') || p_idempotency_key::STRING) || '","policyVersion":"resolution-policy-v1","proposalId":"') || v_proposal_id::STRING) || '","scenarioId":"helios-payroll-2026-06-correction-v1","sessionId":"') || v_session_id::STRING) || '","supersededObservationId":') || CASE WHEN v_superseded_observation_id IS NULL THEN 'null' ELSE ('"' || v_superseded_observation_id::STRING) || '"' END) || '}';
     v_receipt_hash := pg_catalog.sha256(v_receipt_canonical);
 
     UPDATE public.memory_demo_sessions
        SET state = v_final_state,
            decision_version = 1,
            updated_at = p_decided_at
-     WHERE id = v_session_id
-       AND state = 'pending';
+     WHERE (id = v_session_id)
+       AND (state = 'pending');
 
     UPDATE public.memory_resolution_proposals
        SET status = v_final_state,
            updated_at = p_decided_at
-     WHERE id = v_proposal_id
-       AND status = 'pending';
+     WHERE (id = v_proposal_id)
+       AND (status = 'pending');
 
     IF p_decision = 'approve' THEN
         UPDATE public.memory_resolution_observations

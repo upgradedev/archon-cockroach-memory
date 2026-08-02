@@ -3094,6 +3094,7 @@ jobs:
           CONFIRMATION: ${{ inputs.confirmation }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           DRILL_SOURCE_ARTIFACT_DIGEST: ${{ steps.drill_gate.outputs.source_receipt_artifact_digest }}
+          EXPECTED_APPLICATION_URL: ${{ steps.previous.outputs.application_url }}
           PREVIOUS_FUNCTION_NAME: ${{ steps.previous.outputs.function_name }}
           PREVIOUS_FUNCTION_VERSION: ${{ steps.previous.outputs.function_version }}
           PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
@@ -3342,7 +3343,7 @@ jobs:
             | select(.OutputKey == "ApplicationUrl")
             | .OutputValue
           ' "$stack_state")"
-          test "$application_url" = "${{ steps.previous.outputs.application_url }}"
+          test "$application_url" = "$EXPECTED_APPLICATION_URL"
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors \
             --max-time 30 "$application_url/api/health" >"$health"
@@ -3818,6 +3819,7 @@ jobs:
           EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
           EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
           EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+          PRE_MUTATION_REPROVED: ${{ steps.application_s3_recheck.outputs.reproved }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
           PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
           PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
@@ -3928,7 +3930,7 @@ jobs:
             --arg environment staging \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
-            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg preMutationReproved "$PRE_MUTATION_REPROVED" \
             --arg stackState "$EXPECTED_STACK_STATE" \
             --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
             --arg frontendRecoverySha256 "$FRONTEND_RECOVERY_SHA256" \
@@ -6648,6 +6650,7 @@ jobs:
           EXPECTED_PREFLIGHT_SHA256: ${{ steps.application_s3_preflight.outputs.receipt_sha256 }}
           EXPECTED_PROOF_SHA256: ${{ steps.application_s3_verify.outputs.receipt_sha256 }}
           EXPECTED_STACK_STATE: ${{ steps.application_s3_recheck.outputs.stack_state }}
+          PRE_MUTATION_REPROVED: ${{ steps.application_s3_recheck.outputs.reproved }}
           HAS_PREVIOUS_STACK: ${{ steps.previous.outputs.has_previous_stack }}
           PREVIOUS_STACK_ID: ${{ steps.previous.outputs.stack_id }}
           PREVIOUS_STACK_STATUS: ${{ steps.previous.outputs.stack_status }}
@@ -6758,7 +6761,7 @@ jobs:
             --arg environment production \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
-            --arg preMutationReproved "${{ steps.application_s3_recheck.outputs.reproved }}" \
+            --arg preMutationReproved "$PRE_MUTATION_REPROVED" \
             --arg stackState "$EXPECTED_STACK_STATE" \
             --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
             --arg frontendRecoverySha256 "$FRONTEND_RECOVERY_SHA256" \

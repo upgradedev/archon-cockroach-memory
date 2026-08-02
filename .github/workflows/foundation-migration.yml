@@ -1302,6 +1302,8 @@ jobs:
           mask-aws-account-id: true
 
       - name: Verify and retire the exact authority stack
+        env:
+          PERMANENT_PROOF_SHA256: ${{ needs.prove-retirement-readiness.outputs.proof-sha256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1348,8 +1350,7 @@ jobs:
             --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
             --arg workflowRef "$GITHUB_WORKFLOW_REF" \
             --arg clientToken "$client_token" \
-            --arg permanentProofSha256 \
-              "${{ needs.prove-retirement-readiness.outputs.proof-sha256 }}" \
+            --arg permanentProofSha256 "$PERMANENT_PROOF_SHA256" \
             --slurpfile authority "$authority_proof" \
             '{
               schema: "archon.aws.foundation-storage-migration",
