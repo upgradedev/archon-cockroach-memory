@@ -251,9 +251,13 @@ test("script implements pending, tested cutover, hosted proof, and retirement", 
   assert.match(clusterGrantProof, /SELECT current_database\(\) AS database_name/u);
   assert.match(
     clusterGrantProof,
-    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u
   );
-  assert.match(clusterGrantProof, /FROM \[SHOW DATABASES\]/u);
+  assert.match(
+    clusterGrantProof,
+    /\}>\("SHOW DATABASES"\)[\s\S]*?\.map\(\(row\) => row\.database_name\)[\s\S]*?\.sort\(\)/u
+  );
+  assert.doesNotMatch(clusterGrantProof, /FROM \[SHOW (?:GRANTS|DATABASES)/u);
   assert.match(
     clusterGrantProof,
     /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u

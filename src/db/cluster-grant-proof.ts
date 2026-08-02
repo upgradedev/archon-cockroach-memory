@@ -260,12 +260,10 @@ async function enumerateDatabases(
 ): Promise<string[]> {
   const databases = await proofClient.query<{
     database_name: string;
-  }>(
-    `SELECT database_name
-       FROM [SHOW DATABASES]
-      ORDER BY database_name`
-  );
-  const databaseNames = databases.rows.map((row) => row.database_name);
+  }>("SHOW DATABASES");
+  const databaseNames = databases.rows
+    .map((row) => row.database_name)
+    .sort();
   if (
     databaseNames.length === 0 ||
     new Set(databaseNames).size !== databaseNames.length ||
@@ -331,14 +329,19 @@ export async function verifyClusterWideResolutionGrants(input: {
         "Cluster-wide grant proof did not enter the anonymous database."
       );
     }
-    const routineGrants = await proofClient.query<ClusterGrantRow>(
-      `SELECT database_name, schema_name, object_name, object_type, grantee,
-              privilege_type, is_grantable
-         FROM [SHOW GRANTS FOR ${principalSql}]
-        WHERE object_type = 'routine'
-        ORDER BY database_name, schema_name, object_name, object_type,
-                 grantee, privilege_type, is_grantable`
+    // Direct SHOW statements remain valid in CockroachDB's anonymous-database
+    // mode. Wrapping them as virtual-table sources does not, so filtering and
+    // canonical ordering deliberately happen in typed application code.
+    const clusterGrants = await proofClient.query<ClusterGrantRow>(
+      `SHOW GRANTS FOR ${principalSql}`
     );
+    const routineGrants = clusterGrants.rows
+      .filter((grant) => grant.object_type === "routine")
+      .sort((left, right) => {
+        const leftKey = routineGrantKey(left);
+        const rightKey = routineGrantKey(right);
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      });
 
     const databaseGrants: ClusterGrantRow[] = [];
     let databaseInventory: readonly string[] = [];
@@ -388,7 +391,7 @@ export async function verifyClusterWideResolutionGrants(input: {
       }
     }
     return validateClusterWideResolutionGrants(
-      [...routineGrants.rows, ...databaseGrants],
+      [...routineGrants, ...databaseGrants],
       input.applicationDatabase,
       input.expectedDatabaseGrants,
       databaseInventory

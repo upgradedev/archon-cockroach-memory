@@ -5136,7 +5136,7 @@ function sourceChecks(): SourceCheck[] {
         /database\.rows\[0\]\?\.database_name !== null/u.test(
           clusterGrantProof
         ) &&
-        /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u.test(
+        /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u.test(
           clusterGrantProof
         ) &&
         /archon_resolution_create_session\(text, uuid, uuid, uuid, uuid, timestamptz, int8\)/u.test(
@@ -5148,7 +5148,10 @@ function sourceChecks(): SourceCheck[] {
         /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u.test(
           clusterGrantProof
         ) &&
-        /FROM \[SHOW DATABASES\]/u.test(clusterGrantProof) &&
+        /\}>\("SHOW DATABASES"\)[\s\S]*?\.map\(\(row\) => row\.database_name\)[\s\S]*?\.sort\(\)/u.test(
+          clusterGrantProof
+        ) &&
+        !/FROM \[SHOW (?:GRANTS|DATABASES)/u.test(clusterGrantProof) &&
         /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u.test(
           clusterGrantProof
         ) &&

@@ -2763,7 +2763,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   );
   assert.match(
     clusterGrantProof,
-    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?object_type = 'routine'/u
+    /SHOW GRANTS FOR \$\{principalSql\}[\s\S]*?\.filter\(\(grant\) => grant\.object_type === "routine"\)/u
   );
   assert.match(
     clusterGrantProof,
@@ -2781,7 +2781,11 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     clusterGrantProof,
     /COCKROACH_BUILTIN_PUBLIC_DATABASE_GRANTS[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "defaultdb"[\s\S]*?privilegeType: "TEMPORARY"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "CONNECT"[\s\S]*?databaseName: "postgres"[\s\S]*?privilegeType: "TEMPORARY"/u
   );
-  assert.match(clusterGrantProof, /FROM \[SHOW DATABASES\]/u);
+  assert.match(
+    clusterGrantProof,
+    /\}>\("SHOW DATABASES"\)[\s\S]*?\.map\(\(row\) => row\.database_name\)[\s\S]*?\.sort\(\)/u
+  );
+  assert.doesNotMatch(clusterGrantProof, /FROM \[SHOW (?:GRANTS|DATABASES)/u);
   assert.match(
     clusterGrantProof,
     /SHOW GRANTS ON DATABASE \$\{databaseSql\} FOR \$\{principalSql\}/u

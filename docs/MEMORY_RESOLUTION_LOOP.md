@@ -55,6 +55,9 @@ state, and run
 principal-focused `SHOW GRANTS`. The gate compares database, schema, canonical
 identity signature, granting role, `EXECUTE`, and grant-option fields and
 accepts exactly the two transition routines anywhere in the cluster. The
+proof deliberately executes direct `SHOW GRANTS` and `SHOW DATABASES`
+statements, then filters and sorts their typed rows in-process; CockroachDB
+v26.2.3 does not allow virtual-table wrappers in anonymous-database mode. The
 connection is always destroyed so anonymous-database state cannot return to a
 pool. In the shared build-test cluster, migration and reconciliation databases
 are created sequentially and dropped after their rehearsal, and the migration
