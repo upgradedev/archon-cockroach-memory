@@ -1741,7 +1741,7 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
     codeql,
     /name: Enforce the CodeQL high-severity policy/u
   );
-  assert.match(codeql, /properties\["security-severity"\]/u);
+  assert.match(codeql, /properties\?\.\["security-severity"\]/u);
   assert.match(
     codeql,
     /securitySeverity >= 7 \|\| rawLevel === "error"/u
@@ -1800,7 +1800,7 @@ test("readiness: dependency release freeze and CodeQL pins fail closed", () => {
   assert.equal(hasExactDependabotReleaseFreeze(dependabot), true);
   assert.equal(
     EXPECTED_DEPENDABOT_RELEASE_FREEZE.length,
-    5
+    4
   );
   assert.equal(
     hasExactDependabotReleaseFreeze(
@@ -4382,7 +4382,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
-    3
+    6
   );
   assert.equal(
     (bootstrap.match(/- cloudfront:GetDistribution$/gmu) ?? []).length,
@@ -4410,12 +4410,21 @@ test("readiness: named HTTP API stage controls are proved from transform to live
       action === "logs:DescribeLogStreams" ||
       action === "logs:FilterLogEvents"
         ? 3
-        : 1;
+        : action === "logs:CreateLogDelivery" ||
+            action === "logs:DeleteLogDelivery" ||
+            action === "logs:DescribeResourcePolicies" ||
+            action === "logs:PutResourcePolicy"
+          ? 2
+          : 1;
     assert.equal(
       (bootstrap.match(new RegExp(`- ${action}$`, "gmu")) ?? []).length,
       expectedCount
     );
   }
+  assert.match(
+    bootstrap,
+    /Sid: ConfigureOnlyCloudFormationWafLogDelivery[\s\S]*?- logs:CreateLogDelivery\s+- logs:DeleteLogDelivery\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+- logs:PutResourcePolicy[\s\S]*?Resource: "\*"[\s\S]*?aws:RequestedRegion: us-east-1[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
   assert.equal(
     (
       bootstrap.match(

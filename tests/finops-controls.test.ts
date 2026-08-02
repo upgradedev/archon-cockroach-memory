@@ -393,6 +393,6 @@ test("FinOps documentation distinguishes prepared controls from live evidence", 
   assert.match(runbook, /prepared, not live/iu);
   assert.match(runbook, /Do not borrow a deployment role/iu);
   assert.match(runbook, /The workflow refuses to create a plan during `apply`/iu);
-  assert.match(runbook, /human acknowledgment/iu);
+  assert.match(runbook, /human\s+acknowledgment/iu);
   assert.doesNotMatch(`${costModel}\n${runbook}`, /us-west-2/iu);
 });

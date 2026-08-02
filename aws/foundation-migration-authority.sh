@@ -385,17 +385,38 @@ render_policy() {
           }
         },
         {
-          Sid: "InspectPermanentControlRoleContracts",
+          Sid: "InspectPermanentControlRoleMetadata",
           Effect: "Allow",
-          Action: [
-            "iam:GetRole",
-            "iam:GetRolePolicy"
-          ],
+          Action: "iam:GetRole",
           Resource: [
             (
               "arn:aws:iam::" + $account
               + ":role/" + $app + "-github-edge-controls"
             ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-finops-controls"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-finops-cloudformation-execution"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app
+              + "-alarm-routing-cloudformation-execution"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-alarm-routing-controls"
+            )
+          ]
+        },
+        {
+          Sid: "InspectPermanentControlRolePolicies",
+          Effect: "Allow",
+          Action: "iam:GetRolePolicy",
+          Resource: [
             (
               "arn:aws:iam::" + $account
               + ":role/" + $app + "-github-finops-controls"

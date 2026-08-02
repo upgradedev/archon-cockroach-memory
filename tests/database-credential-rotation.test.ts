@@ -534,7 +534,7 @@ test("receipt is sanitized, attested, and honest about the live boundary", () =>
   );
   assert.match(workflow, /retention-days:\s+90/u);
   assert.match(runbook, /two-principal/u);
-  assert.match(runbook, /live rotation has not yet been exercised/u);
+  assert.match(runbook, /live\s+rotation has not yet been exercised/iu);
 });
 
 test("all third-party actions are pinned and checkout credentials are disabled", () => {

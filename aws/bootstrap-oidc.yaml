@@ -2796,14 +2796,24 @@ Resources:
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: InspectPermanentControlRoleContracts
+              - Sid: InspectPermanentControlRoleMetadata
                 Effect: Allow
-                Action:
-                  - iam:GetRole
-                  - iam:GetRolePolicy
+                Action: iam:GetRole
                 Resource:
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-finops-cloudformation-execution
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-alarm-routing-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-alarm-routing-cloudformation-execution
+              - Sid: InspectPermanentControlRolePolicies
+                Effect: Allow
+                Action: iam:GetRolePolicy
+                Resource:
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
                   - !Sub >-

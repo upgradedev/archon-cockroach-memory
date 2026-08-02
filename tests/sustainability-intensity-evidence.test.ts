@@ -245,7 +245,7 @@ test("measurement script uses bounded read APIs and conservative per-successful-
   );
   assert.match(script, /telemetry_duration" -le 780/u);
   assert.equal(
-    (script.match(/\] -eq "\$expected_http_requests"/gu) ?? []).length,
+    (script.match(/-eq "\$expected_http_requests" \]/gu) ?? []).length,
     3
   );
   assert.match(script, /Period:60/u);

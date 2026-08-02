@@ -93,12 +93,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run -d --name memory-eval-crdb -p 26257:26257 \
+          docker run -d --name crdb -p 26257:26257 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 \
             start-single-node --insecure
           ready=0
           for _ in $(seq 1 30); do
-            if docker exec memory-eval-crdb cockroach sql --insecure \
+            if docker exec crdb cockroach sql --insecure \
               -e "SELECT 1" >/dev/null 2>&1; then
               ready=1
               break
@@ -106,7 +106,7 @@ jobs:
             sleep 2
           done
           test "$ready" -eq 1
-          docker exec memory-eval-crdb cockroach sql --insecure \
+          docker exec crdb cockroach sql --insecure \
             -e "CREATE DATABASE IF NOT EXISTS archon_memory"
 
       - name: Apply schema with native distributed vector index
@@ -239,7 +239,7 @@ jobs:
 
       - name: Stop ephemeral CockroachDB
         if: always()
-        run: docker rm -f memory-eval-crdb >/dev/null 2>&1 || true
+        run: docker rm -f crdb >/dev/null 2>&1 || true
 
       - name: Upload exact-SHA evaluation evidence
         if: always()

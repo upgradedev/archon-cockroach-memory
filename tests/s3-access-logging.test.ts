@@ -327,20 +327,29 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
+    /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u
+  );
+  assert.match(
+    role,
+    /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u
+  );
+  assert.match(
+    role,
     /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.equal(
     (role.match(/Action: s3:PutBucketLogging/gmu) ?? []).length,
     1
   );
-  assert.equal((role.match(/Action: iam:GetRole/gmu) ?? []).length, 2);
+  assert.equal((role.match(/Action: iam:GetRole$/gmu) ?? []).length, 3);
+  assert.equal((role.match(/Action: iam:GetRolePolicy$/gmu) ?? []).length, 1);
   assert.equal(
     (
       role.match(
         /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
       ) ?? []
     ).length,
-    21
+    25
   );
   assert.equal(
     (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
@@ -349,7 +358,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.doesNotMatch(
     role,
-    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass|ListRoles|ListRolePolicies|GetRolePolicy|ListAttachedRolePolicies|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
+    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass|ListRoles|ListRolePolicies|ListAttachedRolePolicies|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
   );
   assert.equal(
     (
