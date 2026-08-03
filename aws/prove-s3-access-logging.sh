@@ -386,26 +386,34 @@ if [ "$mode" = "baseline" ]; then
   logging_enabled="false"
 fi
 
+sha256_text() {
+  printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+stack_name_sha256="$(sha256_text "$stack_name")"
+archive_bucket_sha256="$(sha256_text "$archive_bucket")"
+artifact_bucket_sha256="$(sha256_text "$artifact_bucket")"
+rule_arn_sha256="$(sha256_text "$rule_arn")"
+
 jq -n \
   --arg mode "$mode" \
-  --arg stack "$stack_name" \
+  --arg stackSha256 "$stack_name_sha256" \
   --arg stackStatus "$stack_status" \
   --arg parameter "$expected_parameter" \
-  --arg archive "$archive_bucket" \
-  --arg artifact "$artifact_bucket" \
-  --arg ruleArn "$rule_arn" \
+  --arg archiveSha256 "$archive_bucket_sha256" \
+  --arg artifactSha256 "$artifact_bucket_sha256" \
+  --arg ruleArnSha256 "$rule_arn_sha256" \
   --argjson loggingEnabled "$logging_enabled" \
   '{
     ok: true,
     mode: $mode,
     evidence: "live-control-plane",
     stack: {
-      name: $stack,
+      nameSha256: $stackSha256,
       status: $stackStatus,
       artifactAccessLoggingEnabled: $parameter
     },
     archive: {
-      bucket: $archive,
+      bucketSha256: $archiveSha256,
       encryption: "AES256",
       ownership: "BucketOwnerEnforced",
       publicAccessBlocked: true,
@@ -415,14 +423,16 @@ jq -n \
       selfLogging: false
     },
     artifact: {
-      bucket: $artifact,
+      bucketSha256: $artifactSha256,
       loggingEnabled: $loggingEnabled,
-      targetBucket: (if $loggingEnabled then $archive else null end),
+      targetBucketSha256:
+        (if $loggingEnabled then $archiveSha256 else null end),
+      targetMatchesArchive: $loggingEnabled,
       targetPrefix: (if $loggingEnabled then "artifacts/" else null end),
       partitionDateSource: (if $loggingEnabled then "EventTime" else null end)
     },
     securityHub: {
-      ruleArn: $ruleArn,
+      ruleArnSha256: $ruleArnSha256,
       controlId: "S3.9",
       status: "ENABLED",
       terminal: true,

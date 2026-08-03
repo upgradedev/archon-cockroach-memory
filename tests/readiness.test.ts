@@ -28,6 +28,7 @@ import {
   EXPECTED_WORKFLOW_ACTION_REFS,
   DURABLE_RECOVERY_LOCAL_BASENAMES,
   DURABLE_RECOVERY_SCRIPT_PATHS,
+  evaluateIncrementalFixedCostContract,
   generatedArtifactPaths,
   GENERATED_ARTIFACT_BASENAMES,
   hasExactAwsDeliveryConcurrency,
@@ -67,6 +68,32 @@ function repositoryWorkflowTexts(): string[] {
   return repositoryWorkflowSources().map(({ source }) => source);
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function extractNamedWorkflowStep(source: string, name: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)      - name: ${escapeRegExp(name)}\\r?\\n[\\s\\S]*?(?=\\r?\\n      - name: |$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
+}
+
+function extractNamedWorkflowJob(source: string, id: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)  ${escapeRegExp(id)}:\\r?\\n[\\s\\S]*?(?=\\r?\\n  [A-Za-z0-9_-]+:\\r?\\n|$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
+}
+
 test("readiness: every repository-verifiable source gate passes", () => {
   const report = evaluate();
   const failing = report.checks.filter((check) => check.status === "fail");
@@ -77,6 +104,510 @@ test("readiness: every repository-verifiable source gate passes", () => {
   );
   assert.ok(report.sourceGate.pct >= SOURCE_FLOOR);
   assert.equal(report.sourceGate.pass, true);
+});
+
+test("readiness: lifecycle fixed-cost ceiling is itemized and independently recomputed", () => {
+  const policySource = readFileSync(
+    new URL(
+      "../aws/foundation-storage-migration-policy.json",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const evaluation = evaluateIncrementalFixedCostContract(
+    JSON.parse(policySource) as unknown
+  );
+  assert.equal(evaluation.valid, true);
+  assert.deepEqual(evaluation.scenarioMonthlyUsd, {
+    initial: 22.4,
+    afterFirstBilledKmsRotation: 23.4,
+    afterSecondBilledKmsRotation: 24.4,
+  });
+  assert.equal(evaluation.maximumMonthlyUsd, 24.4);
+  assert.equal(evaluation.approvedCeilingMonthlyUsd, 26);
+  assert.equal(evaluation.headroomMonthlyUsd, 1.6);
+  assert.doesNotMatch(policySource, /withinApprovedCeiling/u);
+
+  const misstatedScenarioSource = policySource.replace(
+    '"expectedMonthlyUsd": 23.40',
+    '"expectedMonthlyUsd": 23.39'
+  );
+  assert.notEqual(misstatedScenarioSource, policySource);
+  assert.equal(
+    evaluateIncrementalFixedCostContract(
+      JSON.parse(misstatedScenarioSource) as unknown
+    ).valid,
+    false
+  );
+
+  const unapprovedUnitPriceSource = policySource.replace(
+    '"unitMonthlyUsd": 5.00',
+    '"unitMonthlyUsd": 5.01'
+  );
+  assert.notEqual(unapprovedUnitPriceSource, policySource);
+  assert.equal(
+    evaluateIncrementalFixedCostContract(
+      JSON.parse(unapprovedUnitPriceSource) as unknown
+    ).valid,
+    false
+  );
+
+  const check = evaluate().checks.find(
+    (candidate) => candidate.id === "product.lifecycle-fixed-cost-ceiling"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(audit, /evaluateIncrementalFixedCostContract/u);
+  assert.match(audit, /incremental-fixed-cost-contract-arithmetic/u);
+  assert.doesNotMatch(audit, /withinApprovedCeiling/u);
+});
+
+test("readiness: edge cleanup and finalization have bounded restart-safe lifecycle contracts", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.protected-foundation-and-edge-delivery"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Production Readiness");
+  assert.equal(check.status, "pass", check.detail);
+
+  const workflow = readFileSync(
+    new URL("../.github/workflows/edge-controls.yml", import.meta.url),
+    "utf8"
+  );
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const contract = JSON.parse(
+    readFileSync(
+      new URL(
+        "../docs/operations/well-architected-contract.json",
+        import.meta.url
+      ),
+      "utf8"
+    )
+  ) as {
+    controls: Array<{
+      id: string;
+      operations?: string;
+      typedConfirmations?: Record<string, string>;
+      cleanupEligibleStates?: string[];
+      cleanupOldSourceValidation?: string;
+      cleanupTerminalProof?: string;
+      cleanupReceiptSanitized?: boolean;
+      finalizeCreatesChangeSet?: boolean;
+      finalizeExactLiveProof?: boolean;
+      restartSafeProtectionRepair?: boolean;
+      alarmDeliveryDrill?: string;
+      humanPagingClaimed?: boolean;
+    }>;
+  };
+  const inspectStep = extractNamedWorkflowStep(
+    workflow,
+    "Inspect current edge stack state"
+  );
+  const cleanupStep = extractNamedWorkflowStep(
+    workflow,
+    "Clean up exact recoverable edge shell"
+  );
+  const createPlanStep = extractNamedWorkflowStep(
+    workflow,
+    "Create or reuse exact edge plan"
+  );
+  const loadPlanStep = extractNamedWorkflowStep(
+    workflow,
+    "Load exact existing edge plan"
+  );
+  const requirePlanStep = extractNamedWorkflowStep(
+    workflow,
+    "Require exact non-replacement WAF evidence plan"
+  );
+  const executePlanStep = extractNamedWorkflowStep(
+    workflow,
+    "Execute exact inspected edge plan"
+  );
+  const preProtectionProofStep = extractNamedWorkflowStep(
+    workflow,
+    "Prove exact deployed stack before lifecycle protection"
+  );
+  const setProtectionStep = extractNamedWorkflowStep(
+    workflow,
+    "Set exact edge stack lifecycle protections"
+  );
+  const liveProofStep = extractNamedWorkflowStep(
+    workflow,
+    "Prove exact deployed WAF controls"
+  );
+
+  for (const step of [
+    inspectStep,
+    cleanupStep,
+    createPlanStep,
+    loadPlanStep,
+    requirePlanStep,
+    executePlanStep,
+    preProtectionProofStep,
+    setProtectionStep,
+    liveProofStep,
+  ]) {
+    assert.ok(step.length > 0);
+  }
+  assert.match(
+    workflow,
+    /options:\r?\n\s+- plan\r?\n\s+- apply\r?\n\s+- verify\r?\n\s+- cleanup\r?\n\s+- finalize/u
+  );
+  for (const confirmation of [
+    "APPLY-${environment_upper}-EDGE-CONTROLS",
+    "CLEANUP-${environment_upper}-EDGE-CONTROLS",
+    "FINALIZE-${environment_upper}-EDGE-CONTROLS",
+  ]) {
+    assert.ok(workflow.includes(`expected_confirmation="${confirmation}"`));
+  }
+  assert.match(
+    workflow,
+    /plan\|verify\)\r?\n\s+test -z "\$CONFIRMATION"/u
+  );
+
+  assert.match(inspectStep, /^[ \t]+REVIEW_IN_PROGRESS\)\r?$/mu);
+  assert.match(inspectStep, /^[ \t]+apply\|cleanup\) ;;\r?$/mu);
+  assert.match(inspectStep, /EDGE_CLEANUP_PRIOR_STATUS=REVIEW_IN_PROGRESS/u);
+  assert.match(inspectStep, /^[ \t]+ROLLBACK_COMPLETE\)\r?$/mu);
+  assert.match(inspectStep, /test "\$OPERATION" = "cleanup"/u);
+  assert.match(inspectStep, /EDGE_CLEANUP_PRIOR_STATUS=ROLLBACK_COMPLETE/u);
+  assert.match(
+    cleanupStep,
+    /if \$priorStatus == "REVIEW_IN_PROGRESS"\s+then \(\.StackResourceSummaries \| length\) == 0\s+else \$priorStatus == "ROLLBACK_COMPLETE"\s+and all\(\s+\.StackResourceSummaries\[\];\s+\.ResourceStatus == "DELETE_COMPLETE"/u
+  );
+  assert.match(
+    cleanupStep,
+    /git fetch --no-tags --depth=1 origin "\$cleanup_source_commit"/u
+  );
+  assert.match(
+    cleanupStep,
+    /"\$\{cleanup_source_commit\}:aws\/edge-waf\.yaml"/u
+  );
+  assert.match(cleanupStep, /sha256sum "\$cleanup_source_template"/u);
+  assert.match(cleanupStep, /sha256sum "\$cleanup_template"/u);
+  assert.match(
+    cleanupStep,
+    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$stack_id"/u
+  );
+  assert.match(cleanupStep, /grep -Fq "does not exist" "\$cleanup_error"/u);
+  const cleanupReceiptOffset = cleanupStep.indexOf(
+    'receipt_next="${RUNNER_TEMP:?}/edge-cleanup-receipt.json"'
+  );
+  assert.ok(cleanupReceiptOffset >= 0);
+  const cleanupReceipt = cleanupStep.slice(cleanupReceiptOffset);
+  assert.match(cleanupReceipt, /stackIdSha256: \$stackIdSha256/u);
+  assert.match(
+    cleanupReceipt,
+    /clientRequestTokenSha256: \$cleanupTokenSha256/u
+  );
+  assert.match(cleanupReceipt, /sourceRepositoryCommitBound: true/u);
+  assert.match(cleanupReceipt, /stackDeletedAndNotFound: true/u);
+  assert.doesNotMatch(
+    cleanupReceipt,
+    /--arg stackId "\$stack_id"|AWS_ACCOUNT_ID|arn:aws:/u
+  );
+  assert.doesNotMatch(
+    cleanupStep,
+    /filter-log-events|get-log-events|start-query|set-alarm-state/u
+  );
+
+  assert.match(inspectStep, /if \[ "\$OPERATION" = "finalize" \] \|\|/u);
+  assert.match(inspectStep, /EDGE_APPLY_MODE=finalize/u);
+  assert.match(createPlanStep, /if: inputs\.operation == 'plan'/u);
+  assert.match(
+    loadPlanStep,
+    /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u
+  );
+  assert.match(
+    requirePlanStep,
+    /if: inputs\.operation == 'plan' \|\| \(inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'\)/u
+  );
+  assert.match(
+    executePlanStep,
+    /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u
+  );
+  assert.match(
+    preProtectionProofStep,
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+  );
+  assert.match(
+    preProtectionProofStep,
+    /\(\.StackResourceSummaries \| length\) == 9/u
+  );
+  assert.match(
+    setProtectionStep,
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+  );
+  assert.match(setProtectionStep, /set-stack-policy/u);
+  assert.match(setProtectionStep, /update-termination-protection/u);
+  assert.match(
+    liveProofStep,
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'verify' \|\| inputs\.operation == 'finalize'/u
+  );
+  assert.match(liveProofStep, /stackPolicyProtected: true/u);
+  assert.match(liveProofStep, /terminationProtection: true/u);
+  for (const readCommand of [
+    "aws wafv2 get-web-acl",
+    "aws wafv2 get-logging-configuration",
+    "aws logs describe-log-groups",
+    "aws logs describe-resource-policies",
+    "aws events describe-rule",
+    "aws events list-targets-by-rule",
+    "aws cloudwatch describe-alarms",
+  ]) {
+    assert.ok(liveProofStep.includes(readCommand), readCommand);
+  }
+  assert.match(liveProofStep, /alarmDeliveryDrill: "not-run"/u);
+  assert.match(
+    liveProofStep,
+    /humanPagingDestination: "not-configured-by-this-stack"/u
+  );
+  assert.doesNotMatch(
+    `${setProtectionStep}\n${liveProofStep}`,
+    /filter-log-events|get-log-events|start-query|set-alarm-state/u
+  );
+  assert.doesNotMatch(
+    `${preProtectionProofStep}\n${setProtectionStep}\n${liveProofStep}`,
+    /cloudformation (?:create|describe|execute)-change-set/u
+  );
+
+  const wa04 = contract.controls.find((control) => control.id === "WA-04");
+  assert.ok(wa04);
+  assert.equal(wa04.operations, "plan|apply|verify|cleanup|finalize");
+  assert.deepEqual(wa04.typedConfirmations, {
+    apply: "APPLY-{ENV}-EDGE-CONTROLS",
+    cleanup: "CLEANUP-{ENV}-EDGE-CONTROLS",
+    finalize: "FINALIZE-{ENV}-EDGE-CONTROLS",
+  });
+  assert.deepEqual(wa04.cleanupEligibleStates, [
+    "REVIEW_IN_PROGRESS with zero stack resources",
+    "ROLLBACK_COMPLETE with every listed stack resource DELETE_COMPLETE",
+  ]);
+  assert.equal(
+    wa04.cleanupOldSourceValidation,
+    "change-set source commit and template digest independently re-proved"
+  );
+  assert.equal(
+    wa04.cleanupTerminalProof,
+    "delete exact stack ID and prove stack name NotFound"
+  );
+  assert.equal(wa04.cleanupReceiptSanitized, true);
+  assert.equal(wa04.finalizeCreatesChangeSet, false);
+  assert.equal(wa04.finalizeExactLiveProof, true);
+  assert.equal(wa04.restartSafeProtectionRepair, true);
+  assert.equal(wa04.alarmDeliveryDrill, "not-run");
+  assert.equal(wa04.humanPagingClaimed, false);
+
+  assert.match(audit, /extractNamedWorkflowStep/u);
+  assert.match(audit, /edgeCleanupLifecycleValid/u);
+  assert.match(audit, /edgeFinalizeLifecycleValid/u);
+  assert.equal(
+    audit.includes(
+      '/REVIEW_IN_PROGRESS\\)[\\s\\S]*?test "\\$OPERATION" = "apply"'
+    ),
+    false
+  );
+});
+
+test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-bound", () => {
+  const check = evaluate().checks.find(
+    (candidate) =>
+      candidate.id === "product.protected-foundation-and-edge-delivery"
+  );
+  assert.ok(check);
+  assert.equal(check.status, "pass", check.detail);
+
+  const workflow = readFileSync(
+    new URL("../.github/workflows/foundation-migration.yml", import.meta.url),
+    "utf8"
+  );
+  const authority = readFileSync(
+    new URL("../aws/foundation-migration-authority.sh", import.meta.url),
+    "utf8"
+  );
+  const runbook = readFileSync(
+    new URL(
+      "../docs/operations/FOUNDATION_STORAGE_MIGRATION.md",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const audit = readFileSync(
+    new URL(
+      "../.github/scripts/well-architected-contract-audit.mjs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const phaseZero =
+    runbook.match(
+      /## Phase 0: create the one-time authority[\s\S]*?```bash\r?\n([\s\S]*?)\r?\n```/u
+    )?.[1] ?? "";
+  const authorizeStep = extractNamedWorkflowStep(
+    workflow,
+    "Fail closed unless the dispatch targets current green main"
+  );
+  const failedPlanCleanupStep = extractNamedWorkflowStep(
+    workflow,
+    "Delete an unverified foundation migration plan"
+  );
+  const abortJob = extractNamedWorkflowJob(workflow, "abort-authority");
+  const abortStep = extractNamedWorkflowStep(
+    abortJob,
+    "Prove stable foundation, clean safe plans, and delete authority"
+  );
+  for (const source of [
+    phaseZero,
+    authorizeStep,
+    failedPlanCleanupStep,
+    abortJob,
+    abortStep,
+  ]) {
+    assert.ok(source.length > 0);
+  }
+
+  assert.match(phaseZero, /test -z "\$\(git status --porcelain=v1\)"/u);
+  assert.match(phaseZero, /SOURCE_COMMIT=\$\(git rev-parse HEAD\)/u);
+  assert.match(
+    phaseZero,
+    /AUTHORITY_TEMPLATE_SHA256=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template-sha256\s*\)/u
+  );
+  assert.match(
+    phaseZero,
+    /authority_template=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template\s*\)/u
+  );
+  for (const binding of [
+    "ParameterKey=SourceCommit,ParameterValue=${SOURCE_COMMIT}",
+    "ParameterKey=AuthorityTemplateSha256,ParameterValue=${AUTHORITY_TEMPLATE_SHA256}",
+    "Key=SourceCommit,Value=${SOURCE_COMMIT}",
+    "Key=AuthorityTemplateSha256,Value=${AUTHORITY_TEMPLATE_SHA256}",
+    "--no-enable-termination-protection",
+  ]) {
+    assert.ok(phaseZero.includes(binding), binding);
+  }
+  assert.doesNotMatch(phaseZero, /--role-arn/u);
+  assert.match(
+    authority,
+    /\(\$template\.Resources \| keys\) == \["FoundationMigrationRole"\]/u
+  );
+  assert.match(authority, /\.Stacks\[0\]\.EnableTerminationProtection == false/u);
+  assert.match(authority, /\(\(\.Stacks\[0\]\.RoleARN \/\/ null\) == null\)/u);
+  assert.match(authority, /cloudformation:ListChangeSets/u);
+  assert.match(authority, /cloudformation:ListStackResources/u);
+  assert.match(
+    runbook,
+    /pre-binding contract cannot be[\s\S]*?administrator must delete it and[\s\S]*?recreate it from Phase 0/u
+  );
+  assert.match(
+    runbook,
+    /No authority stack has been created as part of[\s\S]*?repository work/u
+  );
+
+  assert.match(failedPlanCleanupStep, /always\(\)/u);
+  for (const failedStep of ["create_plan", "load_plan", "exact_plan"]) {
+    assert.ok(
+      failedPlanCleanupStep.includes(
+        `steps.${failedStep}.outcome == 'failure'`
+      ),
+      failedStep
+    );
+  }
+  assert.match(failedPlanCleanupStep, /\.ExecutionStatus == "AVAILABLE"/u);
+  assert.match(failedPlanCleanupStep, /aws cloudformation delete-change-set/u);
+  assert.match(failedPlanCleanupStep, /test "\$absent" = "true"/u);
+  assert.match(
+    failedPlanCleanupStep,
+    /test "\$after_projection_sha256" = "\$before_projection_sha256"/u
+  );
+  assert.match(
+    failedPlanCleanupStep,
+    /changeSetArnSha256: \$arnSha256/u
+  );
+  assert.doesNotMatch(failedPlanCleanupStep, /execute-change-set/u);
+
+  assert.match(
+    workflow,
+    /options:\r?\n\s+- plan\r?\n\s+- apply\r?\n\s+- verify\r?\n\s+- abort\r?\n\s+- retire/u
+  );
+  assert.match(
+    authorizeStep,
+    /ABORT-FOUNDATION-MIGRATION-AND-RETIRE-AUTHORITY/u
+  );
+  assert.match(authorizeStep, /test "\$GITHUB_SHA" = "\$TARGET_SHA"/u);
+  assert.match(
+    authorizeStep,
+    /test "\$\(git rev-parse origin\/main\)" = "\$TARGET_SHA"/u
+  );
+  assert.match(abortJob, /needs: authorize/u);
+  assert.match(abortJob, /Configure exact one-time migration authority/u);
+  assert.doesNotMatch(abortJob, /Configure permanent narrow foundation authority/u);
+  assert.match(
+    abortStep,
+    /foundation-migration-authority\.sh verify-intrinsic/u
+  );
+  assert.match(abortStep, /\.creationBindingVerified == true/u);
+  assert.match(abortStep, /\.resourceCount == 1/u);
+  assert.match(
+    abortStep,
+    /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u
+  );
+  assert.match(
+    abortStep,
+    /contents\/aws\/bootstrap-oidc\.yaml\?ref=\$\{plan_source\}/u
+  );
+  assert.match(abortStep, /aws cloudformation delete-change-set/u);
+  for (const digest of [
+    "target_projection_sha256",
+    "target_policy_sha256",
+    "target_resources_sha256",
+  ]) {
+    assert.ok(abortStep.includes(`)" = "$${digest}"`), digest);
+  }
+  assert.match(
+    abortStep,
+    /\)" = \\\r?\n\s+"\$target_template_sha256"/u
+  );
+  assert.match(
+    abortStep,
+    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id"/u
+  );
+  assert.equal(
+    (abortStep.match(/aws cloudformation delete-stack/gu) ?? []).length,
+    1
+  );
+  assert.match(abortStep, /grep -Fq "NoSuchEntity" "\$role_error"/u);
+  assert.doesNotMatch(
+    abortStep,
+    /cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u
+  );
+  const abortReceiptOffset = abortStep.lastIndexOf("          phase=receipt");
+  assert.ok(abortReceiptOffset >= 0);
+  const abortReceipt = abortStep.slice(abortReceiptOffset);
+  assert.match(abortReceipt, /remainingCount: 0/u);
+  assert.match(abortReceipt, /stackDeleted: true/u);
+  assert.match(abortReceipt, /roleDeleted: true/u);
+  assert.doesNotMatch(abortReceipt, /AWS_ACCOUNT_ID|arn:aws:/u);
+
+  assert.match(audit, /foundation-migration-lifecycle-source/u);
+  assert.match(audit, /foundationPhaseZeroContractValid/u);
+  assert.match(audit, /foundationSameRunCleanupValid/u);
+  assert.match(audit, /foundationAbortContractValid/u);
 });
 
 test("readiness: centralized S3 access logging is a first-class product gate", () => {

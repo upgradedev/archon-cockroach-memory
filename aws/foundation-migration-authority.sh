@@ -3,9 +3,9 @@ set -euo pipefail
 
 mode="${1:-verify}"
 case "$mode" in
-  render-trust|render-policy|render-template|verify) ;;
+  render-trust|render-policy|render-template|render-template-sha256|verify|verify-intrinsic) ;;
   *)
-    echo "Usage: $0 [render-trust|render-policy|render-template|verify]" >&2
+    echo "Usage: $0 [render-trust|render-policy|render-template|render-template-sha256|verify|verify-intrinsic]" >&2
     exit 1
     ;;
 esac
@@ -102,12 +102,14 @@ render_policy() {
           Action: [
             "cloudformation:CreateChangeSet",
             "cloudformation:DeleteChangeSet",
+            "cloudformation:DetectStackResourceDrift",
             "cloudformation:DescribeChangeSet",
             "cloudformation:DescribeStackEvents",
             "cloudformation:DescribeStacks",
             "cloudformation:ExecuteChangeSet",
             "cloudformation:GetStackPolicy",
             "cloudformation:GetTemplate",
+            "cloudformation:ListChangeSets",
             "cloudformation:ListStackResources",
             "cloudformation:SetStackPolicy"
           ],
@@ -227,10 +229,6 @@ render_policy() {
               "arn:aws:kms:" + $region + ":" + $account
               + ":alias/" + $app + "-storage"
             ),
-            (
-              "arn:aws:kms:" + $region + ":" + $account
-              + ":alias/" + $app + "-cloudfront-logs"
-            ),
             ("arn:aws:kms:" + $region + ":" + $account + ":key/*")
           ],
           Condition: {
@@ -318,6 +316,10 @@ render_policy() {
             ),
             (
               "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-edge-cleanup"
+            ),
+            (
+              "arn:aws:iam::" + $account
               + ":role/" + $app
               + "-alarm-routing-cloudformation-execution"
             ),
@@ -391,7 +393,15 @@ render_policy() {
           Resource: [
             (
               "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-foundation-promotion"
+            ),
+            (
+              "arn:aws:iam::" + $account
               + ":role/" + $app + "-github-edge-controls"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-edge-cleanup"
             ),
             (
               "arn:aws:iam::" + $account
@@ -417,6 +427,18 @@ render_policy() {
           Effect: "Allow",
           Action: "iam:GetRolePolicy",
           Resource: [
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-foundation-promotion"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-edge-controls"
+            ),
+            (
+              "arn:aws:iam::" + $account
+              + ":role/" + $app + "-github-edge-cleanup"
+            ),
             (
               "arn:aws:iam::" + $account
               + ":role/" + $app + "-github-finops-controls"
@@ -452,7 +474,8 @@ render_policy() {
             "cloudformation:DeleteStack",
             "cloudformation:DescribeStackEvents",
             "cloudformation:DescribeStacks",
-            "cloudformation:GetTemplate"
+            "cloudformation:GetTemplate",
+            "cloudformation:ListStackResources"
           ],
           Resource: $authorityStack
         }
@@ -473,7 +496,27 @@ render_template() {
     '{
       AWSTemplateFormatVersion: "2010-09-09",
       Description:
-        "One-time, approval-gated authority for the protected Archon foundation storage migration. Delete this stack after a successful migration and permanent-role verification.",
+        "One-time, approval-gated authority for the protected Archon foundation storage migration. The original source commit and canonical template digest are bound through exact stack parameters and stack tags. Delete this stack after success or an approved abort.",
+      Metadata: {
+        AuthorityCreationContract: {
+          SourceCommitParameter: "SourceCommit",
+          TemplateSha256Parameter: "AuthorityTemplateSha256",
+          RequiredStackTagKeys: [
+            "SourceCommit",
+            "AuthorityTemplateSha256"
+          ]
+        }
+      },
+      Parameters: {
+        SourceCommit: {
+          Type: "String",
+          AllowedPattern: "^[0-9a-f]{40}$"
+        },
+        AuthorityTemplateSha256: {
+          Type: "String",
+          AllowedPattern: "^[0-9a-f]{64}$"
+        }
+      },
       Resources: {
         FoundationMigrationRole: {
           Type: "AWS::IAM::Role",
@@ -512,9 +555,16 @@ case "$mode" in
   render-template)
     render_template
     ;;
-  verify)
+  render-template-sha256)
+    render_template | jq -Sc . | sha256sum | awk '{print $1}'
+    ;;
+  verify|verify-intrinsic)
     : "${AWS_FOUNDATION_MIGRATION_ROLE_ARN:?}"
     test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = "$migration_role_arn"
+    if [ "$mode" = "verify" ]; then
+      : "${TARGET_SHA:?}"
+      [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+    fi
     work_dir="$(mktemp -d)"
     cleanup() {
       rm -rf -- "$work_dir"
@@ -546,58 +596,349 @@ case "$mode" in
       --template-stage Original \
       --region "$AWS_REGION" \
       --output json >"$live_template"
-    jq -e \
-      --arg arn "$migration_role_arn" \
-      --slurpfile trust "$expected_trust" \
-      '
-        .Role.Arn == $arn
-        and .Role.MaxSessionDuration == 3600
-        and .Role.AssumeRolePolicyDocument == $trust[0]
-      ' "$live_role" >/dev/null
-    jq -e \
-      --arg role "$role_name" \
-      --arg policy "$policy_name" \
-      --slurpfile expected "$expected_policy" \
-      '
-        .RoleName == $role
-        and .PolicyName == $policy
-        and .PolicyDocument == $expected[0]
-      ' "$live_policy" >/dev/null
-    jq -e \
-      --arg stack "${APP_NAME}-foundation-migration-authority" \
-      --arg roleArn "$migration_role_arn" \
-      '
-        (.Stacks | length) == 1
-        and .Stacks[0].StackName == $stack
-        and (
-          .Stacks[0].StackStatus == "CREATE_COMPLETE"
-          or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
-        )
-        and .Stacks[0].EnableTerminationProtection == false
-        and ((.Stacks[0].RoleARN // null) == null)
-        and (
-          [
-            .Stacks[0].Outputs[]
-            | select(
-                .OutputKey == "FoundationMigrationRoleArn"
-              )
-            | .OutputValue
+    live_resources="$work_dir/live-resources.json"
+    aws cloudformation list-stack-resources \
+      --stack-name "${APP_NAME}-foundation-migration-authority" \
+      --region "$AWS_REGION" \
+      --output json >"$live_resources"
+
+    expected_template_digest="$(
+      jq -Sc . "$expected_template" | sha256sum | awk '{print $1}'
+    )"
+    live_template_digest="$(
+      jq -Sc '
+        .TemplateBody
+        | if type == "string" then fromjson else . end
+      ' "$live_template" | sha256sum | awk '{print $1}'
+    )"
+
+    if [ "$mode" = "verify" ]; then
+      test "$live_template_digest" = "$expected_template_digest"
+      jq -e \
+        --arg arn "$migration_role_arn" \
+        --arg sourceCommit "$TARGET_SHA" \
+        --arg templateSha256 "$expected_template_digest" \
+        --arg app "$APP_NAME" \
+        --slurpfile trust "$expected_trust" \
+        '
+          def tag_map:
+            map({key:.Key, value:.Value}) | from_entries;
+          .Role.Arn == $arn
+          and .Role.MaxSessionDuration == 3600
+          and .Role.AssumeRolePolicyDocument == $trust[0]
+          and (
+            [
+              .Role.Tags[]
+              | select(.Key | startswith("aws:cloudformation:") | not)
+            ] | tag_map
+          ) == {
+            Application: $app,
+            Environment: "bootstrap",
+            Lifecycle: "one-time-migration-authority",
+            ManagedBy: "CloudFormation",
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+        ' "$live_role" >/dev/null
+      jq -e \
+        --arg role "$role_name" \
+        --arg policy "$policy_name" \
+        --slurpfile expected "$expected_policy" \
+        '
+          .RoleName == $role
+          and .PolicyName == $policy
+          and .PolicyDocument == $expected[0]
+        ' "$live_policy" >/dev/null
+      jq -e \
+        --arg account "$AWS_ACCOUNT_ID" \
+        --arg stack "${APP_NAME}-foundation-migration-authority" \
+        --arg roleArn "$migration_role_arn" \
+        --arg sourceCommit "$TARGET_SHA" \
+        --arg templateSha256 "$expected_template_digest" \
+        '
+          def parameter_map:
+            map({key:.ParameterKey, value:.ParameterValue}) | from_entries;
+          def tag_map:
+            map({key:.Key, value:.Value}) | from_entries;
+          (.Stacks | length) == 1
+          and .Stacks[0].StackName == $stack
+          and .Stacks[0].StackId == (
+            "arn:aws:cloudformation:eu-west-1:" + $account
+            + ":stack/" + $stack + "/"
+            + (.Stacks[0].StackId | split("/") | last)
+          )
+          and (.Stacks[0].StackId | split("/") | length) == 3
+          and (
+            .Stacks[0].StackStatus == "CREATE_COMPLETE"
+            or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+          )
+          and .Stacks[0].EnableTerminationProtection == false
+          and ((.Stacks[0].RoleARN // null) == null)
+          and ((.Stacks[0].NotificationARNs // []) == [])
+          and (.Stacks[0].Capabilities // []) == ["CAPABILITY_NAMED_IAM"]
+          and (.Stacks[0].Parameters | parameter_map) == {
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+          and ((.Stacks[0].Tags // []) | tag_map) == {
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+          and (
+            [
+              .Stacks[0].Outputs[]
+              | select(.OutputKey == "FoundationMigrationRoleArn")
+              | .OutputValue
+            ]
+          ) == [$roleArn]
+        ' "$live_stack" >/dev/null
+      jq -e \
+        --slurpfile expected "$expected_template" \
+        '
+          (
+            .TemplateBody
+            | if type == "string" then fromjson else . end
+          ) == $expected[0]
+        ' "$live_template" >/dev/null
+    else
+      source_commit="$(
+        jq -er '
+          def parameter_map:
+            map({key:.ParameterKey, value:.ParameterValue}) | from_entries;
+          .Stacks[0].Parameters | parameter_map | .SourceCommit
+          | select(test("^[0-9a-f]{40}$"))
+        ' "$live_stack"
+      )"
+      recorded_template_digest="$(
+        jq -er '
+          def parameter_map:
+            map({key:.ParameterKey, value:.ParameterValue}) | from_entries;
+          .Stacks[0].Parameters | parameter_map | .AuthorityTemplateSha256
+          | select(test("^[0-9a-f]{64}$"))
+        ' "$live_stack"
+      )"
+      test "$live_template_digest" = "$recorded_template_digest"
+
+      jq -e \
+        --arg account "$AWS_ACCOUNT_ID" \
+        --arg stack "${APP_NAME}-foundation-migration-authority" \
+        --arg roleArn "$migration_role_arn" \
+        --arg sourceCommit "$source_commit" \
+        --arg templateSha256 "$recorded_template_digest" \
+        '
+          def parameter_map:
+            map({key:.ParameterKey, value:.ParameterValue}) | from_entries;
+          def tag_map:
+            map({key:.Key, value:.Value}) | from_entries;
+          (.Stacks | length) == 1
+          and .Stacks[0].StackName == $stack
+          and .Stacks[0].StackId == (
+            "arn:aws:cloudformation:eu-west-1:" + $account
+            + ":stack/" + $stack + "/"
+            + (.Stacks[0].StackId | split("/") | last)
+          )
+          and (.Stacks[0].StackId | split("/") | length) == 3
+          and (
+            .Stacks[0].StackStatus == "CREATE_COMPLETE"
+            or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+            or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+          )
+          and .Stacks[0].EnableTerminationProtection == false
+          and ((.Stacks[0].RoleARN // null) == null)
+          and ((.Stacks[0].NotificationARNs // []) == [])
+          and (.Stacks[0].Capabilities // []) == ["CAPABILITY_NAMED_IAM"]
+          and (.Stacks[0].Parameters | parameter_map) == {
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+          and ((.Stacks[0].Tags // []) | tag_map) == {
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+          and (
+            [
+              .Stacks[0].Outputs[]
+              | select(.OutputKey == "FoundationMigrationRoleArn")
+              | .OutputValue
+            ]
+          ) == [$roleArn]
+        ' "$live_stack" >/dev/null
+      jq -e \
+        --arg arn "$migration_role_arn" \
+        --arg sourceCommit "$source_commit" \
+        --arg templateSha256 "$recorded_template_digest" \
+        --arg app "$APP_NAME" \
+        --slurpfile trust "$expected_trust" \
+        '
+          def tag_map:
+            map({key:.Key, value:.Value}) | from_entries;
+          .Role.Arn == $arn
+          and .Role.MaxSessionDuration == 3600
+          and .Role.AssumeRolePolicyDocument == $trust[0]
+          and (
+            [
+              .Role.Tags[]
+              | select(.Key | startswith("aws:cloudformation:") | not)
+            ] | tag_map
+          ) == {
+            Application: $app,
+            Environment: "bootstrap",
+            Lifecycle: "one-time-migration-authority",
+            ManagedBy: "CloudFormation",
+            SourceCommit: $sourceCommit,
+            AuthorityTemplateSha256: $templateSha256
+          }
+        ' "$live_role" >/dev/null
+      jq -e \
+        --arg role "$role_name" \
+        --arg policy "$policy_name" \
+        --slurpfile allowed "$expected_policy" \
+        '
+          def list:
+            if type == "array" then . else [.] end;
+          def subset($actual; $expected):
+            all($actual[]; . as $value | any($expected[]; . == $value));
+          .RoleName == $role
+          and .PolicyName == $policy
+          and .PolicyDocument.Version == "2012-10-17"
+          and (
+            .PolicyDocument.Statement | map(.Sid) | unique | length
+          ) == (.PolicyDocument.Statement | length)
+          and all(
+            .PolicyDocument.Statement[];
+            . as $statement
+            | [
+                $allowed[0].Statement[]
+                | select(.Sid == $statement.Sid)
+              ] as $matches
+            | ($matches | length) == 1
+            and ($statement | keys | sort) == ($matches[0] | keys | sort)
+            and $statement.Effect == "Allow"
+            and subset(
+              ($statement.Action | list);
+              ($matches[0].Action | list)
+            )
+            and subset(
+              ($statement.Resource | list);
+              ($matches[0].Resource | list)
+            )
+            and (($statement.Condition // null) == ($matches[0].Condition // null))
+          )
+          and any(
+            .PolicyDocument.Statement[];
+            .Sid == "ManageExactFoundationStack"
+            and ((.Action | list) | index("cloudformation:DeleteChangeSet")) != null
+            and ((.Action | list) | index("cloudformation:DetectStackResourceDrift")) != null
+            and ((.Action | list) | index("cloudformation:DescribeChangeSet")) != null
+            and ((.Action | list) | index("cloudformation:DescribeStacks")) != null
+            and ((.Action | list) | index("cloudformation:GetStackPolicy")) != null
+            and ((.Action | list) | index("cloudformation:GetTemplate")) != null
+            and ((.Action | list) | index("cloudformation:ListChangeSets")) != null
+            and ((.Action | list) | index("cloudformation:ListStackResources")) != null
+          )
+          and any(
+            .PolicyDocument.Statement[];
+            .Sid == "InspectOwnAuthorityContract"
+            and ((.Action | list) | index("iam:GetRole")) != null
+            and ((.Action | list) | index("iam:GetRolePolicy")) != null
+          )
+          and any(
+            .PolicyDocument.Statement[];
+            .Sid == "RetireAuthorityStack"
+            and ((.Action | list) | index("cloudformation:DeleteStack")) != null
+            and ((.Action | list) | index("cloudformation:DescribeStacks")) != null
+            and ((.Action | list) | index("cloudformation:GetTemplate")) != null
+            and ((.Action | list) | index("cloudformation:ListStackResources")) != null
+          )
+        ' "$live_policy" >/dev/null
+      jq -e \
+        --arg app "$APP_NAME" \
+        --arg role "$role_name" \
+        --arg policy "$policy_name" \
+        --argjson trust "$(jq -c '.Role.AssumeRolePolicyDocument' "$live_role")" \
+        --argjson permissions "$(jq -c '.PolicyDocument' "$live_policy")" \
+        '
+          def body:
+            .TemplateBody
+            | if type == "string" then fromjson else . end;
+          body as $template
+          | ($template | keys | sort) == ([
+              "AWSTemplateFormatVersion",
+              "Description",
+              "Metadata",
+              "Outputs",
+              "Parameters",
+              "Resources"
+            ] | sort)
+          and $template.AWSTemplateFormatVersion == "2010-09-09"
+          and $template.Description ==
+            "One-time, approval-gated authority for the protected Archon foundation storage migration. The original source commit and canonical template digest are bound through exact stack parameters and stack tags. Delete this stack after success or an approved abort."
+          and $template.Metadata == {
+            AuthorityCreationContract: {
+              SourceCommitParameter: "SourceCommit",
+              TemplateSha256Parameter: "AuthorityTemplateSha256",
+              RequiredStackTagKeys: [
+                "SourceCommit",
+                "AuthorityTemplateSha256"
+              ]
+            }
+          }
+          and $template.Parameters == {
+            SourceCommit: {
+              Type: "String",
+              AllowedPattern: "^[0-9a-f]{40}$"
+            },
+            AuthorityTemplateSha256: {
+              Type: "String",
+              AllowedPattern: "^[0-9a-f]{64}$"
+            }
+          }
+          and ($template.Resources | keys) == ["FoundationMigrationRole"]
+          and $template.Resources.FoundationMigrationRole.Type == "AWS::IAM::Role"
+          and $template.Resources.FoundationMigrationRole.Properties.RoleName == $role
+          and $template.Resources.FoundationMigrationRole.Properties.MaxSessionDuration == 3600
+          and $template.Resources.FoundationMigrationRole.Properties.AssumeRolePolicyDocument == $trust
+          and $template.Resources.FoundationMigrationRole.Properties.Policies == [{
+            PolicyName: $policy,
+            PolicyDocument: $permissions
+          }]
+          and $template.Resources.FoundationMigrationRole.Properties.Tags == [
+            {Key:"Application", Value:$app},
+            {Key:"Environment", Value:"bootstrap"},
+            {Key:"Lifecycle", Value:"one-time-migration-authority"},
+            {Key:"ManagedBy", Value:"CloudFormation"}
           ]
-        ) == [$roleArn]
-      ' "$live_stack" >/dev/null
-    jq -e \
-      --slurpfile expected "$expected_template" \
-      '
-        (
-          .TemplateBody
-          | if type == "string" then fromjson else . end
-        ) == $expected[0]
-      ' "$live_template" >/dev/null
+          and $template.Outputs == {
+            FoundationMigrationRoleArn: {
+              Value: {"Fn::GetAtt":["FoundationMigrationRole","Arn"]}
+            }
+          }
+        ' "$live_template" >/dev/null
+    fi
+
+    jq -e '
+      (.StackResourceSummaries | length) == 1
+      and .StackResourceSummaries[0].LogicalResourceId
+        == "FoundationMigrationRole"
+      and .StackResourceSummaries[0].ResourceType == "AWS::IAM::Role"
+      and (
+        .StackResourceSummaries[0].ResourceStatus == "CREATE_COMPLETE"
+        or .StackResourceSummaries[0].ResourceStatus == "UPDATE_COMPLETE"
+        or .StackResourceSummaries[0].ResourceStatus
+          == "UPDATE_ROLLBACK_COMPLETE"
+      )
+      and (.StackResourceSummaries[0].PhysicalResourceId | type) == "string"
+      and (.StackResourceSummaries[0].PhysicalResourceId | length) > 0
+    ' "$live_resources" >/dev/null
     trust_digest="$(
-      jq -Sc . "$expected_trust" | sha256sum | awk '{print $1}'
+      jq -Sc '.Role.AssumeRolePolicyDocument' "$live_role" |
+        sha256sum |
+        awk '{print $1}'
     )"
     policy_digest="$(
-      jq -Sc . "$expected_policy" | sha256sum | awk '{print $1}'
+      jq -Sc '.PolicyDocument' "$live_policy" |
+        sha256sum |
+        awk '{print $1}'
     )"
     jq -n \
       --arg roleArnSha256 "$(
@@ -607,6 +948,28 @@ case "$mode" in
       )" \
       --arg trustSha256 "$trust_digest" \
       --arg policySha256 "$policy_digest" \
+      --arg templateSha256 "$live_template_digest" \
+      --arg stackIdSha256 "$(
+        jq -er '.Stacks[0].StackId' "$live_stack" |
+          sha256sum |
+          awk '{print $1}'
+      )" \
+      --arg sourceCommit "$(
+        if [ "$mode" = "verify" ]; then
+          printf '%s' "$TARGET_SHA"
+        else
+          printf '%s' "$source_commit"
+        fi
+      )" \
+      --arg stackStatus "$(jq -er '.Stacks[0].StackStatus' "$live_stack")" \
+      --arg verificationMode "$mode" \
+      --argjson exact "$(
+        if [ "$mode" = "verify" ]; then
+          printf 'true'
+        else
+          printf 'false'
+        fi
+      )" \
       '{
         schema: "archon.aws.foundation-migration-authority",
         schemaVersion: 1,
@@ -615,8 +978,17 @@ case "$mode" in
         roleArnSha256: $roleArnSha256,
         trustPolicySha256: $trustSha256,
         permissionsPolicySha256: $policySha256,
-        liveContractExact: true,
-        cloudFormationCreationContractExact: true,
+        authorityTemplateSha256: $templateSha256,
+        authorityStackIdSha256: $stackIdSha256,
+        sourceCommit: $sourceCommit,
+        stackStatus: $stackStatus,
+        verificationMode: $verificationMode,
+        resourceCount: 1,
+        liveContractExact: $exact,
+        cloudFormationCreationContractExact: $exact,
+        intrinsicSafetyContractVerified: true,
+        creationBindingVerified: true,
+        trustRepositoryBound: true,
         retirementRequired: true
       }'
     ;;

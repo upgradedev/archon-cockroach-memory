@@ -4,9 +4,54 @@ Status: repository model, approval-gated template, and source-only control
 workflow are defined. No hosted workflow receipt proves that a FinOps owner,
 notification route, budget, or anomaly control is activated.
 
-This model avoids a false precision claim. No monthly amount, budget, forecast,
-or unit cost is committed until a billing-authorized read-only pipeline
-collects the corresponding AWS and CockroachDB evidence.
+This model avoids a false precision claim. No total application monthly amount,
+budget, forecast, or unit cost is committed until a billing-authorized
+read-only pipeline collects the corresponding AWS and CockroachDB evidence.
+The separately approved foundation-and-edge fixed control-plane envelope below
+is a source estimate, not a measured bill or a total application forecast.
+
+## Approved foundation and edge fixed envelope
+
+The approved scope is exactly **incremental foundation + two edge stacks; not
+total application cost**. Its fixed-cost ceiling is `$26.00/month`. Pricing was
+checked on **2026-08-03**; the canonical machine-readable contract is
+[`aws/foundation-storage-migration-policy.json`](../../aws/foundation-storage-migration-policy.json).
+
+| Fixed control | Physical quantity | Unit monthly USD | Initial | After first billed KMS rotation | After second billed KMS rotation |
+|---|---:|---:|---:|---:|---:|
+| CloudFront WebACLs | 2 | `$5.00` | `$10.00` | `$10.00` | `$10.00` |
+| WebACL rule associations | 10 (5 per WebACL) | `$1.00` | `$10.00` | `$10.00` | `$10.00` |
+| Standard-resolution CloudWatch alarm metrics | 6 | `$0.10` | `$0.60` | `$0.60` | `$0.60` |
+| Source-owned Secrets Manager secrets | 2 | `$0.40` | `$0.80` | `$0.80` | `$0.80` |
+| Application customer-managed KMS key | 1 key; billed key-material units 1 / 2 / 3 | `$1.00` | `$1.00` | `$2.00` | `$3.00` |
+| **Recomputed fixed total** | | | **`$22.40`** | **`$23.40`** | **`$24.40`** |
+| **Headroom to `$26.00` ceiling** | | | **`$3.60`** | **`$2.60`** | **`$1.60`** |
+
+AWS KMS charges the current key material and up to the first two retained
+rotations; later rotations do not increase this storage line beyond the second
+billed rotation. The lifecycle maximum is therefore `$24.40`, which must be
+**strictly less than** `$26.00`, leaving `$1.60` fixed-cost headroom.
+
+The CloudFront log bucket uses S3-managed `AES256`; both the WAF log group and
+the alarm-state archive use CloudWatch Logs' AWS-owned default encryption.
+They therefore add no customer-managed-key fixed charge. Official pricing
+sources are [AWS WAF](https://aws.amazon.com/waf/pricing/),
+[Amazon CloudWatch](https://aws.amazon.com/cloudwatch/pricing/),
+[AWS Secrets Manager](https://aws.amazon.com/secrets-manager/pricing/), and
+[AWS KMS](https://aws.amazon.com/kms/pricing/).
+
+Variable usage charges excluded from this fixed envelope are WAF requests,
+CloudWatch Logs ingestion and storage, S3 storage and requests, EventBridge
+events, and data transfer. External or otherwise out-of-scope charges are
+taxes; application compute, API, and network services; CockroachDB Cloud;
+model and inference services; the conditional regional alarm-routing control;
+the optional FinOps human notification route; and GitHub Actions.
+
+CI does not trust a stored `within ceiling` flag. Readiness and the independent
+Well-Architected audit calculate every line in integer cents, reconcile all
+three declared scenario totals, derive the maximum, and then compare that
+maximum strictly with the ceiling. These are source assertions, not a measured
+AWS bill; variable charges still require billing-authorized evidence.
 
 ## Unit of value
 
@@ -28,8 +73,8 @@ Allocated workload cost must state whether it includes:
 - S3 storage, requests, logs, and recovery evidence;
 - Bedrock embedding and narration inference;
 - CloudWatch logs, metrics, dashboards, and alarms;
-- KMS, SNS, and SQS if alarm routing is later activated;
-- WAF if later activated;
+- KMS, SNS, and SQS for the separately gated regional alarm-routing control;
+- WAF, EventBridge, and log usage for the approved edge controls;
 - CockroachDB Cloud;
 - GitHub-hosted CI/CD consumption where separately measurable.
 

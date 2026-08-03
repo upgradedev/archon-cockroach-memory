@@ -85,6 +85,72 @@ AWS Inspector and organization delegated-administrator posture remain outside
 the WA-03 receipt. See
 [`aws-account-security-baseline.md`](../runbooks/aws-account-security-baseline.md).
 
+## Protected foundation lifecycle
+
+The one-time foundation migration authority is a source-bound CloudFormation
+creation contract, not a manually assembled IAM role. Phase 0 requires a clean
+current `main` worktree, sets `SOURCE_COMMIT=$(git rev-parse HEAD)`, computes
+`AUTHORITY_TEMPLATE_SHA256` with
+`foundation-migration-authority.sh render-template-sha256`, renders the
+canonical template only in memory, and creates the authority stack with no
+CloudFormation `RoleARN` and termination protection disabled. The exact source
+commit and template digest are both stack parameters and the only two stack
+tags. The template contains one resource, `FoundationMigrationRole`; its trust,
+inline policy, original template, parameters, tags, and inventory are all
+proved before use. A pre-contract authority cannot be adopted: it requires
+administrator deletion and Phase 0 recreation. No authority has been created
+by this repository work.
+
+`.github/workflows/foundation-migration.yml` exposes exact-current-green-main
+`plan|apply|verify|abort|retire` operations. Apply, abort, and retirement require
+their exact confirmation phrases. The one-time policy includes the bounded
+`ListChangeSets` and `ListStackResources` reads required to prove complete plan
+and resource inventories; those reads do not authorize broader mutation.
+
+The plan/apply job has a same-run `always()` cleanup when an exact change-set
+ID was captured but plan creation, loading, or exact inspection failed. It
+re-proves that single AVAILABLE, non-importing UPDATE plan, its source template,
+parameters, tags, target identity, and no-role/no-notification boundary before
+deletion, then proves both plan absence and an unchanged target-stack
+projection. The receipt hashes the plan ARN, name, and description. It never
+executes an unverified plan. A final adjacent re-description must still show
+the exact ID in `CREATE_COMPLETE`/`AVAILABLE`, UPDATE, non-importing state.
+
+`abort` is a separate terminal authority-cleanup operation and does not require
+the post-migration permanent foundation role. It first intrinsically proves the
+historical authority source binding, digest-bound original template, exact
+repository trust, bounded/subset-safe inline policy, and single live resource.
+The recorded source must be a verified ancestor; only that commit's exact
+generator `render-template` mode runs in a credential-free environment, and its
+canonical digest must match the recorded and live authority template.
+It then proves the target foundation stable and snapshots digests for its full
+stack projection, original template, stack policy, and resource inventory.
+Before its deletion loop, the complete change-set inventory must contain only
+`foundation-storage-*` entries in `CREATE_COMPLETE` and
+`AVAILABLE|OBSOLETE`, with imports disabled. An unrelated, pending, failed, or
+executing plan rejects the whole abort. Every eligible plan is independently
+bound to its historical committed source/template and exact UPDATE contract,
+deleted, and proved absent. The target foundation digests must remain identical
+after cleanup. Immediately before authority deletion, a second complete
+all-change-set inventory must be empty; any concurrent unrelated or executing
+plan fails closed. Finally the exact authority stack is deleted and both stack and
+role absence are proved. The sanitized receipt contains hashes and committed
+source/template digests, not account IDs or account-bearing ARNs.
+
+The normal `retire` path remains stronger after a completed migration: it first
+requires the permanent foundation role to prove the migrated live controls.
+The destructive job then repeats the live proof immediately before deletion,
+matches its digest to the preceding proof, compares the exact deployed template
+and stack policy, requires the permanent role's source-bound trust/policy and
+CloudFormation resource drift to be `IN_SYNC`, proves the full change-set
+inventory empty, and binds a fresh composite proof digest into the receipt.
+After `ExecuteChangeSet` is dispatched, the failure trap cannot restore the old
+stack policy; restoration is allowed only before dispatch or after an observed
+`UPDATE_ROLLBACK_COMPLETE` terminal state.
+Neither `abort` nor same-run plan cleanup rolls back or otherwise mutates the
+foundation stack. See
+[`FOUNDATION_STORAGE_MIGRATION.md`](./FOUNDATION_STORAGE_MIGRATION.md).
+
 ## Protected edge-control delivery
 
 [`aws/edge-waf.yaml`](../../aws/edge-waf.yaml) now defines an approval-gated
@@ -95,33 +161,84 @@ rate-based rules. It is hard-bound to the AWS CloudFront WAF control plane in
 
 The same edge stack defines three exact CloudWatch `BlockedRequests` alarms
 (all WebACL blocks and both rate rules). CloudFront alarms omit the WAF
-`Region` dimension in accordance with the AWS metric contract. Both `ALARM`
-and `OK` transitions route through a customer-managed-KMS encrypted SNS topic
-to a customer-managed-KMS encrypted SQS archive with 14-day retention. This is
-durable machine evidence, not human paging.
+`Region` dimension in accordance with the AWS metric contract. The alarms have
+no notification actions. One account- and ARN-bound EventBridge rule captures
+only their `ALARM` and `OK` state changes and sends them to a dedicated 14-day
+CloudWatch Logs archive. An exact resource policy permits only EventBridge log
+delivery for that rule. This is durable machine evidence, not human paging.
 
 Request sampling is disabled because AWS states that WAF logging redaction does
 not apply to sampled requests. The only request-level route is a 30-day,
-customer-managed-KMS encrypted CloudWatch Logs group whose WAF filter keeps
-only `BLOCK` records. Query strings and the declared credential/session headers
-are redacted. Raw logs and AWS responses stay outside GitHub artifacts; the
-edge receipt contains only resource-identifier hashes and stable booleans.
+CloudWatch-encrypted Logs group whose WAF filter keeps only `BLOCK` records.
+Both edge log groups use CloudWatch Logs' AWS-owned default encryption; the
+stack does not create a billable KMS key. Query strings and the declared
+credential/session headers are redacted. Raw logs and AWS responses stay
+outside GitHub artifacts. Edge receipts hash account-bearing identifiers and
+retain only deterministic account-neutral source/stack metadata, stable
+booleans, counts, and explicit limitations.
 
 `.github/workflows/edge-controls.yml` provides manual, protected
-plan/apply/verify operations using a repository-bound OIDC role. It accepts
-only the two deterministic edge stacks, the exact 13-resource non-replacement
-change set, the source template digest, the protective stack policy, and
-termination protection. `apply` executes the independently created, still
-available change set whose name, description, parameters, original-template
-digest, resource changes, and replacement semantics are re-proved. For a
-greenfield CREATE, the apply run accepts CloudFormation's intermediate
-`REVIEW_IN_PROGRESS` shell stack only when that stack and the pending change
-set are mutually identity-bound and the exact source SHA, description,
-parameters, and original-template digest all match before CREATE is selected.
-`verify` then reads the live WebACL, logging filter, KMS key/rotation/policy,
-log group,
-SNS policy/subscription, SQS policy/retention, and all three alarm definitions.
-Its receipt stores only identifier digests rather than raw AWS identifiers.
+`plan|apply|verify|cleanup|finalize` operations. Every dispatch requires the
+exact current green `main` SHA. Non-destructive planning, deployment,
+verification, and lifecycle protection use the repository-bound
+`EdgeControlRole` through `edge-controls`; destructive recoverable-shell
+cleanup uses the separately protected `edge-cleanup` environment and
+`EdgeCleanupRole`. The ordinary role cannot list change sets or delete stacks;
+the cleanup role cannot create/execute/delete change sets, change stack policy
+or termination protection, pass roles, or assume roles. The three explicitly
+confirmed operations require exact environment-specific values:
+`APPLY-{ENV}-EDGE-CONTROLS`, `CLEANUP-{ENV}-EDGE-CONTROLS`, and
+`FINALIZE-{ENV}-EDGE-CONTROLS`; `plan` and `verify` require an empty
+confirmation.
+
+The plan/apply path accepts only the two deterministic edge stacks, the source
+template digest, the protective stack policy, termination protection, and one
+of three exact non-replacement change-set shapes: a greenfield CREATE with nine
+Add actions; the legacy bootstrap UPDATE with eight Add actions plus one WebACL
+Modify; or a steady-state UPDATE containing a non-empty Modify-only subset of
+the exact nine resources, with `Replacement=False`, non-empty property details,
+and `RequiresRecreation=Never`. `apply` executes the independently created,
+still-available change set whose name, description, parameters,
+original-template digest, resource changes, and replacement semantics are
+re-proved. For a greenfield CREATE, the apply run accepts CloudFormation's
+intermediate `REVIEW_IN_PROGRESS` shell stack only when that stack and the
+pending change set are mutually identity-bound and the exact source SHA,
+description, parameters, and original-template digest all match before CREATE
+is selected. Although `plan` has no typed confirmation, it still runs behind
+the protected environment and may materialize only that empty CloudFormation
+shell; it cannot deploy a stack resource.
+
+Recovery from partial lifecycle progress is bounded rather than manual. The
+`cleanup` operation accepts only an unprotected `REVIEW_IN_PROGRESS` shell with
+zero resources or an unprotected `ROLLBACK_COMPLETE` stack for which every
+listed resource is `DELETE_COMPLETE`. It derives the originating commit and
+template digest from the single CREATE change set, fetches that historical
+commit even when current `main` has advanced, matches the repository and
+CloudFormation templates to that digest, refreshes current `main`, and then
+repeats the complete AWS/source checks so `DeleteStack` is the next external
+action. It deletes the exact stack ID and requires the stack-name lookup to
+return `NotFound`. Its receipt retains the
+source SHA, template digest, and deterministic account-neutral
+stack/change-set names but hashes the stack ID and deletion token; no account
+ID or ARN is emitted.
+
+The `finalize` operation creates no change set. Normally it proves the exact
+current template, parameters, and nine-resource live inventory before repairing
+the stack policy and termination protection, then repeats the full live proof.
+`apply` automatically selects that same finalize path when the exact current
+template is already live, making a run restart-safe if deployment completed
+before lifecycle protection setup. For an interrupted older deployment, the
+optional `deployed_sha` must be a green ancestor of current `main` with exact
+successful CI, CodeQL, and Supply Chain push runs. The workflow loads that
+revision's template and stack policy and repairs only its lifecycle protections.
+If its semantics differ from current `main`, the resulting source-bound receipt
+explicitly does not claim current live controls and requires a new current
+plan/apply. `verify`, post-apply proof, and current-semantics finalize proof read
+the live WebACL, logging filter, default-encrypted log groups, exact EventBridge
+event pattern and log target, archive resource policy/retention, all three
+action-free alarm definitions, stack policy, and termination protection. Live
+receipts hash account-bearing identifiers while retaining only deterministic
+account-neutral source/stack metadata and proof facts.
 
 The regional application template has no optional, unprotected mode. Its
 mandatory WebACL ARN is resolved directly from the protected edge stack rather
@@ -135,11 +252,13 @@ receipts. Deploy AWS fails before mutation unless the same SHA has:
 - direct edge-stack output validation for account, name, environment, region,
   rate limits, status, stack-role absence, and termination protection.
 
-Neither edge `apply` nor `verify` generates a probe, reads an archive message,
-or contacts a human. Every receipt therefore records alarm delivery as
-`not-run`, human paging as `not-configured-by-this-stack`, and acknowledgement
-as `not-claimed`. No live edge activation, delivery drill, or response evidence
-is claimed by repository source.
+No edge lifecycle operation generates a probe, queries the alarm archive, or
+contacts a human. In particular, `cleanup` proves only the eligible shell's
+source-bound deletion, while `finalize` proves configuration and lifecycle
+protection—not alarm delivery. Every receipt therefore records alarm delivery
+as `not-run`, human paging as `not-configured-by-this-stack`, and
+acknowledgement as `not-claimed`. No live edge activation, delivery drill, or
+response evidence is claimed by repository source.
 
 Regional application alarm routing has a separate manual,
 protected, exact-green-main `plan|apply|verify|drill` workflow. Its activation

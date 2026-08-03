@@ -25,6 +25,10 @@ const FOUNDATION_MIGRATION_WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "foundation-migration.yml"),
   "utf8"
 );
+const FOUNDATION_MIGRATION_AUTHORITY_SOURCE = readFileSync(
+  join(ROOT, "aws", "foundation-migration-authority.sh"),
+  "utf8"
+);
 const DEPLOY_WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "deploy-aws.yml"),
   "utf8"
@@ -38,6 +42,10 @@ const APPLICATION_PROOF_SCRIPT = join(
 );
 const APPLICATION_PROOF_SOURCE = readFileSync(
   APPLICATION_PROOF_SCRIPT,
+  "utf8"
+);
+const FOUNDATION_STORAGE_PROOF_SOURCE = readFileSync(
+  join(ROOT, "aws", "prove-foundation-storage-controls.sh"),
   "utf8"
 );
 const RECOVERY_SNAPSHOT_SOURCE = readFileSync(
@@ -74,6 +82,32 @@ function resourceBlock(logicalId: string): string {
   );
   assert.ok(match, `missing ${logicalId}`);
   return match[0];
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function workflowStep(source: string, name: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)      - name: ${escapeRegExp(name)}\\r?\\n[\\s\\S]*?(?=\\r?\\n      - name: |$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
+}
+
+function workflowJob(source: string, id: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)  ${escapeRegExp(id)}:\\r?\\n[\\s\\S]*?(?=\\r?\\n  [A-Za-z0-9_-]+:\\r?\\n|$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
 }
 
 test("S3 logging IaC retains and hardens the non-recursive archive", () => {
@@ -139,7 +173,40 @@ test("S3 logging IaC retains and hardens the non-recursive archive", () => {
     cloudFrontAccessLogs,
     /OwnershipControls:[\s\S]*?ObjectOwnership: BucketOwnerPreferred/u,
   );
+  assert.match(
+    cloudFrontAccessLogs,
+    /BucketEncryption:[\s\S]*?SSEAlgorithm: AES256/u,
+  );
+  assert.doesNotMatch(
+    cloudFrontAccessLogs,
+    /KMSMasterKeyID|BucketKeyEnabled:\s*true/u,
+  );
   assert.doesNotMatch(cloudFrontAccessLogs, /\n\s+AccessControl:/u);
+  assert.doesNotMatch(
+    BOOTSTRAP,
+    /CloudFrontAccessLogKey(?:Alias|Arn|AliasArn)?:/u,
+  );
+  for (const expected of [
+    'has("CloudFrontAccessLogKeyArn") | not',
+    'has("CloudFrontAccessLogKeyAliasArn") | not',
+    '== "AES256"',
+    'schemaVersion: 2',
+    'cloudFrontAccessLogEncryption:',
+    'serviceManaged: true',
+    'customerManagedKey: false',
+    'lifecycleFixedMonthlyUsd: 0',
+    'manage-exact-cloudfront-waf-stacks',
+    'leastPrivilegePolicyVerified: true',
+    'alarmArchive: "EventBridge-to-CloudWatch-Logs"',
+    '"PlanAndApplyExactEdgeStacks"',
+    '"CheckCloudFrontWebAclCapacity"',
+  ]) {
+    assert.ok(FOUNDATION_STORAGE_PROOF_SOURCE.includes(expected), expected);
+  }
+  assert.doesNotMatch(
+    FOUNDATION_STORAGE_PROOF_SOURCE,
+    /cloudFrontAccessLogKey:|cloudfront-logs/u,
+  );
 });
 
 test("candidate and recovery objects have a bounded evidence lifecycle", () => {
@@ -176,6 +243,239 @@ test("foundation updates preserve the exact legacy and alarm-routing parameter c
   );
 });
 
+test("foundation migration receipts hash account-bearing evidence locators", () => {
+  assert.match(FOUNDATION_MIGRATION_WORKFLOW, /generatedAt:\s*\$generatedAt/u);
+  assert.match(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    /terminalStackStatus:\s*\$storage\[0\]\.stack\.status/u
+  );
+  assert.doesNotMatch(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    /terminalStackStatus:\s*"UPDATE_COMPLETE"/u
+  );
+  assert.equal(
+    (
+      FOUNDATION_MIGRATION_WORKFLOW.match(
+        /versionIdSha256:\s*\$[A-Za-z]+/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.doesNotMatch(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    /(?:recoveryAnchor|templateObject):\s*\{[\s\S]*?\n\s+versionId:/u
+  );
+  for (const expected of [
+    "nameSha256: $stackSha256",
+    "bucketSha256: $archiveSha256",
+    "bucketSha256: $artifactSha256",
+    "targetBucketSha256:",
+    "ruleArnSha256: $ruleArnSha256",
+  ]) {
+    assert.ok(PROOF_SOURCE.includes(expected), expected);
+  }
+  assert.doesNotMatch(
+    PROOF_SOURCE,
+    /\n\s+(?:name|bucket|targetBucket|ruleArn):\s*\$/u
+  );
+});
+
+test("foundation migration cleanup and abort inventory plans before sanitized retirement", () => {
+  const sameRunCleanup = workflowStep(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "Delete an unverified foundation migration plan"
+  );
+  const abortJob = workflowJob(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "abort-authority"
+  );
+  const abort = workflowStep(
+    abortJob,
+    "Prove stable foundation, clean safe plans, and delete authority"
+  );
+  assert.ok(sameRunCleanup.length > 0);
+  assert.ok(abortJob.length > 0);
+  assert.ok(abort.length > 0);
+
+  assert.match(sameRunCleanup, /always\(\)/u);
+  assert.match(sameRunCleanup, /steps\.create_plan\.outcome == 'failure'/u);
+  assert.match(sameRunCleanup, /steps\.load_plan\.outcome == 'failure'/u);
+  assert.match(sameRunCleanup, /steps\.exact_plan\.outcome == 'failure'/u);
+  assert.match(sameRunCleanup, /\.ExecutionStatus == "AVAILABLE"/u);
+  assert.match(sameRunCleanup, /aws cloudformation delete-change-set/u);
+  assert.match(sameRunCleanup, /changeSetArnSha256: \$arnSha256/u);
+  assert.match(sameRunCleanup, /changeSetNameSha256: \$nameSha256/u);
+  assert.match(sameRunCleanup, /descriptionSha256: \$descriptionSha256/u);
+  assert.doesNotMatch(sameRunCleanup, /execute-change-set/u);
+
+  assert.match(
+    FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
+    /Sid: "ManageExactFoundationStack"[\s\S]*?"cloudformation:ListChangeSets"[\s\S]*?"cloudformation:ListStackResources"/u
+  );
+  assert.match(
+    FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
+    /Sid: "RetireAuthorityStack"[\s\S]*?"cloudformation:ListStackResources"/u
+  );
+  assert.match(abortJob, /needs: authorize/u);
+  assert.match(abortJob, /Configure exact one-time migration authority/u);
+  assert.doesNotMatch(abortJob, /Configure permanent narrow foundation authority/u);
+  assert.match(abort, /foundation-migration-authority\.sh verify-intrinsic/u);
+  assert.match(
+    abort,
+    /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u
+  );
+  assert.match(
+    abort,
+    /contents\/aws\/bootstrap-oidc\.yaml\?ref=\$\{plan_source\}/u
+  );
+  assert.match(abort, /aws cloudformation delete-change-set/u);
+  for (const digest of [
+    "target_projection_sha256",
+    "target_policy_sha256",
+    "target_resources_sha256",
+  ]) {
+    assert.ok(abort.includes(`)" = "$${digest}"`), digest);
+  }
+  assert.match(abort, /\)" = \\\r?\n\s+"\$target_template_sha256"/u);
+  assert.match(
+    abort,
+    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id"/u
+  );
+  assert.equal(
+    (abort.match(/aws cloudformation delete-stack/gu) ?? []).length,
+    1
+  );
+  assert.doesNotMatch(
+    abort,
+    /cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u
+  );
+  const receiptOffset = abort.lastIndexOf("          phase=receipt");
+  assert.ok(receiptOffset >= 0);
+  const receipt = abort.slice(receiptOffset);
+  for (const expected of [
+    "targetProjectionSha256: $targetProjectionSha256",
+    "clientRequestTokenSha256: $clientTokenSha256",
+    "remainingCount: 0",
+    "stackDeleted: true",
+    "roleDeleted: true",
+  ]) {
+    assert.ok(receipt.includes(expected), expected);
+  }
+  assert.doesNotMatch(receipt, /AWS_ACCOUNT_ID|arn:aws:/u);
+});
+
+test("foundation destructive transitions use adjacent fresh fail-closed proofs", () => {
+  const apply = workflowStep(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "Apply target stack policy and execute the inspected plan"
+  );
+  const cleanup = workflowStep(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "Delete an unverified foundation migration plan"
+  );
+  const abort = workflowStep(
+    workflowJob(FOUNDATION_MIGRATION_WORKFLOW, "abort-authority"),
+    "Prove stable foundation, clean safe plans, and delete authority"
+  );
+  const retire = workflowStep(
+    workflowJob(FOUNDATION_MIGRATION_WORKFLOW, "retire-authority"),
+    "Verify and retire the exact authority stack"
+  );
+
+  assert.match(apply, /execution_started=false/u);
+  assert.match(
+    apply,
+    /execution_started=true\s+aws cloudformation execute-change-set/u
+  );
+  assert.match(
+    apply,
+    /UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?set-stack-policy[\s\S]*?execution_started=false/u
+  );
+  assert.match(
+    apply,
+    /\[ "\$execution_started" = "false" \][\s\S]*?set-stack-policy/u
+  );
+
+  for (const step of [cleanup, abort]) {
+    assert.match(
+      step,
+      /describe-change-set[\s\S]*?\.Status == "CREATE_COMPLETE"[\s\S]*?\.ExecutionStatus[\s\S]*?cloudformation delete-change-set/u
+    );
+  }
+  assert.match(
+    cleanup,
+    /env\.CHANGE_SET_ID != '' \|\|[\s\S]*?steps\.create_plan\.outcome == 'failure'/u
+  );
+  for (const expected of [
+    'cleanup_change_set_id="${CHANGE_SET_ID:-}"',
+    '--change-set-name "$CHANGE_SET_NAME"',
+    '($plans | length) == 1',
+    'recoveredByDeterministicName:',
+  ]) {
+    assert.ok(cleanup.includes(expected), expected);
+  }
+  assert.match(
+    abort,
+    /foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?env -i[\s\S]*?render-template[\s\S]*?historical_authority_template_sha256/u
+  );
+  assert.ok(
+    (abort.match(/\(\.Summaries \/\/ \[\]\) \| length == 0/gu) ?? [])
+      .length >= 2
+  );
+
+  for (const expected of [
+    "prove-foundation-storage-controls.sh",
+    "detect-stack-resource-drift",
+    'StackResourceDriftStatus == "IN_SYNC"',
+    '(.Summaries // []) | length == 0',
+    "fresh_retirement_proof_sha256",
+    "freshRetirementProofBound: true",
+    "finalAuthorityProofSha256",
+    "finalAuthorityProofBoundImmediatelyBeforeDeletion: true",
+  ]) {
+    assert.ok(retire.includes(expected), expected);
+  }
+  const finalAuthorityProof = retire.lastIndexOf(
+    "bash aws/foundation-migration-authority.sh verify-intrinsic"
+  );
+  const authorityDelete = retire.indexOf(
+    "aws cloudformation delete-stack",
+    finalAuthorityProof
+  );
+  assert.ok(finalAuthorityProof >= 0);
+  assert.ok(authorityDelete > finalAuthorityProof);
+  assert.doesNotMatch(
+    retire.slice(finalAuthorityProof, authorityDelete),
+    /\n\s+(?:aws|git)\s/u
+  );
+  assert.match(
+    FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
+    /cloudformation:DetectStackResourceDrift/u
+  );
+});
+
+test("legacy foundation workflow receipts hash change-set ARNs and S3 version IDs", () => {
+  assert.equal((WORKFLOW.match(/versionIdSha256:/gmu) ?? []).length, 2);
+  assert.equal((WORKFLOW.match(/arnSha256:/gmu) ?? []).length, 5);
+  for (const expected of [
+    "--arg versionIdSha256",
+    "--arg changeSetArnSha256",
+    "--arg recoveryChangeSetArnSha256",
+    "versionIdSha256: $versionIdSha256",
+    "arnSha256: $changeSetArnSha256",
+  ]) {
+    assert.ok(WORKFLOW.includes(expected), expected);
+  }
+  assert.doesNotMatch(
+    WORKFLOW,
+    /--arg (?:version|changeSetId|recoveryChangeSetId)\s/u
+  );
+  assert.doesNotMatch(
+    WORKFLOW,
+    /(?:versionId|changeSetId|id):\s*\$(?:version|changeSetId|recoveryChangeSetId)/u
+  );
+});
+
 test("AWS application names cannot overflow the longest generated S3 bucket", () => {
   const constrainedTemplates = [
     BOOTSTRAP,
@@ -192,10 +492,7 @@ test("AWS application names cannot overflow the longest generated S3 bucket", ()
   const constrainedValidators = [
     PROOF_SOURCE,
     APPLICATION_PROOF_SOURCE,
-    readFileSync(
-      join(ROOT, "aws", "prove-foundation-storage-controls.sh"),
-      "utf8"
-    ),
+    FOUNDATION_STORAGE_PROOF_SOURCE,
     readFileSync(join(ROOT, "aws", "prove-alarm-routing.sh"), "utf8"),
     readFileSync(
       join(ROOT, "aws", "merge-canonical-stack-tags.sh"),
@@ -331,7 +628,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
-    /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u
+    /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u
   );
   assert.match(
     role,
@@ -349,7 +646,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
         /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
       ) ?? []
     ).length,
-    25
+    26
   );
   assert.equal(
     (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
@@ -481,8 +778,6 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/ArtifactBucketPolicy",
       "LogicalResourceId/CloudFrontAccessLogBucket",
       "LogicalResourceId/CloudFrontAccessLogBucketPolicy",
-      "LogicalResourceId/CloudFrontAccessLogKey",
-      "LogicalResourceId/CloudFrontAccessLogKeyAlias",
       "LogicalResourceId/EdgeControlRole",
       "LogicalResourceId/FinOpsCloudFormationExecutionRole",
       "LogicalResourceId/FinOpsControlRole",
@@ -963,7 +1258,19 @@ test("S3 access-logging proof accepts only the exact baseline and live state", (
   assert.equal(receipt.ok, true);
   assert.equal(receipt.archive.selfLogging, false);
   assert.equal(receipt.artifact.partitionDateSource, "EventTime");
+  assert.equal(receipt.artifact.targetMatchesArchive, true);
   assert.equal(receipt.securityHub.workflow, "SUPPRESSED");
+  for (const digest of [
+    receipt.stack.nameSha256,
+    receipt.archive.bucketSha256,
+    receipt.artifact.bucketSha256,
+    receipt.artifact.targetBucketSha256,
+    receipt.securityHub.ruleArnSha256,
+  ]) {
+    assert.match(digest, /^[0-9a-f]{64}$/u);
+  }
+  assert.doesNotMatch(live.stdout, new RegExp(ACCOUNT, "u"));
+  assert.doesNotMatch(live.stdout, new RegExp(RULE_ARN, "u"));
 });
 
 test("S3 access-logging proof rejects drift and redacts AWS failures", () => {

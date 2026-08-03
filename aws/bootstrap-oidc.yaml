@@ -140,55 +140,6 @@ Resources:
       AliasName: !Sub "alias/${AppName}-storage"
       TargetKeyId: !Ref ApplicationStorageKey
 
-  CloudFrontAccessLogKey:
-    Type: AWS::KMS::Key
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      Description: !Sub >-
-        Dedicated customer-managed key for ${AppName} CloudFront standard
-        access logs; isolated from application data and secrets
-      EnableKeyRotation: true
-      KeySpec: SYMMETRIC_DEFAULT
-      KeyUsage: ENCRYPT_DECRYPT
-      MultiRegion: false
-      PendingWindowInDays: 30
-      KeyPolicy:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: EnableAccountAdministration
-            Effect: Allow
-            Principal:
-              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
-            Action: kms:*
-            Resource: "*"
-          # AWS documents this service principal without SourceAccount or
-          # SourceArn conditions for SSE-KMS CloudFront standard logging.
-          # Isolating it on this log-only key bounds that service grant.
-          - Sid: AllowCloudFrontAccessLogEncryption
-            Effect: Allow
-            Principal:
-              Service: delivery.logs.amazonaws.com
-            Action:
-              - kms:Decrypt
-              - kms:GenerateDataKey*
-            Resource: "*"
-      Tags:
-        - Key: Application
-          Value: !Ref AppName
-        - Key: DataClassification
-          Value: cloudfront-access-logs-only
-        - Key: ManagedBy
-          Value: CloudFormation
-
-  CloudFrontAccessLogKeyAlias:
-    Type: AWS::KMS::Alias
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      AliasName: !Sub "alias/${AppName}-cloudfront-logs"
-      TargetKeyId: !Ref CloudFrontAccessLogKey
-
   StagingOriginVerifySecret:
     Type: AWS::SecretsManager::Secret
     DependsOn: ApplicationStorageKeyAlias
@@ -418,10 +369,8 @@ Resources:
       # this bucket; the GitHub deployment roles can only pass those roles.
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - BucketKeyEnabled: true
-            ServerSideEncryptionByDefault:
-              KMSMasterKeyID: !GetAtt CloudFrontAccessLogKey.Arn
-              SSEAlgorithm: aws:kms
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerPreferred
@@ -2111,6 +2060,9 @@ Resources:
                       - edge-controls-*
                       - !Sub >-
                         arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/edge-controls-*/*
+              # Destructive stack cleanup is intentionally absent. It is
+              # isolated in EdgeCleanupRole, whose trust is bound to the
+              # separately protected edge-cleanup GitHub environment.
               - Sid: ManageExactCloudFrontWebAcls
                 Effect: Allow
                 Action:
@@ -2121,8 +2073,11 @@ Resources:
                   - wafv2:TagResource
                   - wafv2:UntagResource
                   - wafv2:UpdateWebACL
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-*/*
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-staging-cloudfront/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-production-cloudfront/*
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
@@ -2132,16 +2087,20 @@ Resources:
                   - wafv2:GetLoggingConfiguration
                   - wafv2:GetWebACL
                   - wafv2:ListTagsForResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-*/*
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-staging-cloudfront/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/${AppName}-production-cloudfront/*
               # AWS WAF documents these account-scoped CloudWatch Logs
               # permissions as mandatory for PutLoggingConfiguration. They
               # cannot be resource-scoped, so they remain CloudFormation-only
               # and region-bound.
-              - Sid: ConfigureOnlyCloudFormationWafLogDelivery
+              - Sid: ConfigureOnlyCloudFormationEdgeLogDelivery
                 Effect: Allow
                 Action:
                   - logs:CreateLogDelivery
+                  - logs:DeleteResourcePolicy
                   - logs:DeleteLogDelivery
                   - logs:DescribeLogGroups
                   - logs:DescribeResourcePolicies
@@ -2152,204 +2111,127 @@ Resources:
                     aws:RequestedRegion: us-east-1
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: CreateOnlyTaggedEdgeEvidenceKeys
-                Effect: Allow
-                Action: kms:CreateKey
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    aws:RequestTag/Application: !Ref AppName
-                    aws:RequestTag/DataClassification: security-evidence
-                    aws:RequestTag/Environment:
-                      - staging
-                      - production
-                    aws:RequestedRegion: us-east-1
-                  "ForAnyValue:StringEquals":
-                    aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: ManageOnlyTaggedEdgeEvidenceKeys
+              - Sid: ManageOnlyNamedEdgeLogGroups
                 Effect: Allow
                 Action:
-                  - kms:CancelKeyDeletion
-                  - kms:DisableKeyRotation
-                  - kms:EnableKeyRotation
-                  - kms:PutKeyPolicy
-                  - kms:ScheduleKeyDeletion
-                  - kms:TagResource
-                  - kms:UntagResource
-                  - kms:UpdateKeyDescription
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/DataClassification: security-evidence
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
-                  "ForAnyValue:StringEquals":
-                    aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: ManageOnlyNamedEdgeEvidenceAliases
-                Effect: Allow
-                Action:
-                  - kms:CreateAlias
-                  - kms:DeleteAlias
-                  - kms:UpdateAlias
-                Resource:
-                  - !Sub >-
-                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:alias/${AppName}-staging-edge-evidence
-                  - !Sub >-
-                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:alias/${AppName}-production-edge-evidence
-                  - !Sub >-
-                      arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
-                Condition:
-                  "ForAnyValue:StringEquals":
-                    aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: InspectOnlyTaggedEdgeEvidenceKeys
-                Effect: Allow
-                Action:
-                  - kms:DescribeKey
-                  - kms:GetKeyPolicy
-                  - kms:GetKeyRotationStatus
-                  - kms:ListResourceTags
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/DataClassification: security-evidence
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
-              - Sid: ManageOnlyNamedWafLogGroups
-                Effect: Allow
-                Action:
-                  - logs:AssociateKmsKey
                   - logs:CreateLogGroup
                   - logs:DeleteLogGroup
                   - logs:DeleteRetentionPolicy
-                  - logs:DisassociateKmsKey
                   - logs:PutRetentionPolicy
-                  - logs:TagResource
-                  - logs:UntagResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-*-blocked*
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-staging-blocked:*
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-production-blocked:*
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-staging-edge-waf-alarm-archive:*
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-production-edge-waf-alarm-archive:*
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: InspectOnlyNamedWafLogGroups
+              # CloudWatch Logs tagging APIs require the logGroupArn form,
+              # without the trailing :* required by most log-group APIs.
+              - Sid: TagOnlyNamedEdgeLogGroups
+                Effect: Allow
+                Action:
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-staging-blocked
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-production-blocked
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-staging-edge-waf-alarm-archive
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-production-edge-waf-alarm-archive
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    aws:CalledVia: cloudformation.amazonaws.com
+              - Sid: InspectOnlyNamedEdgeLogGroups
                 Effect: Allow
                 Action: logs:ListTagsForResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-*-blocked
-              - Sid: DescribeOnlyUsEastOneWafLogGroups
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-staging-blocked
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-production-blocked
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-staging-edge-waf-alarm-archive
+                  - !Sub >-
+                      arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-production-edge-waf-alarm-archive
+              - Sid: DescribeOnlyUsEastOneEdgeLogs
                 Effect: Allow
-                Action: logs:DescribeLogGroups
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeResourcePolicies
                 Resource: "*"
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: us-east-1
-              - Sid: CreateOnlyTaggedEdgeAlarmTopics
+              - Sid: PutOnlyExactEdgeAlarmEventRules
                 Effect: Allow
-                Action:
-                  - sns:CreateTopic
-                  - sns:TagResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                Action: events:PutRule
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-staging-edge-waf-alarm-events
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-production-edge-waf-alarm-events
                 Condition:
-                  StringEquals:
-                    aws:RequestTag/Application: !Ref AppName
-                    aws:RequestTag/EvidenceRoute: waf-alarm-archive
-                    aws:RequestTag/Environment:
-                      - staging
-                      - production
+                  "ForAllValues:StringEquals":
+                    events:source: aws.cloudwatch
+                    events:detail-type: CloudWatch Alarm State Change
+                  "Null":
+                    events:source: "false"
+                    events:detail-type: "false"
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: ManageOnlyTaggedEdgeAlarmTopics
+              - Sid: PutTargetsOnlyExactEdgeAlarmArchives
                 Effect: Allow
-                Action:
-                  - sns:DeleteTopic
-                  - sns:SetSubscriptionAttributes
-                  - sns:SetTopicAttributes
-                  - sns:Subscribe
-                  - sns:TagResource
-                  - sns:Unsubscribe
-                  - sns:UntagResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                Action: events:PutTargets
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-staging-edge-waf-alarm-events
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-production-edge-waf-alarm-events
                 Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
+                  "ForAllValues:ArnEquals":
+                    events:TargetArn:
+                      - !Sub >-
+                          arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-staging-edge-waf-alarm-archive
+                      - !Sub >-
+                          arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-production-edge-waf-alarm-archive
+                  "Null":
+                    events:TargetArn: "false"
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: InspectOnlyTaggedEdgeAlarmTopics
+              - Sid: ManageOnlyNamedEdgeAlarmEventRules
                 Effect: Allow
                 Action:
-                  - sns:GetSubscriptionAttributes
-                  - sns:GetTopicAttributes
-                  - sns:ListSubscriptionsByTopic
-                  - sns:ListTagsForResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarms
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:TagResource
+                  - events:UntagResource
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-staging-edge-waf-alarm-events
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-production-edge-waf-alarm-events
                 Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
-              - Sid: CreateOnlyTaggedEdgeAlarmArchives
-                Effect: Allow
-                Action:
-                  - sqs:CreateQueue
-                  - sqs:TagQueue
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
-                Condition:
-                  StringEquals:
-                    aws:RequestTag/Application: !Ref AppName
-                    aws:RequestTag/EvidenceRoute: waf-alarm-archive
-                    aws:RequestTag/Environment:
-                      - staging
-                      - production
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: ManageOnlyTaggedEdgeAlarmArchives
+              - Sid: InspectOnlyNamedEdgeAlarmEventRules
                 Effect: Allow
                 Action:
-                  - sqs:DeleteQueue
-                  - sqs:SetQueueAttributes
-                  - sqs:TagQueue
-                  - sqs:UntagQueue
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
-                  "ForAnyValue:StringEquals":
-                    aws:CalledVia: cloudformation.amazonaws.com
-              - Sid: InspectOnlyTaggedEdgeAlarmArchives
-                Effect: Allow
-                Action:
-                  - sqs:GetQueueAttributes
-                  - sqs:GetQueueUrl
-                  - sqs:ListQueueTags
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:sqs:us-east-1:${AWS::AccountId}:${AppName}-*-edge-waf-alarm-archive
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Application: !Ref AppName
-                    aws:ResourceTag/EvidenceRoute: waf-alarm-archive
-                    aws:ResourceTag/Environment:
-                      - staging
-                      - production
+                  - events:DescribeRule
+                  - events:ListTagsForResource
+                  - events:ListTargetsByRule
+                Resource:
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-staging-edge-waf-alarm-events
+                  - !Sub >-
+                      arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-production-edge-waf-alarm-events
               - Sid: ManageOnlyNamedEdgeWafAlarms
                 Effect: Allow
                 Action:
@@ -2357,8 +2239,19 @@ Resources:
                   - cloudwatch:PutMetricAlarm
                   - cloudwatch:TagResource
                   - cloudwatch:UntagResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-*-waf-*
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-any-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-api-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-resolution-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-any-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-api-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-resolution-rate-block
                 Condition:
                   "ForAnyValue:StringEquals":
                     aws:CalledVia: cloudformation.amazonaws.com
@@ -2367,8 +2260,19 @@ Resources:
                 Action:
                   - cloudwatch:DescribeAlarms
                   - cloudwatch:ListTagsForResource
-                Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-*-waf-*
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-any-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-api-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-staging-waf-resolution-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-any-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-api-rate-block
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-production-waf-resolution-rate-block
               - Sid: CheckCloudFrontWebAclCapacity
                 Effect: Allow
                 Action: wafv2:CheckCapacity
@@ -2381,6 +2285,77 @@ Resources:
           Value: !Ref AppName
         - Key: Environment
           Value: edge-controls
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  EdgeCleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-github-edge-cleanup"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:edge-cleanup
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubRepositoryOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:environment: edge-cleanup
+                token.actions.githubusercontent.com:workflow: Manage AWS Edge Controls
+      Policies:
+        - PolicyName: cleanup-exact-cloudfront-waf-stacks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InspectExactEdgeCleanupStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListChangeSets
+                  - cloudformation:ListStackResources
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-staging-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-production-edge/*
+              - Sid: InspectExactEdgeCleanupSources
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-staging-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-production-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:changeSet/edge-controls-*/*
+              - Sid: DeleteOnlyExactEdgeStacks
+                Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-staging-edge/*
+                  - !Sub >-
+                    arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${AppName}-production-edge/*
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: edge-cleanup
         - Key: ManagedBy
           Value: CloudFormation
 
@@ -2709,13 +2684,6 @@ Resources:
                   - kms:GetKeyRotationStatus
                   - kms:ReEncrypt*
                 Resource: !GetAtt ApplicationStorageKey.Arn
-              - Sid: InspectCloudFrontAccessLogKey
-                Effect: Allow
-                Action:
-                  - kms:DescribeKey
-                  - kms:GetKeyPolicy
-                  - kms:GetKeyRotationStatus
-                Resource: !GetAtt CloudFrontAccessLogKey.Arn
               - Sid: InspectOriginVerificationSecretMetadata
                 Effect: Allow
                 Action: secretsmanager:DescribeSecret
@@ -2778,6 +2746,8 @@ Resources:
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
                   - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-cleanup
+                  - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-finops-cloudformation-execution
@@ -2803,6 +2773,8 @@ Resources:
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
                   - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-cleanup
+                  - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-finops-cloudformation-execution
@@ -2814,6 +2786,10 @@ Resources:
                 Effect: Allow
                 Action: iam:GetRolePolicy
                 Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-controls
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-edge-cleanup
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-finops-controls
                   - !Sub >-
@@ -3383,11 +3359,6 @@ Outputs:
   ApplicationStorageKeyAliasArn:
     Value: !Sub >-
       arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage
-  CloudFrontAccessLogKeyArn:
-    Value: !GetAtt CloudFrontAccessLogKey.Arn
-  CloudFrontAccessLogKeyAliasArn:
-    Value: !Sub >-
-      arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-cloudfront-logs
   ArtifactBucketName:
     Value: !Ref ArtifactBucket
   CloudFrontAccessLogBucketName:
@@ -3404,6 +3375,8 @@ Outputs:
     Value: !GetAtt S3AccessLogArchiveS39Suppression.RuleArn
   EdgeControlRoleArn:
     Value: !GetAtt EdgeControlRole.Arn
+  EdgeCleanupRoleArn:
+    Value: !GetAtt EdgeCleanupRole.Arn
   FinOpsControlRoleArn:
     Value: !GetAtt FinOpsControlRole.Arn
   FinOpsCloudFormationExecutionRoleArn:
