@@ -56,6 +56,22 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Validate the approved incremental fixed-cost contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .incrementalFixedCostContract
+            | .initialMonthlyUsd == 22.40
+            and .maximumAfterBilledKmsRotationsMonthlyUsd == 24.40
+            and .approvedCeilingMonthlyUsd == 26.00
+            and .withinApprovedCeiling == true
+            and (
+              .maximumAfterBilledKmsRotationsMonthlyUsd
+              < .approvedCeilingMonthlyUsd
+            )
+          ' aws/foundation-storage-migration-policy.json >/dev/null
+
       - name: Fail closed unless the dispatch targets current green main
         shell: bash
         env:
@@ -151,6 +167,19 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Mask foundation account and authority ARN
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          role_name="${APP_NAME}-github-foundation-migration"
+          if [ "$OPERATION" = "verify" ]; then
+            role_name="${APP_NAME}-github-foundation-promotion"
+          fi
+          role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${role_name}"
+          echo "::add-mask::$AWS_ACCOUNT_ID"
+          echo "::add-mask::$role_arn"
 
       - name: Configure pre-existing initial migration authority
         if: inputs.operation != 'verify'
@@ -821,16 +850,10 @@ jobs:
               and .ExecutionStatus == "AVAILABLE"
               and ((.IncludeNestedStacks // false) == false)
               and .Capabilities == ["CAPABILITY_NAMED_IAM"]
-              and ((.RoleARN // null) == null)
-              and ((.NotificationARNs // []) == [])
-              and (
-                (.RollbackConfiguration.RollbackTriggers // [])
-                == []
-              )
-              and (
-                (.RollbackConfiguration.MonitoringTimeInMinutes // 0)
-                == 0
-              )
+              and .RoleARN == null
+              and .NotificationARNs == []
+              and .RollbackConfiguration.RollbackTriggers == []
+              and .RollbackConfiguration.MonitoringTimeInMinutes == 0
               and ((.ImportExistingResources // false) == false)
               and (
                 (.Tags // [] | sort_by(.Key))
@@ -865,7 +888,7 @@ jobs:
                   .Changes[];
                   .ResourceChange as $change
                   | ($policy.forbiddenActions | index($change.Action)) == null
-                  and ($change.Replacement // "False") == "False"
+                  and $change.Replacement == "False"
                   and all(
                     ($change.Details // [])[];
                     .Target.RequiresRecreation == "Never"
@@ -944,7 +967,7 @@ jobs:
                     .ResourceChange.LogicalResourceId,
                   resourceType: .ResourceChange.ResourceType,
                   replacement:
-                    ((.ResourceChange.Replacement // "False") == "True")
+                    (.ResourceChange.Replacement == "True")
                 }
             ]
             | sort_by(.logicalResourceId, .action)
@@ -1227,6 +1250,15 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Mask foundation account and permanent authority ARN
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-promotion"
+          echo "::add-mask::$AWS_ACCOUNT_ID"
+          echo "::add-mask::$role_arn"
+
       - name: Configure permanent narrow foundation authority
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
         with:
@@ -1292,6 +1324,15 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Mask foundation account and retirement authority ARN
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration"
+          echo "::add-mask::$AWS_ACCOUNT_ID"
+          echo "::add-mask::$role_arn"
 
       - name: Configure exact one-time migration authority
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2

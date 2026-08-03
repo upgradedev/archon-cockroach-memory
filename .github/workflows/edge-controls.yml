@@ -149,6 +149,15 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Mask edge account and authority ARN
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-edge-controls"
+          echo "::add-mask::$AWS_ACCOUNT_ID"
+          echo "::add-mask::$role_arn"
+
       - name: Configure exact edge-control authority
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
         with:
@@ -324,9 +333,11 @@ jobs:
                     and .ChangeSetType == "CREATE"
                     and .Status == "CREATE_COMPLETE"
                     and .ExecutionStatus == "AVAILABLE"
-                    and ((.RoleARN // null) == null)
+                    and .RoleARN == null
                     and ((.Capabilities // []) == [])
-                    and ((.NotificationARNs // []) == [])
+                    and .NotificationARNs == []
+                    and .RollbackConfiguration.RollbackTriggers == []
+                    and .RollbackConfiguration.MonitoringTimeInMinutes == 0
                     and ((.IncludeNestedStacks // false) == false)
                     and (.Parameters | parameter_map) == {
                       AppName: $app,
@@ -527,32 +538,8 @@ jobs:
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveSubscription",
-                resourceType: "AWS::SNS::Subscription",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeAlarmTopic",
-                resourceType: "AWS::SNS::Topic",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeAlarmTopicPolicy",
-                resourceType: "AWS::SNS::TopicPolicy",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeEvidenceKey",
-                resourceType: "AWS::KMS::Key",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeEvidenceKeyAlias",
-                resourceType: "AWS::KMS::Alias",
+                logicalResourceId: "EdgeAlarmStateEventRule",
+                resourceType: "AWS::Events::Rule",
                 action: "Add",
                 replacement: false
               },
@@ -601,7 +588,7 @@ jobs:
                       logicalResourceId: .LogicalResourceId,
                       resourceType: .ResourceType,
                       action: .Action,
-                      replacement: ((.Replacement // "False") == "True")
+                      replacement: (.Replacement == "True")
                     }
                 ] | sort_by(.logicalResourceId);
               .ChangeSetId == $id
@@ -612,6 +599,10 @@ jobs:
               and .ExecutionStatus == "AVAILABLE"
               and ((.IncludeNestedStacks // false) == false)
               and (.Capabilities // []) == []
+              and .RoleARN == null
+              and .NotificationARNs == []
+              and .RollbackConfiguration.RollbackTriggers == []
+              and .RollbackConfiguration.MonitoringTimeInMinutes == 0
               and (.Parameters | parameter_map) == {
                 AppName: $app,
                 Environment: $environment,
@@ -621,7 +612,8 @@ jobs:
               and normalized_changes == $expected[0]
               and all(
                 .Changes[].ResourceChange;
-                all(
+                .Replacement == "False"
+                and all(
                   (.Details // [])[];
                   .Target.RequiresRecreation == "Never"
                 )
@@ -735,18 +727,13 @@ jobs:
           web_acl="${RUNNER_TEMP:?}/edge-live-web-acl.json"
           web_acl_tags="${RUNNER_TEMP:?}/edge-live-web-acl-tags.json"
           waf_logging="${RUNNER_TEMP:?}/edge-live-waf-logging.json"
-          evidence_key="${RUNNER_TEMP:?}/edge-live-evidence-key.json"
-          evidence_key_policy="${RUNNER_TEMP:?}/edge-live-evidence-key-policy.json"
-          evidence_key_rotation="${RUNNER_TEMP:?}/edge-live-evidence-key-rotation.json"
-          evidence_key_tags="${RUNNER_TEMP:?}/edge-live-evidence-key-tags.json"
           waf_log_group="${RUNNER_TEMP:?}/edge-live-waf-log-group.json"
           waf_log_group_tags="${RUNNER_TEMP:?}/edge-live-waf-log-group-tags.json"
-          alarm_topic="${RUNNER_TEMP:?}/edge-live-alarm-topic.json"
-          alarm_topic_tags="${RUNNER_TEMP:?}/edge-live-alarm-topic-tags.json"
-          alarm_subscriptions="${RUNNER_TEMP:?}/edge-live-alarm-subscriptions.json"
-          alarm_subscription="${RUNNER_TEMP:?}/edge-live-alarm-subscription.json"
           alarm_queue="${RUNNER_TEMP:?}/edge-live-alarm-queue.json"
           alarm_queue_tags="${RUNNER_TEMP:?}/edge-live-alarm-queue-tags.json"
+          alarm_event_rule="${RUNNER_TEMP:?}/edge-live-alarm-event-rule.json"
+          alarm_event_rule_tags="${RUNNER_TEMP:?}/edge-live-alarm-event-rule-tags.json"
+          alarm_event_targets="${RUNNER_TEMP:?}/edge-live-alarm-event-targets.json"
           waf_alarms="${RUNNER_TEMP:?}/edge-live-waf-alarms.json"
           stack_policy="${RUNNER_TEMP:?}/edge-live-stack-policy.json"
           aws cloudformation describe-stacks \
@@ -793,19 +780,14 @@ jobs:
                           + "-blocked"
                     )
                     and (
-                      output_map.EdgeEvidenceKeyAliasName
-                        == "alias/" + $app + "-" + $environment
-                          + "-edge-evidence"
-                    )
-                    and (
-                      output_map.EdgeAlarmTopicName
-                        == $app + "-" + $environment
-                          + "-edge-waf-alarms"
-                    )
-                    and (
                       output_map.EdgeAlarmArchiveQueueName
                         == $app + "-" + $environment
                           + "-edge-waf-alarm-archive"
+                    )
+                    and (
+                      output_map.EdgeAlarmStateEventRuleName
+                        == $app + "-" + $environment
+                          + "-edge-waf-alarm-events"
                     )
                     and (
                       output_map.WebAclBlockedRequestsAlarmName
@@ -1073,115 +1055,18 @@ jobs:
               )
             ' "$web_acl_tags" >/dev/null
 
-          key_alias="alias/${APP_NAME}-${EDGE_ENVIRONMENT}-edge-evidence"
           log_group_name="aws-waf-logs-${APP_NAME}-${EDGE_ENVIRONMENT}-blocked"
           log_group_arn="arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:${log_group_name}"
-          topic_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarms"
-          topic_arn="arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:${topic_name}"
           queue_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
           queue_arn="arn:aws:sqs:us-east-1:${AWS_ACCOUNT_ID}:${queue_name}"
+          event_rule_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-events"
+          event_rule_arn="arn:aws:events:us-east-1:${AWS_ACCOUNT_ID}:rule/${event_rule_name}"
           any_block_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-any-block"
           api_rate_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-api-rate-block"
           resolution_rate_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-resolution-rate-block"
-
-          aws kms describe-key \
-            --key-id "$key_alias" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key"
-          key_arn="$(
-            jq -er '
-              .KeyMetadata
-              | select(
-                  .Enabled == true
-                  and .KeyManager == "CUSTOMER"
-                  and .KeySpec == "SYMMETRIC_DEFAULT"
-                  and .KeyUsage == "ENCRYPT_DECRYPT"
-                  and .MultiRegion == false
-                  and .Origin == "AWS_KMS"
-                )
-              | .Arn
-              | select(
-                  test(
-                    "^arn:aws:kms:us-east-1:[0-9]{12}:key/[0-9a-f-]+$"
-                  )
-                )
-            ' "$evidence_key"
-          )"
-          aws kms get-key-policy \
-            --key-id "$key_arn" \
-            --policy-name default \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_policy"
-          aws kms get-key-rotation-status \
-            --key-id "$key_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_rotation"
-          aws kms list-resource-tags \
-            --key-id "$key_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_tags"
-          jq -e '.KeyRotationEnabled == true' \
-            "$evidence_key_rotation" >/dev/null
-          jq -e \
-            --arg app "$APP_NAME" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            '
-              (.Tags | sort_by(.TagKey)) == (
-                [
-                  {TagKey:"Application", TagValue:$app},
-                  {
-                    TagKey:"DataClassification",
-                    TagValue:"security-evidence"
-                  },
-                  {TagKey:"Environment", TagValue:$environment},
-                  {TagKey:"ManagedBy", TagValue:"CloudFormation"}
-                ] | sort_by(.TagKey)
-              )
-            ' "$evidence_key_tags" >/dev/null
-          jq -e \
-            --arg account "$AWS_ACCOUNT_ID" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            --arg app "$APP_NAME" \
-            --arg logArn "$log_group_arn" \
-            --arg topicArn "$topic_arn" \
-            '
-              (.Policy | fromjson).Statement as $statements
-              | ($statements | length) == 5
-              and any(
-                $statements[];
-                .Sid == "AllowCloudWatchLogsForExactWafLogGroup"
-                and .Principal.Service == "logs.us-east-1.amazonaws.com"
-                and .Condition.ArnEquals[
-                  "kms:EncryptionContext:aws:logs:arn"
-                ] == $logArn
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowCloudWatchAlarmsToEncryptedTopic"
-                and .Principal.Service == "cloudwatch.amazonaws.com"
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-                and .Condition.ArnLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowExactSnsTopicEncryption"
-                and .Principal.Service == "sns.amazonaws.com"
-                and .Condition.StringEquals[
-                  "kms:EncryptionContext:aws:sns:topicArn"
-                ] == $topicArn
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowSameAccountSnsToEncryptedArchive"
-                and .Principal.Service == "sns.amazonaws.com"
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-              )
-            ' "$evidence_key_policy" >/dev/null
+          any_block_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${any_block_alarm}"
+          api_rate_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${api_rate_alarm}"
+          resolution_rate_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${resolution_rate_alarm}"
 
           aws logs describe-log-groups \
             --log-group-name-prefix "$log_group_name" \
@@ -1193,13 +1078,12 @@ jobs:
             --output json >"$waf_log_group_tags"
           jq -e \
             --arg name "$log_group_name" \
-            --arg keyArn "$key_arn" \
             '
               [
                 .logGroups[]
                 | select(.logGroupName == $name)
                 | select(
-                    .kmsKeyId == $keyArn
+                    (has("kmsKeyId") | not)
                     and .retentionInDays == 30
                     and .logGroupClass == "STANDARD"
                   )
@@ -1255,109 +1139,6 @@ jobs:
               )
             ' "$waf_logging" >/dev/null
 
-          aws sns get-topic-attributes \
-            --topic-arn "$topic_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_topic"
-          aws sns list-tags-for-resource \
-            --resource-arn "$topic_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_topic_tags"
-          aws sns list-subscriptions-by-topic \
-            --topic-arn "$topic_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_subscriptions"
-          jq -e \
-            --arg topicArn "$topic_arn" \
-            --arg keyArn "$key_arn" \
-            --arg account "$AWS_ACCOUNT_ID" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            --arg app "$APP_NAME" \
-            '
-              (.Attributes.Policy | fromjson).Statement as $statements
-              | .Attributes.TopicArn == $topicArn
-              and .Attributes.KmsMasterKeyId == $keyArn
-              and .Attributes.SubscriptionsConfirmed == "1"
-              and ($statements | length) == 3
-              and any(
-                $statements[];
-                .Sid == "AllowOnlyAccountBoundCloudWatchAlarms"
-                and .Principal.Service == "cloudwatch.amazonaws.com"
-                and .Action == "sns:Publish"
-                and .Resource == $topicArn
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-                and .Condition.ArnLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyUnexpectedAlarmPublisher"
-                and .Effect == "Deny"
-                and .Action == "sns:Publish"
-                and .Resource == $topicArn
-                and .Condition.ArnNotLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyInsecureTransport"
-                and .Effect == "Deny"
-                and .Resource == $topicArn
-                and (
-                  .Condition.Bool["aws:SecureTransport"] | tostring
-                ) == "false"
-              )
-            ' "$alarm_topic" >/dev/null
-          jq -e \
-            --arg app "$APP_NAME" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            '
-              (.Tags | sort_by(.Key)) == (
-                [
-                  {Key:"Application", Value:$app},
-                  {Key:"Environment", Value:$environment},
-                  {Key:"EvidenceRoute", Value:"waf-alarm-archive"},
-                  {Key:"ManagedBy", Value:"CloudFormation"}
-                ] | sort_by(.Key)
-              )
-            ' "$alarm_topic_tags" >/dev/null
-          subscription_arn="$(
-            jq -er \
-              --arg topicArn "$topic_arn" \
-              --arg queueArn "$queue_arn" \
-              '
-                [
-                  .Subscriptions[]
-                  | select(
-                      .TopicArn == $topicArn
-                      and .Protocol == "sqs"
-                      and .Endpoint == $queueArn
-                      and (.SubscriptionArn | startswith($topicArn + ":"))
-                    )
-                ]
-                | select(length == 1)
-                | .[0].SubscriptionArn
-              ' "$alarm_subscriptions"
-          )"
-          aws sns get-subscription-attributes \
-            --subscription-arn "$subscription_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_subscription"
-          jq -e \
-            --arg topicArn "$topic_arn" \
-            --arg queueArn "$queue_arn" \
-            '
-              .Attributes.TopicArn == $topicArn
-              and .Attributes.Endpoint == $queueArn
-              and .Attributes.Protocol == "sqs"
-              and .Attributes.RawMessageDelivery == "false"
-            ' "$alarm_subscription" >/dev/null
-
           queue_url="$(
             aws sqs get-queue-url \
               --queue-name "$queue_name" \
@@ -1377,25 +1158,26 @@ jobs:
             --output json >"$alarm_queue_tags"
           jq -e \
             --arg queueArn "$queue_arn" \
-            --arg topicArn "$topic_arn" \
-            --arg keyArn "$key_arn" \
+            --arg eventRuleArn "$event_rule_arn" \
             --arg account "$AWS_ACCOUNT_ID" \
             '
               (.Attributes.Policy | fromjson).Statement as $statements
               | .Attributes.QueueArn == $queueArn
-              and .Attributes.KmsMasterKeyId == $keyArn
-              and .Attributes.KmsDataKeyReusePeriodSeconds == "300"
+              and .Attributes.SqsManagedSseEnabled == "true"
+              and (.Attributes | has("KmsMasterKeyId") | not)
+              and (.Attributes | has("KmsDataKeyReusePeriodSeconds") | not)
               and .Attributes.MessageRetentionPeriod == "1209600"
               and .Attributes.ReceiveMessageWaitTimeSeconds == "20"
               and .Attributes.VisibilityTimeout == "60"
               and ($statements | length) == 3
               and any(
                 $statements[];
-                .Sid == "AllowOnlyExactAlarmTopic"
-                and .Principal.Service == "sns.amazonaws.com"
+                .Sid == "AllowOnlyExactAlarmEventRule"
+                and .Effect == "Allow"
+                and .Principal.Service == "events.amazonaws.com"
                 and .Action == "sqs:SendMessage"
                 and .Resource == $queueArn
-                and .Condition.ArnEquals["aws:SourceArn"] == $topicArn
+                and .Condition.ArnEquals["aws:SourceArn"] == $eventRuleArn
                 and .Condition.StringEquals["aws:SourceAccount"]
                   == $account
               )
@@ -1403,14 +1185,17 @@ jobs:
                 $statements[];
                 .Sid == "DenyUnexpectedAlarmInjection"
                 and .Effect == "Deny"
+                and .Principal == "*"
                 and .Action == "sqs:SendMessage"
                 and .Resource == $queueArn
-                and .Condition.ArnNotLike["aws:SourceArn"] == $topicArn
+                and .Condition.ArnNotLike["aws:SourceArn"] == $eventRuleArn
               )
               and any(
                 $statements[];
                 .Sid == "DenyInsecureTransport"
                 and .Effect == "Deny"
+                and .Principal == "*"
+                and .Action == "sqs:*"
                 and .Resource == $queueArn
                 and (
                   .Condition.Bool["aws:SecureTransport"] | tostring
@@ -1429,6 +1214,69 @@ jobs:
               }
             ' "$alarm_queue_tags" >/dev/null
 
+          aws events describe-rule \
+            --name "$event_rule_name" \
+            --event-bus-name default \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_rule"
+          aws events list-targets-by-rule \
+            --rule "$event_rule_name" \
+            --event-bus-name default \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_targets"
+          aws events list-tags-for-resource \
+            --resource-arn "$event_rule_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_rule_tags"
+          jq -e \
+            --arg name "$event_rule_name" \
+            --arg arn "$event_rule_arn" \
+            --arg anyBlockArn "$any_block_alarm_arn" \
+            --arg apiRateArn "$api_rate_alarm_arn" \
+            --arg resolutionRateArn "$resolution_rate_alarm_arn" \
+            --arg anyBlock "$any_block_alarm" \
+            --arg apiRate "$api_rate_alarm" \
+            --arg resolutionRate "$resolution_rate_alarm" \
+            '
+              (.EventPattern | fromjson) as $pattern
+              | .Name == $name
+              and .Arn == $arn
+              and .EventBusName == "default"
+              and .State == "ENABLED"
+              and $pattern.source == ["aws.cloudwatch"]
+              and $pattern["detail-type"] == [
+                "CloudWatch Alarm State Change"
+              ]
+              and ($pattern.resources | sort) == (
+                [$anyBlockArn, $apiRateArn, $resolutionRateArn] | sort
+              )
+              and ($pattern.detail.alarmName | sort) == (
+                [$anyBlock, $apiRate, $resolutionRate] | sort
+              )
+              and ($pattern.detail.state.value | sort) == ["ALARM", "OK"]
+            ' "$alarm_event_rule" >/dev/null
+          jq -e \
+            --arg queueArn "$queue_arn" \
+            '
+              .Targets == [{
+                Arn: $queueArn,
+                Id: "EdgeAlarmArchiveQueue"
+              }]
+            ' "$alarm_event_targets" >/dev/null
+          jq -e \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            '
+              (.Tags | sort_by(.Key)) == (
+                [
+                  {Key:"Application", Value:$app},
+                  {Key:"Environment", Value:$environment},
+                  {Key:"EvidenceRoute", Value:"waf-alarm-archive"},
+                  {Key:"ManagedBy", Value:"CloudFormation"}
+                ] | sort_by(.Key)
+              )
+            ' "$alarm_event_rule_tags" >/dev/null
+
           aws cloudwatch describe-alarms \
             --alarm-names \
               "$any_block_alarm" \
@@ -1439,11 +1287,12 @@ jobs:
           jq -e \
             --arg app "$APP_NAME" \
             --arg environment "$EDGE_ENVIRONMENT" \
-            --arg topicArn "$topic_arn" \
+            --arg account "$AWS_ACCOUNT_ID" \
             '
               def normalized_alarm:
                 {
                   name: .AlarmName,
+                  arn: .AlarmArn,
                   actionsEnabled: .ActionsEnabled,
                   alarmActions: .AlarmActions,
                   okActions: .OKActions,
@@ -1463,9 +1312,13 @@ jobs:
               def expected($name; $rule):
                 {
                   name: ($app + "-" + $environment + $name),
-                  actionsEnabled: true,
-                  alarmActions: [$topicArn],
-                  okActions: [$topicArn],
+                  arn: (
+                    "arn:aws:cloudwatch:us-east-1:" + $account
+                    + ":alarm:" + $app + "-" + $environment + $name
+                  ),
+                  actionsEnabled: false,
+                  alarmActions: [],
+                  okActions: [],
                   insufficientDataActions: [],
                   namespace: "AWS/WAFV2",
                   metricName: "BlockedRequests",
@@ -1495,7 +1348,7 @@ jobs:
                   )
                 ] | sort_by(.name)
               )
-              and ((.CompositeAlarms // []) | length) == 0
+              and .CompositeAlarms == []
             ' "$waf_alarms" >/dev/null
           for alarm_name in \
               "$any_block_alarm" \
@@ -1536,13 +1389,13 @@ jobs:
           web_acl_id_sha256="$(
             printf '%s' "$web_acl_id" | sha256sum | awk '{print $1}'
           )"
-          evidence_key_arn_sha256="$(
-            printf '%s' "$key_arn" | sha256sum | awk '{print $1}'
+          event_rule_arn_sha256="$(
+            printf '%s' "$event_rule_arn" | sha256sum | awk '{print $1}'
           )"
           alarm_route_sha256="$(
             {
               printf '%s\n' "$log_group_arn"
-              printf '%s\n' "$topic_arn"
+              printf '%s\n' "$event_rule_arn"
               printf '%s\n' "$queue_arn"
               jq -r '.MetricAlarms | sort_by(.AlarmName)[] | .AlarmArn' \
                 "$waf_alarms"
@@ -1558,7 +1411,7 @@ jobs:
             --arg result "$result" \
             --arg webAclArnSha256 "$web_acl_arn_sha256" \
             --arg webAclIdSha256 "$web_acl_id_sha256" \
-            --arg evidenceKeyArnSha256 "$evidence_key_arn_sha256" \
+            --arg eventRuleArnSha256 "$event_rule_arn_sha256" \
             --arg alarmRouteSha256 "$alarm_route_sha256" \
             --arg clientToken "${EXECUTION_CLIENT_TOKEN:-}" \
             --arg runId "$GITHUB_RUN_ID" \
@@ -1594,11 +1447,16 @@ jobs:
                   requestSampling: false,
                   blockOnlyLogging: true,
                   redactedRequestFields: 6,
-                  customerManagedLogEncryption: true,
-                  evidenceKeyArnSha256: $evidenceKeyArnSha256,
+                  cloudWatchLogEncryption:
+                    "AWS-owned-service-managed",
+                  cloudWatchLogKmsKeyConfigured: false,
                   wafAlarms: 3,
-                  encryptedAlarmTopic: true,
-                  encryptedAlarmArchive: true,
+                  alarmActionsConfigured: false,
+                  alarmArchiveTransport: "EventBridge",
+                  eventBridgeAlarmArchive: true,
+                  eventRuleArnSha256: $eventRuleArnSha256,
+                  alarmArchiveEncryption: "SQS-managed-SSE",
+                  sqsManagedSseEnabled: true,
                   alarmArchiveRetentionDays: 14,
                   alarmRouteSha256: $alarmRouteSha256,
                   alarmDeliveryDrill: "not-run",
