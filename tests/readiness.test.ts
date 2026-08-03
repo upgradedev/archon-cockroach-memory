@@ -5077,7 +5077,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   }
   assert.match(
     bootstrap,
-    /Sid: ConfigureOnlyCloudFormationWafLogDelivery[\s\S]*?- logs:CreateLogDelivery\s+- logs:DeleteLogDelivery\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+- logs:PutResourcePolicy[\s\S]*?Resource: "\*"[\s\S]*?aws:RequestedRegion: us-east-1[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+    /Sid: ConfigureOnlyCloudFormationEdgeLogDelivery\s+Effect: Allow\s+Action:\s+- logs:CreateLogDelivery\s+- logs:DeleteResourcePolicy\s+- logs:DeleteLogDelivery\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+- logs:PutResourcePolicy\s+Resource: "\*"\s+Condition:\s+StringEquals:\s+aws:RequestedRegion: us-east-1\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(
     bootstrap,
