@@ -93,6 +93,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          image="cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0"
+          pulled=0
+          for attempt in 1 2 3; do
+            if docker pull "$image"; then
+              pulled=1
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+          test "$pulled" -eq 1
           docker run -d --name crdb -p 26257:26257 \
             cockroachdb/cockroach:v26.2.3@sha256:1073844226a6291b8a44fcb9cab5cb02035bb8fea3266dcc5dd021c0b34484a0 \
             start-single-node --insecure

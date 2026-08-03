@@ -1246,7 +1246,7 @@ const edgeFinalizeLifecycleValid =
   /aws events describe-rule/u.test(edgeLiveProofStep) &&
   /aws events list-targets-by-rule/u.test(edgeLiveProofStep) &&
   /aws cloudwatch describe-alarms/u.test(edgeLiveProofStep) &&
-  /\.Stacks\[0\]\.EnableTerminationProtection == true/u.test(
+  /\$current\.EnableTerminationProtection == true/u.test(
     edgeLiveProofStep,
   ) &&
   /result="finalized-and-proved"/u.test(edgeLiveProofStep) &&
