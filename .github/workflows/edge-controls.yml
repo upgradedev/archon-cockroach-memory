@@ -61,18 +61,206 @@ jobs:
         run: |
           set -euo pipefail
           jq -e '
+            def cents: (. * 100 | round);
             .incrementalFixedCostContract as $cost
+            | [
+                "initial",
+                "afterFirstBilledKmsRotation",
+                "afterSecondBilledKmsRotation"
+              ] as $scenarioIds
             | (
-                $cost.maximumAfterBilledKmsRotationsMonthlyUsd
-                < $cost.approvedCeilingMonthlyUsd
-              ) as $computedWithinCeiling
-            | $cost.currency == "USD"
+                reduce $cost.lineItems[] as $item (
+                  {};
+                  reduce $scenarioIds[] as $scenario (
+                    .;
+                    .[$scenario] = (
+                      (.[$scenario] // 0)
+                      + ($item.monthlyUsdByScenario[$scenario] | cents)
+                    )
+                  )
+                )
+              ) as $computedScenarioCents
+            | (
+                [
+                  $cost.scenarios[]
+                  | {
+                      key: .id,
+                      value: (.expectedMonthlyUsd | cents)
+                    }
+                ] | from_entries
+              ) as $declaredScenarioCents
+            | (
+                $declaredScenarioCents
+                | to_entries
+                | map(.value)
+                | max
+              ) as $computedMaximumCents
+            | $cost.schema
+                == "archon.aws.incremental-fixed-monthly-cost-contract"
+            and $cost.schemaVersion == 1
+            and $cost.scope
+              == "incremental foundation + two edge stacks; not total application cost"
+            and $cost.currency == "USD"
             and $cost.billingPeriod == "month"
-            and $cost.initialMonthlyUsd == 22.40
-            and $cost.maximumAfterBilledKmsRotationsMonthlyUsd == 24.40
-            and $cost.approvedCeilingMonthlyUsd == 26.00
-            and $computedWithinCeiling
-            and $cost.withinApprovedCeiling == $computedWithinCeiling
+            and $cost.pricingAsOf == "2026-08-03"
+            and $cost.officialPricingUrls == {
+              awsCloudWatch: "https://aws.amazon.com/cloudwatch/pricing/",
+              awsKms: "https://aws.amazon.com/kms/pricing/",
+              awsSecretsManager:
+                "https://aws.amazon.com/secrets-manager/pricing/",
+              awsWaf: "https://aws.amazon.com/waf/pricing/"
+            }
+            and ($cost.lineItems | length) == 5
+            and (
+              [$cost.lineItems[].id] | sort
+            ) == ([
+              "application-customer-managed-kms-key",
+              "cloudfront-web-acls",
+              "secrets-manager-secrets",
+              "standard-cloudwatch-alarm-metrics",
+              "web-acl-rules"
+            ] | sort)
+            and (
+              [
+                $cost.lineItems[]
+                | {
+                    key: .id,
+                    value: {
+                      quantity: .quantity,
+                      unitMonthlyUsd: .unitMonthlyUsd,
+                      pricingSource: .pricingSource,
+                      billedUnitsByScenario:
+                        (.billedUnitsByScenario // null)
+                    }
+                  }
+              ] | from_entries
+            ) == {
+              "application-customer-managed-kms-key": {
+                quantity: 1,
+                unitMonthlyUsd: 1.00,
+                pricingSource: "awsKms",
+                billedUnitsByScenario: {
+                  initial: 1,
+                  afterFirstBilledKmsRotation: 2,
+                  afterSecondBilledKmsRotation: 3
+                }
+              },
+              "cloudfront-web-acls": {
+                quantity: 2,
+                unitMonthlyUsd: 5.00,
+                pricingSource: "awsWaf",
+                billedUnitsByScenario: null
+              },
+              "secrets-manager-secrets": {
+                quantity: 2,
+                unitMonthlyUsd: 0.40,
+                pricingSource: "awsSecretsManager",
+                billedUnitsByScenario: null
+              },
+              "standard-cloudwatch-alarm-metrics": {
+                quantity: 6,
+                unitMonthlyUsd: 0.10,
+                pricingSource: "awsCloudWatch",
+                billedUnitsByScenario: null
+              },
+              "web-acl-rules": {
+                quantity: 10,
+                unitMonthlyUsd: 1.00,
+                pricingSource: "awsWaf",
+                billedUnitsByScenario: null
+              }
+            }
+            and all(
+              $cost.lineItems[] as $item;
+              ($item.quantity | type) == "number"
+              and $item.quantity > 0
+              and ($item.unitMonthlyUsd | type) == "number"
+              and $item.unitMonthlyUsd > 0
+              and (
+                $item.monthlyUsdByScenario | keys | sort
+              ) == ($scenarioIds | sort)
+              and all(
+                $scenarioIds[] as $scenario;
+                ($item.monthlyUsdByScenario[$scenario] | type)
+                  == "number"
+                and $item.monthlyUsdByScenario[$scenario] >= 0
+              )
+              and (
+                ($item | has("billedUnitsByScenario"))
+                == (
+                  $item.id
+                    == "application-customer-managed-kms-key"
+                )
+              )
+              and (
+                if ($item | has("billedUnitsByScenario"))
+                then (
+                  $item.billedUnitsByScenario | keys | sort
+                ) == ($scenarioIds | sort)
+                and all(
+                  $scenarioIds[] as $scenario;
+                  ($item.billedUnitsByScenario[$scenario] | type)
+                    == "number"
+                  and $item.billedUnitsByScenario[$scenario] > 0
+                  and (
+                    $item.monthlyUsdByScenario[$scenario] | cents
+                  ) == (
+                    $item.billedUnitsByScenario[$scenario]
+                    * $item.unitMonthlyUsd
+                    | cents
+                  )
+                )
+                else all(
+                  $scenarioIds[] as $scenario;
+                  ($item.monthlyUsdByScenario[$scenario] | cents)
+                    == ($item.quantity * $item.unitMonthlyUsd | cents)
+                )
+                end
+              )
+              and ($cost.officialPricingUrls | has($item.pricingSource))
+            )
+            and ($cost.scenarios | map(.id)) == $scenarioIds
+            and $cost.scenarios == [
+              {id: "initial", expectedMonthlyUsd: 22.40},
+              {
+                id: "afterFirstBilledKmsRotation",
+                expectedMonthlyUsd: 23.40
+              },
+              {
+                id: "afterSecondBilledKmsRotation",
+                expectedMonthlyUsd: 24.40
+              }
+            ]
+            and $declaredScenarioCents == {
+              initial: 2240,
+              afterFirstBilledKmsRotation: 2340,
+              afterSecondBilledKmsRotation: 2440
+            }
+            and $computedScenarioCents == $declaredScenarioCents
+            and (
+              $cost.maximumExpectedMonthlyUsd | cents
+            ) == $computedMaximumCents
+            and $computedMaximumCents == 2440
+            and ($cost.approvedCeilingMonthlyUsd | cents) == 2600
+            and $cost.ceilingComparison == "strictly-less-than"
+            and $computedMaximumCents
+              < ($cost.approvedCeilingMonthlyUsd | cents)
+            and $cost.variableUsageChargesExcluded == [
+              "AWS WAF requests",
+              "CloudWatch Logs ingestion and storage",
+              "Amazon S3 storage and requests",
+              "Amazon EventBridge events",
+              "data transfer"
+            ]
+            and $cost.externalAndOutOfScopeChargesExcluded == [
+              "taxes",
+              "application compute, API, and network services",
+              "CockroachDB Cloud",
+              "model and inference services",
+              "conditional regional alarm-routing control",
+              "optional FinOps human notification route",
+              "GitHub Actions"
+            ]
           ' aws/foundation-storage-migration-policy.json >/dev/null
 
       - name: Fail closed unless dispatch targets current green main
