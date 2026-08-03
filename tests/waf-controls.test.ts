@@ -233,7 +233,10 @@ test("edge and foundation workflows preserve approval and authority boundaries",
   assert.match(edge, /^name:\s*Manage AWS Edge Controls$/mu);
   assert.match(edge, /^\s{2}workflow_dispatch:/mu);
   assert.doesNotMatch(edge, /^\s{2}(push|pull_request|schedule):/mu);
-  assert.doesNotMatch(edge, /^\s+queue:/mu);
+  assert.match(
+    edge,
+    /(?:^|\r?\n)concurrency:\r?\n  group: aws-edge-controls\r?\n  cancel-in-progress: false\r?\n  queue: max/u
+  );
   assert.match(
     edge,
     /environment:\s*\$\{\{ inputs\.operation == 'cleanup' && 'edge-cleanup' \|\| 'edge-controls' \}\}/u
@@ -819,7 +822,7 @@ test("edge cleanup and finalize lifecycle is source-bound and restart-safe", () 
     )?.[0] ?? "";
   assert.match(
     lifecycleProof,
-    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+    /if: \(always\(\) && inputs\.operation == 'apply'\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u
   );
   assert.match(
     lifecycleProof,
@@ -873,7 +876,7 @@ test("edge cleanup and finalize lifecycle is source-bound and restart-safe", () 
     )?.[0] ?? "";
   assert.match(
     lifecycleMutation,
-    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+    /if: \(always\(\) && inputs\.operation == 'apply' && env\.EDGE_BOUND_STACK_ID != ''\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u
   );
   assert.match(
     lifecycleMutation,

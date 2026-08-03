@@ -409,7 +409,7 @@ test("readiness: edge cleanup and finalization have bounded restart-safe lifecyc
   );
   assert.match(
     preProtectionProofStep,
-    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+    /if: \(always\(\) && inputs\.operation == 'apply'\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u
   );
   assert.match(
     preProtectionProofStep,
@@ -417,7 +417,7 @@ test("readiness: edge cleanup and finalization have bounded restart-safe lifecyc
   );
   assert.match(
     setProtectionStep,
-    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u
+    /if: \(always\(\) && inputs\.operation == 'apply' && env\.EDGE_BOUND_STACK_ID != ''\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u
   );
   assert.match(setProtectionStep, /set-stack-policy/u);
   assert.match(setProtectionStep, /update-termination-protection/u);
@@ -871,7 +871,12 @@ test("readiness: foundation authority lifecycle is source-bound and non-self-del
     "while IFS= read -r encoded; do",
     'done <"$plan_queue"',
     "for ((attempt = 1; attempt <= 30; attempt++)); do",
-    "deletionRequestStarted: true",
+    "deletionRequestStarted: null",
+    "deletionRequestAccepted: false",
+    "deletionRequestOutcomeKnown: false",
+    ".[-1].deletionRequestStarted = true",
+    ".[-1].deletionRequestAccepted = true",
+    ".[-1].deletionRequestOutcomeKnown = true",
     "deleted: false",
     "absenceVerified: false",
     'error("missing in-flight plan journal")',
@@ -881,13 +886,24 @@ test("readiness: foundation authority lifecycle is source-bound and non-self-del
     assert.ok(abortStep.includes(expected), expected);
   }
   assert.doesNotMatch(abortStep, /done < <\(/u);
-  const abortJournalStart = abortStep.indexOf("deletionRequestStarted: true");
+  const abortDestructiveBoundary = abortStep.indexOf(
+    "destructive_actions_started=true"
+  );
+  const abortJournalStart = abortStep.indexOf("deletionRequestStarted: null");
   const abortPlanDelete = abortStep.indexOf(
     "aws cloudformation delete-change-set"
   );
   const abortJournalComplete = abortStep.indexOf(".[-1].deleted = true");
-  assert.ok(abortJournalStart >= 0 && abortJournalStart < abortPlanDelete);
-  assert.ok(abortPlanDelete < abortJournalComplete);
+  const abortJournalAccepted = abortStep.indexOf(
+    ".[-1].deletionRequestStarted = true"
+  );
+  assert.ok(
+    abortDestructiveBoundary >= 0 &&
+      abortDestructiveBoundary < abortJournalStart
+  );
+  assert.ok(abortJournalStart < abortPlanDelete);
+  assert.ok(abortPlanDelete < abortJournalAccepted);
+  assert.ok(abortJournalAccepted < abortJournalComplete);
   assert.match(abortFinalizer, /if: always\(\)/u);
   assert.match(abortFinalizer, /\.result == "abort-pending"/u);
   assert.match(abortFinalizer, /result: "abort-failed"/u);

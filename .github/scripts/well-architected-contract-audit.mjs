@@ -1552,11 +1552,21 @@ const foundationAbortContractValid =
   ) &&
   /done <"\$plan_queue"/u.test(foundationAbortStep) &&
   !/< <\(/u.test(foundationAbortStep) &&
-  /deletionRequestStarted: true,[\s\S]*?deleted: false,[\s\S]*?absenceVerified: false/u.test(
+  /deletionRequestStarted: null,[\s\S]*?deletionRequestAccepted: false,[\s\S]*?deletionRequestOutcomeKnown: false,[\s\S]*?deleted: false,[\s\S]*?absenceVerified: false/u.test(
     foundationAbortStep,
   ) &&
-  foundationAbortStep.indexOf("deletionRequestStarted: true") <
-    foundationAbortStep.indexOf("destructive_actions_started=true") &&
+  foundationAbortStep.indexOf("destructive_actions_started=true") >= 0 &&
+  foundationAbortStep.indexOf("destructive_actions_started=true") <
+    foundationAbortStep.indexOf("deletionRequestStarted: null") &&
+  foundationAbortStep.indexOf("deletionRequestStarted: null") <
+    foundationAbortStep.indexOf("aws cloudformation delete-change-set") &&
+  /\.\[-1\]\.deletionRequestStarted = true[\s\S]*?\.\[-1\]\.deletionRequestAccepted = true[\s\S]*?\.\[-1\]\.deletionRequestOutcomeKnown = true/u.test(
+    foundationAbortStep,
+  ) &&
+  foundationAbortStep.indexOf("aws cloudformation delete-change-set") <
+    foundationAbortStep.indexOf(".[-1].deletionRequestStarted = true") &&
+  foundationAbortStep.indexOf(".[-1].deletionRequestStarted = true") <
+    foundationAbortStep.indexOf(".[-1].deleted = true") &&
   /for \(\(attempt = 1; attempt <= 30; attempt\+\+\)\); do/u.test(
     foundationAbortStep,
   ) &&
@@ -1565,7 +1575,7 @@ const foundationAbortContractValid =
     foundationAbortStep,
   ) &&
   /aws cloudformation delete-change-set/u.test(foundationAbortStep) &&
-  /absenceVerified: true/u.test(foundationAbortStep) &&
+  /\.\[-1\]\.absenceVerified = true/u.test(foundationAbortStep) &&
   /remainingCount: 0/u.test(foundationAbortReceiptSource) &&
   /\)" = "\$target_projection_sha256"/u.test(foundationAbortStep) &&
   /\)" = \\\r?\n\s+"\$target_template_sha256"/u.test(
@@ -1677,7 +1687,7 @@ const foundationDestructiveTransitionsValid =
   /if: always\(\) && inputs\.operation == 'apply'/u.test(
     foundationPromotePolicyStep,
   ) &&
-  /StackStatus == "UPDATE_COMPLETE"[\s\S]*?StackStatus == "UPDATE_ROLLBACK_COMPLETE"[\s\S]*?CANDIDATE_TEMPLATE_DIGEST[\s\S]*?\(\$live == \$legacy\[0\] or \$live == \$target\[0\]\)[\s\S]*?candidate_present[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.json[\s\S]*?aws cloudformation set-stack-policy[\s\S]*?\(\.StackPolicyBody \| fromjson\) == \$expected\[0\][\s\S]*?test "\$candidate_present" = "true"/u.test(
+  /case "\$stack_status" in[\s\S]*?UPDATE_COMPLETE\|UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?terminal=true[\s\S]*?CANDIDATE_TEMPLATE_DIGEST[\s\S]*?\(\$live == \$legacy\[0\] or \$live == \$target\[0\]\)[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?if \[ "\$candidate_present" = "true" \]; then[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.json[\s\S]*?aws cloudformation set-stack-policy[\s\S]*?\(\.StackPolicyBody \| fromjson\) == \$expected\[0\][\s\S]*?test "\$candidate_present" = "true"/u.test(
     foundationPromotePolicyStep,
   ) &&
   foundationMigrationWorkflowSource.indexOf(
@@ -2028,7 +2038,7 @@ const edgeFinalizeLifecycleValid =
   /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u.test(
     edgeExecutePlanStep,
   ) &&
-  /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+  /if: \(always\(\) && inputs\.operation == 'apply'\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u.test(
     edgePreProtectionProofStep,
   ) &&
   /\(\.StackResourceSummaries \| length\) == 9/u.test(
@@ -2037,7 +2047,7 @@ const edgeFinalizeLifecycleValid =
   /sha256sum "\$lifecycle_template"[\s\S]*?EDGE_PROTECTION_TEMPLATE_DIGEST/u.test(
     edgePreProtectionProofStep,
   ) &&
-  /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+  /if: \(always\(\) && inputs\.operation == 'apply' && env\.EDGE_BOUND_STACK_ID != ''\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u.test(
     edgeSetProtectionStep,
   ) &&
   /aws cloudformation set-stack-policy/u.test(edgeSetProtectionStep) &&

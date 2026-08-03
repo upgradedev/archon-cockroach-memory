@@ -510,7 +510,12 @@ test("foundation migration cleanup and abort preserve authority for separate ret
     "while IFS= read -r encoded; do",
     'done <"$plan_queue"',
     "for ((attempt = 1; attempt <= 30; attempt++)); do",
-    "deletionRequestStarted: true",
+    "deletionRequestStarted: null",
+    "deletionRequestAccepted: false",
+    "deletionRequestOutcomeKnown: false",
+    ".[-1].deletionRequestStarted = true",
+    ".[-1].deletionRequestAccepted = true",
+    ".[-1].deletionRequestOutcomeKnown = true",
     "deleted: false",
     "absenceVerified: false",
     'error("missing in-flight plan journal")',
@@ -520,11 +525,19 @@ test("foundation migration cleanup and abort preserve authority for separate ret
     assert.ok(abort.includes(expected), expected);
   }
   assert.doesNotMatch(abort, /done < <\(/u);
-  const journalStarted = abort.indexOf("deletionRequestStarted: true");
+  const destructiveBoundary = abort.indexOf("destructive_actions_started=true");
+  const journalPrepared = abort.indexOf("deletionRequestStarted: null");
   const planDelete = abort.indexOf("aws cloudformation delete-change-set");
+  const journalAccepted = abort.indexOf(
+    ".[-1].deletionRequestStarted = true"
+  );
   const journalCompleted = abort.indexOf(".[-1].deleted = true");
-  assert.ok(journalStarted >= 0 && journalStarted < planDelete);
-  assert.ok(planDelete < journalCompleted);
+  assert.ok(
+    destructiveBoundary >= 0 && destructiveBoundary < journalPrepared
+  );
+  assert.ok(journalPrepared < planDelete);
+  assert.ok(planDelete < journalAccepted);
+  assert.ok(journalAccepted < journalCompleted);
   const receiptOffset = abort.lastIndexOf("          phase=receipt");
   assert.ok(receiptOffset >= 0);
   const receipt = abort.slice(receiptOffset);
@@ -1073,7 +1086,10 @@ function runAuthorityProof(fixture: AuthorityProofFixture) {
       JSON.stringify(expectedTemplate)
     ) as Record<string, unknown>;
     if (fixture.mutateTemplate) {
-      liveTemplate.Description = `${String(liveTemplate.Description)} drift`;
+      const metadata = liveTemplate.Metadata as Record<string, unknown>;
+      const terminalLifecycle =
+        metadata.TerminalLifecycleSafetyContract as Record<string, unknown>;
+      terminalLifecycle.SelfDeletionAllowed = true;
     }
     const liveCanonical = canonicalJson(liveTemplate);
     const representation = fixture.representation ?? "none";
