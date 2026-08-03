@@ -33,7 +33,7 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 213;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 216;
 export const EXPECTED_SETUP_NODE_STEPS = 31;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 9;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
@@ -222,6 +222,324 @@ export interface ReadinessReport {
   submissionEligible: boolean;
 }
 
+export interface IncrementalFixedCostEvaluation {
+  valid: boolean;
+  scenarioMonthlyUsd: Record<string, number>;
+  maximumMonthlyUsd: number | null;
+  approvedCeilingMonthlyUsd: number | null;
+  headroomMonthlyUsd: number | null;
+}
+
+const INCREMENTAL_FIXED_COST_SCENARIOS = [
+  "initial",
+  "afterFirstBilledKmsRotation",
+  "afterSecondBilledKmsRotation",
+] as const;
+
+type IncrementalFixedCostScenario =
+  (typeof INCREMENTAL_FIXED_COST_SCENARIOS)[number];
+
+const EXPECTED_INCREMENTAL_FIXED_COST_LINE_ITEMS = [
+  {
+    id: "cloudfront-web-acls",
+    quantity: 2,
+    unitMonthlyUsdCents: 500,
+    pricingSource: "awsWaf",
+  },
+  {
+    id: "web-acl-rules",
+    quantity: 10,
+    unitMonthlyUsdCents: 100,
+    pricingSource: "awsWaf",
+  },
+  {
+    id: "standard-cloudwatch-alarm-metrics",
+    quantity: 6,
+    unitMonthlyUsdCents: 10,
+    pricingSource: "awsCloudWatch",
+  },
+  {
+    id: "secrets-manager-secrets",
+    quantity: 2,
+    unitMonthlyUsdCents: 40,
+    pricingSource: "awsSecretsManager",
+  },
+  {
+    id: "application-customer-managed-kms-key",
+    quantity: 1,
+    unitMonthlyUsdCents: 100,
+    pricingSource: "awsKms",
+    billedUnitsByScenario: {
+      initial: 1,
+      afterFirstBilledKmsRotation: 2,
+      afterSecondBilledKmsRotation: 3,
+    },
+  },
+] as const;
+
+const EXPECTED_INCREMENTAL_FIXED_COST_TOTALS_CENTS: Record<
+  IncrementalFixedCostScenario,
+  number
+> = {
+  initial: 2240,
+  afterFirstBilledKmsRotation: 2340,
+  afterSecondBilledKmsRotation: 2440,
+};
+
+const EXPECTED_INCREMENTAL_FIXED_COST_PRICING_URLS = {
+  awsCloudWatch: "https://aws.amazon.com/cloudwatch/pricing/",
+  awsKms: "https://aws.amazon.com/kms/pricing/",
+  awsSecretsManager: "https://aws.amazon.com/secrets-manager/pricing/",
+  awsWaf: "https://aws.amazon.com/waf/pricing/",
+} as const;
+
+const EXPECTED_INCREMENTAL_FIXED_COST_VARIABLE_EXCLUSIONS = [
+  "AWS WAF requests",
+  "CloudWatch Logs ingestion and storage",
+  "Amazon S3 storage and requests",
+  "Amazon EventBridge events",
+  "data transfer",
+] as const;
+
+const EXPECTED_INCREMENTAL_FIXED_COST_EXTERNAL_EXCLUSIONS = [
+  "taxes",
+  "application compute, API, and network services",
+  "CockroachDB Cloud",
+  "model and inference services",
+  "conditional regional alarm-routing control",
+  "optional FinOps human notification route",
+  "GitHub Actions",
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactObjectKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): boolean {
+  const actual = Object.keys(value).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const expected = [...expectedKeys].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
+function sameOrderedStrings(
+  value: unknown,
+  expected: readonly string[]
+): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    value.every((entry, index) => entry === expected[index])
+  );
+}
+
+function usdToCents(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  const cents = Math.round(value * 100);
+  return Math.abs(value - cents / 100) < Number.EPSILON * 100
+    ? cents
+    : null;
+}
+
+export function evaluateIncrementalFixedCostContract(
+  value: unknown
+): IncrementalFixedCostEvaluation {
+  const invalid: IncrementalFixedCostEvaluation = {
+    valid: false,
+    scenarioMonthlyUsd: {},
+    maximumMonthlyUsd: null,
+    approvedCeilingMonthlyUsd: null,
+    headroomMonthlyUsd: null,
+  };
+  if (!isRecord(value) || !isRecord(value.incrementalFixedCostContract)) {
+    return invalid;
+  }
+
+  const contract = value.incrementalFixedCostContract;
+  const contractKeysValid = hasExactObjectKeys(contract, [
+    "schema",
+    "schemaVersion",
+    "scope",
+    "currency",
+    "billingPeriod",
+    "pricingAsOf",
+    "officialPricingUrls",
+    "lineItems",
+    "scenarios",
+    "maximumExpectedMonthlyUsd",
+    "approvedCeilingMonthlyUsd",
+    "ceilingComparison",
+    "variableUsageChargesExcluded",
+    "externalAndOutOfScopeChargesExcluded",
+  ]);
+
+  const pricingUrls = isRecord(contract.officialPricingUrls)
+    ? contract.officialPricingUrls
+    : {};
+  const pricingUrlsValid =
+    hasExactObjectKeys(
+      pricingUrls,
+      Object.keys(EXPECTED_INCREMENTAL_FIXED_COST_PRICING_URLS)
+    ) &&
+    Object.entries(EXPECTED_INCREMENTAL_FIXED_COST_PRICING_URLS).every(
+      ([key, expected]) => pricingUrls[key] === expected
+    );
+
+  const totalsCents: Record<IncrementalFixedCostScenario, number> = {
+    initial: 0,
+    afterFirstBilledKmsRotation: 0,
+    afterSecondBilledKmsRotation: 0,
+  };
+  const lineItems = Array.isArray(contract.lineItems)
+    ? contract.lineItems
+    : [];
+  let lineItemsValid =
+    lineItems.length === EXPECTED_INCREMENTAL_FIXED_COST_LINE_ITEMS.length;
+
+  for (const [index, expected] of
+    EXPECTED_INCREMENTAL_FIXED_COST_LINE_ITEMS.entries()) {
+    const item = lineItems[index];
+    if (!isRecord(item)) {
+      lineItemsValid = false;
+      continue;
+    }
+    const expectedBilledUnitsByScenario =
+      "billedUnitsByScenario" in expected
+        ? expected.billedUnitsByScenario
+        : undefined;
+    const hasScenarioUnits = expectedBilledUnitsByScenario !== undefined;
+    lineItemsValid &&=
+      hasExactObjectKeys(item, [
+        "id",
+        "description",
+        "quantity",
+        "unitMonthlyUsd",
+        "pricingSource",
+        ...(hasScenarioUnits ? ["billedUnitsByScenario"] : []),
+        "monthlyUsdByScenario",
+      ]) &&
+      item.id === expected.id &&
+      typeof item.description === "string" &&
+      item.description.trim().length > 0 &&
+      item.quantity === expected.quantity &&
+      usdToCents(item.unitMonthlyUsd) === expected.unitMonthlyUsdCents &&
+      item.pricingSource === expected.pricingSource;
+
+    const declaredMonthly = isRecord(item.monthlyUsdByScenario)
+      ? item.monthlyUsdByScenario
+      : {};
+    lineItemsValid &&= hasExactObjectKeys(
+      declaredMonthly,
+      INCREMENTAL_FIXED_COST_SCENARIOS
+    );
+    const declaredBilledUnits = isRecord(item.billedUnitsByScenario)
+      ? item.billedUnitsByScenario
+      : {};
+    if (hasScenarioUnits) {
+      lineItemsValid &&= hasExactObjectKeys(
+        declaredBilledUnits,
+        INCREMENTAL_FIXED_COST_SCENARIOS
+      );
+    }
+
+    for (const scenario of INCREMENTAL_FIXED_COST_SCENARIOS) {
+      const billedUnits = hasScenarioUnits
+        ? declaredBilledUnits[scenario]
+        : item.quantity;
+      const expectedBilledUnits =
+        expectedBilledUnitsByScenario?.[scenario] ?? expected.quantity;
+      const unitsValid =
+        typeof billedUnits === "number" &&
+        Number.isInteger(billedUnits) &&
+        billedUnits === expectedBilledUnits;
+      lineItemsValid &&= unitsValid;
+      if (!unitsValid) continue;
+      const computedMonthlyCents =
+        expected.unitMonthlyUsdCents * billedUnits;
+      totalsCents[scenario] += computedMonthlyCents;
+      lineItemsValid &&=
+        usdToCents(declaredMonthly[scenario]) === computedMonthlyCents;
+    }
+  }
+
+  const scenarios = Array.isArray(contract.scenarios)
+    ? contract.scenarios
+    : [];
+  let scenariosValid =
+    scenarios.length === INCREMENTAL_FIXED_COST_SCENARIOS.length;
+  for (const [index, scenarioId] of INCREMENTAL_FIXED_COST_SCENARIOS.entries()) {
+    const scenario = scenarios[index];
+    scenariosValid &&=
+      isRecord(scenario) &&
+      hasExactObjectKeys(scenario, ["id", "expectedMonthlyUsd"]) &&
+      scenario.id === scenarioId &&
+      totalsCents[scenarioId] ===
+        EXPECTED_INCREMENTAL_FIXED_COST_TOTALS_CENTS[scenarioId] &&
+      usdToCents(scenario.expectedMonthlyUsd) === totalsCents[scenarioId];
+  }
+
+  const maximumCents = Math.max(...Object.values(totalsCents));
+  const declaredMaximumCents = usdToCents(
+    contract.maximumExpectedMonthlyUsd
+  );
+  const ceilingCents = usdToCents(contract.approvedCeilingMonthlyUsd);
+  const maximumAndCeilingValid =
+    declaredMaximumCents === maximumCents &&
+    maximumCents === 2440 &&
+    ceilingCents === 2600 &&
+    maximumCents < ceilingCents &&
+    contract.ceilingComparison === "strictly-less-than";
+
+  const scenarioMonthlyUsd = Object.fromEntries(
+    INCREMENTAL_FIXED_COST_SCENARIOS.map((scenario) => [
+      scenario,
+      totalsCents[scenario] / 100,
+    ])
+  );
+  const valid =
+    contractKeysValid &&
+    contract.schema === "archon.aws.incremental-fixed-monthly-cost-contract" &&
+    contract.schemaVersion === 1 &&
+    contract.scope ===
+      "incremental foundation + two edge stacks; not total application cost" &&
+    contract.currency === "USD" &&
+    contract.billingPeriod === "month" &&
+    contract.pricingAsOf === "2026-08-03" &&
+    pricingUrlsValid &&
+    lineItemsValid &&
+    scenariosValid &&
+    maximumAndCeilingValid &&
+    sameOrderedStrings(
+      contract.variableUsageChargesExcluded,
+      EXPECTED_INCREMENTAL_FIXED_COST_VARIABLE_EXCLUSIONS
+    ) &&
+    sameOrderedStrings(
+      contract.externalAndOutOfScopeChargesExcluded,
+      EXPECTED_INCREMENTAL_FIXED_COST_EXTERNAL_EXCLUSIONS
+    );
+
+  return {
+    valid,
+    scenarioMonthlyUsd,
+    maximumMonthlyUsd: maximumCents / 100,
+    approvedCeilingMonthlyUsd:
+      ceilingCents === null ? null : ceilingCents / 100,
+    headroomMonthlyUsd:
+      ceilingCents === null ? null : (ceilingCents - maximumCents) / 100,
+  };
+}
+
 function path(rel: string): string {
   return join(ROOT, rel);
 }
@@ -232,6 +550,32 @@ function has(rel: string): boolean {
 
 function read(rel: string): string {
   return has(rel) ? readFileSync(path(rel), "utf8") : "";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function extractNamedWorkflowStep(source: string, name: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)      - name: ${escapeRegExp(name)}\\r?\\n[\\s\\S]*?(?=\\r?\\n      - name: |$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
+}
+
+function extractNamedWorkflowJob(source: string, id: string): string {
+  return (
+    source.match(
+      new RegExp(
+        `(?:^|\\r?\\n)  ${escapeRegExp(id)}:\\r?\\n[\\s\\S]*?(?=\\r?\\n  [A-Za-z0-9_-]+:\\r?\\n|$)`,
+        "u"
+      )
+    )?.[0] ?? ""
+  );
 }
 
 export function generatedArtifactPaths(root = ROOT): string[] {
@@ -1986,6 +2330,228 @@ function sourceChecks(): SourceCheck[] {
   const edgeControlsWorkflow = read(
     ".github/workflows/edge-controls.yml"
   );
+  const edgeInspectStackStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Inspect current edge stack state"
+  );
+  const edgeCleanupStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Clean up exact recoverable edge shell"
+  );
+  const edgeCleanupReceiptMarker =
+    'receipt_next="${RUNNER_TEMP:?}/edge-cleanup-receipt.json"';
+  const edgeCleanupReceiptOffset = edgeCleanupStep.indexOf(
+    edgeCleanupReceiptMarker
+  );
+  const edgeCleanupReceiptSource =
+    edgeCleanupReceiptOffset >= 0
+      ? edgeCleanupStep.slice(edgeCleanupReceiptOffset)
+      : "";
+  const edgeCreatePlanStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Create or reuse exact edge plan"
+  );
+  const edgeLoadPlanStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Load exact existing edge plan"
+  );
+  const edgeRequirePlanStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Require exact non-replacement WAF evidence plan"
+  );
+  const edgeExecutePlanStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Execute exact inspected edge plan"
+  );
+  const edgePreProtectionProofStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Prove exact deployed stack before lifecycle protection"
+  );
+  const edgeSetProtectionStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Set exact edge stack lifecycle protections"
+  );
+  const edgeLiveProofStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Prove exact deployed WAF controls"
+  );
+  const edgeHistoricalFinalizeStep = extractNamedWorkflowStep(
+    edgeControlsWorkflow,
+    "Prove historical finalize protection without current-control claims"
+  );
+  const edgeLifecycleOperationsValid =
+    /environment: \$\{\{ inputs\.operation == 'cleanup' && 'edge-cleanup' \|\| 'edge-controls' \}\}/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /github-edge-cleanup/u.test(edgeControlsWorkflow) &&
+    /options:\r?\n\s+- plan\r?\n\s+- apply\r?\n\s+- verify\r?\n\s+- cleanup\r?\n\s+- finalize/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /expected_confirmation="APPLY-\$\{environment_upper\}-EDGE-CONTROLS"/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /expected_confirmation="CLEANUP-\$\{environment_upper\}-EDGE-CONTROLS"/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /expected_confirmation="FINALIZE-\$\{environment_upper\}-EDGE-CONTROLS"/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /plan\|verify\)\r?\n\s+test -z "\$CONFIRMATION"/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /^[ \t]+REVIEW_IN_PROGRESS\)\r?$/mu.test(edgeInspectStackStep) &&
+    /^[ \t]+apply\|cleanup\) ;;\r?$/mu.test(edgeInspectStackStep) &&
+    /EDGE_CLEANUP_PRIOR_STATUS=REVIEW_IN_PROGRESS/u.test(
+      edgeInspectStackStep
+    ) &&
+    /^[ \t]+ROLLBACK_COMPLETE\)\r?$/mu.test(edgeInspectStackStep) &&
+    /test "\$OPERATION" = "cleanup"/u.test(edgeInspectStackStep) &&
+    /EDGE_CLEANUP_PRIOR_STATUS=ROLLBACK_COMPLETE/u.test(
+      edgeInspectStackStep
+    ) &&
+    /if \$priorStatus == "REVIEW_IN_PROGRESS"\s+then \(\.StackResourceSummaries \| length\) == 0\s+else \$priorStatus == "ROLLBACK_COMPLETE"\s+and all\(\s+\.StackResourceSummaries\[\];\s+\.ResourceStatus == "DELETE_COMPLETE"/u.test(
+      edgeCleanupStep
+    ) &&
+    /"arn:aws:cloudformation:us-east-1:" \+ \$account/u.test(
+      edgeCleanupStep
+    ) &&
+    /\(\(\.Stacks\[0\]\.RoleARN \/\/ null\) == null\)/u.test(
+      edgeCleanupStep
+    ) &&
+    /\.Stacks\[0\]\.EnableTerminationProtection == false/u.test(
+      edgeCleanupStep
+    ) &&
+    /capture\(\s+"\^operation=edge-controls environment="/u.test(
+      edgeCleanupStep
+    ) &&
+    /git fetch --no-tags --depth=1 origin "\$cleanup_source_commit"/u.test(
+      edgeCleanupStep
+    ) &&
+    /"\$\{cleanup_source_commit\}:aws\/edge-waf\.yaml"/u.test(
+      edgeCleanupStep
+    ) &&
+    /sha256sum "\$cleanup_source_template"/u.test(edgeCleanupStep) &&
+    /sha256sum "\$cleanup_template"/u.test(edgeCleanupStep) &&
+    /final_stack[\s\S]*?final_resources[\s\S]*?final_change_sets[\s\S]*?final_change_set[\s\S]*?aws cloudformation delete-stack/u.test(
+      edgeCleanupStep
+    ) &&
+    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$stack_id"/u.test(
+      edgeCleanupStep
+    ) &&
+    /grep -Fq "does not exist" "\$cleanup_error"/u.test(
+      edgeCleanupStep
+    ) &&
+    /stackDeletedAndNotFound: true/u.test(edgeCleanupReceiptSource) &&
+    /stackIdSha256: \$stackIdSha256/u.test(edgeCleanupReceiptSource) &&
+    /clientRequestTokenSha256: \$cleanupTokenSha256/u.test(
+      edgeCleanupReceiptSource
+    ) &&
+    !/--arg stackId "\$stack_id"|AWS_ACCOUNT_ID|arn:aws:/u.test(
+      edgeCleanupReceiptSource
+    ) &&
+    !/(?:filter-log-events|get-log-events|start-query|set-alarm-state)/u.test(
+      edgeCleanupStep
+    ) &&
+    /if \[ "\$OPERATION" = "finalize" \] \|\|/u.test(
+      edgeInspectStackStep
+    ) &&
+    /EDGE_APPLY_MODE=finalize/u.test(edgeInspectStackStep) &&
+    /deployed_sha:/u.test(edgeControlsWorkflow) &&
+    /gh api --paginate --slurp[\s\S]*?head_sha=\$\{sha\}[\s\S]*?\.\[\]\.workflow_runs\[\][\s\S]*?prove_green_sha "\$DEPLOYED_SHA"/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /repos\/\$GITHUB_REPOSITORY\/compare\/\$\{DEPLOYED_SHA\}\.\.\.\$\{TARGET_SHA\}/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /\.base_commit\.sha == \$deployed[\s\S]*?\.merge_base_commit\.sha == \$deployed[\s\S]*?\.head_commit\.sha == \$target[\s\S]*?\.status == "ahead"[\s\S]*?\.ahead_by > 0[\s\S]*?\.behind_by == 0/u.test(
+      edgeControlsWorkflow
+    ) &&
+    /if: inputs\.operation == 'plan'/u.test(edgeCreatePlanStep) &&
+    /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u.test(
+      edgeLoadPlanStep
+    ) &&
+    /if: inputs\.operation == 'plan' \|\| \(inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'\)/u.test(
+      edgeRequirePlanStep
+    ) &&
+    /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u.test(
+      edgeExecutePlanStep
+    ) &&
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+      edgePreProtectionProofStep
+    ) &&
+    /\(\.StackResourceSummaries \| length\) == 9/u.test(
+      edgePreProtectionProofStep
+    ) &&
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+      edgeSetProtectionStep
+    ) &&
+    /set-stack-policy/u.test(edgeSetProtectionStep) &&
+    /update-termination-protection/u.test(edgeSetProtectionStep) &&
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'verify' \|\| \(inputs\.operation == 'finalize' && env\.EDGE_CURRENT_SEMANTICS_MATCH == 'true'\)/u.test(
+      edgeLiveProofStep
+    ) &&
+    /\(\.StackResourceSummaries \| length\) == 9/u.test(
+      edgeLiveProofStep
+    ) &&
+    /aws wafv2 get-web-acl/u.test(edgeLiveProofStep) &&
+    /aws wafv2 get-logging-configuration/u.test(edgeLiveProofStep) &&
+    /aws logs describe-log-groups/u.test(edgeLiveProofStep) &&
+    /aws logs describe-resource-policies/u.test(edgeLiveProofStep) &&
+    /aws events describe-rule/u.test(edgeLiveProofStep) &&
+    /aws events list-targets-by-rule/u.test(edgeLiveProofStep) &&
+    /aws cloudwatch describe-alarms/u.test(edgeLiveProofStep) &&
+    /stackPolicyProtected: true/u.test(edgeLiveProofStep) &&
+    /terminationProtection: true/u.test(edgeLiveProofStep) &&
+    /historical-finalized-protection-only/u.test(edgeHistoricalFinalizeStep) &&
+    /currentLiveControlsProved:\s*false/u.test(edgeHistoricalFinalizeStep) &&
+    !/git fetch|origin\/main/u.test(
+      edgeExecutePlanStep.slice(
+        edgeExecutePlanStep.indexOf("aws cloudformation execute-change-set")
+      )
+    ) &&
+    /alarmDeliveryDrill: "not-run"/u.test(edgeLiveProofStep) &&
+    /humanPagingDestination: "not-configured-by-this-stack"/u.test(
+      edgeLiveProofStep
+    ) &&
+    !/(?:filter-log-events|get-log-events|start-query|set-alarm-state)/u.test(
+      `${edgeSetProtectionStep}\n${edgeLiveProofStep}`
+    ) &&
+    !/cloudformation (?:create|describe|execute)-change-set/u.test(
+      `${edgePreProtectionProofStep}\n${edgeSetProtectionStep}\n${edgeLiveProofStep}`
+    ) &&
+    /"operations":\s*"plan\|apply\|verify\|cleanup\|finalize"/u.test(
+      wellArchitectedContract
+    ) &&
+    /"cleanupReceiptSanitized":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"cleanupProtectedEnvironment":\s*"edge-cleanup"/u.test(
+      wellArchitectedContract
+    ) &&
+    wellArchitectedContract.includes(
+      '"roleSeparation": "EdgeControlRole cannot list change sets or delete stacks; EdgeCleanupRole cannot create, execute, or delete change sets, set stack policy, change termination protection, pass roles, or assume roles"'
+    ) &&
+    /"cleanupFinalPreDeleteRevalidation":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"finalizeCreatesChangeSet":\s*false/u.test(
+      wellArchitectedContract
+    ) &&
+    /"restartSafeProtectionRepair":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"finalizeHistoricalSourceAllowed":\s*true/u.test(
+      wellArchitectedContract
+    ) &&
+    /"historicalFinalizeClaimsCurrentControls":\s*false/u.test(
+      wellArchitectedContract
+    ) &&
+    /"postExecuteMutableMainRead":\s*false/u.test(
+      wellArchitectedContract
+    ) &&
+    /"updatePlanShapes":\s*\[[\s\S]*?nine Add[\s\S]*?eight Add[\s\S]*?Modify-only/u.test(
+      wellArchitectedContract
+    );
   const finOpsControlsWorkflow = read(
     ".github/workflows/finops-controls.yml"
   );
@@ -1998,12 +2564,220 @@ function sourceChecks(): SourceCheck[] {
   const foundationMigrationAuthority = read(
     "aws/foundation-migration-authority.sh"
   );
+  const foundationMigrationRunbook = read(
+    "docs/operations/FOUNDATION_STORAGE_MIGRATION.md"
+  );
+  const foundationAuthorizeStep = extractNamedWorkflowStep(
+    foundationMigrationWorkflow,
+    "Fail closed unless the dispatch targets current green main"
+  );
+  const foundationFailedPlanCleanupStep = extractNamedWorkflowStep(
+    foundationMigrationWorkflow,
+    "Delete an unverified foundation migration plan"
+  );
+  const foundationAbortJob = extractNamedWorkflowJob(
+    foundationMigrationWorkflow,
+    "abort-authority"
+  );
+  const foundationAbortStep = extractNamedWorkflowStep(
+    foundationAbortJob,
+    "Prove stable foundation, clean safe plans, and delete authority"
+  );
+  const foundationApplyStep = extractNamedWorkflowStep(
+    foundationMigrationWorkflow,
+    "Apply target stack policy and execute the inspected plan"
+  );
+  const foundationRetireStep = extractNamedWorkflowStep(
+    extractNamedWorkflowJob(foundationMigrationWorkflow, "retire-authority"),
+    "Verify and retire the exact authority stack"
+  );
+  const foundationAbortReceiptOffset =
+    foundationAbortStep.lastIndexOf("          phase=receipt");
+  const foundationAbortReceiptSource =
+    foundationAbortReceiptOffset >= 0
+      ? foundationAbortStep.slice(foundationAbortReceiptOffset)
+      : "";
+  const foundationPhaseZeroSource =
+    foundationMigrationRunbook.match(
+      /## Phase 0: create the one-time authority[\s\S]*?```bash\r?\n([\s\S]*?)\r?\n```/u
+    )?.[1] ?? "";
+  const foundationLifecycleOperationsValid =
+    /SOURCE_COMMIT=\$\(git rev-parse HEAD\)/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /AUTHORITY_TEMPLATE_SHA256=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template-sha256\s*\)/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /authority_template=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template\s*\)/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /ParameterKey=SourceCommit,ParameterValue=\$\{SOURCE_COMMIT\}/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /ParameterKey=AuthorityTemplateSha256,ParameterValue=\$\{AUTHORITY_TEMPLATE_SHA256\}/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /Key=SourceCommit,Value=\$\{SOURCE_COMMIT\}/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /Key=AuthorityTemplateSha256,Value=\$\{AUTHORITY_TEMPLATE_SHA256\}/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    /--no-enable-termination-protection/u.test(
+      foundationPhaseZeroSource
+    ) &&
+    !/--role-arn/u.test(foundationPhaseZeroSource) &&
+    /\(\$template\.Resources \| keys\) == \["FoundationMigrationRole"\]/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /\.Stacks\[0\]\.EnableTerminationProtection == false/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /\(\(\.Stacks\[0\]\.RoleARN \/\/ null\) == null\)/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /cloudformation:ListChangeSets/u.test(foundationMigrationAuthority) &&
+    /cloudformation:ListStackResources/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /No authority stack has been created as part of[\s\S]*?repository work/u.test(
+      foundationMigrationRunbook
+    ) &&
+    /pre-binding contract cannot be[\s\S]*?administrator must delete it and[\s\S]*?recreate it from Phase 0/u.test(
+      foundationMigrationRunbook
+    ) &&
+    /always\(\)/u.test(foundationFailedPlanCleanupStep) &&
+    /steps\.create_plan\.outcome == 'failure'/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /steps\.load_plan\.outcome == 'failure'/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /steps\.exact_plan\.outcome == 'failure'/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /\.ExecutionStatus == "AVAILABLE"/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /aws cloudformation delete-change-set/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /test "\$absent" = "true"/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /test "\$after_projection_sha256" = "\$before_projection_sha256"/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /changeSetArnSha256: \$arnSha256/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /cleanup_change_set_id="\$\{CHANGE_SET_ID:-\}"[\s\S]*?--change-set-name "\$CHANGE_SET_NAME"[\s\S]*?\(\$plans \| length\) == 1[\s\S]*?recoveredByDeterministicName/u.test(
+      foundationFailedPlanCleanupStep
+    ) &&
+    /options:\r?\n\s+- plan\r?\n\s+- apply\r?\n\s+- verify\r?\n\s+- abort\r?\n\s+- retire/u.test(
+      foundationMigrationWorkflow
+    ) &&
+    /ABORT-FOUNDATION-MIGRATION-AND-RETIRE-AUTHORITY/u.test(
+      foundationAuthorizeStep
+    ) &&
+    /test "\$GITHUB_SHA" = "\$TARGET_SHA"/u.test(
+      foundationAuthorizeStep
+    ) &&
+    /test "\$\(git rev-parse origin\/main\)" = "\$TARGET_SHA"/u.test(
+      foundationAuthorizeStep
+    ) &&
+    /needs: authorize/u.test(foundationAbortJob) &&
+    /Configure exact one-time migration authority/u.test(
+      foundationAbortJob
+    ) &&
+    !/Configure permanent narrow foundation authority/u.test(
+      foundationAbortJob
+    ) &&
+    /foundation-migration-authority\.sh verify-intrinsic/u.test(
+      foundationAbortStep
+    ) &&
+    /\.creationBindingVerified == true/u.test(foundationAbortStep) &&
+    /\.resourceCount == 1/u.test(foundationAbortStep) &&
+    /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u.test(
+      foundationAbortStep
+    ) &&
+    /contents\/aws\/bootstrap-oidc\.yaml\?ref=\$\{plan_source\}/u.test(
+      foundationAbortStep
+    ) &&
+    /aws cloudformation delete-change-set/u.test(foundationAbortStep) &&
+    /remainingCount: 0/u.test(foundationAbortReceiptSource) &&
+    /\)" = "\$target_projection_sha256"/u.test(foundationAbortStep) &&
+    /\)" = \\\r?\n\s+"\$target_template_sha256"/u.test(
+      foundationAbortStep
+    ) &&
+    /\)" = "\$target_policy_sha256"/u.test(foundationAbortStep) &&
+    /\)" = "\$target_resources_sha256"/u.test(foundationAbortStep) &&
+    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id"/u.test(
+      foundationAbortStep
+    ) &&
+    (foundationAbortStep.match(/aws cloudformation delete-stack/gu) ?? [])
+      .length === 1 &&
+    /grep -Fq "NoSuchEntity" "\$role_error"/u.test(
+      foundationAbortStep
+    ) &&
+    /stackDeleted: true/u.test(foundationAbortReceiptSource) &&
+    /roleDeleted: true/u.test(foundationAbortReceiptSource) &&
+    foundationAbortReceiptOffset >= 0 &&
+    !/AWS_ACCOUNT_ID|arn:aws:/u.test(foundationAbortReceiptSource) &&
+    !/cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u.test(
+      foundationAbortStep
+    ) &&
+    /execution_started=true\s+aws cloudformation execute-change-set/u.test(
+      foundationApplyStep
+    ) &&
+    /UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?set-stack-policy/u.test(
+      foundationApplyStep
+    ) &&
+    /foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?env -i[\s\S]*?render-template/u.test(
+      foundationAbortStep
+    ) &&
+    (foundationAbortStep.match(/\(\.Summaries \/\/ \[\]\) \| length == 0/gu) ?? [])
+      .length >= 2 &&
+    /cloudformation:DetectStackResourceDrift/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /prove-foundation-storage-controls\.sh[\s\S]*?detect-stack-resource-drift[\s\S]*?StackResourceDriftStatus == "IN_SYNC"[\s\S]*?fresh_retirement_proof_sha256[\s\S]*?aws cloudformation delete-stack/u.test(
+      foundationRetireStep
+    ) &&
+    /finalAuthorityProofBoundImmediatelyBeforeDeletion: true/u.test(
+      foundationRetireStep
+    ) &&
+    !/\n\s+(?:aws|git)\s/u.test(
+      foundationRetireStep.slice(
+        foundationRetireStep.lastIndexOf(
+          "bash aws/foundation-migration-authority.sh verify-intrinsic"
+        ),
+        foundationRetireStep.indexOf(
+          "aws cloudformation delete-stack",
+          foundationRetireStep.lastIndexOf(
+            "bash aws/foundation-migration-authority.sh verify-intrinsic"
+          )
+        )
+      )
+    );
   const foundationStorageProof = read(
     "aws/prove-foundation-storage-controls.sh"
   );
   const foundationStorageMigrationPolicy = read(
     "aws/foundation-storage-migration-policy.json"
   );
+  let parsedFoundationStorageMigrationPolicy: unknown;
+  try {
+    parsedFoundationStorageMigrationPolicy = JSON.parse(
+      foundationStorageMigrationPolicy
+    );
+  } catch {
+    parsedFoundationStorageMigrationPolicy = undefined;
+  }
+  const incrementalFixedCostEvaluation =
+    evaluateIncrementalFixedCostContract(
+      parsedFoundationStorageMigrationPolicy
+    );
   const bootstrapStackPolicy = read("aws/bootstrap-stack-policy.json");
   const edgeStackPolicy = read("aws/edge-stack-policy.json");
   const foundationPromotionRole =
@@ -4240,8 +5014,8 @@ function sourceChecks(): SourceCheck[] {
         /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u.test(
           supplyChainWorkflow
         ) &&
-        /rawFindings == 3/u.test(supplyChainWorkflow) &&
-        /compatibilityFindings == 3/u.test(supplyChainWorkflow) &&
+        /rawFindings == 4/u.test(supplyChainWorkflow) &&
+        /compatibilityFindings == 4/u.test(supplyChainWorkflow) &&
         /rawFindings == 4/u.test(supplyChainWorkflow) &&
         /approvedBuildLicenseFindings == 4/u.test(supplyChainWorkflow) &&
         /blockingFindings == 0/u.test(supplyChainWorkflow) &&
@@ -4260,6 +5034,9 @@ function sourceChecks(): SourceCheck[] {
         /EXPECTED_TARGET = "aws\/template\.yaml"/u.test(
           trivyIacCompatibilityValidator
         ) &&
+        /EXPECTED_BOOTSTRAP_TARGET = "aws\/bootstrap-oidc\.yaml"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
         /CloudFrontDefaultCertificate: true/u.test(
           trivyIacCompatibilityValidator
         ) &&
@@ -4276,6 +5053,13 @@ function sourceChecks(): SourceCheck[] {
           trivyIacCompatibilityValidator
         ) &&
         /keyRotation: true/u.test(trivyIacCompatibilityValidator) &&
+        /legacyCloudFrontStandardLogging: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /sseS3Aes256: true/u.test(trivyIacCompatibilityValidator) &&
+        /customerManagedKeyAbsent: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
         /captured Trivy version must be/u.test(
           trivyIacCompatibilityValidator
         ) &&
@@ -4851,11 +5635,20 @@ function sourceChecks(): SourceCheck[] {
       "The WA-05 protected rotation, exact IAM boundary, behavioral failure tests, hot refresh, or actionable failure receipt contract is incomplete."
     ),
     sourceCheck(
+      "product.lifecycle-fixed-cost-ceiling",
+      "Production Readiness",
+      incrementalFixedCostEvaluation.valid,
+      "The incremental foundation + two edge stacks fixed-cost contract independently recomputes $22.40/$23.40/$24.40 across the initial and two billed KMS-rotation scenarios, with a $24.40 maximum strictly below the $26.00 ceiling.",
+      "The itemized lifecycle fixed-cost contract, official pricing sources, exclusions, scenario arithmetic, or strict sub-$26.00 ceiling is invalid."
+    ),
+    sourceCheck(
       "product.protected-foundation-and-edge-delivery",
       "Production Readiness",
-      /name:\s*Foundation Storage Migration/u.test(
-        foundationMigrationWorkflow
-      ) &&
+      incrementalFixedCostEvaluation.valid &&
+        foundationLifecycleOperationsValid &&
+        /name:\s*Foundation Storage Migration/u.test(
+          foundationMigrationWorkflow
+        ) &&
         /- retire/u.test(foundationMigrationWorkflow) &&
         /environment:\s*bootstrap/u.test(
           foundationMigrationWorkflow
@@ -4888,7 +5681,7 @@ function sourceChecks(): SourceCheck[] {
         /"FinOpsControlRole"/u.test(
           foundationStorageMigrationPolicy
         ) &&
-        /render-trust\|render-policy\|render-template\|verify/u.test(
+        /render-trust\|render-policy\|render-template\|render-template-sha256\|verify\|verify-intrinsic/u.test(
           foundationMigrationAuthority
         ) &&
         /migrationAuthorityRetired/u.test(foundationStorageProof) &&
@@ -4900,10 +5693,13 @@ function sourceChecks(): SourceCheck[] {
         /LogicalResourceId\/FinOpsControlRole/u.test(
           bootstrapStackPolicy
         ) &&
+        edgeLifecycleOperationsValid &&
         /name:\s*Manage AWS Edge Controls/u.test(
           edgeControlsWorkflow
         ) &&
-        /environment:\s*edge-controls/u.test(edgeControlsWorkflow) &&
+        /environment:\s*\$\{\{ inputs\.operation == 'cleanup' && 'edge-cleanup' \|\| 'edge-controls' \}\}/u.test(
+          edgeControlsWorkflow
+        ) &&
         /set-stack-policy/u.test(edgeControlsWorkflow) &&
         /update-termination-protection/u.test(edgeControlsWorkflow) &&
         /Prove exact deployed WAF controls/u.test(edgeControlsWorkflow) &&
@@ -4933,8 +5729,8 @@ function sourceChecks(): SourceCheck[] {
         /Resolve the exact staging edge-stack handoff/u.test(deploy) &&
         /Resolve the exact production edge-stack handoff/u.test(deploy) &&
         !/CLOUDFRONT_WEB_ACL_ARN:\s*\$\{\{\s*vars\./u.test(deploy),
-      "The exact-SHA foundation migration, retained KMS/secret/control roles, mandatory WAF association, direct edge-stack handoff, one-time-authority retirement, and sanitized live proofs are source-complete and fail closed.",
-      "The protected foundation migration, mandatory WAF handoff, role/stack protection, or sanitized live-proof contract is incomplete."
+      "The exact-SHA foundation migration has source-bound Phase 0 creation, same-run failed-plan cleanup, bounded no-foundation-mutation abort and authority retirement; edge delivery adds mandatory five-rule WAF association, recoverable-shell cleanup, restart-safe finalization, direct handoff, sanitized live proofs, and the recomputed lifecycle cost ceiling.",
+      "The source-bound foundation Phase 0/abort lifecycle, protected migration, mandatory five-rule WAF handoff, bounded edge cleanup/finalize lifecycle, role/stack protection, recomputed lifecycle cost ceiling, or sanitized live-proof contract is incomplete."
     ),
     sourceCheck(
       "product.separated-finops-control-plane",
@@ -6167,13 +6963,13 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u.test(
+        /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u.test(
+        /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u.test(
           foundationPromotionRole
         ) &&
         /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
@@ -6189,7 +6985,7 @@ function sourceChecks(): SourceCheck[] {
           foundationPromotionRole.match(
             /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
           ) ?? []
-        ).length === 25 &&
+        ).length === 29 &&
         (
           foundationPromotionRole.match(
             /Action: securityhub:ListTagsForResource/gmu

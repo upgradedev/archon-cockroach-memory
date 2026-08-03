@@ -782,8 +782,8 @@ jobs:
                "sarifDriver":"0.72.0"
              } and
              .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
-             .rawFindings == 3 and
-             .compatibilityFindings == 3 and
+             .rawFindings == 4 and
+             .compatibilityFindings == 4 and
              .blockingFindings == 0 and
              .acceptedWaivers == 0 and
              .effectiveExitCode == 0 and
@@ -791,25 +791,30 @@ jobs:
                "applicationTemplate":"aws/template.yaml",
                "foundationTemplate":"aws/bootstrap-oidc.yaml"
              } and
-             (.compatibilities | length) == 3 and
+             (.compatibilities | length) == 4 and
              [.compatibilities[].ruleId] ==
-               ["AWS-0011","AWS-0013","AWS-0132"] and
+               ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
+             [.compatibilities[].target] == [
+               "aws/template.yaml",
+               "aws/template.yaml",
+               "aws/template.yaml",
+               "aws/bootstrap-oidc.yaml"
+             ] and
              all(.compatibilities[];
                .findingType == "CloudFormation Security Check" and
                .severity == "HIGH" and
-               .target == "aws/template.yaml" and
                (.scannerResource |
-                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+                 test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
                (.sourceRange as $range |
                  ($range.startLine | type) == "number" and
                  ($range.endLine | type) == "number" and
                  $range.startLine > 0 and
                  $range.endLine >= $range.startLine and
                  ($range.startLine | floor) == $range.startLine and
-                 ($range.endLine | floor) == $range.endLine and
-                 .scannerResource ==
-                   ("aws/template.yaml:" +
-                    ($range.startLine | tostring) + "-" +
+                  ($range.endLine | floor) == $range.endLine and
+                  .scannerResource ==
+                    (.target + ":" +
+                     ($range.startLine | tostring) + "-" +
                     ($range.endLine | tostring)))) and
              .compatibilities[0].logicalResource == "Distribution" and
              .compatibilities[0].sourceProperty ==
@@ -843,6 +848,21 @@ jobs:
                "importExportBound":true,
                "denyUnencryptedWrites":true,
                "denyUnexpectedKeyWrites":true
+             } and
+             .compatibilities[3].logicalResource ==
+               "CloudFrontAccessLogBucket" and
+             .compatibilities[3].sourceProperty ==
+               "SSEAlgorithm: AES256" and
+             .compatibilities[3].controls == {
+               "legacyCloudFrontStandardLogging":true,
+               "sseS3Aes256":true,
+               "customerManagedKeyAbsent":true,
+               "bucketOwnerPreferred":true,
+               "publicAccessBlocked":true,
+               "versioningEnabled":true,
+               "serverAccessLogging":true,
+               "lifecycleRetention":true,
+               "denyInsecureTransport":true
              }' \
             "$REPORT_DIR/trivy-iac-status.json" >/dev/null
           test -s "$REPORT_DIR/guard-tests.junit.xml"
@@ -851,25 +871,36 @@ jobs:
           jq -e '.Results | type == "array"' \
             "$REPORT_DIR/trivy-iac.json" >/dev/null
           jq -e '
-            length == 3 and
-            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            length == 4 and
+            map(.ruleId) ==
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
             map(.namespace) == [
               "builtin.aws.cloudfront.aws0011",
               "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132",
               "builtin.aws.s3.aws0132"
+            ] and
+            map(.target) == [
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/bootstrap-oidc.yaml"
+            ] and
+            map(.logicalResource) == [
+              "Distribution",
+              "Distribution",
+              "SpaBucket",
+              "CloudFrontAccessLogBucket"
             ] and
             all(.[];
               .findingType == "CloudFormation Security Check" and
               .legacyAlias == null and
               .severity == "HIGH" and
               .status == "FAIL" and
-              .target == "aws/template.yaml" and
-              (.logicalResource == "Distribution" or
-               .logicalResource == "SpaBucket") and
               (.scannerResource |
-                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+                test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
               .scannerResource ==
-                ("aws/template.yaml:" +
+                (.target + ":" +
                  (.startLine | tostring) + "-" +
                  (.endLine | tostring)))
           ' \
@@ -878,18 +909,18 @@ jobs:
             "$REPORT_DIR/trivy-iac-blocking-findings.json" >/dev/null
           jq -e '
             .version == "2.1.0" and
-            ([.runs[].results[]] | length) == 3 and
+            ([.runs[].results[]] | length) == 4 and
             ([.runs[].results[].ruleId] | sort) ==
-              ["AWS-0011","AWS-0013","AWS-0132"]
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"]
           ' "$REPORT_DIR/trivy-iac.sarif" >/dev/null
           test -s "$REPORT_DIR/waiver-ledger.sha256"
           {
             echo "### Enforced Trivy IaC policy"
             echo
-            echo "- Raw findings: **3**"
-            echo "- Exact compatibility findings: **3**"
+            echo "- Raw findings: **4**"
+            echo "- Exact compatibility findings: **4**"
             echo "- Blocking findings: **0**"
-            echo "- Boundaries: Trivy 0.72.0 HIGH \`AWS-0011\` and \`AWS-0013\` on \`Distribution\`, plus \`AWS-0132\` on \`SpaBucket\`; mandatory WAF, HTTPS-only paths, and the imported rotating foundation CMK are source-validated."
+            echo "- Boundaries: Trivy 0.72.0 HIGH \`AWS-0011\` and \`AWS-0013\` on \`Distribution\`, plus \`AWS-0132\` on \`SpaBucket\` and the legacy CloudFront standard-log bucket; mandatory WAF, HTTPS-only paths, the imported rotating foundation CMK, and the required SSE-S3/AES256 log boundary are source-validated."
             echo "- Raw JSON and SARIF retain the finding; no Trivy ignore or security waiver is used."
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -1426,8 +1457,8 @@ jobs:
               "sarifDriver":"0.72.0"
             } and
             .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
-            .rawFindings == 3 and
-            .compatibilityFindings == 3 and
+            .rawFindings == 4 and
+            .compatibilityFindings == 4 and
             .blockingFindings == 0 and
             .acceptedWaivers == 0 and
             .effectiveExitCode == 0 and
@@ -1435,15 +1466,21 @@ jobs:
               "applicationTemplate":"aws/template.yaml",
               "foundationTemplate":"aws/bootstrap-oidc.yaml"
             } and
-            (.compatibilities | length) == 3 and
+            (.compatibilities | length) == 4 and
             [.compatibilities[].ruleId] ==
-              ["AWS-0011","AWS-0013","AWS-0132"] and
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
             [.compatibilities[].logicalResource] ==
-              ["Distribution","Distribution","SpaBucket"] and
+              ["Distribution","Distribution","SpaBucket",
+               "CloudFrontAccessLogBucket"] and
+            [.compatibilities[].target] == [
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/bootstrap-oidc.yaml"
+            ] and
             all(.compatibilities[];
               .findingType == "CloudFormation Security Check" and
               .severity == "HIGH" and
-              .target == "aws/template.yaml" and
               (.reason | type) == "string" and
               (.reason | length) > 0 and
               (.sourceRange as $range |
@@ -1454,7 +1491,7 @@ jobs:
                 ($range.startLine | floor) == $range.startLine and
                 ($range.endLine | floor) == $range.endLine and
                 .scannerResource ==
-                  ("aws/template.yaml:" +
+                  (.target + ":" +
                    ($range.startLine | tostring) + "-" +
                    ($range.endLine | tostring)))) and
             .compatibilities[0].sourceProperty ==
@@ -1486,28 +1523,55 @@ jobs:
               "importExportBound":true,
               "denyUnencryptedWrites":true,
               "denyUnexpectedKeyWrites":true
+            } and
+            .compatibilities[3].sourceProperty ==
+              "SSEAlgorithm: AES256" and
+            .compatibilities[3].controls == {
+              "legacyCloudFrontStandardLogging":true,
+              "sseS3Aes256":true,
+              "customerManagedKeyAbsent":true,
+              "bucketOwnerPreferred":true,
+              "publicAccessBlocked":true,
+              "versioningEnabled":true,
+              "serverAccessLogging":true,
+              "lifecycleRetention":true,
+              "denyInsecureTransport":true
             }
           ' "$status" >/dev/null
           jq -e \
             --slurpfile status "$status" '
-            length == 3 and
-            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            length == 4 and
+            map(.ruleId) ==
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
             map(.namespace) == [
               "builtin.aws.cloudfront.aws0011",
               "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132",
               "builtin.aws.s3.aws0132"
             ] and
             map(.logicalResource) ==
-              ["Distribution","Distribution","SpaBucket"] and
+              ["Distribution","Distribution","SpaBucket",
+               "CloudFrontAccessLogBucket"] and
+            map(.target) == [
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/bootstrap-oidc.yaml"
+            ] and
             all(.[];
               . as $finding |
               ($status[0].compatibilities |
-                map(select(.ruleId == $finding.ruleId)) | .[0]) as $contract |
+                map(select(
+                  .ruleId == $finding.ruleId and
+                  .target == $finding.target and
+                  .logicalResource == $finding.logicalResource
+                ))) as $contracts |
+              ($contracts | length) == 1 and
+              ($contracts[0] as $contract |
               .findingType == "CloudFormation Security Check" and
               .legacyAlias == null and
               .severity == "HIGH" and
               .status == "FAIL" and
-              .target == "aws/template.yaml" and
               .findingType == $contract.findingType and
               .severity == $contract.severity and
               .target == $contract.target and
@@ -1519,8 +1583,8 @@ jobs:
               .reason == $contract.reason and
               .controls == $contract.controls and
               .scannerResource ==
-                ("aws/template.yaml:" + (.startLine | tostring) + "-" +
-                 (.endLine | tostring)))
+                (.target + ":" + (.startLine | tostring) + "-" +
+                 (.endLine | tostring))))
           ' "$compatibility" >/dev/null
           jq -e 'length == 0' "$blocking" >/dev/null
           jq -e \
@@ -1534,18 +1598,28 @@ jobs:
                 ($run.tool.driver.rules | length) == 3 and
                 ([$run.tool.driver.rules[].id] | sort) ==
                   ["AWS-0011","AWS-0013","AWS-0132"] and
-                ($run.results | length) == 3 and
+                ($run.results | length) == 4 and
                 ([$run.results[].ruleId] | sort) ==
-                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                  ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
                 all($run.results[];
                   . as $result |
-                  ($status[0].compatibilities |
-                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
-                  ($compatibility[0] |
-                    map(select(.ruleId == $result.ruleId)) | .[0]) as $finding |
                   $result.level == "error" and
                   ($result.locations | length) == 1 and
                   ($result.locations[0].physicalLocation as $location |
+                    ($status[0].compatibilities |
+                      map(select(
+                        .ruleId == $result.ruleId and
+                        .target == $location.artifactLocation.uri
+                      ))) as $contracts |
+                    ($compatibility[0] |
+                      map(select(
+                        .ruleId == $result.ruleId and
+                        .target == $location.artifactLocation.uri
+                      ))) as $findings |
+                    ($contracts | length) == 1 and
+                    ($findings | length) == 1 and
+                    ($contracts[0] as $contract |
+                     $findings[0] as $finding |
                     $location.artifactLocation.uri ==
                       $contract.target and
                     $location.artifactLocation.uri == $finding.target and
@@ -1556,7 +1630,7 @@ jobs:
                       $contract.sourceRange.endLine and
                     $location.region.endLine == $finding.endLine and
                     $location.region.startColumn == 1 and
-                    $location.region.endColumn == 1)))
+                    $location.region.endColumn == 1))))
             ' "$raw" >/dev/null
           jq \
             --slurpfile status "$status" '
@@ -1592,8 +1666,8 @@ jobs:
                 "version":1,
                 "mode":
                   "blocking-exact-source-validated-parser-compatibilities",
-                "rawFindings":3,
-                "compatibilityFindings":3,
+                "rawFindings":4,
+                "compatibilityFindings":4,
                 "blockingFindings":0,
                 "acceptedWaivers":0,
                 "rawEvidence":"trivy-iac.sarif"
@@ -1843,8 +1917,8 @@ jobs:
                "sarifDriver":"0.72.0"
              } and
              .thresholdSeverities == ["MEDIUM","HIGH","CRITICAL"] and
-             .rawFindings == 3 and
-             .compatibilityFindings == 3 and
+             .rawFindings == 4 and
+             .compatibilityFindings == 4 and
              .blockingFindings == 0 and
              .acceptedWaivers == 0 and
              .effectiveExitCode == 0 and
@@ -1853,17 +1927,23 @@ jobs:
                "foundationTemplate":"aws/bootstrap-oidc.yaml"
              } and
              [.compatibilities[].ruleId] ==
-               ["AWS-0011","AWS-0013","AWS-0132"] and
+               ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
              [.compatibilities[].logicalResource] ==
-               ["Distribution","Distribution","SpaBucket"] and
+               ["Distribution","Distribution","SpaBucket",
+                "CloudFrontAccessLogBucket"] and
+             [.compatibilities[].target] == [
+               "aws/template.yaml",
+               "aws/template.yaml",
+               "aws/template.yaml",
+               "aws/bootstrap-oidc.yaml"
+             ] and
              all(.compatibilities[];
                .findingType == "CloudFormation Security Check" and
                .severity == "HIGH" and
-               .target == "aws/template.yaml" and
                (.scannerResource |
-                 test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+                 test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
                .scannerResource ==
-                 ("aws/template.yaml:" +
+                 (.target + ":" +
                   (.sourceRange.startLine | tostring) + "-" +
                   (.sourceRange.endLine | tostring)))' \
             "$EVIDENCE_ROOT/iac/trivy-iac-status.json" >/dev/null
@@ -1874,35 +1954,55 @@ jobs:
               | select(.Status == "FAIL")
               | {target:$result.Target, finding:.}
             ] as $findings
-            | ($findings | length) == 3 and
-              ([$findings[].finding.ID] | sort) ==
-                ["AWS-0011","AWS-0013","AWS-0132"] and
+            | ($findings | length) == 4 and
+              ([$findings[] | (.target + "|" + .finding.ID)] | sort) == [
+                "aws/bootstrap-oidc.yaml|AWS-0132",
+                "aws/template.yaml|AWS-0011",
+                "aws/template.yaml|AWS-0013",
+                "aws/template.yaml|AWS-0132"
+              ] and
               all($findings[];
-                .target == "aws/template.yaml" and
                 .finding.Type == "CloudFormation Security Check" and
                 (.finding.AVDID == null) and
                 .finding.Severity == "HIGH" and
                 (.finding.CauseMetadata.Resource |
-                  test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")))
+                  test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+                .finding.CauseMetadata.Resource ==
+                  (.target + ":" +
+                   (.finding.CauseMetadata.StartLine | tostring) + "-" +
+                   (.finding.CauseMetadata.EndLine | tostring)))
           ' "$EVIDENCE_ROOT/iac/trivy-iac.json" >/dev/null
           jq -e '
-            length == 3 and
-            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            length == 4 and
+            map(.ruleId) ==
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
             map(.namespace) == [
               "builtin.aws.cloudfront.aws0011",
               "builtin.aws.cloudfront.aws0013",
+              "builtin.aws.s3.aws0132",
               "builtin.aws.s3.aws0132"
+            ] and
+            map(.target) == [
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/bootstrap-oidc.yaml"
+            ] and
+            map(.logicalResource) == [
+              "Distribution",
+              "Distribution",
+              "SpaBucket",
+              "CloudFrontAccessLogBucket"
             ] and
             all(.[];
               .findingType == "CloudFormation Security Check" and
               .legacyAlias == null and
               .severity == "HIGH" and
               .status == "FAIL" and
-              .target == "aws/template.yaml" and
               (.scannerResource |
-                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
+                test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
               .scannerResource ==
-                ("aws/template.yaml:" +
+                (.target + ":" +
                  (.startLine | tostring) + "-" +
                  (.endLine | tostring)))
           ' \
@@ -1922,24 +2022,29 @@ jobs:
                          . == "AWS-0013" or
                          . == "AWS-0132")] | sort) ==
                   ["AWS-0011","AWS-0013","AWS-0132"] and
-                ($run.results | length) == 3 and
+                ($run.results | length) == 4 and
                 ([$run.results[].ruleId] | sort) ==
-                  ["AWS-0011","AWS-0013","AWS-0132"] and
+                  ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
                 all($run.results[];
                   . as $result |
-                  ($status[0].compatibilities |
-                    map(select(.ruleId == $result.ruleId)) | .[0]) as $contract |
                   $result.level == "error" and
                   ($result.locations | length) == 1 and
                   ($result.locations[0].physicalLocation as $location |
+                    ($status[0].compatibilities |
+                      map(select(
+                        .ruleId == $result.ruleId and
+                        .target == $location.artifactLocation.uri
+                      ))) as $contracts |
+                    ($contracts | length) == 1 and
+                    ($contracts[0] as $contract |
                     $location.artifactLocation.uri ==
-                      "aws/template.yaml" and
+                      $contract.target and
                     $location.region.startLine ==
                       $contract.sourceRange.startLine and
                     $location.region.endLine ==
                       $contract.sourceRange.endLine and
                     $location.region.startColumn == 1 and
-                    $location.region.endColumn == 1)))
+                    $location.region.endColumn == 1))))
             ' "$EVIDENCE_ROOT/iac/trivy-iac.sarif" >/dev/null
           test "$(
             sed -n '1p' "$EVIDENCE_ROOT/iac/trivy-version.txt"
@@ -2177,19 +2282,28 @@ jobs:
           trivy_scanner_resources="$(
             jq -ec '[.compatibilities[] | {
               ruleId,
+              target,
               logicalResource,
               scannerResource
             }]' \
               "$EVIDENCE_ROOT/iac/trivy-iac-status.json"
           )"
           jq -e '
-            length == 3 and
-            map(.ruleId) == ["AWS-0011","AWS-0013","AWS-0132"] and
+            length == 4 and
+            map(.ruleId) ==
+              ["AWS-0011","AWS-0013","AWS-0132","AWS-0132"] and
+            map(.target) == [
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/template.yaml",
+              "aws/bootstrap-oidc.yaml"
+            ] and
             map(.logicalResource) ==
-              ["Distribution","Distribution","SpaBucket"] and
+              ["Distribution","Distribution","SpaBucket",
+               "CloudFrontAccessLogBucket"] and
             all(.[];
               .scannerResource |
-                test("^aws/template\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
+                test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$"))
           ' <<<"$trivy_scanner_resources" >/dev/null
 
           jq -n \
@@ -2253,13 +2367,16 @@ jobs:
                     version: "0.72.0",
                     ruleIds: ["AWS-0011", "AWS-0013", "AWS-0132"],
                     severity: "HIGH",
-                    target: "aws/template.yaml",
+                    targets: [
+                      "aws/template.yaml",
+                      "aws/bootstrap-oidc.yaml"
+                    ],
                     scannerResources: $trivyScannerResources,
-                    rawFindings: 3,
-                    compatibilityFindings: 3,
+                    rawFindings: 4,
+                    compatibilityFindings: 4,
                     blockingFindings: 0,
                     disposition:
-                      "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+                      "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, the imported rotating foundation CMK, and the required legacy CloudFront log-bucket SSE-S3 boundary are source-validated parser compatibilities, not waivers."
                   },
                   trivySbomLicenseCompatibility: {
                     analyzer: "Trivy",
@@ -2390,13 +2507,16 @@ jobs:
                 "version":"0.72.0",
                 "ruleIds":["AWS-0011","AWS-0013","AWS-0132"],
                 "severity":"HIGH",
-                "target":"aws/template.yaml",
+                "targets":[
+                  "aws/template.yaml",
+                  "aws/bootstrap-oidc.yaml"
+                ],
                 "scannerResources":$trivyScannerResources,
-                "rawFindings":3,
-                "compatibilityFindings":3,
+                "rawFindings":4,
+                "compatibilityFindings":4,
                 "blockingFindings":0,
                 "disposition":
-                  "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, and the imported rotating foundation CMK are source-validated parser compatibilities, not waivers."
+                  "Raw JSON/SARIF retained; mandatory WAF, the CloudFront default-certificate constraint, the imported rotating foundation CMK, and the required legacy CloudFront log-bucket SSE-S3 boundary are source-validated parser compatibilities, not waivers."
               } and
               .enforcement.trivySbomLicenseCompatibility == {
                 "analyzer":"Trivy",
@@ -2492,6 +2612,6 @@ jobs:
             echo "| Receipt SHA-256 | \`$RECEIPT_SHA256\` |"
             echo "| Provenance attestation | GitHub artifact attestation |"
             echo "| Enforcement | Blocking; zero unwaived findings; exact actionlint, Trivy IaC, and build-license compatibility dispositions retained in raw evidence |"
-            echo "| Trivy IaC | raw=3; compatibility=3; blocking=0; Trivy 0.72.0 HIGH AWS-0011/AWS-0013/AWS-0132 with source-validated WAF, TLS, and CMK contracts |"
+            echo "| Trivy IaC | raw=4; compatibility=4; blocking=0; Trivy 0.72.0 HIGH AWS-0011/AWS-0013/AWS-0132 with source-validated WAF, TLS, CMK, and legacy CloudFront log-bucket SSE-S3 contracts |"
             echo "| Trivy SBOM | vulnerabilities=0; raw licenses=4; exact build-only compatibility=4; blocking=0; Syft and lockfile bound |"
           } >>"$GITHUB_STEP_SUMMARY"

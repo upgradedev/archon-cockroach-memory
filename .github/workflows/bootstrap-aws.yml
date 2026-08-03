@@ -537,13 +537,23 @@ jobs:
             ' "$CHANGE_SET_FILE" >/dev/null
 
           receipt_next="${RUNNER_TEMP:?}/foundation-plan-receipt.json"
+          template_version_id_sha256="$(
+            printf '%s' "$TEMPLATE_VERSION_ID" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          change_set_arn_sha256="$(
+            printf '%s' "$CHANGE_SET_ID" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           jq -n \
             --arg operation "$OPERATION" \
             --arg commit "$TARGET_SHA" \
             --arg digest "$TEMPLATE_DIGEST" \
-            --arg version "$TEMPLATE_VERSION_ID" \
+            --arg versionIdSha256 "$template_version_id_sha256" \
             --arg changeSet "$CHANGE_SET_NAME" \
-            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg changeSetArnSha256 "$change_set_arn_sha256" \
             --slurpfile baseline "$BASELINE_PROOF_FILE" \
             '{
               ok: ($operation == "plan"),
@@ -557,11 +567,11 @@ jobs:
               commit: $commit,
               template: {
                 sha256: $digest,
-                versionId: $version
+                versionIdSha256: $versionIdSha256
               },
               changeSet: {
                 name: $changeSet,
-                id: $changeSetId,
+                arnSha256: $changeSetArnSha256,
                 changes: [{
                   action: "Modify",
                   logicalResourceId: "ArtifactBucket",
@@ -580,13 +590,18 @@ jobs:
         run: |
           set -euo pipefail
           record_cleanup() {
-            local deleted execution_status result receipt_next
+            local change_set_arn_sha256 deleted execution_status result receipt_next
             result="$1"
             deleted="$2"
             execution_status="$3"
+            change_set_arn_sha256="$(
+              printf '%s' "$CHANGE_SET_ID" |
+                sha256sum |
+                awk '{print $1}'
+            )"
             receipt_next="${RUNNER_TEMP:?}/foundation-unverified-plan-receipt.json"
             jq \
-              --arg changeSetId "$CHANGE_SET_ID" \
+              --arg changeSetArnSha256 "$change_set_arn_sha256" \
               --arg result "$result" \
               --arg executionStatus "$execution_status" \
               --argjson deleted "$deleted" \
@@ -594,7 +609,7 @@ jobs:
                 ok: false,
                 result: $result,
                 unverifiedPlan: {
-                  id: $changeSetId,
+                  arnSha256: $changeSetArnSha256,
                   executionStatus: (
                     if $executionStatus == ""
                     then null
@@ -814,10 +829,15 @@ jobs:
           fi
 
           receipt_next="${RUNNER_TEMP:?}/foundation-native-rollback-receipt.json"
+          change_set_arn_sha256="$(
+            printf '%s' "$CHANGE_SET_ID" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           jq -n \
             --arg commit "$TARGET_SHA" \
             --arg changeSet "$CHANGE_SET_NAME" \
-            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg changeSetArnSha256 "$change_set_arn_sha256" \
             --arg clientToken "$client_token" \
             --arg result "$result" \
             --arg outcome "$outcome_kind" \
@@ -832,7 +852,7 @@ jobs:
               commit: $commit,
               changeSet: {
                 name: $changeSet,
-                id: $changeSetId,
+                arnSha256: $changeSetArnSha256,
                 clientRequestToken: $clientToken,
                 executeApiAccepted: $executeAccepted
               },
@@ -1122,14 +1142,28 @@ jobs:
                 --query 'Stacks[0].StackStatus' \
                 --output text 2>/dev/null || printf 'UNKNOWN'
             )"
+            change_set_arn_sha256="$(
+              printf '%s' "$CHANGE_SET_ID" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            recovery_change_set_arn_sha256=""
+            if [ -n "$recovery_change_set_id" ]; then
+              recovery_change_set_arn_sha256="$(
+                printf '%s' "$recovery_change_set_id" |
+                  sha256sum |
+                  awk '{print $1}'
+              )"
+            fi
             receipt_next="${RUNNER_TEMP:?}/foundation-proof-failure-receipt.json"
             jq -n \
               --arg commit "$TARGET_SHA" \
               --arg changeSet "$CHANGE_SET_NAME" \
-              --arg changeSetId "$CHANGE_SET_ID" \
+              --arg changeSetArnSha256 "$change_set_arn_sha256" \
               --arg result "$recovery_result" \
               --arg stackStatus "$recovery_status" \
-              --arg recoveryChangeSetId "$recovery_change_set_id" \
+              --arg recoveryChangeSetArnSha256 \
+                "$recovery_change_set_arn_sha256" \
               --argjson recovered "$recovered" \
               --slurpfile recovery "$recovery_proof" \
               '{
@@ -1139,15 +1173,15 @@ jobs:
                 commit: $commit,
                 changeSet: {
                   name: $changeSet,
-                  id: $changeSetId
+                  arnSha256: $changeSetArnSha256
                 },
                 recovery: {
                   recovered: $recovered,
                   stackStatus: $stackStatus,
-                  changeSetId: (
-                    if $recoveryChangeSetId == ""
+                  changeSetArnSha256: (
+                    if $recoveryChangeSetArnSha256 == ""
                     then null
-                    else $recoveryChangeSetId
+                    else $recoveryChangeSetArnSha256
                     end
                   ),
                   proof: (
@@ -1161,12 +1195,22 @@ jobs:
           fi
 
           receipt_next="${RUNNER_TEMP:?}/foundation-apply-receipt.json"
+          template_version_id_sha256="$(
+            printf '%s' "$TEMPLATE_VERSION_ID" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          change_set_arn_sha256="$(
+            printf '%s' "$CHANGE_SET_ID" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           jq -n \
             --arg commit "$TARGET_SHA" \
             --arg digest "$TEMPLATE_DIGEST" \
-            --arg version "$TEMPLATE_VERSION_ID" \
+            --arg versionIdSha256 "$template_version_id_sha256" \
             --arg changeSet "$CHANGE_SET_NAME" \
-            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg changeSetArnSha256 "$change_set_arn_sha256" \
             --slurpfile proof "$proof" \
             '{
               ok: true,
@@ -1175,11 +1219,11 @@ jobs:
               commit: $commit,
               template: {
                 sha256: $digest,
-                versionId: $version
+                versionIdSha256: $versionIdSha256
               },
               changeSet: {
                 name: $changeSet,
-                id: $changeSetId,
+                arnSha256: $changeSetArnSha256,
                 action: "Modify",
                 logicalResourceId: "ArtifactBucket",
                 replacement: false

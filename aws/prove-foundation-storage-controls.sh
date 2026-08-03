@@ -41,10 +41,6 @@ key_file="$work_dir/key.json"
 rotation_file="$work_dir/rotation.json"
 alias_key_file="$work_dir/alias-key.json"
 key_policy_file="$work_dir/key-policy.json"
-log_key_file="$work_dir/log-key.json"
-log_rotation_file="$work_dir/log-rotation.json"
-log_alias_key_file="$work_dir/log-alias-key.json"
-log_key_policy_file="$work_dir/log-key-policy.json"
 artifact_encryption_file="$work_dir/artifact-encryption.json"
 artifact_policy_file="$work_dir/artifact-policy.json"
 cloudfront_encryption_file="$work_dir/cloudfront-encryption.json"
@@ -56,6 +52,9 @@ cloudfront_logging_file="$work_dir/cloudfront-logging.json"
 staging_secret_file="$work_dir/staging-secret.json"
 production_secret_file="$work_dir/production-secret.json"
 edge_role_file="$work_dir/edge-control-role.json"
+edge_role_policy_file="$work_dir/edge-control-role-policy.json"
+edge_cleanup_role_file="$work_dir/edge-cleanup-role.json"
+edge_cleanup_role_policy_file="$work_dir/edge-cleanup-role-policy.json"
 finops_control_role_file="$work_dir/finops-control-role.json"
 finops_control_policy_file="$work_dir/finops-control-policy.json"
 finops_execution_role_file="$work_dir/finops-execution-role.json"
@@ -103,12 +102,6 @@ storage_key_arn="$(
 storage_alias_arn="$(
   jq -er '.ApplicationStorageKeyAliasArn | strings' "$outputs_file"
 )"
-log_key_arn="$(
-  jq -er '.CloudFrontAccessLogKeyArn | strings' "$outputs_file"
-)"
-log_alias_arn="$(
-  jq -er '.CloudFrontAccessLogKeyAliasArn | strings' "$outputs_file"
-)"
 staging_secret_arn="$(
   jq -er '.StagingOriginVerifySecretArn | strings' "$outputs_file"
 )"
@@ -117,6 +110,9 @@ production_secret_arn="$(
 )"
 edge_role_arn="$(
   jq -er '.EdgeControlRoleArn | strings' "$outputs_file"
+)"
+edge_cleanup_role_arn="$(
+  jq -er '.EdgeCleanupRoleArn | strings' "$outputs_file"
 )"
 finops_control_role_arn="$(
   jq -er '.FinOpsControlRoleArn | strings' "$outputs_file"
@@ -166,6 +162,11 @@ jq -e \
         "arn:aws:iam::" + $account
         + ":role/" + $app + "-github-edge-controls"
       )
+    and .EdgeCleanupRoleArn
+      == (
+        "arn:aws:iam::" + $account
+        + ":role/" + $app + "-github-edge-cleanup"
+      )
     and .FinOpsControlRoleArn
       == (
         "arn:aws:iam::" + $account
@@ -199,18 +200,8 @@ jq -e \
         "arn:aws:kms:" + $region + ":" + $account
         + ":alias/" + $app + "-storage"
       )
-    and (
-      .CloudFrontAccessLogKeyArn
-      | test(
-          "^arn:aws:kms:" + $region + ":" + $account
-          + ":key/[0-9a-f-]+$"
-        )
-    )
-    and .CloudFrontAccessLogKeyAliasArn
-      == (
-        "arn:aws:kms:" + $region + ":" + $account
-        + ":alias/" + $app + "-cloudfront-logs"
-      )
+    and (has("CloudFrontAccessLogKeyArn") | not)
+    and (has("CloudFrontAccessLogKeyAliasArn") | not)
     and (
       .StagingOriginVerifySecretArn
       | test(
@@ -231,8 +222,6 @@ jq -e \
 
 test "$storage_alias_arn" = \
   "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage"
-test "$log_alias_arn" = \
-  "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-cloudfront-logs"
 
 aws kms describe-key \
   --key-id "$storage_key_arn" \
@@ -251,24 +240,6 @@ aws kms get-key-policy \
   --policy-name default \
   --region "$AWS_REGION" \
   --output json >"$key_policy_file"
-aws kms describe-key \
-  --key-id "$log_key_arn" \
-  --region "$AWS_REGION" \
-  --output json >"$log_key_file"
-aws kms describe-key \
-  --key-id "alias/${APP_NAME}-cloudfront-logs" \
-  --region "$AWS_REGION" \
-  --output json >"$log_alias_key_file"
-aws kms get-key-rotation-status \
-  --key-id "$log_key_arn" \
-  --region "$AWS_REGION" \
-  --output json >"$log_rotation_file"
-aws kms get-key-policy \
-  --key-id "$log_key_arn" \
-  --policy-name default \
-  --region "$AWS_REGION" \
-  --output json >"$log_key_policy_file"
-
 jq -e \
   --arg arn "$storage_key_arn" \
   '
@@ -317,40 +288,6 @@ jq -e \
     )
   ' "$key_policy_file" >/dev/null
 
-jq -e \
-  --arg arn "$log_key_arn" \
-  '
-    .KeyMetadata.Arn == $arn
-    and .KeyMetadata.AWSAccountId == ($arn | split(":")[4])
-    and .KeyMetadata.Enabled == true
-    and .KeyMetadata.KeyManager == "CUSTOMER"
-    and .KeyMetadata.KeySpec == "SYMMETRIC_DEFAULT"
-    and .KeyMetadata.KeyUsage == "ENCRYPT_DECRYPT"
-    and .KeyMetadata.MultiRegion == false
-    and .KeyMetadata.Origin == "AWS_KMS"
-  ' "$log_key_file" >/dev/null
-jq -e \
-  --arg arn "$log_key_arn" \
-  '.KeyMetadata.Arn == $arn' "$log_alias_key_file" >/dev/null
-jq -e '.KeyRotationEnabled == true' "$log_rotation_file" >/dev/null
-jq -e '
-  (.Policy | fromjson).Statement as $statements
-  | any(
-      $statements[];
-      .Sid == "AllowCloudFrontAccessLogEncryption"
-      and .Effect == "Allow"
-      and .Principal.Service == "delivery.logs.amazonaws.com"
-      and (.Action | sort)
-        == (["kms:Decrypt", "kms:GenerateDataKey*"] | sort)
-      and .Resource == "*"
-      and ((.Condition // {}) | length) == 0
-    )
-  and all(
-    $statements[];
-    (.Principal.Service // "") != "cloudfront.amazonaws.com"
-  )
-' "$log_key_policy_file" >/dev/null
-
 prove_secret_metadata() {
   local environment secret_arn output_file
   environment="$1"
@@ -380,6 +317,10 @@ prove_secret_metadata \
 aws iam get-role \
   --role-name "${APP_NAME}-github-edge-controls" \
   --output json >"$edge_role_file"
+aws iam get-role-policy \
+  --role-name "${APP_NAME}-github-edge-controls" \
+  --policy-name manage-exact-cloudfront-waf-stacks \
+  --output json >"$edge_role_policy_file"
 jq -e \
   --arg arn "$edge_role_arn" \
   --arg account "$AWS_ACCOUNT_ID" \
@@ -425,6 +366,486 @@ jq -e \
       ] == "Manage AWS Edge Controls"
     )
   ' "$edge_role_file" >/dev/null
+
+jq -e \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  '
+    def actions:
+      .Action | if type == "array" then . else [.] end;
+    def statement($sid):
+      .PolicyDocument.Statement | map(select(.Sid == $sid)) | .[0];
+    def edge_stacks:
+      [
+        (
+          "arn:aws:cloudformation:us-east-1:" + $account
+          + ":stack/" + $app + "-staging-edge/*"
+        ),
+        (
+          "arn:aws:cloudformation:us-east-1:" + $account
+          + ":stack/" + $app + "-production-edge/*"
+        )
+      ];
+    def web_acls:
+      [
+        (
+          "arn:aws:wafv2:us-east-1:" + $account
+          + ":global/webacl/" + $app + "-staging-cloudfront/*"
+        ),
+        (
+          "arn:aws:wafv2:us-east-1:" + $account
+          + ":global/webacl/" + $app + "-production-cloudfront/*"
+        )
+      ];
+    def log_groups_iam:
+      [
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:aws-waf-logs-" + $app + "-staging-blocked:*"
+        ),
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:aws-waf-logs-" + $app + "-production-blocked:*"
+        ),
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:/aws/events/" + $app
+          + "-staging-edge-waf-alarm-archive:*"
+        ),
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:/aws/events/" + $app
+          + "-production-edge-waf-alarm-archive:*"
+        )
+      ];
+    def log_groups_tag:
+      log_groups_iam | map(rtrimstr(":*"));
+    def alarm_rules:
+      [
+        (
+          "arn:aws:events:us-east-1:" + $account + ":rule/"
+          + $app + "-staging-edge-waf-alarm-events"
+        ),
+        (
+          "arn:aws:events:us-east-1:" + $account + ":rule/"
+          + $app + "-production-edge-waf-alarm-events"
+        )
+      ];
+    def alarm_archives:
+      [
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:/aws/events/" + $app
+          + "-staging-edge-waf-alarm-archive"
+        ),
+        (
+          "arn:aws:logs:us-east-1:" + $account
+          + ":log-group:/aws/events/" + $app
+          + "-production-edge-waf-alarm-archive"
+        )
+      ];
+    def waf_alarms:
+      ["staging", "production"]
+      | map(
+          . as $environment
+          | ["waf-any-block", "waf-api-rate-block", "waf-resolution-rate-block"]
+          | map(
+              "arn:aws:cloudwatch:us-east-1:" + $account
+              + ":alarm:" + $app + "-" + $environment + "-" + .
+            )
+        )
+      | add;
+    .RoleName == ($app + "-github-edge-controls")
+    and .PolicyName == "manage-exact-cloudfront-waf-stacks"
+    and .PolicyDocument.Version == "2012-10-17"
+    and (.PolicyDocument.Statement | length) == 15
+    and (.PolicyDocument.Statement | map(.Sid) | unique | length) == 15
+    and (
+      .PolicyDocument.Statement | map(.Sid) | sort
+    ) == ([
+      "CheckCloudFrontWebAclCapacity",
+      "ConfigureOnlyCloudFormationEdgeLogDelivery",
+      "DescribeOnlyUsEastOneEdgeLogs",
+      "InspectExactCloudFrontWebAcls",
+      "InspectOnlyNamedEdgeAlarmEventRules",
+      "InspectOnlyNamedEdgeLogGroups",
+      "InspectOnlyNamedEdgeWafAlarms",
+      "ManageExactCloudFrontWebAcls",
+      "ManageOnlyNamedEdgeAlarmEventRules",
+      "ManageOnlyNamedEdgeLogGroups",
+      "ManageOnlyNamedEdgeWafAlarms",
+      "PlanAndApplyExactEdgeStacks",
+      "PutOnlyExactEdgeAlarmEventRules",
+      "PutTargetsOnlyExactEdgeAlarmArchives",
+      "TagOnlyNamedEdgeLogGroups"
+    ] | sort)
+    and all(
+      .PolicyDocument.Statement[];
+      .Effect == "Allow"
+      and (has("Principal") | not)
+      and (has("NotAction") | not)
+      and (has("NotResource") | not)
+    )
+    and (
+      statement("PlanAndApplyExactEdgeStacks")
+      | (actions | sort) == ([
+          "cloudformation:CreateChangeSet",
+          "cloudformation:DeleteChangeSet",
+          "cloudformation:DescribeChangeSet",
+          "cloudformation:DescribeStackEvents",
+          "cloudformation:DescribeStacks",
+          "cloudformation:ExecuteChangeSet",
+          "cloudformation:GetStackPolicy",
+          "cloudformation:GetTemplate",
+          "cloudformation:ListStackResources",
+          "cloudformation:SetStackPolicy",
+          "cloudformation:UpdateTerminationProtection"
+        ] | sort)
+      and (.Resource | sort) == ((edge_stacks + [
+          (
+            "arn:aws:cloudformation:us-east-1:" + $account
+            + ":changeSet/edge-controls-*/*"
+          )
+        ]) | sort)
+      and .Condition == {
+        StringLikeIfExists: {
+          "cloudformation:ChangeSetName": [
+            "edge-controls-*",
+            (
+              "arn:aws:cloudformation:us-east-1:" + $account
+              + ":changeSet/edge-controls-*/*"
+            )
+          ]
+        }
+      }
+    )
+    and (
+      statement("ManageExactCloudFrontWebAcls")
+      | (actions | sort) == ([
+          "wafv2:CreateWebACL",
+          "wafv2:DeleteLoggingConfiguration",
+          "wafv2:DeleteWebACL",
+          "wafv2:PutLoggingConfiguration",
+          "wafv2:TagResource",
+          "wafv2:UntagResource",
+          "wafv2:UpdateWebACL"
+        ] | sort)
+      and (.Resource | sort) == (web_acls | sort)
+      and .Condition == {
+        "ForAnyValue:StringEquals": {
+          "aws:CalledVia": "cloudformation.amazonaws.com"
+        }
+      }
+    )
+    and (
+      statement("InspectExactCloudFrontWebAcls")
+      | (actions | sort) == ([
+          "wafv2:GetLoggingConfiguration",
+          "wafv2:GetWebACL",
+          "wafv2:ListTagsForResource"
+        ] | sort)
+      and (.Resource | sort) == (web_acls | sort)
+      and (has("Condition") | not)
+    )
+    and (
+      statement("ConfigureOnlyCloudFormationEdgeLogDelivery")
+      | (actions | sort) == ([
+          "logs:CreateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:DeleteResourcePolicy",
+          "logs:DescribeLogGroups",
+          "logs:DescribeResourcePolicies",
+          "logs:PutResourcePolicy"
+        ] | sort)
+      and .Resource == "*"
+      and .Condition.StringEquals["aws:RequestedRegion"] == "us-east-1"
+      and .Condition["ForAnyValue:StringEquals"]["aws:CalledVia"]
+        == "cloudformation.amazonaws.com"
+      and (.Condition | keys | sort) == ([
+          "ForAnyValue:StringEquals",
+          "StringEquals"
+        ] | sort)
+    )
+    and (
+      statement("ManageOnlyNamedEdgeLogGroups")
+      | (actions | sort) == ([
+          "logs:CreateLogGroup",
+          "logs:DeleteLogGroup",
+          "logs:DeleteRetentionPolicy",
+          "logs:PutRetentionPolicy"
+        ] | sort)
+      and (.Resource | sort) == (log_groups_iam | sort)
+      and .Condition["ForAnyValue:StringEquals"]["aws:CalledVia"]
+        == "cloudformation.amazonaws.com"
+      and (.Condition | keys) == ["ForAnyValue:StringEquals"]
+    )
+    and (
+      statement("TagOnlyNamedEdgeLogGroups")
+      | (actions | sort) == ([
+          "logs:TagResource",
+          "logs:UntagResource"
+        ] | sort)
+      and (.Resource | sort) == (log_groups_tag | sort)
+      and .Condition["ForAnyValue:StringEquals"]["aws:CalledVia"]
+        == "cloudformation.amazonaws.com"
+      and (.Condition | keys) == ["ForAnyValue:StringEquals"]
+    )
+    and (
+      statement("InspectOnlyNamedEdgeLogGroups")
+      | .Action == "logs:ListTagsForResource"
+      and (.Resource | sort) == (log_groups_tag | sort)
+      and (has("Condition") | not)
+    )
+    and (
+      statement("DescribeOnlyUsEastOneEdgeLogs")
+      | (actions | sort) == ([
+          "logs:DescribeLogGroups",
+          "logs:DescribeResourcePolicies"
+        ] | sort)
+      and .Resource == "*"
+      and .Condition == {
+        StringEquals: {"aws:RequestedRegion": "us-east-1"}
+      }
+    )
+    and (
+      statement("PutOnlyExactEdgeAlarmEventRules")
+      | .Action == "events:PutRule"
+      and (.Resource | sort) == (alarm_rules | sort)
+      and .Condition == {
+        "ForAllValues:StringEquals": {
+          "events:source": "aws.cloudwatch",
+          "events:detail-type": "CloudWatch Alarm State Change"
+        },
+        "Null": {
+          "events:source": "false",
+          "events:detail-type": "false"
+        },
+        "ForAnyValue:StringEquals": {
+          "aws:CalledVia": "cloudformation.amazonaws.com"
+        }
+      }
+    )
+    and (
+      statement("PutTargetsOnlyExactEdgeAlarmArchives")
+      | .Action == "events:PutTargets"
+      and (.Resource | sort) == (alarm_rules | sort)
+      and .Condition["ForAllValues:ArnEquals"]["events:TargetArn"]
+        == alarm_archives
+      and .Condition.Null["events:TargetArn"] == "false"
+      and .Condition["ForAnyValue:StringEquals"]["aws:CalledVia"]
+        == "cloudformation.amazonaws.com"
+      and (.Condition | keys | sort) == ([
+          "ForAllValues:ArnEquals",
+          "ForAnyValue:StringEquals",
+          "Null"
+        ] | sort)
+      and (
+        .Condition["ForAllValues:ArnEquals"] | keys
+      ) == ["events:TargetArn"]
+      and (.Condition.Null | keys) == ["events:TargetArn"]
+      and (
+        .Condition["ForAnyValue:StringEquals"] | keys
+      ) == ["aws:CalledVia"]
+    )
+    and (
+      statement("ManageOnlyNamedEdgeAlarmEventRules")
+      | (actions | sort) == ([
+          "events:DeleteRule",
+          "events:RemoveTargets",
+          "events:TagResource",
+          "events:UntagResource"
+        ] | sort)
+      and (.Resource | sort) == (alarm_rules | sort)
+      and .Condition["ForAnyValue:StringEquals"]["aws:CalledVia"]
+        == "cloudformation.amazonaws.com"
+      and (.Condition | keys) == ["ForAnyValue:StringEquals"]
+    )
+    and (
+      statement("InspectOnlyNamedEdgeAlarmEventRules")
+      | (actions | sort) == ([
+          "events:DescribeRule",
+          "events:ListTagsForResource",
+          "events:ListTargetsByRule"
+        ] | sort)
+      and (.Resource | sort) == (alarm_rules | sort)
+      and (has("Condition") | not)
+    )
+    and (
+      statement("ManageOnlyNamedEdgeWafAlarms")
+      | (actions | sort) == ([
+          "cloudwatch:DeleteAlarms",
+          "cloudwatch:PutMetricAlarm",
+          "cloudwatch:TagResource",
+          "cloudwatch:UntagResource"
+        ] | sort)
+      and (.Resource | sort) == (waf_alarms | sort)
+      and .Condition == {
+        "ForAnyValue:StringEquals": {
+          "aws:CalledVia": "cloudformation.amazonaws.com"
+        }
+      }
+    )
+    and (
+      statement("InspectOnlyNamedEdgeWafAlarms")
+      | (actions | sort) == ([
+          "cloudwatch:DescribeAlarms",
+          "cloudwatch:ListTagsForResource"
+        ] | sort)
+      and (.Resource | sort) == (waf_alarms | sort)
+      and (has("Condition") | not)
+    )
+    and (
+      statement("CheckCloudFrontWebAclCapacity")
+      | .Action == "wafv2:CheckCapacity"
+      and .Resource == "*"
+      and .Condition == {
+        StringEquals: {"aws:RequestedRegion": "us-east-1"}
+      }
+    )
+    and all(
+      .PolicyDocument.Statement[];
+      all(actions[]; test("^(kms|sns|sqs):") | not)
+    )
+    and all(
+      .PolicyDocument.Statement[];
+      all(
+        actions[];
+        . != "cloudformation:DeleteStack"
+        and . != "cloudformation:ListChangeSets"
+      )
+    )
+  ' "$edge_role_policy_file" >/dev/null
+
+aws iam get-role \
+  --role-name "${APP_NAME}-github-edge-cleanup" \
+  --output json >"$edge_cleanup_role_file"
+aws iam get-role-policy \
+  --role-name "${APP_NAME}-github-edge-cleanup" \
+  --policy-name cleanup-exact-cloudfront-waf-stacks \
+  --output json >"$edge_cleanup_role_policy_file"
+jq -e \
+  --arg arn "$edge_cleanup_role_arn" \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  --arg repository "$GITHUB_REPOSITORY" \
+  --arg repositoryId "$GITHUB_REPOSITORY_ID" \
+  --arg ownerId "$GITHUB_REPOSITORY_OWNER_ID" \
+  '
+    .Role.Arn == $arn
+    and .Role.RoleName == ($app + "-github-edge-cleanup")
+    and .Role.MaxSessionDuration == 3600
+    and (.Role.AssumeRolePolicyDocument.Statement | length) == 1
+    and (
+      .Role.AssumeRolePolicyDocument.Statement[0]
+      | .Effect == "Allow"
+      and .Action == "sts:AssumeRoleWithWebIdentity"
+      and .Principal.Federated
+        == (
+          "arn:aws:iam::" + $account
+          + ":oidc-provider/token.actions.githubusercontent.com"
+        )
+      and .Condition.StringEquals == {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub":
+          ("repo:" + $repository + ":environment:edge-cleanup"),
+        "token.actions.githubusercontent.com:repository": $repository,
+        "token.actions.githubusercontent.com:repository_id": $repositoryId,
+        "token.actions.githubusercontent.com:repository_owner_id": $ownerId,
+        "token.actions.githubusercontent.com:ref": "refs/heads/main",
+        "token.actions.githubusercontent.com:environment": "edge-cleanup",
+        "token.actions.githubusercontent.com:workflow":
+          "Manage AWS Edge Controls"
+      }
+      and (.Condition | keys) == ["StringEquals"]
+    )
+    and (.Role.Tags | sort_by(.Key)) == ([
+      {Key:"Application", Value:$app},
+      {Key:"Environment", Value:"edge-cleanup"},
+      {Key:"ManagedBy", Value:"CloudFormation"}
+    ] | sort_by(.Key))
+  ' "$edge_cleanup_role_file" >/dev/null
+jq -e \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  '
+    def actions:
+      .Action | if type == "array" then . else [.] end;
+    def resources:
+      .Resource | if type == "array" then . else [.] end;
+    def statement($sid):
+      .PolicyDocument.Statement | map(select(.Sid == $sid)) | .[0];
+    def edge_stacks:
+      [
+        (
+          "arn:aws:cloudformation:us-east-1:" + $account
+          + ":stack/" + $app + "-staging-edge/*"
+        ),
+        (
+          "arn:aws:cloudformation:us-east-1:" + $account
+          + ":stack/" + $app + "-production-edge/*"
+        )
+      ];
+    def edge_change_sets:
+      [
+        (
+          "arn:aws:cloudformation:us-east-1:" + $account
+          + ":changeSet/edge-controls-*/*"
+        )
+      ];
+    .RoleName == ($app + "-github-edge-cleanup")
+    and .PolicyName == "cleanup-exact-cloudfront-waf-stacks"
+    and .PolicyDocument.Version == "2012-10-17"
+    and (.PolicyDocument.Statement | length) == 3
+    and (.PolicyDocument.Statement | map(.Sid) | unique | length) == 3
+    and (.PolicyDocument.Statement | map(.Sid) | sort) == ([
+      "DeleteOnlyExactEdgeStacks",
+      "InspectExactEdgeCleanupSources",
+      "InspectExactEdgeCleanupStacks"
+    ] | sort)
+    and all(
+      .PolicyDocument.Statement[];
+      .Effect == "Allow"
+      and (has("Condition") | not)
+      and (has("Principal") | not)
+      and (has("NotAction") | not)
+      and (has("NotResource") | not)
+    )
+    and (
+      statement("InspectExactEdgeCleanupStacks")
+      | (actions | sort) == ([
+          "cloudformation:DescribeStacks",
+          "cloudformation:ListChangeSets",
+          "cloudformation:ListStackResources"
+        ] | sort)
+      and (resources | sort) == (edge_stacks | sort)
+    )
+    and (
+      statement("InspectExactEdgeCleanupSources")
+      | (actions | sort) == ([
+          "cloudformation:DescribeChangeSet",
+          "cloudformation:GetTemplate"
+        ] | sort)
+      and (resources | sort) == ((edge_stacks + edge_change_sets) | sort)
+    )
+    and (
+      statement("DeleteOnlyExactEdgeStacks")
+      | actions == ["cloudformation:DeleteStack"]
+      and (resources | sort) == (edge_stacks | sort)
+    )
+    and all(
+      .PolicyDocument.Statement[];
+      all(
+        actions[];
+        . != "cloudformation:CreateChangeSet"
+        and . != "cloudformation:DeleteChangeSet"
+        and . != "cloudformation:ExecuteChangeSet"
+        and . != "cloudformation:SetStackPolicy"
+        and . != "cloudformation:UpdateTerminationProtection"
+        and . != "iam:PassRole"
+        and . != "sts:AssumeRole"
+      )
+    )
+  ' "$edge_cleanup_role_policy_file" >/dev/null
 
 aws iam get-role \
   --role-name "${APP_NAME}-github-finops-controls" \
@@ -963,16 +1384,16 @@ jq -e \
         == $key
       and $rules[0].BucketKeyEnabled == true
   ' "$artifact_encryption_file" >/dev/null
-jq -e \
-  --arg key "$log_key_arn" \
-  '
+jq -e '
     .ServerSideEncryptionConfiguration.Rules as $rules
     | ($rules | length) == 1
       and $rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm
-        == "aws:kms"
-      and $rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID
-        == $key
-      and $rules[0].BucketKeyEnabled == true
+        == "AES256"
+      and ((
+        $rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID
+        // null
+      ) == null)
+      and ($rules[0].BucketKeyEnabled // false) == false
   ' "$cloudfront_encryption_file" >/dev/null
 
 jq -e \
@@ -1087,12 +1508,6 @@ jq -n \
   --arg keyAliasArnSha256 "$(
     printf '%s' "$storage_alias_arn" | sha256sum | awk '{print $1}'
   )" \
-  --arg logKeyArnSha256 "$(
-    printf '%s' "$log_key_arn" | sha256sum | awk '{print $1}'
-  )" \
-  --arg logKeyAliasArnSha256 "$(
-    printf '%s' "$log_alias_arn" | sha256sum | awk '{print $1}'
-  )" \
   --arg artifactBucketSha256 "$(
     printf '%s' "$artifact_bucket" | sha256sum | awk '{print $1}'
   )" \
@@ -1110,6 +1525,9 @@ jq -n \
   )" \
   --arg edgeControlRoleArnSha256 "$(
     printf '%s' "$edge_role_arn" | sha256sum | awk '{print $1}'
+  )" \
+  --arg edgeCleanupRoleArnSha256 "$(
+    printf '%s' "$edge_cleanup_role_arn" | sha256sum | awk '{print $1}'
   )" \
   --arg finOpsControlRoleArnSha256 "$(
     printf '%s' "$finops_control_role_arn" |
@@ -1136,7 +1554,7 @@ jq -n \
     "$migration_authority_retired" \
   '{
     schema: "archon.aws.foundation-storage-controls",
-    schemaVersion: 1,
+    schemaVersion: 2,
     ok: true,
     stack: {
       name: $stack,
@@ -1150,14 +1568,11 @@ jq -n \
       bucketKeysEnabled: true,
       explicitWritePolicy: true
     },
-    cloudFrontAccessLogKey: {
-      arnSha256: $logKeyArnSha256,
-      aliasArnSha256: $logKeyAliasArnSha256,
-      customerManaged: true,
-      rotationEnabled: true,
-      dataScope: "cloudfront-access-logs-only",
-      servicePrincipalIsolated: true,
-      bucketKeysEnabled: true
+    cloudFrontAccessLogEncryption: {
+      algorithm: "AES256",
+      serviceManaged: true,
+      customerManagedKey: false,
+      lifecycleFixedMonthlyUsd: 0
     },
     buckets: {
       artifactSha256: $artifactBucketSha256,
@@ -1176,6 +1591,19 @@ jq -n \
     },
     edgeControls: {
       roleArnSha256: $edgeControlRoleArnSha256,
+      inlinePolicy: "manage-exact-cloudfront-waf-stacks",
+      inlinePolicyStatementCount: 15,
+      cleanupRoleArnSha256: $edgeCleanupRoleArnSha256,
+      cleanupInlinePolicy: "cleanup-exact-cloudfront-waf-stacks",
+      cleanupInlinePolicyStatementCount: 3,
+      cleanupRoleEnvironment: "edge-cleanup",
+      destructiveRoleSeparation: true,
+      leastPrivilegePolicyVerified: true,
+      exactEnvironmentScope: ["staging", "production"],
+      eventPatternConstrained: true,
+      eventTargetsConstrained: true,
+      cleanupStackScope: "staging-production-only",
+      alarmArchive: "EventBridge-to-CloudWatch-Logs",
       workflow: "Manage AWS Edge Controls",
       controlPlaneRegion: "us-east-1",
       liveActivationPerformed: false

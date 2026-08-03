@@ -143,10 +143,43 @@
       "stackPolicy": "aws/edge-stack-policy.json",
       "runbook": "docs/runbooks/waf-abuse-response.md",
       "protectedEnvironment": "edge-controls",
-      "operations": "plan|apply|verify",
+      "cleanupProtectedEnvironment": "edge-cleanup",
+      "roleSeparation": "EdgeControlRole cannot list change sets or delete stacks; EdgeCleanupRole cannot create, execute, or delete change sets, set stack policy, change termination protection, pass roles, or assume roles",
+      "operations": "plan|apply|verify|cleanup|finalize",
+      "typedConfirmations": {
+        "apply": "APPLY-{ENV}-EDGE-CONTROLS",
+        "cleanup": "CLEANUP-{ENV}-EDGE-CONTROLS",
+        "finalize": "FINALIZE-{ENV}-EDGE-CONTROLS"
+      },
+      "cleanupEligibleStates": [
+        "REVIEW_IN_PROGRESS with zero stack resources",
+        "ROLLBACK_COMPLETE with every listed stack resource DELETE_COMPLETE"
+      ],
+      "cleanupOldSourceValidation": "change-set source commit and template digest independently re-proved",
+      "cleanupFinalPreDeleteRevalidation": true,
+      "cleanupTerminalProof": "delete exact stack ID and prove stack name NotFound",
+      "cleanupReceiptSanitized": true,
+      "finalizeCreatesChangeSet": false,
+      "finalizeExactLiveProof": true,
+      "finalizeHistoricalSourceAllowed": true,
+      "finalizeHistoricalRequirements": "deployed_sha is a green ancestor of current main with exact successful CI, CodeQL, and Supply Chain push runs",
+      "historicalFinalizeClaimsCurrentControls": false,
+      "restartSafeProtectionRepair": true,
+      "postExecuteMutableMainRead": false,
+      "updatePlanShapes": [
+        "CREATE exact nine Add actions",
+        "legacy bootstrap exact eight Add actions plus WebACL Modify",
+        "steady state non-empty exact-resource Modify-only subset with Replacement False and RequiresRecreation Never"
+      ],
+      "alarmDeliveryDrill": "not-run",
+      "humanPagingClaimed": false,
       "controlPlaneRegion": "us-east-1",
       "applicationWorkloadRegion": false,
-      "evidenceBoundary": "BLOCK-only redacted encrypted logs and encrypted durable alarm archive; human paging not claimed"
+      "evidenceBoundary": "BLOCK-only redacted AWS-owned encrypted logs and an exact EventBridge-to-CloudWatch-Logs alarm archive; alarm actions empty and human paging not claimed",
+      "initialFixedMonthlyUsd": 22.4,
+      "maximumRotatedFixedMonthlyUsd": 24.4,
+      "approvedFixedMonthlyUsdCeiling": 26,
+      "variableUsageExcluded": true
     },
     {
       "id": "WA-05",

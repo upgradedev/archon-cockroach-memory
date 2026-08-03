@@ -195,11 +195,19 @@ Trivy 0.72.0 cannot resolve statically:
   unexpected key. Trivy reports the finding because its CloudFormation model
   treats the unresolved import as empty, not because the deployed bucket lacks
   a CMK.
+- The second `AWS-0132` is the separate `CloudFrontAccessLogBucket` in
+  `aws/bootstrap-oidc.yaml`. CloudFront standard logging (legacy) requires its
+  ACL-enabled destination bucket to use S3-managed `AES256` encryption. The
+  validator binds that finding to the complete bucket source range and requires
+  the exact SSE-S3-only encryption block, `BucketOwnerPreferred`, all four
+  public-access blocks, versioning, server-access logging, bounded lifecycle
+  retention, and the exact insecure-transport deny. It also rejects any KMS
+  property in that legacy-log bucket boundary.
 
 Trivy 0.72.0 therefore runs its CloudFormation/Dockerfile evidence passes with
 `--exit-code 0`, preserving the complete raw JSON and SARIF before a
 repository-owned deterministic validator applies policy. The validator permits
-exactly three raw findings only when all of the following remain exact:
+exactly four raw findings only when all of the following remain exact:
 
 - scanner and version: Trivy 0.72.0;
 - rules, raw type, severity, and status: `AWS-0011`, `AWS-0013`, and
@@ -208,11 +216,13 @@ exactly three raw findings only when all of the following remain exact:
   unexpected legacy alias fails closed;
 - raw rule references: the canonical Aqua `aws-0011`, `aws-0013`, and
   `aws-0132` records;
-- target and normalized logical resources: `aws/template.yaml`, with
-  `Distribution` for `AWS-0011`/`AWS-0013` and `SpaBucket` for `AWS-0132`;
-- raw Trivy resources: the exact complete `Distribution` and `SpaBucket`
-  source ranges, cross-checked against `CauseMetadata`, SARIF, and the current
-  template blocks;
+- targets and normalized logical resources: `aws/template.yaml`, with
+  `Distribution` for `AWS-0011`/`AWS-0013` and `SpaBucket` for `AWS-0132`, plus
+  `aws/bootstrap-oidc.yaml` with `CloudFrontAccessLogBucket` for the second
+  `AWS-0132`;
+- raw Trivy resources: the exact complete `Distribution`, `SpaBucket`, and
+  `CloudFrontAccessLogBucket` source ranges, cross-checked against
+  `CauseMetadata`, SARIF, and the current template blocks;
 - WAF parameter ARN constraint and direct `WebACLId` binding;
 - source property: exactly one `CloudFrontDefaultCertificate: true`, with no
   `MinimumProtocolVersion` or custom-domain `Aliases`;
@@ -227,13 +237,15 @@ exactly three raw findings only when all of the following remain exact:
 - SpaBucket retains SSE-KMS, its bucket key, and the exact foundation CMK
   import; the foundation retains key rotation, the matching alias and export;
 - SpaBucketPolicy rejects writes without KMS or with an unexpected key.
+- the legacy CloudFront standard-log bucket retains its exact required
+  SSE-S3/`AES256` boundary and the compensating storage controls above.
 
-The validator also requires the corresponding three SARIF errors and exact
+The validator also requires the corresponding four SARIF errors and exact
 source locations, runs positive and adversarial self-tests in the hosted
 pipeline, and emits separate compatibility and blocking-finding documents.
 Any extra, missing, duplicated, renamed, relocated, or malformed finding—or
 any source-control drift—fails closed. The status and exact-main receipt
-disclose `rawFindings=3`, `compatibilityFindings=3`, and
+disclose `rawFindings=4`, `compatibilityFindings=4`, and
 `blockingFindings=0`.
 
 No inline Trivy ignore is present, the raw HIGH results remain visible in the
@@ -241,8 +253,8 @@ immutable infrastructure artifact and exact-main release evidence, and the
 empty security waiver ledger is unchanged. After that raw SARIF, its exact
 source locations, the compatibility record, and the zero-item blocking record
 are revalidated, GitHub code scanning receives a policy-effective SARIF with
-zero results. Its run metadata discloses `rawFindings=3`,
-`compatibilityFindings=3`, `blockingFindings=0`, `acceptedWaivers=0`, and names
+zero results. Its run metadata discloses `rawFindings=4`,
+`compatibilityFindings=4`, `blockingFindings=0`, `acceptedWaivers=0`, and names
 the retained raw SARIF. This keeps the GitHub check aligned with the enforced
 blocking policy without hiding or mutating the canonical scanner evidence. The
 hosted job also fails if any repository Trivy ignore or configuration override

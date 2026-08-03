@@ -36,108 +36,14 @@ Rules:
         AssertDescription: CloudFront-scope WAF must be deployed in us-east-1.
 
 Resources:
-  EdgeEvidenceKey:
-    Type: AWS::KMS::Key
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      Description: !Sub >-
-        Customer-managed key for ${AppName} ${Environment} WAF block logs and
-        durable alarm evidence in the CloudFront control-plane region.
-      EnableKeyRotation: true
-      KeySpec: SYMMETRIC_DEFAULT
-      KeyUsage: ENCRYPT_DECRYPT
-      MultiRegion: false
-      PendingWindowInDays: 30
-      KeyPolicy:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: EnableAccountAdministration
-            Effect: Allow
-            Principal:
-              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
-            Action: kms:*
-            Resource: "*"
-          - Sid: AllowCloudWatchLogsForExactWafLogGroup
-            Effect: Allow
-            Principal:
-              Service: logs.us-east-1.amazonaws.com
-            Action:
-              - kms:Decrypt
-              - kms:DescribeKey
-              - kms:Encrypt
-              - kms:GenerateDataKey*
-              - kms:ReEncrypt*
-            Resource: "*"
-            Condition:
-              ArnEquals:
-                kms:EncryptionContext:aws:logs:arn: !Sub >-
-                  arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-${AppName}-${Environment}-blocked
-          - Sid: AllowCloudWatchAlarmsToEncryptedTopic
-            Effect: Allow
-            Principal:
-              Service: cloudwatch.amazonaws.com
-            Action:
-              - kms:Decrypt
-              - kms:GenerateDataKey*
-            Resource: "*"
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-*
-          - Sid: AllowExactSnsTopicEncryption
-            Effect: Allow
-            Principal:
-              Service: sns.amazonaws.com
-            Action:
-              - kms:Decrypt
-              - kms:GenerateDataKey*
-            Resource: "*"
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-                kms:EncryptionContext:aws:sns:topicArn: !Sub >-
-                  arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:${AppName}-${Environment}-edge-waf-alarms
-          # AWS's least-privilege SNS-to-SQS KMS pattern scopes this service
-          # grant to the account; the queue policy independently binds the
-          # only accepted publisher to EdgeAlarmTopic.
-          - Sid: AllowSameAccountSnsToEncryptedArchive
-            Effect: Allow
-            Principal:
-              Service: sns.amazonaws.com
-            Action:
-              - kms:Decrypt
-              - kms:GenerateDataKey*
-            Resource: "*"
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-      Tags:
-        - Key: Application
-          Value: !Ref AppName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: DataClassification
-          Value: security-evidence
-        - Key: ManagedBy
-          Value: CloudFormation
-
-  EdgeEvidenceKeyAlias:
-    Type: AWS::KMS::Alias
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      AliasName: !Sub "alias/${AppName}-${Environment}-edge-evidence"
-      TargetKeyId: !Ref EdgeEvidenceKey
-
   WafBlockLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
-      KmsKeyId: !GetAtt EdgeEvidenceKey.Arn
+      # CloudWatch Logs encrypts log data at rest with AWS-owned AES-GCM by
+      # default. Omitting a customer-managed key reference preserves that
+      # managed encryption boundary.
       LogGroupClass: STANDARD
       LogGroupName: !Sub "aws-waf-logs-${AppName}-${Environment}-blocked"
       RetentionInDays: 30
@@ -151,14 +57,102 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  EdgeAlarmTopic:
-    Type: AWS::SNS::Topic
+  EdgeAlarmArchiveLogGroup:
+    Type: AWS::Logs::LogGroup
     DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
-      DisplayName: !Sub "${AppName} ${Environment} edge WAF alarms"
-      KmsMasterKeyId: !GetAtt EdgeEvidenceKey.Arn
-      TopicName: !Sub "${AppName}-${Environment}-edge-waf-alarms"
+      # EventBridge cannot target an SQS queue encrypted with an AWS-owned key.
+      # CloudWatch Logs provides AWS-owned encryption at rest without a CMK.
+      LogGroupClass: STANDARD
+      LogGroupName: !Sub >-
+        /aws/events/${AppName}-${Environment}-edge-waf-alarm-archive
+      RetentionInDays: 14
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DataClassification
+          Value: alarm-state-security-evidence
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  EdgeAlarmArchiveLogPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      PolicyName: !Sub "${AppName}-${Environment}-edge-waf-alarm-archive"
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowExactEventBridgeAlarmArchive",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "delivery.logs.amazonaws.com",
+                  "events.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-${Environment}-edge-waf-alarm-archive:*",
+              "Condition": {
+                "ArnEquals": {
+                  "aws:SourceArn": "arn:${AWS::Partition}:events:us-east-1:${AWS::AccountId}:rule/${AppName}-${Environment}-edge-waf-alarm-events"
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": "${AWS::AccountId}"
+                }
+              }
+            }
+          ]
+        }
+
+  EdgeAlarmStateEventRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    DependsOn:
+      - EdgeAlarmArchiveLogGroup
+      - EdgeAlarmArchiveLogPolicy
+    Properties:
+      Description: !Sub >-
+        Exact ALARM and OK state-change archive route for the three
+        ${AppName} ${Environment} CloudFront WAF alarms.
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+        resources:
+          - !Sub >-
+              arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-any-block
+          - !Sub >-
+              arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-api-rate-block
+          - !Sub >-
+              arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-resolution-rate-block
+        detail:
+          alarmName:
+            - !Sub "${AppName}-${Environment}-waf-any-block"
+            - !Sub "${AppName}-${Environment}-waf-api-rate-block"
+            - !Sub "${AppName}-${Environment}-waf-resolution-rate-block"
+          state:
+            value:
+              - ALARM
+              - OK
+      Name: !Sub "${AppName}-${Environment}-edge-waf-alarm-events"
+      State: ENABLED
+      Targets:
+        - Arn: !Sub >-
+            arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:/aws/events/${AppName}-${Environment}-edge-waf-alarm-archive
+          Id: EdgeAlarmArchiveLogGroup
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -168,116 +162,6 @@ Resources:
           Value: waf-alarm-archive
         - Key: ManagedBy
           Value: CloudFormation
-
-  EdgeAlarmTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      Topics:
-        - !Ref EdgeAlarmTopic
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowOnlyAccountBoundCloudWatchAlarms
-            Effect: Allow
-            Principal:
-              Service: cloudwatch.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref EdgeAlarmTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-*
-          - Sid: DenyUnexpectedAlarmPublisher
-            Effect: Deny
-            Principal: "*"
-            Action: sns:Publish
-            Resource: !Ref EdgeAlarmTopic
-            Condition:
-              ArnNotLike:
-                aws:SourceArn: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:${AppName}-${Environment}-waf-*
-          - Sid: DenyInsecureTransport
-            Effect: Deny
-            Principal: "*"
-            Action: sns:*
-            Resource: !Ref EdgeAlarmTopic
-            Condition:
-              Bool:
-                aws:SecureTransport: "false"
-
-  EdgeAlarmArchiveQueue:
-    Type: AWS::SQS::Queue
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      KmsDataKeyReusePeriodSeconds: 300
-      KmsMasterKeyId: !GetAtt EdgeEvidenceKey.Arn
-      MessageRetentionPeriod: 1209600
-      QueueName: !Sub "${AppName}-${Environment}-edge-waf-alarm-archive"
-      ReceiveMessageWaitTimeSeconds: 20
-      VisibilityTimeout: 60
-      Tags:
-        - Key: Application
-          Value: !Ref AppName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: EvidenceRoute
-          Value: waf-alarm-archive
-        - Key: ManagedBy
-          Value: CloudFormation
-
-  EdgeAlarmArchiveQueuePolicy:
-    Type: AWS::SQS::QueuePolicy
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    Properties:
-      Queues:
-        - !Ref EdgeAlarmArchiveQueue
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowOnlyExactAlarmTopic
-            Effect: Allow
-            Principal:
-              Service: sns.amazonaws.com
-            Action: sqs:SendMessage
-            Resource: !GetAtt EdgeAlarmArchiveQueue.Arn
-            Condition:
-              ArnEquals:
-                aws:SourceArn: !Ref EdgeAlarmTopic
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-          - Sid: DenyUnexpectedAlarmInjection
-            Effect: Deny
-            Principal: "*"
-            Action: sqs:SendMessage
-            Resource: !GetAtt EdgeAlarmArchiveQueue.Arn
-            Condition:
-              ArnNotLike:
-                aws:SourceArn: !Ref EdgeAlarmTopic
-          - Sid: DenyInsecureTransport
-            Effect: Deny
-            Principal: "*"
-            Action: sqs:*
-            Resource: !GetAtt EdgeAlarmArchiveQueue.Arn
-            Condition:
-              Bool:
-                aws:SecureTransport: "false"
-
-  EdgeAlarmArchiveSubscription:
-    Type: AWS::SNS::Subscription
-    DeletionPolicy: RetainExceptOnCreate
-    UpdateReplacePolicy: Retain
-    DependsOn: EdgeAlarmArchiveQueuePolicy
-    Properties:
-      Endpoint: !GetAtt EdgeAlarmArchiveQueue.Arn
-      Protocol: sqs
-      RawMessageDelivery: false
-      TopicArn: !Ref EdgeAlarmTopic
 
   ArchonCloudFrontWebAcl:
     Type: AWS::WAFv2::WebACL
@@ -435,13 +319,9 @@ Resources:
     Properties:
       AlarmName: !Sub "${AppName}-${Environment}-waf-any-block"
       AlarmDescription: >-
-        One or more CloudFront WAF blocks in five minutes; archive routing is
-        active, while a live human paging destination is separately governed.
-      ActionsEnabled: true
-      AlarmActions:
-        - !Ref EdgeAlarmTopic
-      OKActions:
-        - !Ref EdgeAlarmTopic
+        One or more CloudFront WAF blocks in five minutes; EventBridge archives
+        state changes while human paging remains separately governed.
+      ActionsEnabled: false
       Namespace: AWS/WAFV2
       MetricName: BlockedRequests
       Dimensions:
@@ -474,11 +354,7 @@ Resources:
       AlarmDescription: >-
         CloudFront WAF aggregate API rate rule blocked one or more requests in
         five minutes.
-      ActionsEnabled: true
-      AlarmActions:
-        - !Ref EdgeAlarmTopic
-      OKActions:
-        - !Ref EdgeAlarmTopic
+      ActionsEnabled: false
       Namespace: AWS/WAFV2
       MetricName: BlockedRequests
       Dimensions:
@@ -511,11 +387,7 @@ Resources:
       AlarmDescription: >-
         CloudFront WAF resolution-create rate rule blocked one or more
         requests in five minutes.
-      ActionsEnabled: true
-      AlarmActions:
-        - !Ref EdgeAlarmTopic
-      OKActions:
-        - !Ref EdgeAlarmTopic
+      ActionsEnabled: false
       Namespace: AWS/WAFV2
       MetricName: BlockedRequests
       Dimensions:
@@ -549,12 +421,10 @@ Outputs:
     Value: !Ref "AWS::Region"
   WafBlockLogGroupName:
     Value: !Ref WafBlockLogGroup
-  EdgeEvidenceKeyAliasName:
-    Value: !Ref EdgeEvidenceKeyAlias
-  EdgeAlarmTopicName:
-    Value: !GetAtt EdgeAlarmTopic.TopicName
-  EdgeAlarmArchiveQueueName:
-    Value: !GetAtt EdgeAlarmArchiveQueue.QueueName
+  EdgeAlarmArchiveLogGroupName:
+    Value: !Ref EdgeAlarmArchiveLogGroup
+  EdgeAlarmStateEventRuleName:
+    Value: !Ref EdgeAlarmStateEventRule
   WebAclBlockedRequestsAlarmName:
     Value: !Ref WebAclBlockedRequestsAlarm
   ApiAggregateRateAlarmName:

@@ -1,6 +1,120 @@
 {
   "schema": "archon.aws.foundation-storage-migration-policy",
   "schemaVersion": 1,
+  "incrementalFixedCostContract": {
+    "schema": "archon.aws.incremental-fixed-monthly-cost-contract",
+    "schemaVersion": 1,
+    "scope": "incremental foundation + two edge stacks; not total application cost",
+    "currency": "USD",
+    "billingPeriod": "month",
+    "pricingAsOf": "2026-08-03",
+    "officialPricingUrls": {
+      "awsCloudWatch": "https://aws.amazon.com/cloudwatch/pricing/",
+      "awsKms": "https://aws.amazon.com/kms/pricing/",
+      "awsSecretsManager": "https://aws.amazon.com/secrets-manager/pricing/",
+      "awsWaf": "https://aws.amazon.com/waf/pricing/"
+    },
+    "lineItems": [
+      {
+        "id": "cloudfront-web-acls",
+        "description": "CloudFront WebACLs",
+        "quantity": 2,
+        "unitMonthlyUsd": 5.00,
+        "pricingSource": "awsWaf",
+        "monthlyUsdByScenario": {
+          "initial": 10.00,
+          "afterFirstBilledKmsRotation": 10.00,
+          "afterSecondBilledKmsRotation": 10.00
+        }
+      },
+      {
+        "id": "web-acl-rules",
+        "description": "Five WebACL rule associations per edge stack",
+        "quantity": 10,
+        "unitMonthlyUsd": 1.00,
+        "pricingSource": "awsWaf",
+        "monthlyUsdByScenario": {
+          "initial": 10.00,
+          "afterFirstBilledKmsRotation": 10.00,
+          "afterSecondBilledKmsRotation": 10.00
+        }
+      },
+      {
+        "id": "standard-cloudwatch-alarm-metrics",
+        "description": "Standard-resolution CloudWatch alarm metrics",
+        "quantity": 6,
+        "unitMonthlyUsd": 0.10,
+        "pricingSource": "awsCloudWatch",
+        "monthlyUsdByScenario": {
+          "initial": 0.60,
+          "afterFirstBilledKmsRotation": 0.60,
+          "afterSecondBilledKmsRotation": 0.60
+        }
+      },
+      {
+        "id": "secrets-manager-secrets",
+        "description": "Source-owned Secrets Manager secrets",
+        "quantity": 2,
+        "unitMonthlyUsd": 0.40,
+        "pricingSource": "awsSecretsManager",
+        "monthlyUsdByScenario": {
+          "initial": 0.80,
+          "afterFirstBilledKmsRotation": 0.80,
+          "afterSecondBilledKmsRotation": 0.80
+        }
+      },
+      {
+        "id": "application-customer-managed-kms-key",
+        "description": "Application customer-managed KMS key and billed rotated key material",
+        "quantity": 1,
+        "unitMonthlyUsd": 1.00,
+        "pricingSource": "awsKms",
+        "billedUnitsByScenario": {
+          "initial": 1,
+          "afterFirstBilledKmsRotation": 2,
+          "afterSecondBilledKmsRotation": 3
+        },
+        "monthlyUsdByScenario": {
+          "initial": 1.00,
+          "afterFirstBilledKmsRotation": 2.00,
+          "afterSecondBilledKmsRotation": 3.00
+        }
+      }
+    ],
+    "scenarios": [
+      {
+        "id": "initial",
+        "expectedMonthlyUsd": 22.40
+      },
+      {
+        "id": "afterFirstBilledKmsRotation",
+        "expectedMonthlyUsd": 23.40
+      },
+      {
+        "id": "afterSecondBilledKmsRotation",
+        "expectedMonthlyUsd": 24.40
+      }
+    ],
+    "maximumExpectedMonthlyUsd": 24.40,
+    "approvedCeilingMonthlyUsd": 26.00,
+    "ceilingComparison": "strictly-less-than",
+    "variableUsageChargesExcluded": [
+      "AWS WAF requests",
+      "CloudWatch Logs ingestion and storage",
+      "Amazon S3 storage and requests",
+      "Amazon EventBridge events",
+      "data transfer"
+    ],
+    "externalAndOutOfScopeChargesExcluded": [
+      "taxes",
+      "application compute, API, and network services",
+      "CockroachDB Cloud",
+      "model and inference services",
+      "conditional regional alarm-routing control",
+      "optional FinOps human notification route",
+      "GitHub Actions"
+    ]
+  },
   "requiredNewResources": [
     {
       "logicalResourceId": "AlarmRoutingCloudFormationExecutionRole",
@@ -27,12 +141,8 @@
       "resourceType": "AWS::S3::BucketPolicy"
     },
     {
-      "logicalResourceId": "CloudFrontAccessLogKey",
-      "resourceType": "AWS::KMS::Key"
-    },
-    {
-      "logicalResourceId": "CloudFrontAccessLogKeyAlias",
-      "resourceType": "AWS::KMS::Alias"
+      "logicalResourceId": "EdgeCleanupRole",
+      "resourceType": "AWS::IAM::Role"
     },
     {
       "logicalResourceId": "EdgeControlRole",

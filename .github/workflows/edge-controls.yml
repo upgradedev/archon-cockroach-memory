@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Create an inspected plan, apply that exact plan, or verify live controls.
+        description: Plan, apply, verify, clean up an exact recoverable shell, or finalize exact live controls.
         required: true
         type: choice
         options:
           - plan
           - apply
           - verify
+          - cleanup
+          - finalize
       environment:
         description: Exact edge stack to manage.
         required: true
@@ -22,8 +24,12 @@ on:
         description: Exact 40-character current main SHA proven by CI, CodeQL, and Supply Chain.
         required: true
         type: string
+      deployed_sha:
+        description: Optional exact historical deployed SHA; accepted only by finalize.
+        required: false
+        type: string
       confirmation:
-        description: For apply, enter APPLY-STAGING-EDGE-CONTROLS or APPLY-PRODUCTION-EDGE-CONTROLS.
+        description: Enter the exact APPLY-, CLEANUP-, or FINALIZE-{ENV}-EDGE-CONTROLS confirmation for mutating operations.
         required: false
         type: string
 
@@ -42,6 +48,7 @@ env:
   EDGE_ENVIRONMENT: ${{ inputs.environment }}
   OPERATION: ${{ inputs.operation }}
   TARGET_SHA: ${{ inputs.target_sha }}
+  DEPLOYED_SHA: ${{ inputs.deployed_sha }}
 
 jobs:
   authorize:
@@ -56,6 +63,213 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Validate the approved incremental fixed-cost contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            def cents: (. * 100 | round);
+            .incrementalFixedCostContract as $cost
+            | [
+                "initial",
+                "afterFirstBilledKmsRotation",
+                "afterSecondBilledKmsRotation"
+              ] as $scenarioIds
+            | (
+                reduce $cost.lineItems[] as $item (
+                  {};
+                  reduce $scenarioIds[] as $scenario (
+                    .;
+                    .[$scenario] = (
+                      (.[$scenario] // 0)
+                      + ($item.monthlyUsdByScenario[$scenario] | cents)
+                    )
+                  )
+                )
+              ) as $computedScenarioCents
+            | (
+                [
+                  $cost.scenarios[]
+                  | {
+                      key: .id,
+                      value: (.expectedMonthlyUsd | cents)
+                    }
+                ] | from_entries
+              ) as $declaredScenarioCents
+            | (
+                $declaredScenarioCents
+                | to_entries
+                | map(.value)
+                | max
+              ) as $computedMaximumCents
+            | $cost.schema
+                == "archon.aws.incremental-fixed-monthly-cost-contract"
+            and $cost.schemaVersion == 1
+            and $cost.scope
+              == "incremental foundation + two edge stacks; not total application cost"
+            and $cost.currency == "USD"
+            and $cost.billingPeriod == "month"
+            and $cost.pricingAsOf == "2026-08-03"
+            and $cost.officialPricingUrls == {
+              awsCloudWatch: "https://aws.amazon.com/cloudwatch/pricing/",
+              awsKms: "https://aws.amazon.com/kms/pricing/",
+              awsSecretsManager:
+                "https://aws.amazon.com/secrets-manager/pricing/",
+              awsWaf: "https://aws.amazon.com/waf/pricing/"
+            }
+            and ($cost.lineItems | length) == 5
+            and (
+              [$cost.lineItems[].id] | sort
+            ) == ([
+              "application-customer-managed-kms-key",
+              "cloudfront-web-acls",
+              "secrets-manager-secrets",
+              "standard-cloudwatch-alarm-metrics",
+              "web-acl-rules"
+            ] | sort)
+            and (
+              [
+                $cost.lineItems[]
+                | {
+                    key: .id,
+                    value: {
+                      quantity: .quantity,
+                      unitMonthlyUsd: .unitMonthlyUsd,
+                      pricingSource: .pricingSource,
+                      billedUnitsByScenario:
+                        (.billedUnitsByScenario // null)
+                    }
+                  }
+              ] | from_entries
+            ) == {
+              "application-customer-managed-kms-key": {
+                quantity: 1,
+                unitMonthlyUsd: 1.00,
+                pricingSource: "awsKms",
+                billedUnitsByScenario: {
+                  initial: 1,
+                  afterFirstBilledKmsRotation: 2,
+                  afterSecondBilledKmsRotation: 3
+                }
+              },
+              "cloudfront-web-acls": {
+                quantity: 2,
+                unitMonthlyUsd: 5.00,
+                pricingSource: "awsWaf",
+                billedUnitsByScenario: null
+              },
+              "secrets-manager-secrets": {
+                quantity: 2,
+                unitMonthlyUsd: 0.40,
+                pricingSource: "awsSecretsManager",
+                billedUnitsByScenario: null
+              },
+              "standard-cloudwatch-alarm-metrics": {
+                quantity: 6,
+                unitMonthlyUsd: 0.10,
+                pricingSource: "awsCloudWatch",
+                billedUnitsByScenario: null
+              },
+              "web-acl-rules": {
+                quantity: 10,
+                unitMonthlyUsd: 1.00,
+                pricingSource: "awsWaf",
+                billedUnitsByScenario: null
+              }
+            }
+            and all(
+              $cost.lineItems[] as $item;
+              ($item.quantity | type) == "number"
+              and $item.quantity > 0
+              and ($item.unitMonthlyUsd | type) == "number"
+              and $item.unitMonthlyUsd > 0
+              and (
+                $item.monthlyUsdByScenario | keys | sort
+              ) == ($scenarioIds | sort)
+              and all(
+                $scenarioIds[] as $scenario;
+                ($item.monthlyUsdByScenario[$scenario] | type)
+                  == "number"
+                and $item.monthlyUsdByScenario[$scenario] >= 0
+              )
+              and (
+                ($item | has("billedUnitsByScenario"))
+                == (
+                  $item.id
+                    == "application-customer-managed-kms-key"
+                )
+              )
+              and (
+                if ($item | has("billedUnitsByScenario"))
+                then (
+                  $item.billedUnitsByScenario | keys | sort
+                ) == ($scenarioIds | sort)
+                and all(
+                  $scenarioIds[] as $scenario;
+                  ($item.billedUnitsByScenario[$scenario] | type)
+                    == "number"
+                  and $item.billedUnitsByScenario[$scenario] > 0
+                  and (
+                    $item.monthlyUsdByScenario[$scenario] | cents
+                  ) == (
+                    $item.billedUnitsByScenario[$scenario]
+                    * $item.unitMonthlyUsd
+                    | cents
+                  )
+                )
+                else all(
+                  $scenarioIds[] as $scenario;
+                  ($item.monthlyUsdByScenario[$scenario] | cents)
+                    == ($item.quantity * $item.unitMonthlyUsd | cents)
+                )
+                end
+              )
+              and ($cost.officialPricingUrls | has($item.pricingSource))
+            )
+            and ($cost.scenarios | map(.id)) == $scenarioIds
+            and $cost.scenarios == [
+              {id: "initial", expectedMonthlyUsd: 22.40},
+              {
+                id: "afterFirstBilledKmsRotation",
+                expectedMonthlyUsd: 23.40
+              },
+              {
+                id: "afterSecondBilledKmsRotation",
+                expectedMonthlyUsd: 24.40
+              }
+            ]
+            and $declaredScenarioCents == {
+              initial: 2240,
+              afterFirstBilledKmsRotation: 2340,
+              afterSecondBilledKmsRotation: 2440
+            }
+            and $computedScenarioCents == $declaredScenarioCents
+            and (
+              $cost.maximumExpectedMonthlyUsd | cents
+            ) == $computedMaximumCents
+            and $computedMaximumCents == 2440
+            and ($cost.approvedCeilingMonthlyUsd | cents) == 2600
+            and $cost.ceilingComparison == "strictly-less-than"
+            and $computedMaximumCents
+              < ($cost.approvedCeilingMonthlyUsd | cents)
+            and $cost.variableUsageChargesExcluded == [
+              "AWS WAF requests",
+              "CloudWatch Logs ingestion and storage",
+              "Amazon S3 storage and requests",
+              "Amazon EventBridge events",
+              "data transfer"
+            ]
+            and $cost.externalAndOutOfScopeChargesExcluded == [
+              "taxes",
+              "application compute, API, and network services",
+              "CockroachDB Cloud",
+              "model and inference services",
+              "conditional regional alarm-routing control",
+              "optional FinOps human notification route",
+              "GitHub Actions"
+            ]
+          ' aws/foundation-storage-migration-policy.json >/dev/null
+
       - name: Fail closed unless dispatch targets current green main
         shell: bash
         env:
@@ -64,6 +278,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [ -n "$DEPLOYED_SHA" ]; then
+            test "$OPERATION" = "finalize"
+            [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
           [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
           test "$AWS_REGION" = "us-east-1"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
@@ -77,38 +295,47 @@ jobs:
             staging|production) ;;
             *) exit 1 ;;
           esac
-          if [ "$OPERATION" = "apply" ]; then
-            expected_confirmation="$(
-              printf 'APPLY-%s-EDGE-CONTROLS' \
-                "$(tr '[:lower:]' '[:upper:]' <<<"$EDGE_ENVIRONMENT")"
-            )"
-            test "$CONFIRMATION" = "$expected_confirmation"
-          else
-            case "$OPERATION" in
-              plan|verify) ;;
-              *) exit 1 ;;
-            esac
-            test -z "$CONFIRMATION"
-          fi
+          environment_upper="$(
+            tr '[:lower:]' '[:upper:]' <<<"$EDGE_ENVIRONMENT"
+          )"
+          case "$OPERATION" in
+            apply)
+              expected_confirmation="APPLY-${environment_upper}-EDGE-CONTROLS"
+              test "$CONFIRMATION" = "$expected_confirmation"
+              ;;
+            cleanup)
+              expected_confirmation="CLEANUP-${environment_upper}-EDGE-CONTROLS"
+              test "$CONFIRMATION" = "$expected_confirmation"
+              ;;
+            finalize)
+              expected_confirmation="FINALIZE-${environment_upper}-EDGE-CONTROLS"
+              test "$CONFIRMATION" = "$expected_confirmation"
+              ;;
+            plan|verify)
+              test -z "$CONFIRMATION"
+              ;;
+            *) exit 1 ;;
+          esac
 
           git fetch --no-tags --depth=1 origin main
           test "$(git rev-parse origin/main)" = "$TARGET_SHA"
 
           prove_workflow() {
-            local expected_name expected_path state workflow
+            local expected_name expected_path sha state workflow
             workflow="$1"
             expected_name="$2"
             expected_path="$3"
+            sha="$4"
             state="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&per_page=100" |
+              gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&head_sha=${sha}&per_page=100" |
                 jq -er \
-                  --arg sha "$TARGET_SHA" \
+                  --arg sha "$sha" \
                   --arg name "$expected_name" \
                   --arg path "$expected_path" \
                   '
                     [
-                      .workflow_runs[]
+                      .[].workflow_runs[]
                       | select(
                           .head_sha == $sha
                           and .head_branch == "main"
@@ -125,18 +352,41 @@ jobs:
             )"
             test "$state" = "success"
           }
-          prove_workflow ci.yml CI .github/workflows/ci.yml
-          prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml
-          prove_workflow \
-            supply-chain.yml "Supply Chain (enforced)" \
-            .github/workflows/supply-chain.yml
+          prove_green_sha() {
+            local sha
+            sha="$1"
+            prove_workflow ci.yml CI .github/workflows/ci.yml "$sha"
+            prove_workflow codeql.yml CodeQL .github/workflows/codeql.yml "$sha"
+            prove_workflow \
+              supply-chain.yml "Supply Chain (enforced)" \
+              .github/workflows/supply-chain.yml "$sha"
+          }
+          prove_green_sha "$TARGET_SHA"
+          if [ -n "$DEPLOYED_SHA" ] && [ "$DEPLOYED_SHA" != "$TARGET_SHA" ]; then
+            comparison="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/compare/${DEPLOYED_SHA}...${TARGET_SHA}"
+            )"
+            jq -e \
+              --arg deployed "$DEPLOYED_SHA" \
+              --arg target "$TARGET_SHA" \
+              '
+                .base_commit.sha == $deployed
+                and .merge_base_commit.sha == $deployed
+                and .head_commit.sha == $target
+                and .status == "ahead"
+                and .ahead_by > 0
+                and .behind_by == 0
+              ' <<<"$comparison" >/dev/null
+            prove_green_sha "$DEPLOYED_SHA"
+          fi
 
   edge:
-    name: ${{ inputs.operation == 'plan' && 'Plan edge controls' || inputs.operation == 'apply' && 'Apply edge controls' || 'Verify edge controls' }}
+    name: ${{ inputs.operation == 'plan' && 'Plan edge controls' || inputs.operation == 'apply' && 'Apply edge controls' || inputs.operation == 'verify' && 'Verify edge controls' || inputs.operation == 'cleanup' && 'Clean up recoverable edge shell' || 'Finalize edge controls' }}
     needs: authorize
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment: edge-controls
+    environment: ${{ inputs.operation == 'cleanup' && 'edge-cleanup' || 'edge-controls' }}
     permissions:
       actions: read
       contents: read
@@ -149,11 +399,20 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Mask edge account and authority ARN
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          echo "::add-mask::$AWS_ACCOUNT_ID"
+          echo "::add-mask::arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-edge-controls"
+          echo "::add-mask::arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-edge-cleanup"
+
       - name: Configure exact edge-control authority
         uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5 # v6.1.2
         with:
           aws-region: us-east-1
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.APP_NAME }}-github-edge-controls
+          role-to-assume: ${{ inputs.operation == 'cleanup' && format('arn:aws:iam::{0}:role/{1}-github-edge-cleanup', env.AWS_ACCOUNT_ID, env.APP_NAME) || format('arn:aws:iam::{0}:role/{1}-github-edge-controls', env.AWS_ACCOUNT_ID, env.APP_NAME) }}
           role-session-name: archon-edge-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
           mask-aws-account-id: true
 
@@ -167,9 +426,13 @@ jobs:
           test "$(git rev-parse origin/main)" = "$TARGET_SHA"
           identity="${RUNNER_TEMP:?}/edge-identity.json"
           aws sts get-caller-identity --output json >"$identity"
+          expected_role="${APP_NAME}-github-edge-controls"
+          if [ "$OPERATION" = "cleanup" ]; then
+            expected_role="${APP_NAME}-github-edge-cleanup"
+          fi
           jq -e \
             --arg account "$AWS_ACCOUNT_ID" \
-            --arg role "${APP_NAME}-github-edge-controls" \
+            --arg role "$expected_role" \
             '
               .Account == $account
               and (.Arn | contains(":assumed-role/" + $role + "/"))
@@ -179,6 +442,40 @@ jobs:
           template_digest="$(
             sha256sum aws/edge-waf.yaml | awk '{print $1}'
           )"
+          current_policy_digest="$(
+            sha256sum aws/edge-stack-policy.json | awk '{print $1}'
+          )"
+          protection_source_sha="$TARGET_SHA"
+          protection_template="aws/edge-waf.yaml"
+          protection_policy="aws/edge-stack-policy.json"
+          historical_finalize=false
+          if [ -n "$DEPLOYED_SHA" ] && [ "$DEPLOYED_SHA" != "$TARGET_SHA" ]; then
+            test "$OPERATION" = "finalize"
+            protection_source_sha="$DEPLOYED_SHA"
+            historical_finalize=true
+            protection_template="${RUNNER_TEMP:?}/edge-historical-template.yaml"
+            protection_policy="${RUNNER_TEMP:?}/edge-historical-stack-policy.json"
+            git fetch --no-tags --depth=1 origin "$protection_source_sha"
+            test "$(git rev-parse FETCH_HEAD)" = "$protection_source_sha"
+            git show \
+              "${protection_source_sha}:aws/edge-waf.yaml" \
+              >"$protection_template"
+            git show \
+              "${protection_source_sha}:aws/edge-stack-policy.json" \
+              >"$protection_policy"
+          fi
+          jq -e . "$protection_policy" >/dev/null
+          protection_template_digest="$(
+            sha256sum "$protection_template" | awk '{print $1}'
+          )"
+          protection_policy_digest="$(
+            sha256sum "$protection_policy" | awk '{print $1}'
+          )"
+          current_semantics_match=false
+          if [ "$protection_template_digest" = "$template_digest" ] &&
+              [ "$protection_policy_digest" = "$current_policy_digest" ]; then
+            current_semantics_match=true
+          fi
           change_set="edge-controls-${EDGE_ENVIRONMENT}-${TARGET_SHA:0:12}-${template_digest:0:12}"
           description="operation=edge-controls environment=${EDGE_ENVIRONMENT} commit=${TARGET_SHA} template_sha256=${template_digest}"
           receipt="${RUNNER_TEMP:?}/edge-controls-receipt.json"
@@ -188,6 +485,10 @@ jobs:
             --arg environment "$EDGE_ENVIRONMENT" \
             --arg commit "$TARGET_SHA" \
             --arg digest "$template_digest" \
+            --arg protectionSourceSha "$protection_source_sha" \
+            --arg protectionTemplateSha256 "$protection_template_digest" \
+            --argjson historicalFinalize "$historical_finalize" \
+            --argjson currentSemanticsMatch "$current_semantics_match" \
             --arg stack "$stack_name" \
             --arg generatedAt "$generated_at" \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -202,6 +503,12 @@ jobs:
               repository: $repository,
               generatedAt: $generatedAt,
               templateSha256: $digest,
+              protectionSource: {
+                commit: $protectionSourceSha,
+                templateSha256: $protectionTemplateSha256,
+                historicalFinalize: $historicalFinalize,
+                currentSemanticsMatch: $currentSemanticsMatch
+              },
               stack: {
                 name: $stack,
                 controlPlaneRegion: "us-east-1"
@@ -217,6 +524,13 @@ jobs:
             echo "CHANGE_SET_NAME=$change_set"
             echo "EDGE_STACK_NAME=$stack_name"
             echo "EDGE_TEMPLATE_DIGEST=$template_digest"
+            echo "EDGE_PROTECTION_SOURCE_SHA=$protection_source_sha"
+            echo "EDGE_PROTECTION_TEMPLATE=$protection_template"
+            echo "EDGE_PROTECTION_TEMPLATE_DIGEST=$protection_template_digest"
+            echo "EDGE_PROTECTION_POLICY=$protection_policy"
+            echo "EDGE_PROTECTION_POLICY_DIGEST=$protection_policy_digest"
+            echo "EDGE_HISTORICAL_FINALIZE=$historical_finalize"
+            echo "EDGE_CURRENT_SEMANTICS_MATCH=$current_semantics_match"
             echo "RECEIPT_FILE=$receipt"
           } >>"$GITHUB_ENV"
 
@@ -230,35 +544,105 @@ jobs:
               --stack-name "$EDGE_STACK_NAME" \
               --region "$AWS_REGION" \
               --output json >"$current" 2>"$error"; then
+            jq -e \
+              --arg account "$AWS_ACCOUNT_ID" \
+              --arg stack "$EDGE_STACK_NAME" \
+              '
+                (.Stacks | length) == 1
+                and .Stacks[0].StackName == $stack
+                and .Stacks[0].StackId == (
+                  "arn:aws:cloudformation:us-east-1:" + $account
+                  + ":stack/" + $stack + "/"
+                  + (.Stacks[0].StackId | split("/") | last)
+                )
+                and (.Stacks[0].StackId | split("/") | length) == 3
+                and (
+                  .Stacks[0].StackId | split("/") | last
+                  | test(
+                      "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    )
+                )
+                and ((.Stacks[0].RoleARN // null) == null)
+                and ((.Stacks[0].Tags // []) == [])
+                and ((.Stacks[0].NotificationARNs // []) == [])
+                and ((.Stacks[0].Capabilities // []) == [])
+              ' "$current" >/dev/null
             stack_status="$(jq -er '.Stacks[0].StackStatus' "$current")"
             case "$stack_status" in
               CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
-                jq -e \
-                  --arg stack "$EDGE_STACK_NAME" \
-                  '
-                    (.Stacks | length) == 1
-                    and .Stacks[0].StackName == $stack
-                    and ((.Stacks[0].RoleARN // null) == null)
-                    and .Stacks[0].EnableTerminationProtection == true
-                  ' "$current" >/dev/null
-                stack_policy="${RUNNER_TEMP:?}/edge-current-stack-policy.json"
-                aws cloudformation get-stack-policy \
+                test "$OPERATION" != "cleanup"
+                live_template_response="${RUNNER_TEMP:?}/edge-current-template-response.json"
+                live_template="${RUNNER_TEMP:?}/edge-current-template.yaml"
+                aws cloudformation get-template \
                   --stack-name "$EDGE_STACK_NAME" \
+                  --template-stage Original \
                   --region "$AWS_REGION" \
-                  --output json >"$stack_policy"
-                jq -e \
-                  --slurpfile expected aws/edge-stack-policy.json \
-                  '(.StackPolicyBody | fromjson) == $expected[0]' \
-                  "$stack_policy" >/dev/null
+                  --output json >"$live_template_response"
+                jq -er '
+                  .TemplateBody
+                  | select(type == "string" and length > 0)
+                  | @base64
+                ' "$live_template_response" |
+                  base64 --decode >"$live_template"
+                live_template_digest="$(
+                  sha256sum "$live_template" | awk '{print $1}'
+                )"
+
+                if [ "$OPERATION" = "finalize" ] || {
+                    [ "$OPERATION" = "apply" ] &&
+                    [ "$live_template_digest" = "$EDGE_TEMPLATE_DIGEST" ];
+                  }; then
+                  # A previous execute may have completed before the workflow
+                  # installed lifecycle protections. A later proof step must
+                  # validate the exact live template and nine-resource
+                  # inventory before either protection is mutated.
+                  test "$live_template_digest" = \
+                    "$EDGE_PROTECTION_TEMPLATE_DIGEST"
+                  if [ "$OPERATION" = "apply" ]; then
+                    echo "EDGE_APPLY_MODE=finalize" >>"$GITHUB_ENV"
+                  fi
+                else
+                  case "$OPERATION" in
+                    plan|apply|verify) ;;
+                    *) exit 1 ;;
+                  esac
+                  jq -e \
+                    '.Stacks[0].EnableTerminationProtection == true' \
+                    "$current" >/dev/null
+                  stack_policy="${RUNNER_TEMP:?}/edge-current-stack-policy.json"
+                  aws cloudformation get-stack-policy \
+                    --stack-name "$EDGE_STACK_NAME" \
+                    --region "$AWS_REGION" \
+                    --output json >"$stack_policy"
+                  jq -e \
+                    --slurpfile expected aws/edge-stack-policy.json \
+                    '(.StackPolicyBody | fromjson) == $expected[0]' \
+                    "$stack_policy" >/dev/null
+                  if [ "$OPERATION" = "apply" ]; then
+                    echo "EDGE_APPLY_MODE=execute" >>"$GITHUB_ENV"
+                  fi
+                fi
                 echo "EDGE_STACK_EXISTS=true" >>"$GITHUB_ENV"
                 echo "CHANGE_SET_TYPE=UPDATE" >>"$GITHUB_ENV"
                 ;;
               REVIEW_IN_PROGRESS)
+                case "$OPERATION" in
+                  apply|cleanup) ;;
+                  *) exit 1 ;;
+                esac
+                jq -e '
+                  .Stacks[0].StackStatus == "REVIEW_IN_PROGRESS"
+                  and .Stacks[0].EnableTerminationProtection == false
+                ' "$current" >/dev/null
+                if [ "$OPERATION" = "cleanup" ]; then
+                  echo "EDGE_CLEANUP_PRIOR_STATUS=REVIEW_IN_PROGRESS" \
+                    >>"$GITHUB_ENV"
+                else
+
                 # A CREATE change set materializes a shell stack in
-                # REVIEW_IN_PROGRESS. Only apply may adopt that state, and only
-                # after re-proving the exact source-bound pending plan before
-                # any CREATE classification is exported to later steps.
-                test "$OPERATION" = "apply"
+                # REVIEW_IN_PROGRESS. Apply may adopt that state only after
+                # re-proving the exact source-bound pending plan before any
+                # CREATE classification is exported to later steps.
                 test "$GITHUB_SHA" = "$TARGET_SHA"
                 test "$(git rev-parse HEAD)" = "$TARGET_SHA"
                 expected_change_set="edge-controls-${EDGE_ENVIRONMENT}-${TARGET_SHA:0:12}-${EDGE_TEMPLATE_DIGEST:0:12}"
@@ -324,10 +708,23 @@ jobs:
                     and .ChangeSetType == "CREATE"
                     and .Status == "CREATE_COMPLETE"
                     and .ExecutionStatus == "AVAILABLE"
-                    and ((.RoleARN // null) == null)
+                    and .RoleARN == null
                     and ((.Capabilities // []) == [])
-                    and ((.NotificationARNs // []) == [])
+                    and .NotificationARNs == []
+                    and (
+                      .RollbackConfiguration == {}
+                      or .RollbackConfiguration == {
+                        RollbackTriggers: [],
+                        MonitoringTimeInMinutes: 0
+                      }
+                    )
                     and ((.IncludeNestedStacks // false) == false)
+                    and ((.ImportExistingResources // false) == false)
+                    and ((.Tags // []) == [])
+                    and (
+                      .OnStackFailure == null
+                      or .OnStackFailure == "ROLLBACK"
+                    )
                     and (.Parameters | parameter_map) == {
                       AppName: $app,
                       Environment: $environment,
@@ -344,9 +741,24 @@ jobs:
                     and .Stacks[0].StackId == $stackId
                     and .Stacks[0].StackStatus == "REVIEW_IN_PROGRESS"
                     and ((.Stacks[0].RoleARN // null) == null)
+                    and .Stacks[0].EnableTerminationProtection == false
+                    and ((.Stacks[0].Tags // []) == [])
                   ' "$current" >/dev/null
-                echo "EDGE_STACK_EXISTS=false" >>"$GITHUB_ENV"
-                echo "CHANGE_SET_TYPE=CREATE" >>"$GITHUB_ENV"
+                {
+                  echo "EDGE_STACK_EXISTS=false"
+                  echo "CHANGE_SET_TYPE=CREATE"
+                  echo "EDGE_APPLY_MODE=execute"
+                } >>"$GITHUB_ENV"
+                fi
+                ;;
+              ROLLBACK_COMPLETE)
+                test "$OPERATION" = "cleanup"
+                jq -e '
+                  .Stacks[0].StackStatus == "ROLLBACK_COMPLETE"
+                  and .Stacks[0].EnableTerminationProtection == false
+                ' "$current" >/dev/null
+                echo "EDGE_CLEANUP_PRIOR_STATUS=ROLLBACK_COMPLETE" \
+                  >>"$GITHUB_ENV"
                 ;;
               *)
                 echo "Unexpected existing edge stack state: $stack_status" >&2
@@ -356,10 +768,503 @@ jobs:
           else
             grep -Fq "ValidationError" "$error"
             grep -Fq "does not exist" "$error"
-            test "$OPERATION" != "verify"
+            case "$OPERATION" in
+              plan|apply) ;;
+              *) exit 1 ;;
+            esac
             echo "EDGE_STACK_EXISTS=false" >>"$GITHUB_ENV"
             echo "CHANGE_SET_TYPE=CREATE" >>"$GITHUB_ENV"
+            if [ "$OPERATION" = "apply" ]; then
+              echo "EDGE_APPLY_MODE=execute" >>"$GITHUB_ENV"
+            fi
           fi
+
+      - name: Clean up exact recoverable edge shell
+        if: inputs.operation == 'cleanup'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stack="${RUNNER_TEMP:?}/edge-cleanup-stack.json"
+          resources="${RUNNER_TEMP:?}/edge-cleanup-resources.json"
+          change_sets="${RUNNER_TEMP:?}/edge-cleanup-change-sets.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$EDGE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack"
+          stack_id="$(jq -er '.Stacks[0].StackId' "$stack")"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            --arg priorStatus "$EDGE_CLEANUP_PRIOR_STATUS" \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$stack_id" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].StackId == (
+                "arn:aws:cloudformation:us-east-1:" + $account
+                + ":stack/" + $stack + "/"
+                + (.Stacks[0].StackId | split("/") | last)
+              )
+              and (.Stacks[0].StackId | split("/") | length) == 3
+              and .Stacks[0].StackStatus == $priorStatus
+              and (
+                $priorStatus == "REVIEW_IN_PROGRESS"
+                or $priorStatus == "ROLLBACK_COMPLETE"
+              )
+              and ((.Stacks[0].RoleARN // null) == null)
+              and .Stacks[0].EnableTerminationProtection == false
+              and ((.Stacks[0].Tags // []) == [])
+              and ((.Stacks[0].NotificationARNs // []) == [])
+              and ((.Stacks[0].Capabilities // []) == [])
+              and (.Stacks[0].Parameters | parameter_map) == {
+                AppName: $app,
+                Environment: $environment,
+                ApiAggregateRateLimit: "1000",
+                ResolutionCreateRateLimit: "100"
+              }
+            ' "$stack" >/dev/null
+
+          aws cloudformation list-stack-resources \
+            --stack-name "$EDGE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$resources"
+          jq -e \
+            --arg priorStatus "$EDGE_CLEANUP_PRIOR_STATUS" \
+            '
+              all(
+                .StackResourceSummaries[];
+                (.LogicalResourceId | type) == "string"
+                and (.LogicalResourceId | length) > 0
+                and (.ResourceType | type) == "string"
+                and (.ResourceType | length) > 0
+              )
+              and (
+                if $priorStatus == "REVIEW_IN_PROGRESS"
+                then (.StackResourceSummaries | length) == 0
+                else $priorStatus == "ROLLBACK_COMPLETE"
+                  and all(
+                    .StackResourceSummaries[];
+                    .ResourceStatus == "DELETE_COMPLETE"
+                  )
+                end
+              )
+            ' "$resources" >/dev/null
+          cleanup_resource_count="$(
+            jq -er '.StackResourceSummaries | length' "$resources"
+          )"
+
+          aws cloudformation list-change-sets \
+            --stack-name "$EDGE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$change_sets"
+          jq -e \
+            --arg priorStatus "$EDGE_CLEANUP_PRIOR_STATUS" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$stack_id" \
+            '
+              (.Summaries | length) == 1
+              and all(
+                .Summaries[];
+                .StackName == $stack
+                and .StackId == $stackId
+                and (
+                  .ChangeSetName
+                  | test(
+                      "^edge-controls-" + $environment
+                      + "-[0-9a-f]{12}-[0-9a-f]{12}$"
+                    )
+                )
+                and ((.ImportExistingResources // false) == false)
+              )
+              and (
+                if $priorStatus == "REVIEW_IN_PROGRESS"
+                then .Summaries[0].Status == "CREATE_COMPLETE"
+                  and .Summaries[0].ExecutionStatus == "AVAILABLE"
+                else true
+                end
+              )
+            ' "$change_sets" >/dev/null
+
+          cleanup_change_set_bound=false
+          cleanup_template_bound=false
+          cleanup_change_set="${RUNNER_TEMP:?}/edge-cleanup-change-set.json"
+          cleanup_change_set_id="$(
+            jq -er '.Summaries[0].ChangeSetId' "$change_sets"
+          )"
+          aws cloudformation describe-change-set \
+            --stack-name "$EDGE_STACK_NAME" \
+            --change-set-name "$cleanup_change_set_id" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$cleanup_change_set"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            --arg priorStatus "$EDGE_CLEANUP_PRIOR_STATUS" \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$stack_id" \
+            '
+                def parameter_map:
+                  map({key:.ParameterKey, value:.ParameterValue})
+                  | from_entries;
+                def normalized_changes:
+                  [
+                    .Changes[].ResourceChange
+                    | {
+                        logicalResourceId: .LogicalResourceId,
+                        resourceType: .ResourceType,
+                        action: .Action
+                      }
+                  ] | sort_by(.logicalResourceId);
+                (
+                  .Description
+                  | capture(
+                      "^operation=edge-controls environment="
+                      + "(?<environment>staging|production) "
+                      + "commit=(?<commit>[0-9a-f]{40}) "
+                      + "template_sha256=(?<digest>[0-9a-f]{64})$"
+                    )
+                ) as $source
+                | $source.environment == $environment
+                and .ChangeSetName == (
+                  "edge-controls-" + $environment + "-"
+                  + ($source.commit[0:12]) + "-"
+                  + ($source.digest[0:12])
+                )
+                and .ChangeSetId == (
+                  "arn:aws:cloudformation:us-east-1:" + $account
+                  + ":changeSet/" + .ChangeSetName + "/"
+                  + (.ChangeSetId | split("/") | last)
+                )
+                and (.ChangeSetId | split("/") | length) == 3
+                and (
+                  .ChangeSetId | split("/") | last
+                  | test("^[A-Za-z0-9-]+$")
+                )
+                and .StackName == $stack
+                and .StackId == $stackId
+                and .ChangeSetType == "CREATE"
+                and .RoleARN == null
+                and ((.Capabilities // []) == [])
+                and .NotificationARNs == []
+                and ((.IncludeNestedStacks // false) == false)
+                and ((.ImportExistingResources // false) == false)
+                and ((.Tags // []) == [])
+                and (
+                  .OnStackFailure == null
+                  or .OnStackFailure == "ROLLBACK"
+                )
+                and (
+                  .RollbackConfiguration == {}
+                  or .RollbackConfiguration == {
+                    RollbackTriggers: [],
+                    MonitoringTimeInMinutes: 0
+                  }
+                )
+                and (.Parameters | parameter_map) == {
+                  AppName: $app,
+                  Environment: $environment,
+                  ApiAggregateRateLimit: "1000",
+                  ResolutionCreateRateLimit: "100"
+                }
+                and (
+                  if $priorStatus == "REVIEW_IN_PROGRESS"
+                  then .Status == "CREATE_COMPLETE"
+                    and .ExecutionStatus == "AVAILABLE"
+                  else (
+                    .Status == "CREATE_COMPLETE"
+                    or .Status == "DELETE_COMPLETE"
+                  )
+                  and (
+                    .ExecutionStatus == "EXECUTE_COMPLETE"
+                    or .ExecutionStatus == "EXECUTE_FAILED"
+                    or .ExecutionStatus == "UNAVAILABLE"
+                  )
+                  end
+                )
+                and normalized_changes == (
+                  [
+                    {
+                      logicalResourceId: "ApiAggregateRateAlarm",
+                      resourceType: "AWS::CloudWatch::Alarm",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "ArchonCloudFrontWebAcl",
+                      resourceType: "AWS::WAFv2::WebACL",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "EdgeAlarmArchiveLogGroup",
+                      resourceType: "AWS::Logs::LogGroup",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "EdgeAlarmArchiveLogPolicy",
+                      resourceType: "AWS::Logs::ResourcePolicy",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "EdgeAlarmStateEventRule",
+                      resourceType: "AWS::Events::Rule",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "ResolutionCreateRateAlarm",
+                      resourceType: "AWS::CloudWatch::Alarm",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "WafBlockLogGroup",
+                      resourceType: "AWS::Logs::LogGroup",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "WafBlockLoggingConfiguration",
+                      resourceType: "AWS::WAFv2::LoggingConfiguration",
+                      action: "Add"
+                    },
+                    {
+                      logicalResourceId: "WebAclBlockedRequestsAlarm",
+                      resourceType: "AWS::CloudWatch::Alarm",
+                      action: "Add"
+                    }
+                  ] | sort_by(.logicalResourceId)
+                )
+                and all(
+                  .Changes[].ResourceChange;
+                  .Action == "Add"
+                  and .Replacement == null
+                  and (
+                    (has("Details") | not)
+                    or .Details == null
+                    or .Details == []
+                  )
+                )
+            ' "$cleanup_change_set" >/dev/null
+          cleanup_change_set_bound=true
+          cleanup_source_commit="$(
+            jq -er '
+              .Description
+              | capture("commit=(?<commit>[0-9a-f]{40})")
+              | .commit
+            ' "$cleanup_change_set"
+          )"
+          cleanup_source_template_digest="$(
+            jq -er '
+              .Description
+              | capture("template_sha256=(?<digest>[0-9a-f]{64})$")
+              | .digest
+            ' "$cleanup_change_set"
+          )"
+          cleanup_change_set_name="$(
+            jq -er '.ChangeSetName' "$cleanup_change_set"
+          )"
+          cleanup_source_template="${RUNNER_TEMP:?}/edge-cleanup-source-template.yaml"
+          git fetch --no-tags --depth=1 origin "$cleanup_source_commit"
+          test "$(git rev-parse FETCH_HEAD)" = "$cleanup_source_commit"
+          git show \
+            "${cleanup_source_commit}:aws/edge-waf.yaml" \
+            >"$cleanup_source_template"
+          test "$(sha256sum "$cleanup_source_template" | awk '{print $1}')" = \
+            "$cleanup_source_template_digest"
+
+          cleanup_template_response="${RUNNER_TEMP:?}/edge-cleanup-template-response.json"
+          cleanup_template="${RUNNER_TEMP:?}/edge-cleanup-template.yaml"
+          if [ "$EDGE_CLEANUP_PRIOR_STATUS" = "REVIEW_IN_PROGRESS" ]; then
+            aws cloudformation get-template \
+              --stack-name "$EDGE_STACK_NAME" \
+              --change-set-name "$cleanup_change_set_id" \
+              --template-stage Original \
+              --region "$AWS_REGION" \
+              --output json >"$cleanup_template_response"
+          else
+            aws cloudformation get-template \
+              --stack-name "$EDGE_STACK_NAME" \
+              --template-stage Original \
+              --region "$AWS_REGION" \
+              --output json >"$cleanup_template_response"
+          fi
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$cleanup_template_response" |
+            base64 --decode >"$cleanup_template"
+          test "$(sha256sum "$cleanup_template" | awk '{print $1}')" = \
+            "$cleanup_source_template_digest"
+          cleanup_template_bound=true
+
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+
+          # Close the console/other-role TOCTOU window immediately before the
+          # destructive call. Every intrinsically validated stack, inventory,
+          # plan, status, parameter, tag, role, and source field must remain
+          # byte-for-byte equivalent after canonical JSON normalization.
+          final_stack="${RUNNER_TEMP:?}/edge-cleanup-final-stack.json"
+          final_resources="${RUNNER_TEMP:?}/edge-cleanup-final-resources.json"
+          final_change_sets="${RUNNER_TEMP:?}/edge-cleanup-final-change-sets.json"
+          final_change_set="${RUNNER_TEMP:?}/edge-cleanup-final-change-set.json"
+          final_template_response="${RUNNER_TEMP:?}/edge-cleanup-final-template-response.json"
+          final_template="${RUNNER_TEMP:?}/edge-cleanup-final-template.yaml"
+          aws cloudformation describe-stacks \
+            --stack-name "$stack_id" \
+            --region "$AWS_REGION" \
+            --output json >"$final_stack"
+          aws cloudformation list-stack-resources \
+            --stack-name "$stack_id" \
+            --region "$AWS_REGION" \
+            --output json >"$final_resources"
+          aws cloudformation list-change-sets \
+            --stack-name "$stack_id" \
+            --region "$AWS_REGION" \
+            --output json >"$final_change_sets"
+          aws cloudformation describe-change-set \
+            --stack-name "$stack_id" \
+            --change-set-name "$cleanup_change_set_id" \
+            --include-property-values \
+            --region "$AWS_REGION" \
+            --output json >"$final_change_set"
+          test "$(jq -Sc . "$stack")" = "$(jq -Sc . "$final_stack")"
+          test "$(jq -Sc . "$resources")" = \
+            "$(jq -Sc . "$final_resources")"
+          test "$(jq -Sc . "$change_sets")" = \
+            "$(jq -Sc . "$final_change_sets")"
+          test "$(jq -Sc . "$cleanup_change_set")" = \
+            "$(jq -Sc . "$final_change_set")"
+          if [ "$EDGE_CLEANUP_PRIOR_STATUS" = "REVIEW_IN_PROGRESS" ]; then
+            aws cloudformation get-template \
+              --stack-name "$stack_id" \
+              --change-set-name "$cleanup_change_set_id" \
+              --template-stage Original \
+              --region "$AWS_REGION" \
+              --output json >"$final_template_response"
+          else
+            aws cloudformation get-template \
+              --stack-name "$stack_id" \
+              --template-stage Original \
+              --region "$AWS_REGION" \
+              --output json >"$final_template_response"
+          fi
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$final_template_response" |
+            base64 --decode >"$final_template"
+          test "$(sha256sum "$final_template" | awk '{print $1}')" = \
+            "$cleanup_source_template_digest"
+          test "$(sha256sum "$cleanup_source_template" | awk '{print $1}')" = \
+            "$cleanup_source_template_digest"
+          cleanup_final_revalidation=true
+
+          cleanup_token="edge-cleanup-${EDGE_ENVIRONMENT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA:0:12}"
+          aws cloudformation delete-stack \
+            --stack-name "$stack_id" \
+            --client-request-token "$cleanup_token" \
+            --region "$AWS_REGION"
+
+          deleted=false
+          for attempt in $(seq 1 120); do
+            cleanup_probe="${RUNNER_TEMP:?}/edge-cleanup-probe.json"
+            cleanup_error="${RUNNER_TEMP:?}/edge-cleanup-probe.err"
+            if aws cloudformation describe-stacks \
+                --stack-name "$EDGE_STACK_NAME" \
+                --region "$AWS_REGION" \
+                --output json >"$cleanup_probe" 2>"$cleanup_error"; then
+              jq -e \
+                --arg stack "$EDGE_STACK_NAME" \
+                --arg stackId "$stack_id" \
+                '
+                  (.Stacks | length) == 1
+                  and .Stacks[0].StackName == $stack
+                  and .Stacks[0].StackId == $stackId
+                  and (
+                    .Stacks[0].StackStatus == "DELETE_IN_PROGRESS"
+                    or .Stacks[0].StackStatus == "DELETE_COMPLETE"
+                  )
+                ' "$cleanup_probe" >/dev/null
+            else
+              grep -Fq "ValidationError" "$cleanup_error"
+              grep -Fq "does not exist" "$cleanup_error"
+              deleted=true
+              break
+            fi
+            test "$attempt" -lt 120
+            sleep 5
+          done
+          test "$deleted" = "true"
+
+          stack_id_sha256="$(
+            printf '%s' "$stack_id" | sha256sum | awk '{print $1}'
+          )"
+          cleanup_token_sha256="$(
+            printf '%s' "$cleanup_token" | sha256sum | awk '{print $1}'
+          )"
+          receipt_next="${RUNNER_TEMP:?}/edge-cleanup-receipt.json"
+          jq \
+            --arg priorStatus "$EDGE_CLEANUP_PRIOR_STATUS" \
+            --arg stackIdSha256 "$stack_id_sha256" \
+            --arg cleanupTokenSha256 "$cleanup_token_sha256" \
+            --arg sourceCommit "$cleanup_source_commit" \
+            --arg sourceTemplateSha256 \
+              "$cleanup_source_template_digest" \
+            --arg sourceChangeSetName "$cleanup_change_set_name" \
+            --argjson resourceCount "$cleanup_resource_count" \
+            --argjson changeSetBound "$cleanup_change_set_bound" \
+            --argjson templateBound "$cleanup_template_bound" \
+            --argjson finalRevalidation "$cleanup_final_revalidation" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" \
+            '
+              . + {
+                ok: true,
+                result: "cleaned-up",
+                run: {
+                  id: ($runId | tonumber),
+                  attempt: ($runAttempt | tonumber),
+                  workflowRef: $workflowRef
+                },
+                execution: {
+                  clientRequestTokenSha256: $cleanupTokenSha256
+                },
+                cleanup: {
+                  priorStatus: $priorStatus,
+                  stackIdSha256: $stackIdSha256,
+                  sourceCommit: $sourceCommit,
+                  sourceTemplateSha256: $sourceTemplateSha256,
+                  sourceChangeSetName: $sourceChangeSetName,
+                  sourceRepositoryCommitBound: true,
+                  exactAccountRegionAndName: true,
+                  roleArnConfigured: false,
+                  terminationProtection: false,
+                  stackTags: [],
+                  importedResources: false,
+                  resourceCount: $resourceCount,
+                  allListedResourcesDeleteComplete: (
+                    if $priorStatus == "ROLLBACK_COMPLETE"
+                    then true
+                    else null
+                    end
+                  ),
+                  changeSetMetadataBound: $changeSetBound,
+                  templateBound: $templateBound,
+                  finalPreDeleteRevalidation: $finalRevalidation,
+                  stackDeletedAndNotFound: true
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
 
       - name: Create or reuse exact edge plan
         if: inputs.operation == 'plan'
@@ -443,7 +1348,7 @@ jobs:
           echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
 
       - name: Load exact existing edge plan
-        if: inputs.operation == 'apply'
+        if: inputs.operation == 'apply' && env.EDGE_APPLY_MODE == 'execute'
         shell: bash
         run: |
           set -euo pipefail
@@ -466,7 +1371,7 @@ jobs:
           echo "CHANGE_SET_ID=$change_set_id" >>"$GITHUB_ENV"
 
       - name: Require exact non-replacement WAF evidence plan
-        if: inputs.operation == 'plan' || inputs.operation == 'apply'
+        if: inputs.operation == 'plan' || (inputs.operation == 'apply' && env.EDGE_APPLY_MODE == 'execute')
         shell: bash
         run: |
           set -euo pipefail
@@ -494,12 +1399,69 @@ jobs:
           test "$(sha256sum "$template" | awk '{print $1}')" = \
             "$EDGE_TEMPLATE_DIGEST"
 
+          update_shape="create"
+          if [ "$CHANGE_SET_TYPE" = "UPDATE" ]; then
+            existing_inventory="${RUNNER_TEMP:?}/edge-existing-inventory.json"
+            aws cloudformation list-stack-resources \
+              --stack-name "$EDGE_STACK_NAME" \
+              --region "$AWS_REGION" \
+              --output json >"$existing_inventory"
+            update_shape="$(
+              jq -er '
+                def normalized_inventory:
+                  [.StackResourceSummaries[] | {
+                    logicalResourceId:.LogicalResourceId,
+                    resourceType:.ResourceType
+                  }] | sort_by(.logicalResourceId);
+                def legacy_inventory:
+                  [{logicalResourceId:"ArchonCloudFrontWebAcl", resourceType:"AWS::WAFv2::WebACL"}];
+                def steady_inventory:
+                  [
+                    {logicalResourceId:"ApiAggregateRateAlarm", resourceType:"AWS::CloudWatch::Alarm"},
+                    {logicalResourceId:"ArchonCloudFrontWebAcl", resourceType:"AWS::WAFv2::WebACL"},
+                    {logicalResourceId:"EdgeAlarmArchiveLogGroup", resourceType:"AWS::Logs::LogGroup"},
+                    {logicalResourceId:"EdgeAlarmArchiveLogPolicy", resourceType:"AWS::Logs::ResourcePolicy"},
+                    {logicalResourceId:"EdgeAlarmStateEventRule", resourceType:"AWS::Events::Rule"},
+                    {logicalResourceId:"ResolutionCreateRateAlarm", resourceType:"AWS::CloudWatch::Alarm"},
+                    {logicalResourceId:"WafBlockLogGroup", resourceType:"AWS::Logs::LogGroup"},
+                    {logicalResourceId:"WafBlockLoggingConfiguration", resourceType:"AWS::WAFv2::LoggingConfiguration"},
+                    {logicalResourceId:"WebAclBlockedRequestsAlarm", resourceType:"AWS::CloudWatch::Alarm"}
+                  ] | sort_by(.logicalResourceId);
+                if all(
+                  .StackResourceSummaries[];
+                  (
+                    .ResourceStatus == "CREATE_COMPLETE"
+                    or .ResourceStatus == "UPDATE_COMPLETE"
+                    or .ResourceStatus == "UPDATE_ROLLBACK_COMPLETE"
+                  ) and (.ResourceStatus | startswith("IMPORT_") | not)
+                ) | not
+                then error("ineligible existing resource state")
+                elif normalized_inventory == legacy_inventory
+                then "legacy-bootstrap"
+                elif normalized_inventory == steady_inventory
+                then "steady-state"
+                else error("unexpected existing edge inventory")
+                end
+              ' "$existing_inventory"
+            )"
+          fi
+
           expected_changes="${RUNNER_TEMP:?}/edge-expected-changes.json"
           web_acl_action="Modify"
           if [ "$CHANGE_SET_TYPE" = "CREATE" ]; then
             web_acl_action="Add"
           fi
-          jq -n \
+          if [ "$update_shape" = "steady-state" ]; then
+            jq '
+              [.Changes[].ResourceChange | {
+                logicalResourceId:.LogicalResourceId,
+                resourceType:.ResourceType,
+                action:.Action,
+                replacement:(.Replacement == "True")
+              }] | sort_by(.logicalResourceId)
+            ' "$change_set" >"$expected_changes"
+          else
+            jq -n \
             --arg webAclAction "$web_acl_action" \
             '[
               {
@@ -515,44 +1477,20 @@ jobs:
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveQueue",
-                resourceType: "AWS::SQS::Queue",
+                logicalResourceId: "EdgeAlarmArchiveLogGroup",
+                resourceType: "AWS::Logs::LogGroup",
                 action: "Add",
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveQueuePolicy",
-                resourceType: "AWS::SQS::QueuePolicy",
+                logicalResourceId: "EdgeAlarmArchiveLogPolicy",
+                resourceType: "AWS::Logs::ResourcePolicy",
                 action: "Add",
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveSubscription",
-                resourceType: "AWS::SNS::Subscription",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeAlarmTopic",
-                resourceType: "AWS::SNS::Topic",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeAlarmTopicPolicy",
-                resourceType: "AWS::SNS::TopicPolicy",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeEvidenceKey",
-                resourceType: "AWS::KMS::Key",
-                action: "Add",
-                replacement: false
-              },
-              {
-                logicalResourceId: "EdgeEvidenceKeyAlias",
-                resourceType: "AWS::KMS::Alias",
+                logicalResourceId: "EdgeAlarmStateEventRule",
+                resourceType: "AWS::Events::Rule",
                 action: "Add",
                 replacement: false
               },
@@ -581,6 +1519,7 @@ jobs:
                 replacement: false
               }
             ] | sort_by(.logicalResourceId)' >"$expected_changes"
+          fi
 
           jq -e \
             --arg id "$CHANGE_SET_ID" \
@@ -589,6 +1528,7 @@ jobs:
             --arg type "$CHANGE_SET_TYPE" \
             --arg app "$APP_NAME" \
             --arg environment "$EDGE_ENVIRONMENT" \
+            --arg updateShape "$update_shape" \
             --slurpfile expected "$expected_changes" \
             '
               def parameter_map:
@@ -601,9 +1541,21 @@ jobs:
                       logicalResourceId: .LogicalResourceId,
                       resourceType: .ResourceType,
                       action: .Action,
-                      replacement: ((.Replacement // "False") == "True")
+                      replacement: (.Replacement == "True")
                     }
                 ] | sort_by(.logicalResourceId);
+              def allowed_resources:
+                [
+                  {logicalResourceId:"ApiAggregateRateAlarm", resourceType:"AWS::CloudWatch::Alarm"},
+                  {logicalResourceId:"ArchonCloudFrontWebAcl", resourceType:"AWS::WAFv2::WebACL"},
+                  {logicalResourceId:"EdgeAlarmArchiveLogGroup", resourceType:"AWS::Logs::LogGroup"},
+                  {logicalResourceId:"EdgeAlarmArchiveLogPolicy", resourceType:"AWS::Logs::ResourcePolicy"},
+                  {logicalResourceId:"EdgeAlarmStateEventRule", resourceType:"AWS::Events::Rule"},
+                  {logicalResourceId:"ResolutionCreateRateAlarm", resourceType:"AWS::CloudWatch::Alarm"},
+                  {logicalResourceId:"WafBlockLogGroup", resourceType:"AWS::Logs::LogGroup"},
+                  {logicalResourceId:"WafBlockLoggingConfiguration", resourceType:"AWS::WAFv2::LoggingConfiguration"},
+                  {logicalResourceId:"WebAclBlockedRequestsAlarm", resourceType:"AWS::CloudWatch::Alarm"}
+                ];
               .ChangeSetId == $id
               and .ChangeSetName == $name
               and .Description == $description
@@ -612,6 +1564,25 @@ jobs:
               and .ExecutionStatus == "AVAILABLE"
               and ((.IncludeNestedStacks // false) == false)
               and (.Capabilities // []) == []
+              and .RoleARN == null
+              and .NotificationARNs == []
+              and (
+                .RollbackConfiguration == {}
+                or .RollbackConfiguration == {
+                  RollbackTriggers: [],
+                  MonitoringTimeInMinutes: 0
+                }
+              )
+              and ((.ImportExistingResources // false) == false)
+              and ((.Tags // []) == [])
+              and (
+                if $type == "CREATE"
+                then .OnStackFailure == null
+                  or .OnStackFailure == "ROLLBACK"
+                else $type == "UPDATE"
+                  and .OnStackFailure == null
+                end
+              )
               and (.Parameters | parameter_map) == {
                 AppName: $app,
                 Environment: $environment,
@@ -619,12 +1590,54 @@ jobs:
                 ResolutionCreateRateLimit: "100"
               }
               and normalized_changes == $expected[0]
+              and (
+                if $type == "CREATE"
+                then $updateShape == "create"
+                  and (normalized_changes | length) == 9
+                elif $updateShape == "legacy-bootstrap"
+                then $type == "UPDATE"
+                  and (normalized_changes | length) == 9
+                  and (normalized_changes | map(select(.action == "Add")) | length) == 8
+                  and (normalized_changes | map(select(
+                    .logicalResourceId == "ArchonCloudFrontWebAcl"
+                    and .action == "Modify"
+                  )) | length) == 1
+                else $type == "UPDATE"
+                  and $updateShape == "steady-state"
+                  and (normalized_changes | length) > 0
+                  and (normalized_changes | map(.logicalResourceId) | unique | length)
+                    == (normalized_changes | length)
+                  and all(
+                    normalized_changes[];
+                    . as $change
+                    | $change.action == "Modify"
+                    and any(
+                      allowed_resources[];
+                      .logicalResourceId == $change.logicalResourceId
+                      and .resourceType == $change.resourceType
+                    )
+                  )
+                end
+              )
               and all(
                 .Changes[].ResourceChange;
-                all(
-                  (.Details // [])[];
-                  .Target.RequiresRecreation == "Never"
-                )
+                if .Action == "Add"
+                then .Replacement == null
+                  and (
+                    (has("Details") | not)
+                    or .Details == null
+                    or .Details == []
+                  )
+                elif .Action == "Modify"
+                then .Replacement == "False"
+                  and (.Details | type) == "array"
+                  and (.Details | length) > 0
+                  and all(
+                    .Details[];
+                    .Target.RequiresRecreation == "Never"
+                  )
+                else false
+                end
               )
             ' "$change_set" >/dev/null
 
@@ -637,6 +1650,7 @@ jobs:
               "$([ "$OPERATION" = "plan" ] && printf inspected-plan || printf apply-pending)" \
             --arg changeSetArnSha256 "$change_set_arn_sha256" \
             --arg changeSetName "$CHANGE_SET_NAME" \
+            --arg updateShape "$update_shape" \
             --slurpfile changes "$expected_changes" \
             '
               . + {
@@ -647,6 +1661,7 @@ jobs:
                   name: $changeSetName,
                   status: "CREATE_COMPLETE",
                   executionStatus: "AVAILABLE",
+                  updateShape: $updateShape,
                   changes: $changes[0]
                 }
               }
@@ -654,7 +1669,7 @@ jobs:
           mv "$receipt_next" "$RECEIPT_FILE"
 
       - name: Execute exact inspected edge plan
-        if: inputs.operation == 'apply'
+        if: inputs.operation == 'apply' && env.EDGE_APPLY_MODE == 'execute'
         shell: bash
         run: |
           set -euo pipefail
@@ -714,45 +1729,338 @@ jobs:
             sleep 10
           done
           test "$terminal" = "true"
-          aws cloudformation set-stack-policy \
-            --stack-name "$EDGE_STACK_NAME" \
-            --stack-policy-body file://aws/edge-stack-policy.json \
-            --region "$AWS_REGION"
-          aws cloudformation update-termination-protection \
-            --stack-name "$EDGE_STACK_NAME" \
-            --enable-termination-protection \
-            --region "$AWS_REGION"
           echo "EXECUTION_CLIENT_TOKEN=$client_token" >>"$GITHUB_ENV"
 
+      - name: Prove exact deployed stack before lifecycle protection
+        if: inputs.operation == 'apply' || inputs.operation == 'finalize'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(sha256sum "$EDGE_PROTECTION_TEMPLATE" | awk '{print $1}')" = \
+            "$EDGE_PROTECTION_TEMPLATE_DIGEST"
+          test "$(sha256sum "$EDGE_PROTECTION_POLICY" | awk '{print $1}')" = \
+            "$EDGE_PROTECTION_POLICY_DIGEST"
+
+          lifecycle_stack="${RUNNER_TEMP:?}/edge-lifecycle-stack.json"
+          lifecycle_resources="${RUNNER_TEMP:?}/edge-lifecycle-resources.json"
+          lifecycle_template_response="${RUNNER_TEMP:?}/edge-lifecycle-template-response.json"
+          lifecycle_template="${RUNNER_TEMP:?}/edge-lifecycle-template.yaml"
+          aws cloudformation describe-stacks \
+            --stack-name "$EDGE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_stack"
+          lifecycle_stack_id="$(
+            jq -er '.Stacks[0].StackId' "$lifecycle_stack"
+          )"
+          jq -e \
+            --arg account "$AWS_ACCOUNT_ID" \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$lifecycle_stack_id" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue})
+                | from_entries;
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].StackId == (
+                "arn:aws:cloudformation:us-east-1:" + $account
+                + ":stack/" + $stack + "/"
+                + (.Stacks[0].StackId | split("/") | last)
+              )
+              and (.Stacks[0].StackId | split("/") | length) == 3
+              and (
+                .Stacks[0].StackId | split("/") | last
+                | test(
+                    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  )
+              )
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus
+                  == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and ((.Stacks[0].RoleARN // null) == null)
+              and ((.Stacks[0].Tags // []) == [])
+              and ((.Stacks[0].NotificationARNs // []) == [])
+              and ((.Stacks[0].Capabilities // []) == [])
+              and (.Stacks[0].Parameters | parameter_map) == {
+                AppName: $app,
+                Environment: $environment,
+                ApiAggregateRateLimit: "1000",
+                ResolutionCreateRateLimit: "100"
+              }
+            ' "$lifecycle_stack" >/dev/null
+
+          aws cloudformation get-template \
+            --stack-name "$lifecycle_stack_id" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_template_response"
+          jq -er '
+            .TemplateBody
+            | select(type == "string" and length > 0)
+            | @base64
+          ' "$lifecycle_template_response" |
+            base64 --decode >"$lifecycle_template"
+          test "$(sha256sum "$lifecycle_template" | awk '{print $1}')" = \
+            "$EDGE_PROTECTION_TEMPLATE_DIGEST"
+
+          aws cloudformation list-stack-resources \
+            --stack-name "$lifecycle_stack_id" \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_resources"
+          jq -e '
+            def normalized_inventory:
+              [
+                .StackResourceSummaries[]
+                | {
+                    logicalResourceId: .LogicalResourceId,
+                    resourceType: .ResourceType
+                  }
+              ] | sort_by(.logicalResourceId);
+            normalized_inventory == (
+              [
+                {
+                  logicalResourceId: "ApiAggregateRateAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                },
+                {
+                  logicalResourceId: "ArchonCloudFrontWebAcl",
+                  resourceType: "AWS::WAFv2::WebACL"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmArchiveLogGroup",
+                  resourceType: "AWS::Logs::LogGroup"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmArchiveLogPolicy",
+                  resourceType: "AWS::Logs::ResourcePolicy"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmStateEventRule",
+                  resourceType: "AWS::Events::Rule"
+                },
+                {
+                  logicalResourceId: "ResolutionCreateRateAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                },
+                {
+                  logicalResourceId: "WafBlockLogGroup",
+                  resourceType: "AWS::Logs::LogGroup"
+                },
+                {
+                  logicalResourceId: "WafBlockLoggingConfiguration",
+                  resourceType: "AWS::WAFv2::LoggingConfiguration"
+                },
+                {
+                  logicalResourceId: "WebAclBlockedRequestsAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                }
+              ] | sort_by(.logicalResourceId)
+            )
+            and (.StackResourceSummaries | length) == 9
+            and all(
+              .StackResourceSummaries[];
+              (
+                .ResourceStatus == "CREATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and (.ResourceStatus | startswith("IMPORT_") | not)
+            )
+          ' "$lifecycle_resources" >/dev/null
+
+          lifecycle_stack_id_sha256="$(
+            printf '%s' "$lifecycle_stack_id" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          {
+            echo "EDGE_BOUND_STACK_ID=$lifecycle_stack_id"
+            echo "EDGE_BOUND_STACK_ID_SHA256=$lifecycle_stack_id_sha256"
+          } >>"$GITHUB_ENV"
+
+      - name: Set exact edge stack lifecycle protections
+        if: inputs.operation == 'apply' || inputs.operation == 'finalize'
+        shell: bash
+        run: |
+          set -euo pipefail
+          lifecycle_probe="${RUNNER_TEMP:?}/edge-lifecycle-before-mutation.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_probe"
+          jq -e \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$EDGE_BOUND_STACK_ID" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and .Stacks[0].StackId == $stackId
+              and ((.Stacks[0].RoleARN // null) == null)
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus
+                  == "UPDATE_ROLLBACK_COMPLETE"
+              )
+            ' "$lifecycle_probe" >/dev/null
+          aws cloudformation set-stack-policy \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --stack-policy-body "file://${EDGE_PROTECTION_POLICY}" \
+            --region "$AWS_REGION"
+          aws cloudformation update-termination-protection \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --enable-termination-protection \
+            --region "$AWS_REGION"
+
+      - name: Prove historical finalize protection without current-control claims
+        if: inputs.operation == 'finalize' && env.EDGE_HISTORICAL_FINALIZE == 'true' && env.EDGE_CURRENT_SEMANTICS_MATCH == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          historical_stack="${RUNNER_TEMP:?}/edge-historical-finalize-stack.json"
+          historical_template_response="${RUNNER_TEMP:?}/edge-historical-finalize-template.json"
+          historical_template="${RUNNER_TEMP:?}/edge-historical-finalize-template.yaml"
+          historical_policy="${RUNNER_TEMP:?}/edge-historical-finalize-policy.json"
+          historical_resources="${RUNNER_TEMP:?}/edge-historical-finalize-resources.json"
+          aws cloudformation describe-stacks \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$historical_stack"
+          jq -e \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$EDGE_BOUND_STACK_ID" \
+            '
+              def parameter_map:
+                map({key:.ParameterKey, value:.ParameterValue}) | from_entries;
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].EnableTerminationProtection == true
+              and ((.Stacks[0].RoleARN // null) == null)
+              and ((.Stacks[0].Tags // []) == [])
+              and ((.Stacks[0].NotificationARNs // []) == [])
+              and ((.Stacks[0].Capabilities // []) == [])
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and (.Stacks[0].Parameters | parameter_map) == {
+                AppName:$app,
+                Environment:$environment,
+                ApiAggregateRateLimit:"1000",
+                ResolutionCreateRateLimit:"100"
+              }
+            ' "$historical_stack" >/dev/null
+          aws cloudformation get-template \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --template-stage Original \
+            --region "$AWS_REGION" \
+            --output json >"$historical_template_response"
+          jq -er '.TemplateBody | select(type == "string" and length > 0) | @base64' \
+            "$historical_template_response" |
+            base64 --decode >"$historical_template"
+          test "$(sha256sum "$historical_template" | awk '{print $1}')" = \
+            "$EDGE_PROTECTION_TEMPLATE_DIGEST"
+          aws cloudformation get-stack-policy \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$historical_policy"
+          jq -e \
+            --slurpfile expected "$EDGE_PROTECTION_POLICY" \
+            '(.StackPolicyBody | fromjson) == $expected[0]' \
+            "$historical_policy" >/dev/null
+          aws cloudformation list-stack-resources \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$historical_resources"
+          jq -e '
+            def inventory:
+              [.StackResourceSummaries[] | [.LogicalResourceId,.ResourceType]] | sort;
+            inventory == ([
+              ["ApiAggregateRateAlarm","AWS::CloudWatch::Alarm"],
+              ["ArchonCloudFrontWebAcl","AWS::WAFv2::WebACL"],
+              ["EdgeAlarmArchiveLogGroup","AWS::Logs::LogGroup"],
+              ["EdgeAlarmArchiveLogPolicy","AWS::Logs::ResourcePolicy"],
+              ["EdgeAlarmStateEventRule","AWS::Events::Rule"],
+              ["ResolutionCreateRateAlarm","AWS::CloudWatch::Alarm"],
+              ["WafBlockLogGroup","AWS::Logs::LogGroup"],
+              ["WafBlockLoggingConfiguration","AWS::WAFv2::LoggingConfiguration"],
+              ["WebAclBlockedRequestsAlarm","AWS::CloudWatch::Alarm"]
+            ] | sort)
+            and (.StackResourceSummaries | length) == 9
+            and all(
+              .StackResourceSummaries[];
+              (
+                .ResourceStatus == "CREATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_ROLLBACK_COMPLETE"
+              ) and (.ResourceStatus | startswith("IMPORT_") | not)
+            )
+          ' "$historical_resources" >/dev/null
+          stack_id_sha256="$(
+            printf '%s' "$EDGE_BOUND_STACK_ID" | sha256sum | awk '{print $1}'
+          )"
+          receipt_next="${RUNNER_TEMP:?}/edge-historical-finalize-receipt.json"
+          jq \
+            --arg stackIdSha256 "$stack_id_sha256" \
+            '
+              . + {
+                ok:true,
+                result:"historical-finalized-protection-only",
+                proof:{
+                  stackIdSha256:$stackIdSha256,
+                  exactStackResourceInventory:9,
+                  stackPolicyProtected:true,
+                  terminationProtection:true,
+                  historicalProtectionSourceBound:true,
+                  currentLiveControlsProved:false,
+                  currentPlanApplyRequired:true,
+                  live:true
+                }
+              }
+            ' "$RECEIPT_FILE" >"$receipt_next"
+          mv "$receipt_next" "$RECEIPT_FILE"
+
       - name: Prove exact deployed WAF controls
-        if: inputs.operation == 'apply' || inputs.operation == 'verify'
+        if: inputs.operation == 'apply' || inputs.operation == 'verify' || (inputs.operation == 'finalize' && env.EDGE_CURRENT_SEMANTICS_MATCH == 'true')
         shell: bash
         run: |
           set -euo pipefail
           stack="${RUNNER_TEMP:?}/edge-live-stack.json"
+          stack_resources="${RUNNER_TEMP:?}/edge-live-stack-resources.json"
           template_response="${RUNNER_TEMP:?}/edge-live-template-response.json"
           template="${RUNNER_TEMP:?}/edge-live-template.yaml"
           web_acl="${RUNNER_TEMP:?}/edge-live-web-acl.json"
           web_acl_tags="${RUNNER_TEMP:?}/edge-live-web-acl-tags.json"
           waf_logging="${RUNNER_TEMP:?}/edge-live-waf-logging.json"
-          evidence_key="${RUNNER_TEMP:?}/edge-live-evidence-key.json"
-          evidence_key_policy="${RUNNER_TEMP:?}/edge-live-evidence-key-policy.json"
-          evidence_key_rotation="${RUNNER_TEMP:?}/edge-live-evidence-key-rotation.json"
-          evidence_key_tags="${RUNNER_TEMP:?}/edge-live-evidence-key-tags.json"
           waf_log_group="${RUNNER_TEMP:?}/edge-live-waf-log-group.json"
           waf_log_group_tags="${RUNNER_TEMP:?}/edge-live-waf-log-group-tags.json"
-          alarm_topic="${RUNNER_TEMP:?}/edge-live-alarm-topic.json"
-          alarm_topic_tags="${RUNNER_TEMP:?}/edge-live-alarm-topic-tags.json"
-          alarm_subscriptions="${RUNNER_TEMP:?}/edge-live-alarm-subscriptions.json"
-          alarm_subscription="${RUNNER_TEMP:?}/edge-live-alarm-subscription.json"
-          alarm_queue="${RUNNER_TEMP:?}/edge-live-alarm-queue.json"
-          alarm_queue_tags="${RUNNER_TEMP:?}/edge-live-alarm-queue-tags.json"
+          alarm_archive_log_group="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-group.json"
+          alarm_archive_log_group_tags="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-group-tags.json"
+          alarm_archive_log_policies="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-policies.json"
+          alarm_event_rule="${RUNNER_TEMP:?}/edge-live-alarm-event-rule.json"
+          alarm_event_rule_tags="${RUNNER_TEMP:?}/edge-live-alarm-event-rule-tags.json"
+          alarm_event_targets="${RUNNER_TEMP:?}/edge-live-alarm-event-targets.json"
           waf_alarms="${RUNNER_TEMP:?}/edge-live-waf-alarms.json"
           stack_policy="${RUNNER_TEMP:?}/edge-live-stack-policy.json"
           aws cloudformation describe-stacks \
             --stack-name "$EDGE_STACK_NAME" \
             --region "$AWS_REGION" \
             --output json >"$stack"
+          aws cloudformation list-stack-resources \
+            --stack-name "$EDGE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --output json >"$stack_resources"
           web_acl_arn="$(
             jq -er \
               --arg stack "$EDGE_STACK_NAME" \
@@ -769,10 +2077,22 @@ jobs:
                 | (
                     (.Stacks | length) == 1
                     and $current.StackName == $stack
+                    and $current.StackId == (
+                      "arn:aws:cloudformation:us-east-1:" + $account
+                      + ":stack/" + $stack + "/"
+                      + ($current.StackId | split("/") | last)
+                    )
+                    and ($current.StackId | split("/") | length) == 3
                     and (
                       $current.StackStatus == "CREATE_COMPLETE"
                       or $current.StackStatus == "UPDATE_COMPLETE"
+                      or $current.StackStatus
+                        == "UPDATE_ROLLBACK_COMPLETE"
                     )
+                    and (($current.RoleARN // null) == null)
+                    and (($current.Tags // []) == [])
+                    and (($current.NotificationARNs // []) == [])
+                    and (($current.Capabilities // []) == [])
                     and $current.EnableTerminationProtection == true
                     and (
                       [
@@ -793,19 +2113,14 @@ jobs:
                           + "-blocked"
                     )
                     and (
-                      output_map.EdgeEvidenceKeyAliasName
-                        == "alias/" + $app + "-" + $environment
-                          + "-edge-evidence"
-                    )
-                    and (
-                      output_map.EdgeAlarmTopicName
-                        == $app + "-" + $environment
-                          + "-edge-waf-alarms"
-                    )
-                    and (
-                      output_map.EdgeAlarmArchiveQueueName
-                        == $app + "-" + $environment
+                      output_map.EdgeAlarmArchiveLogGroupName
+                        == "/aws/events/" + $app + "-" + $environment
                           + "-edge-waf-alarm-archive"
+                    )
+                    and (
+                      output_map.EdgeAlarmStateEventRuleName
+                        == $app + "-" + $environment
+                          + "-edge-waf-alarm-events"
                     )
                     and (
                       output_map.WebAclBlockedRequestsAlarmName
@@ -849,6 +2164,67 @@ jobs:
               | select(test("^[0-9a-f-]+$"))
             ' "$stack"
           )"
+
+          jq -e '
+            def normalized_inventory:
+              [
+                .StackResourceSummaries[]
+                | {
+                    logicalResourceId: .LogicalResourceId,
+                    resourceType: .ResourceType
+                  }
+              ] | sort_by(.logicalResourceId);
+            normalized_inventory == (
+              [
+                {
+                  logicalResourceId: "ApiAggregateRateAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                },
+                {
+                  logicalResourceId: "ArchonCloudFrontWebAcl",
+                  resourceType: "AWS::WAFv2::WebACL"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmArchiveLogGroup",
+                  resourceType: "AWS::Logs::LogGroup"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmArchiveLogPolicy",
+                  resourceType: "AWS::Logs::ResourcePolicy"
+                },
+                {
+                  logicalResourceId: "EdgeAlarmStateEventRule",
+                  resourceType: "AWS::Events::Rule"
+                },
+                {
+                  logicalResourceId: "ResolutionCreateRateAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                },
+                {
+                  logicalResourceId: "WafBlockLogGroup",
+                  resourceType: "AWS::Logs::LogGroup"
+                },
+                {
+                  logicalResourceId: "WafBlockLoggingConfiguration",
+                  resourceType: "AWS::WAFv2::LoggingConfiguration"
+                },
+                {
+                  logicalResourceId: "WebAclBlockedRequestsAlarm",
+                  resourceType: "AWS::CloudWatch::Alarm"
+                }
+              ] | sort_by(.logicalResourceId)
+            )
+            and (.StackResourceSummaries | length) == 9
+            and all(
+              .StackResourceSummaries[];
+              (
+                .ResourceStatus == "CREATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_COMPLETE"
+                or .ResourceStatus == "UPDATE_ROLLBACK_COMPLETE"
+              )
+              and (.ResourceStatus | startswith("IMPORT_") | not)
+            )
+          ' "$stack_resources" >/dev/null
 
           aws cloudformation get-template \
             --stack-name "$EDGE_STACK_NAME" \
@@ -1073,115 +2449,20 @@ jobs:
               )
             ' "$web_acl_tags" >/dev/null
 
-          key_alias="alias/${APP_NAME}-${EDGE_ENVIRONMENT}-edge-evidence"
           log_group_name="aws-waf-logs-${APP_NAME}-${EDGE_ENVIRONMENT}-blocked"
           log_group_arn="arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:${log_group_name}"
-          topic_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarms"
-          topic_arn="arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:${topic_name}"
-          queue_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
-          queue_arn="arn:aws:sqs:us-east-1:${AWS_ACCOUNT_ID}:${queue_name}"
+          alarm_archive_log_group_name="/aws/events/${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
+          alarm_archive_log_group_arn="arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:${alarm_archive_log_group_name}"
+          alarm_archive_log_stream_arn="${alarm_archive_log_group_arn}:*"
+          alarm_archive_policy_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
+          event_rule_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-events"
+          event_rule_arn="arn:aws:events:us-east-1:${AWS_ACCOUNT_ID}:rule/${event_rule_name}"
           any_block_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-any-block"
           api_rate_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-api-rate-block"
           resolution_rate_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-resolution-rate-block"
-
-          aws kms describe-key \
-            --key-id "$key_alias" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key"
-          key_arn="$(
-            jq -er '
-              .KeyMetadata
-              | select(
-                  .Enabled == true
-                  and .KeyManager == "CUSTOMER"
-                  and .KeySpec == "SYMMETRIC_DEFAULT"
-                  and .KeyUsage == "ENCRYPT_DECRYPT"
-                  and .MultiRegion == false
-                  and .Origin == "AWS_KMS"
-                )
-              | .Arn
-              | select(
-                  test(
-                    "^arn:aws:kms:us-east-1:[0-9]{12}:key/[0-9a-f-]+$"
-                  )
-                )
-            ' "$evidence_key"
-          )"
-          aws kms get-key-policy \
-            --key-id "$key_arn" \
-            --policy-name default \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_policy"
-          aws kms get-key-rotation-status \
-            --key-id "$key_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_rotation"
-          aws kms list-resource-tags \
-            --key-id "$key_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$evidence_key_tags"
-          jq -e '.KeyRotationEnabled == true' \
-            "$evidence_key_rotation" >/dev/null
-          jq -e \
-            --arg app "$APP_NAME" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            '
-              (.Tags | sort_by(.TagKey)) == (
-                [
-                  {TagKey:"Application", TagValue:$app},
-                  {
-                    TagKey:"DataClassification",
-                    TagValue:"security-evidence"
-                  },
-                  {TagKey:"Environment", TagValue:$environment},
-                  {TagKey:"ManagedBy", TagValue:"CloudFormation"}
-                ] | sort_by(.TagKey)
-              )
-            ' "$evidence_key_tags" >/dev/null
-          jq -e \
-            --arg account "$AWS_ACCOUNT_ID" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            --arg app "$APP_NAME" \
-            --arg logArn "$log_group_arn" \
-            --arg topicArn "$topic_arn" \
-            '
-              (.Policy | fromjson).Statement as $statements
-              | ($statements | length) == 5
-              and any(
-                $statements[];
-                .Sid == "AllowCloudWatchLogsForExactWafLogGroup"
-                and .Principal.Service == "logs.us-east-1.amazonaws.com"
-                and .Condition.ArnEquals[
-                  "kms:EncryptionContext:aws:logs:arn"
-                ] == $logArn
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowCloudWatchAlarmsToEncryptedTopic"
-                and .Principal.Service == "cloudwatch.amazonaws.com"
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-                and .Condition.ArnLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowExactSnsTopicEncryption"
-                and .Principal.Service == "sns.amazonaws.com"
-                and .Condition.StringEquals[
-                  "kms:EncryptionContext:aws:sns:topicArn"
-                ] == $topicArn
-              )
-              and any(
-                $statements[];
-                .Sid == "AllowSameAccountSnsToEncryptedArchive"
-                and .Principal.Service == "sns.amazonaws.com"
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-              )
-            ' "$evidence_key_policy" >/dev/null
+          any_block_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${any_block_alarm}"
+          api_rate_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${api_rate_alarm}"
+          resolution_rate_alarm_arn="arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:${resolution_rate_alarm}"
 
           aws logs describe-log-groups \
             --log-group-name-prefix "$log_group_name" \
@@ -1193,13 +2474,12 @@ jobs:
             --output json >"$waf_log_group_tags"
           jq -e \
             --arg name "$log_group_name" \
-            --arg keyArn "$key_arn" \
             '
               [
                 .logGroups[]
                 | select(.logGroupName == $name)
                 | select(
-                    .kmsKeyId == $keyArn
+                    (has("kmsKeyId") | not)
                     and .retentionInDays == 30
                     and .logGroupClass == "STANDARD"
                   )
@@ -1255,64 +2535,133 @@ jobs:
               )
             ' "$waf_logging" >/dev/null
 
-          aws sns get-topic-attributes \
-            --topic-arn "$topic_arn" \
+          aws logs describe-log-groups \
+            --log-group-name-prefix "$alarm_archive_log_group_name" \
             --region "$AWS_REGION" \
-            --output json >"$alarm_topic"
-          aws sns list-tags-for-resource \
-            --resource-arn "$topic_arn" \
+            --output json >"$alarm_archive_log_group"
+          aws logs list-tags-for-resource \
+            --resource-arn "$alarm_archive_log_group_arn" \
             --region "$AWS_REGION" \
-            --output json >"$alarm_topic_tags"
-          aws sns list-subscriptions-by-topic \
-            --topic-arn "$topic_arn" \
+            --output json >"$alarm_archive_log_group_tags"
+          aws logs describe-resource-policies \
+            --policy-scope ACCOUNT \
             --region "$AWS_REGION" \
-            --output json >"$alarm_subscriptions"
+            --output json >"$alarm_archive_log_policies"
           jq -e \
-            --arg topicArn "$topic_arn" \
-            --arg keyArn "$key_arn" \
-            --arg account "$AWS_ACCOUNT_ID" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            --arg app "$APP_NAME" \
+            --arg name "$alarm_archive_log_group_name" \
+            --arg groupArn "$alarm_archive_log_group_arn" \
+            --arg streamArn "$alarm_archive_log_stream_arn" \
             '
-              (.Attributes.Policy | fromjson).Statement as $statements
-              | .Attributes.TopicArn == $topicArn
-              and .Attributes.KmsMasterKeyId == $keyArn
-              and .Attributes.SubscriptionsConfirmed == "1"
-              and ($statements | length) == 3
-              and any(
-                $statements[];
-                .Sid == "AllowOnlyAccountBoundCloudWatchAlarms"
-                and .Principal.Service == "cloudwatch.amazonaws.com"
-                and .Action == "sns:Publish"
-                and .Resource == $topicArn
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-                and .Condition.ArnLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
+              [
+                .logGroups[]
+                | select(.logGroupName == $name)
+                | select(
+                    .arn == $streamArn
+                    and (
+                      (has("logGroupArn") | not)
+                      or .logGroupArn == $groupArn
+                    )
+                    and (has("kmsKeyId") | not)
+                    and .retentionInDays == 14
+                    and .logGroupClass == "STANDARD"
+                  )
+              ] | length == 1
+            ' "$alarm_archive_log_group" >/dev/null
+          jq -e \
+            --arg app "$APP_NAME" \
+            --arg environment "$EDGE_ENVIRONMENT" \
+            '
+              .tags == {
+                Application: $app,
+                DataClassification: "alarm-state-security-evidence",
+                Environment: $environment,
+                ManagedBy: "CloudFormation"
+              }
+            ' "$alarm_archive_log_group_tags" >/dev/null
+          jq -e \
+            --arg policyName "$alarm_archive_policy_name" \
+            --arg streamArn "$alarm_archive_log_stream_arn" \
+            --arg eventRuleArn "$event_rule_arn" \
+            --arg account "$AWS_ACCOUNT_ID" \
+            '
+              [
+                .resourcePolicies[]
+                | select(.policyName == $policyName)
+              ] as $matching
+              | ($matching | length) == 1
+              and ($matching[0].policyDocument | fromjson) == {
+                Version: "2012-10-17",
+                Statement: [{
+                  Sid: "AllowExactEventBridgeAlarmArchive",
+                  Effect: "Allow",
+                  Principal: {
+                    Service: [
+                      "delivery.logs.amazonaws.com",
+                      "events.amazonaws.com"
+                    ]
+                  },
+                  Action: [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  Resource: $streamArn,
+                  Condition: {
+                    ArnEquals: {"aws:SourceArn": $eventRuleArn},
+                    StringEquals: {"aws:SourceAccount": $account}
+                  }
+                }]
+              }
+            ' "$alarm_archive_log_policies" >/dev/null
+
+          aws events describe-rule \
+            --name "$event_rule_name" \
+            --event-bus-name default \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_rule"
+          aws events list-targets-by-rule \
+            --rule "$event_rule_name" \
+            --event-bus-name default \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_targets"
+          aws events list-tags-for-resource \
+            --resource-arn "$event_rule_arn" \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_event_rule_tags"
+          jq -e \
+            --arg name "$event_rule_name" \
+            --arg arn "$event_rule_arn" \
+            --arg anyBlockArn "$any_block_alarm_arn" \
+            --arg apiRateArn "$api_rate_alarm_arn" \
+            --arg resolutionRateArn "$resolution_rate_alarm_arn" \
+            --arg anyBlock "$any_block_alarm" \
+            --arg apiRate "$api_rate_alarm" \
+            --arg resolutionRate "$resolution_rate_alarm" \
+            '
+              (.EventPattern | fromjson) as $pattern
+              | .Name == $name
+              and .Arn == $arn
+              and .EventBusName == "default"
+              and .State == "ENABLED"
+              and $pattern.source == ["aws.cloudwatch"]
+              and $pattern["detail-type"] == [
+                "CloudWatch Alarm State Change"
+              ]
+              and ($pattern.resources | sort) == (
+                [$anyBlockArn, $apiRateArn, $resolutionRateArn] | sort
               )
-              and any(
-                $statements[];
-                .Sid == "DenyUnexpectedAlarmPublisher"
-                and .Effect == "Deny"
-                and .Action == "sns:Publish"
-                and .Resource == $topicArn
-                and .Condition.ArnNotLike["aws:SourceArn"] == (
-                  "arn:aws:cloudwatch:us-east-1:" + $account
-                  + ":alarm:" + $app + "-" + $environment + "-waf-*"
-                )
+              and ($pattern.detail.alarmName | sort) == (
+                [$anyBlock, $apiRate, $resolutionRate] | sort
               )
-              and any(
-                $statements[];
-                .Sid == "DenyInsecureTransport"
-                and .Effect == "Deny"
-                and .Resource == $topicArn
-                and (
-                  .Condition.Bool["aws:SecureTransport"] | tostring
-                ) == "false"
-              )
-            ' "$alarm_topic" >/dev/null
+              and ($pattern.detail.state.value | sort) == ["ALARM", "OK"]
+            ' "$alarm_event_rule" >/dev/null
+          jq -e \
+            --arg logGroupArn "$alarm_archive_log_group_arn" \
+            '
+              .Targets == [{
+                Arn: $logGroupArn,
+                Id: "EdgeAlarmArchiveLogGroup"
+              }]
+            ' "$alarm_event_targets" >/dev/null
           jq -e \
             --arg app "$APP_NAME" \
             --arg environment "$EDGE_ENVIRONMENT" \
@@ -1325,109 +2674,7 @@ jobs:
                   {Key:"ManagedBy", Value:"CloudFormation"}
                 ] | sort_by(.Key)
               )
-            ' "$alarm_topic_tags" >/dev/null
-          subscription_arn="$(
-            jq -er \
-              --arg topicArn "$topic_arn" \
-              --arg queueArn "$queue_arn" \
-              '
-                [
-                  .Subscriptions[]
-                  | select(
-                      .TopicArn == $topicArn
-                      and .Protocol == "sqs"
-                      and .Endpoint == $queueArn
-                      and (.SubscriptionArn | startswith($topicArn + ":"))
-                    )
-                ]
-                | select(length == 1)
-                | .[0].SubscriptionArn
-              ' "$alarm_subscriptions"
-          )"
-          aws sns get-subscription-attributes \
-            --subscription-arn "$subscription_arn" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_subscription"
-          jq -e \
-            --arg topicArn "$topic_arn" \
-            --arg queueArn "$queue_arn" \
-            '
-              .Attributes.TopicArn == $topicArn
-              and .Attributes.Endpoint == $queueArn
-              and .Attributes.Protocol == "sqs"
-              and .Attributes.RawMessageDelivery == "false"
-            ' "$alarm_subscription" >/dev/null
-
-          queue_url="$(
-            aws sqs get-queue-url \
-              --queue-name "$queue_name" \
-              --region "$AWS_REGION" \
-              --query QueueUrl \
-              --output text
-          )"
-          test -n "$queue_url"
-          aws sqs get-queue-attributes \
-            --queue-url "$queue_url" \
-            --attribute-names All \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_queue"
-          aws sqs list-queue-tags \
-            --queue-url "$queue_url" \
-            --region "$AWS_REGION" \
-            --output json >"$alarm_queue_tags"
-          jq -e \
-            --arg queueArn "$queue_arn" \
-            --arg topicArn "$topic_arn" \
-            --arg keyArn "$key_arn" \
-            --arg account "$AWS_ACCOUNT_ID" \
-            '
-              (.Attributes.Policy | fromjson).Statement as $statements
-              | .Attributes.QueueArn == $queueArn
-              and .Attributes.KmsMasterKeyId == $keyArn
-              and .Attributes.KmsDataKeyReusePeriodSeconds == "300"
-              and .Attributes.MessageRetentionPeriod == "1209600"
-              and .Attributes.ReceiveMessageWaitTimeSeconds == "20"
-              and .Attributes.VisibilityTimeout == "60"
-              and ($statements | length) == 3
-              and any(
-                $statements[];
-                .Sid == "AllowOnlyExactAlarmTopic"
-                and .Principal.Service == "sns.amazonaws.com"
-                and .Action == "sqs:SendMessage"
-                and .Resource == $queueArn
-                and .Condition.ArnEquals["aws:SourceArn"] == $topicArn
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyUnexpectedAlarmInjection"
-                and .Effect == "Deny"
-                and .Action == "sqs:SendMessage"
-                and .Resource == $queueArn
-                and .Condition.ArnNotLike["aws:SourceArn"] == $topicArn
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyInsecureTransport"
-                and .Effect == "Deny"
-                and .Resource == $queueArn
-                and (
-                  .Condition.Bool["aws:SecureTransport"] | tostring
-                ) == "false"
-              )
-            ' "$alarm_queue" >/dev/null
-          jq -e \
-            --arg app "$APP_NAME" \
-            --arg environment "$EDGE_ENVIRONMENT" \
-            '
-              .Tags == {
-                Application: $app,
-                Environment: $environment,
-                EvidenceRoute: "waf-alarm-archive",
-                ManagedBy: "CloudFormation"
-              }
-            ' "$alarm_queue_tags" >/dev/null
+            ' "$alarm_event_rule_tags" >/dev/null
 
           aws cloudwatch describe-alarms \
             --alarm-names \
@@ -1439,11 +2686,12 @@ jobs:
           jq -e \
             --arg app "$APP_NAME" \
             --arg environment "$EDGE_ENVIRONMENT" \
-            --arg topicArn "$topic_arn" \
+            --arg account "$AWS_ACCOUNT_ID" \
             '
               def normalized_alarm:
                 {
                   name: .AlarmName,
+                  arn: .AlarmArn,
                   actionsEnabled: .ActionsEnabled,
                   alarmActions: .AlarmActions,
                   okActions: .OKActions,
@@ -1463,9 +2711,13 @@ jobs:
               def expected($name; $rule):
                 {
                   name: ($app + "-" + $environment + $name),
-                  actionsEnabled: true,
-                  alarmActions: [$topicArn],
-                  okActions: [$topicArn],
+                  arn: (
+                    "arn:aws:cloudwatch:us-east-1:" + $account
+                    + ":alarm:" + $app + "-" + $environment + $name
+                  ),
+                  actionsEnabled: false,
+                  alarmActions: [],
+                  okActions: [],
                   insufficientDataActions: [],
                   namespace: "AWS/WAFV2",
                   metricName: "BlockedRequests",
@@ -1495,7 +2747,7 @@ jobs:
                   )
                 ] | sort_by(.name)
               )
-              and ((.CompositeAlarms // []) | length) == 0
+              and .CompositeAlarms == []
             ' "$waf_alarms" >/dev/null
           for alarm_name in \
               "$any_block_alarm" \
@@ -1536,30 +2788,63 @@ jobs:
           web_acl_id_sha256="$(
             printf '%s' "$web_acl_id" | sha256sum | awk '{print $1}'
           )"
-          evidence_key_arn_sha256="$(
-            printf '%s' "$key_arn" | sha256sum | awk '{print $1}'
+          event_rule_arn_sha256="$(
+            printf '%s' "$event_rule_arn" | sha256sum | awk '{print $1}'
+          )"
+          alarm_archive_log_group_arn_sha256="$(
+            printf '%s' "$alarm_archive_log_group_arn" |
+              sha256sum |
+              awk '{print $1}'
           )"
           alarm_route_sha256="$(
             {
               printf '%s\n' "$log_group_arn"
-              printf '%s\n' "$topic_arn"
-              printf '%s\n' "$queue_arn"
+              printf '%s\n' "$event_rule_arn"
+              printf '%s\n' "$alarm_archive_log_group_arn"
+              jq -Sc --arg policyName "$alarm_archive_policy_name" \
+                '[
+                  .resourcePolicies[]
+                  | select(.policyName == $policyName)
+                ][0].policyDocument | fromjson' \
+                "$alarm_archive_log_policies"
               jq -r '.MetricAlarms | sort_by(.AlarmName)[] | .AlarmArn' \
                 "$waf_alarms"
             } | sha256sum | awk '{print $1}'
           )"
+          stack_id_sha256="$(
+            live_stack_id="$(jq -er '.Stacks[0].StackId' "$stack")"
+            printf '%s' "$live_stack_id" | sha256sum | awk '{print $1}'
+          )"
+          terminal_stack_status="$(
+            jq -er '.Stacks[0].StackStatus' "$stack"
+          )"
 
           result="verified"
           if [ "$OPERATION" = "apply" ]; then
-            result="applied-and-proved"
+            if [ "${EDGE_APPLY_MODE:-}" = "finalize" ]; then
+              result="apply-finalized-and-proved"
+            else
+              result="applied-and-proved"
+            fi
+          elif [ "$OPERATION" = "finalize" ]; then
+            if [ "${EDGE_HISTORICAL_FINALIZE:-false}" = "true" ]; then
+              result="historical-finalized-and-current-controls-proved"
+            else
+              result="finalized-and-proved"
+            fi
           fi
           receipt_next="${RUNNER_TEMP:?}/edge-proved-receipt.json"
           jq \
             --arg result "$result" \
             --arg webAclArnSha256 "$web_acl_arn_sha256" \
             --arg webAclIdSha256 "$web_acl_id_sha256" \
-            --arg evidenceKeyArnSha256 "$evidence_key_arn_sha256" \
+            --arg eventRuleArnSha256 "$event_rule_arn_sha256" \
+            --arg alarmArchiveLogGroupArnSha256 \
+              "$alarm_archive_log_group_arn_sha256" \
             --arg alarmRouteSha256 "$alarm_route_sha256" \
+            --arg stackIdSha256 "$stack_id_sha256" \
+            --arg terminalStackStatus "$terminal_stack_status" \
+            --arg lifecycleMode "${EDGE_APPLY_MODE:-$OPERATION}" \
             --arg clientToken "${EXECUTION_CLIENT_TOKEN:-}" \
             --arg runId "$GITHUB_RUN_ID" \
             --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
@@ -1574,6 +2859,7 @@ jobs:
                   workflowRef: $workflowRef
                 },
                 execution: {
+                  mode: $lifecycleMode,
                   clientRequestToken: (
                     if $clientToken == ""
                     then null
@@ -1582,11 +2868,18 @@ jobs:
                   )
                 },
                 proof: {
+                  stackIdSha256: $stackIdSha256,
+                  terminalStackStatus: $terminalStackStatus,
                   webAclArnSha256: $webAclArnSha256,
                   webAclIdSha256: $webAclIdSha256,
                   accountBound: true,
                   nameBound: true,
                   tagsBound: true,
+                  parametersBound: true,
+                  stackRoleArnConfigured: false,
+                  stackTags: [],
+                  importedResources: false,
+                  exactStackResourceInventory: 9,
                   scope: "CLOUDFRONT",
                   controlPlaneRegion: "us-east-1",
                   managedRuleGroups: 3,
@@ -1594,11 +2887,21 @@ jobs:
                   requestSampling: false,
                   blockOnlyLogging: true,
                   redactedRequestFields: 6,
-                  customerManagedLogEncryption: true,
-                  evidenceKeyArnSha256: $evidenceKeyArnSha256,
+                  cloudWatchLogEncryption:
+                    "AWS-owned-service-managed",
+                  cloudWatchLogKmsKeyConfigured: false,
                   wafAlarms: 3,
-                  encryptedAlarmTopic: true,
-                  encryptedAlarmArchive: true,
+                  alarmActionsConfigured: false,
+                  alarmArchiveTransport:
+                    "EventBridge-to-CloudWatch-Logs",
+                  eventBridgeAlarmArchive: true,
+                  eventRuleArnSha256: $eventRuleArnSha256,
+                  alarmArchiveDestination: "CloudWatch Logs",
+                  alarmArchiveLogGroupArnSha256:
+                    $alarmArchiveLogGroupArnSha256,
+                  alarmArchiveEncryption:
+                    "AWS-owned-service-managed-default",
+                  alarmArchiveKmsKeyConfigured: false,
                   alarmArchiveRetentionDays: 14,
                   alarmRouteSha256: $alarmRouteSha256,
                   alarmDeliveryDrill: "not-run",
