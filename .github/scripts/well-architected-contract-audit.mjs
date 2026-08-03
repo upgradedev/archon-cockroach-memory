@@ -1444,7 +1444,7 @@ const foundationAuthorityTemplateDigestContractValid =
   !/aws cloudformation delete-stack|iam delete-role/u.test(
     foundationAbortStep,
   ) &&
-  /schemaVersion == 2[\s\S]*?verificationMode == \$mode[\s\S]*?stackStatus == \$status[\s\S]*?retirementRetryContractExact[\s\S]*?standardDeleteRetryEligible[\s\S]*?terminalLifecycleSafetyContractVersion[\s\S]*?recordedTemplateTerminator/u.test(
+  /schemaVersion == 2[\s\S]*?verificationMode == \$mode[\s\S]*?stackStatus == \$status[\s\S]*?roleIdSha256[\s\S]*?retirementRetryContractExact[\s\S]*?standardDeleteRetryEligible[\s\S]*?roleAttachmentInventorySha256[\s\S]*?terminalLifecycleSafetyContractVersion[\s\S]*?recordedTemplateTerminator/u.test(
     foundationRetireStep,
   );
 const foundationSameRunCleanupValid =

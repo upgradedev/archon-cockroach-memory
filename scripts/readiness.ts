@@ -3456,7 +3456,7 @@ function sourceChecks(): SourceCheck[] {
     /finalAuthorityProofBoundImmediatelyBeforeDeletion: true/u.test(
       foundationRetireStep
     ) &&
-    /schemaVersion == 2[\s\S]*?verificationMode == \$mode[\s\S]*?stackStatus == \$status[\s\S]*?retirementRetryContractExact[\s\S]*?standardDeleteRetryEligible[\s\S]*?roleAttachmentInventorySha256[\s\S]*?roleIdSha256[\s\S]*?terminalLifecycleSafetyContractVersion/u.test(
+    /schemaVersion == 2[\s\S]*?verificationMode == \$mode[\s\S]*?stackStatus == \$status[\s\S]*?roleIdSha256[\s\S]*?retirementRetryContractExact[\s\S]*?standardDeleteRetryEligible[\s\S]*?roleAttachmentInventorySha256[\s\S]*?terminalLifecycleSafetyContractVersion/u.test(
       foundationRetireStep
     ) &&
     foundationFinalAuthorityProofOffset >= 0 &&
@@ -3489,7 +3489,7 @@ function sourceChecks(): SourceCheck[] {
     !/iam:PassRole|cloudformation:DeleteStack|Resource:\s*"\*"|AssumeRoleWithWebIdentity/u.test(
       foundationAuthorityRetirementExecutionRole
     ) &&
-    /Lifecycle:\s*\r?\n\s+Value: permanent-authority-retirement-execution/u.test(
+    /- Key: Lifecycle\r?\n\s+Value: permanent-authority-retirement-execution/u.test(
       foundationAuthorityRetirementExecutionRole
     ) &&
     /Sid: RetireOneTimeFoundationMigrationAuthorityStack[\s\S]*?Action: cloudformation:DeleteStack[\s\S]*?stack\/\$\{AppName\}-foundation-migration-authority\/\*[\s\S]*?ArnEquals:\s*\r?\n\s+cloudformation:RoleArn: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn/u.test(
