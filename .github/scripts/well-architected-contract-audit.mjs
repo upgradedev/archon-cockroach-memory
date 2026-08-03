@@ -146,9 +146,17 @@ const EDGE_PROTECTION_CONTROL_FILES = [
   "docs/runbooks/waf-abuse-response.md",
 ];
 const FOUNDATION_LIFECYCLE_CONTROL_FILES = [
+  ".github/scripts/revalidate-aws-control-plane-fence.sh",
+  ".github/workflows/ci.yml",
+  ".github/workflows/deploy-aws.yml",
   ".github/workflows/foundation-migration.yml",
+  "aws/bootstrap-oidc.yaml",
+  "aws/bootstrap-stack-policy.json",
   "aws/foundation-migration-authority.sh",
+  "aws/foundation-storage-migration-policy.json",
+  "aws/prove-foundation-storage-controls.sh",
   "docs/operations/FOUNDATION_STORAGE_MIGRATION.md",
+  "tests/s3-access-logging.test.ts",
 ];
 const SUSTAINABILITY_INTENSITY_FILES = [
   ".github/workflows/sustainability-intensity-evidence.yml",
@@ -781,6 +789,37 @@ const foundationMigrationAuthoritySource = readRepositorySource(
 const foundationMigrationRunbookSource = readRepositorySource(
   "docs/operations/FOUNDATION_STORAGE_MIGRATION.md",
 );
+const foundationBootstrapSource = readRepositorySource("aws/bootstrap-oidc.yaml");
+const foundationBootstrapStackPolicySource = readRepositorySource(
+  "aws/bootstrap-stack-policy.json",
+);
+const foundationStorageMigrationPolicySource = readRepositorySource(
+  "aws/foundation-storage-migration-policy.json",
+);
+const foundationStorageProofSource = readRepositorySource(
+  "aws/prove-foundation-storage-controls.sh",
+);
+const deploymentWorkflowSource = readRepositorySource(
+  ".github/workflows/deploy-aws.yml",
+);
+const deploymentControlPlaneFenceSource = readRepositorySource(
+  ".github/scripts/revalidate-aws-control-plane-fence.sh",
+);
+const foundationCiWorkflowSource = readRepositorySource(
+  ".github/workflows/ci.yml",
+);
+const bootstrapWorkflowSource = readRepositorySource(
+  ".github/workflows/bootstrap-aws.yml",
+);
+const sharedEdgeWorkflowSource = readRepositorySource(
+  ".github/workflows/edge-controls.yml",
+);
+const sharedRecoveryWorkflowSource = readRepositorySource(
+  ".github/workflows/recover-aws.yml",
+);
+const foundationContractTestsSource = readRepositorySource(
+  "tests/s3-access-logging.test.ts",
+);
 const foundationAuthorizeStep = extractNamedWorkflowStep(
   foundationMigrationWorkflowSource,
   "Fail closed unless the dispatch targets current green main",
@@ -799,22 +838,444 @@ const foundationAbortJob = extractNamedWorkflowJob(
 );
 const foundationAbortStep = extractNamedWorkflowStep(
   foundationAbortJob,
-  "Prove stable foundation, clean safe plans, and delete authority",
+  "Prove stable foundation and clean only authorized unexecuted plans",
 );
-const foundationApplyStep = extractNamedWorkflowStep(
+const foundationAbortFailureFinalizerStep = extractNamedWorkflowStep(
+  foundationAbortJob,
+  "Finalize any untrapped abort failure receipt",
+);
+const foundationExecuteStep = extractNamedWorkflowStep(
   foundationMigrationWorkflowSource,
-  "Apply target stack policy and execute the inspected plan",
+  "Execute under rollback-safe policy and protect success immediately",
+);
+const foundationPromotePolicyStep = extractNamedWorkflowStep(
+  foundationMigrationWorkflowSource,
+  "Reconcile candidate and rollback-safe stack-policy state",
+);
+const foundationAndEdgeReceiptGateStep = extractNamedWorkflowStep(
+  deploymentWorkflowSource,
+  "Require exact-SHA foundation and edge-control receipts",
+);
+const foundationDeployedControlsProofStep = extractNamedWorkflowStep(
+  foundationMigrationWorkflowSource,
+  "Prove exact deployed template and live storage controls",
+);
+const foundationRetirementReadinessStep = extractNamedWorkflowStep(
+  foundationMigrationWorkflowSource,
+  "Prove candidate foundation and permanent controls",
+);
+const foundationRetireJob = extractNamedWorkflowJob(
+  foundationMigrationWorkflowSource,
+  "retire-authority",
+);
+const deploymentStagingJobSource = extractNamedWorkflowJob(
+  deploymentWorkflowSource,
+  "deploy-staging",
+);
+const deploymentProductionJobSource = extractNamedWorkflowJob(
+  deploymentWorkflowSource,
+  "deploy-production",
+);
+const deploymentStagingFenceStep = extractNamedWorkflowStep(
+  deploymentStagingJobSource,
+  "Revalidate staging control-plane fence before new release mutation",
+);
+const deploymentProductionFenceStep = extractNamedWorkflowStep(
+  deploymentProductionJobSource,
+  "Revalidate production control-plane fence before new release mutation",
 );
 const foundationRetireStep = extractNamedWorkflowStep(
-  extractNamedWorkflowJob(foundationMigrationWorkflowSource, "retire-authority"),
+  foundationRetireJob,
   "Verify and retire the exact authority stack",
 );
+const foundationRetirementFailureFinalizerStep = extractNamedWorkflowStep(
+  foundationRetireJob,
+  "Finalize any untrapped retirement failure receipt",
+);
+const sharedAwsMutationConcurrencyPattern =
+  /^    concurrency:\r?\n      group: aws-shared-control-plane-mutation\r?\n      cancel-in-progress: false\r?\n      queue: max$/gmu;
+const sharedAwsMutationJobContracts = [
+  { source: bootstrapWorkflowSource, jobIds: ["foundation"] },
+  {
+    source: foundationMigrationWorkflowSource,
+    jobIds: ["migrate", "abort-authority", "retire-authority"],
+  },
+  { source: sharedEdgeWorkflowSource, jobIds: ["edge"] },
+  {
+    source: deploymentWorkflowSource,
+    jobIds: ["deploy-staging", "deploy-production"],
+  },
+  {
+    source: sharedRecoveryWorkflowSource,
+    jobIds: ["recover-staging", "recover-production"],
+  },
+];
+const sharedAwsMutationConcurrencyValid =
+  (bootstrapWorkflowSource.match(sharedAwsMutationConcurrencyPattern) ?? [])
+    .length === 1 &&
+  (
+    foundationMigrationWorkflowSource.match(
+      sharedAwsMutationConcurrencyPattern,
+    ) ?? []
+  ).length === 3 &&
+  (sharedEdgeWorkflowSource.match(sharedAwsMutationConcurrencyPattern) ?? [])
+    .length === 1 &&
+  (deploymentWorkflowSource.match(sharedAwsMutationConcurrencyPattern) ?? [])
+    .length === 2 &&
+  (
+    sharedRecoveryWorkflowSource.match(sharedAwsMutationConcurrencyPattern) ??
+    []
+  ).length === 2 &&
+  sharedAwsMutationJobContracts.every(({ source, jobIds }) =>
+    jobIds.every(
+      (jobId) =>
+        (
+          extractNamedWorkflowJob(source, jobId).match(
+            sharedAwsMutationConcurrencyPattern,
+          ) ?? []
+        ).length === 1,
+    ),
+  ) &&
+  !/aws-shared-control-plane-mutation/u.test(
+    extractNamedWorkflowJob(deploymentWorkflowSource, "source-gate"),
+  );
 const foundationAbortReceiptOffset =
   foundationAbortStep.lastIndexOf("          phase=receipt");
 const foundationAbortReceiptSource =
   foundationAbortReceiptOffset >= 0
     ? foundationAbortStep.slice(foundationAbortReceiptOffset)
     : "";
+const foundationRetireReceiptOffset =
+  foundationRetireStep.lastIndexOf("          phase=receipt");
+const foundationRetireReceiptSource =
+  foundationRetireReceiptOffset >= 0
+    ? foundationRetireStep.slice(foundationRetireReceiptOffset)
+    : "";
+const foundationFinalAuthorityProofOffset = foundationRetireStep.lastIndexOf(
+  "bash aws/foundation-migration-authority.sh",
+);
+const foundationAuthorityDeleteOffset = foundationRetireStep.indexOf(
+  "aws cloudformation delete-stack",
+  foundationFinalAuthorityProofOffset,
+);
+const foundationFinalAuthorityProofSource =
+  foundationFinalAuthorityProofOffset >= 0 &&
+  foundationAuthorityDeleteOffset > foundationFinalAuthorityProofOffset
+    ? foundationRetireStep.slice(
+        foundationFinalAuthorityProofOffset,
+        foundationAuthorityDeleteOffset,
+      )
+    : "";
+const foundationAuthorityRetirementExecutionRoleSource =
+  foundationBootstrapSource.match(
+    /(?:^|\r?\n)  FoundationAuthorityRetirementExecutionRole:\r?\n[\s\S]*?(?=\r?\n  FoundationPromotionRole:\r?\n|$)/u,
+  )?.[0] ?? "";
+const foundationPromotionRoleSource =
+  foundationBootstrapSource.match(
+    /(?:^|\r?\n)  FoundationPromotionRole:\r?\n[\s\S]*?(?=\r?\n  StagingDeployRole:\r?\n|$)/u,
+  )?.[0] ?? "";
+const foundationRequiredNewResourcesSource =
+  foundationStorageMigrationPolicySource.match(
+    /"requiredNewResources":\s*\[[\s\S]*?\](?=,\s*"allowedModifications")/u,
+  )?.[0] ?? "";
+const foundationAllowedModificationsSource =
+  foundationStorageMigrationPolicySource.match(
+    /"allowedModifications":\s*\[[\s\S]*?\](?=,\s*"forbiddenActions")/u,
+  )?.[0] ?? "";
+const foundationRetirementProofDigestFields = [
+  "controllerRoleIdSha256",
+  "controllerPolicySha256",
+  "controllerInventorySha256",
+  "controllerDriftSha256",
+  "executionRoleIdSha256",
+  "executionPolicySha256",
+  "executionInventorySha256",
+  "executionDriftSha256",
+];
+const foundationPolicyCanonicalAndQuotaValid =
+  /const expectedSids = \[[\s\S]*?"InspectFoundationRetirementRoleMetadata"[\s\S]*?"InspectFoundationRetirementRolePolicies"[\s\S]*?\];/u.test(
+    foundationContractTestsSource,
+  ) &&
+  /new Set\(expectedSids\)\.size, expectedSids\.length/u.test(
+    foundationContractTestsSource,
+  ) &&
+  /action === "\*"[\s\S]*?action === "cloudformation:\*"[\s\S]*?action === "iam:\*"[\s\S]*?action\.startsWith\("iam:Delete"\)[\s\S]*?!resources\(statement\)\.includes\("\*"\)/u.test(
+    foundationContractTestsSource,
+  ) &&
+  /Buffer\.byteLength\(compactPolicy, "utf8"\) <= 10_240/u.test(
+    foundationContractTestsSource,
+  ) &&
+  /Buffer\.byteLength\(JSON\.stringify\(renderedAuthority\), "utf8"\) <= 10_240/u.test(
+    foundationContractTestsSource,
+  ) &&
+  /PolicyDocument\.Statement \| map\(\.Sid\) \| sort[\s\S]*?"InspectFoundationRetirementRoleMetadata"[\s\S]*?"InspectFoundationRetirementRolePolicies"/u.test(
+    foundationStorageProofSource,
+  ) &&
+  /select\(\s*\(normalized_actions \| index\("cloudformation:deletestack"\)\) != null[\s\S]*?\["RetireOneTimeFoundationMigrationAuthorityStack"\][\s\S]*?select\(\(normalized_actions \| index\("iam:passrole"\)\) != null\)[\s\S]*?\["PassOnlyFoundationAuthorityRetirementExecutionRole"\]/u.test(
+    foundationStorageProofSource,
+  );
+const foundationProofIdentityContractValid =
+  foundationRetirementProofDigestFields.every(
+    (field) =>
+      foundationStorageProofSource.includes(`${field}:`) &&
+      foundationDeployedControlsProofStep.includes(`.${field}`) &&
+      foundationRetirementReadinessStep.includes(`.${field}`) &&
+      foundationRetireStep.includes(`.${field}`) &&
+      foundationAndEdgeReceiptGateStep.includes(`.${field}`),
+  ) &&
+  [
+    foundationDeployedControlsProofStep,
+    foundationRetirementReadinessStep,
+    foundationRetireStep,
+    foundationAndEdgeReceiptGateStep,
+  ].every((source) =>
+    /cloudFormationDriftInSync[\s\S]*?== true/u.test(source),
+  ) &&
+  /FoundationPromotionRoleId:\r?\n\s+Value: !GetAtt FoundationPromotionRole\.RoleId/u.test(
+    foundationBootstrapSource,
+  ) &&
+  /FoundationAuthorityRetirementExecutionRoleId:\r?\n\s+Value: !GetAtt FoundationAuthorityRetirementExecutionRole\.RoleId/u.test(
+    foundationBootstrapSource,
+  ) &&
+  /FoundationMigrationRoleId:[\s\S]*?Fn::GetAtt[\s\S]*?FoundationMigrationRole[\s\S]*?RoleId/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /roleIdSha256: \$roleIdSha256/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /--no-paginate/u.test(foundationMigrationAuthoritySource) &&
+  /--no-paginate/u.test(foundationStorageProofSource);
+const foundationReceiptSelectionContractValid =
+  foundationMigrationWorkflowSource.includes(
+    "run-name: Foundation ${{ inputs.operation }} ${{ inputs.target_sha }}",
+  ) &&
+  readRepositorySource(".github/workflows/edge-controls.yml").includes(
+    "run-name: Edge ${{ inputs.environment }} ${{ inputs.operation }} ${{ inputs.target_sha }}",
+  ) &&
+  /\.display_title == \("Foundation plan " \+ \$head\)[\s\S]*?Foundation apply[\s\S]*?Foundation verify[\s\S]*?Foundation abort[\s\S]*?Foundation retire/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  /Edge " \+ \$environment \+ " plan[\s\S]*?Edge " \+ \$environment \+ " apply[\s\S]*?Edge " \+ \$environment \+ " verify[\s\S]*?Edge " \+ \$environment \+ " cleanup[\s\S]*?Edge " \+ \$environment \+ " finalize/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  (foundationAndEdgeReceiptGateStep.match(
+    /sort_by\(\.updated_at, \.run_number, \.run_attempt\)[\s\S]*?\| last/gmu,
+  ) ?? []).length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(
+    /\(\.conclusion \/\/ "pending"\)/gmu,
+  ) ?? []).length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(
+    /\[ "\$conclusion" = "success" \] \|\| return 1/gmu,
+  ) ?? []).length === 2 &&
+  /\[ "\$operation" = "verify" \] \|\| return 1/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  /\[\[ "\$operation" =~ \^\(verify\|apply\)\$ \]\] \|\| return 1/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  !/select\([^\n]*\.conclusion[^\n]*success/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  (foundationAndEdgeReceiptGateStep.match(
+    /gh run download "\$id" \\\r?\n\s+--repo "\$GITHUB_REPOSITORY"/gmu,
+  ) ?? []).length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! gh run download/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! runs="\$\(/gmu) ?? [])
+    .length === 1 &&
+  /if ! EDGE_CONTROL_RUNS="\$\([\s\S]*?edge-controls\.yml\/runs\?per_page=100[\s\S]*?EDGE_CONTROL_RUNS='\[\]'/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! candidate="\$\(/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! artifacts="\$\(/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! artifact="\$\(/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! destination="\$\(/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/if ! jq -e/gmu) ?? []).length === 2;
+const deploymentControlPlaneFenceContractValid =
+  /for name in[\s\S]*?EXPECTED_SHA[\s\S]*?FENCE_ENVIRONMENT[\s\S]*?FENCE_JOB_ID[\s\S]*?FENCE_MUTEX_GROUP[\s\S]*?GITHUB_RUN_ATTEMPT[\s\S]*?GITHUB_RUN_ID/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  (deploymentControlPlaneFenceSource.match(/--paginate/gmu) ?? []).length ===
+    2 &&
+  (deploymentControlPlaneFenceSource.match(/--slurp/gmu) ?? []).length === 2 &&
+  (deploymentControlPlaneFenceSource.match(/\/runs\?per_page=100/gmu) ?? [])
+    .length === 2 &&
+  !/\/runs\?[^"\r\n]*(?:branch|event)=/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  (deploymentControlPlaneFenceSource.match(
+    /\.\[\]\.workflow_runs\[\]/gmu,
+  ) ?? []).length === 2 &&
+  (deploymentControlPlaneFenceSource.match(
+    /sort_by\(\.updated_at, \.run_number, \.run_attempt\)[\s\S]*?\| last/gmu,
+  ) ?? []).length === 2 &&
+  !/\.head_sha == \$sha/u.test(deploymentControlPlaneFenceSource) &&
+  /test "\$foundation_sha" = "\$EXPECTED_SHA"/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  /test "\$actual_sha" = "\$EXPECTED_SHA"/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  /git\/ref\/heads\/main[\s\S]*?\.object\.sha[\s\S]*?EXPECTED_SHA/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  /jq -cS -n/u.test(deploymentControlPlaneFenceSource) &&
+  /edgeSnapshotShared:true/u.test(deploymentControlPlaneFenceSource) &&
+  /checkedAt:\$checkedAt[\s\S]*?mainHeadRevalidated:true[\s\S]*?mutationMutexHeldByCaller:true[\s\S]*?latestEligibleRunsRevalidated:true[\s\S]*?mutex:[\s\S]*?deployment:[\s\S]*?foundation:[\s\S]*?operation:"verify"[\s\S]*?edge:[\s\S]*?operation:\$stagingEdgeOperation[\s\S]*?operation:\$productionEdgeOperation/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  !/(?:^|\r?\n)\s*aws\s|gh api[\s\S]*?(?:--method|-X)\s*(?:POST|PUT|PATCH|DELETE)/u.test(
+    deploymentControlPlaneFenceSource,
+  ) &&
+  [
+    ["foundation_control_run_id", "foundation_run_id"],
+    ["foundation_control_run_attempt", "foundation_run_attempt"],
+    ["staging_edge_control_run_id", "staging_edge_run_id"],
+    ["staging_edge_control_run_attempt", "staging_edge_run_attempt"],
+    ["production_edge_control_run_id", "production_edge_run_id"],
+    ["production_edge_control_run_attempt", "production_edge_run_attempt"],
+  ].every(
+    ([output, emitted]) =>
+      deploymentWorkflowSource.includes(`${output}:`) &&
+      foundationAndEdgeReceiptGateStep.includes(`echo "${emitted}=`),
+  ) &&
+  (foundationAndEdgeReceiptGateStep.match(/--paginate/gmu) ?? []).length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/--slurp/gmu) ?? []).length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(/\/runs\?per_page=100/gmu) ?? [])
+    .length === 2 &&
+  !/\/runs\?[^"\r\n]*(?:branch|event)=/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  (foundationAndEdgeReceiptGateStep.match(/\.\[\]\.workflow_runs\[\]/gmu) ?? [])
+    .length === 2 &&
+  (foundationAndEdgeReceiptGateStep.match(
+    /if \[ "\$head_sha" != "\$EXPECTED_SHA" \]; then[\s\S]*?CONTROL_RECEIPT_SUPERSEDED=true[\s\S]*?return 1/gmu,
+  ) ?? []).length === 2 &&
+  /CONTROL_RECEIPT_SUPERSEDED=false[\s\S]*?if \[ "\$CONTROL_RECEIPT_SUPERSEDED" = "true" \]; then[\s\S]*?superseded \$EXPECTED_SHA[\s\S]*?exit 1/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  /git\/ref\/heads\/main[\s\S]*?\.object\.type == "commit"[\s\S]*?\.object\.sha == \$sha/u.test(
+    foundationAndEdgeReceiptGateStep,
+  ) &&
+  [deploymentStagingFenceStep, deploymentProductionFenceStep].every(
+    (step) =>
+      step.length > 0 &&
+      /bash \.github\/scripts\/revalidate-aws-control-plane-fence\.sh/u.test(
+        step,
+      ) &&
+      /CONTROL_PLANE_FENCE_FILE=\$fence/u.test(step) &&
+      /CONTROL_PLANE_FENCE_SHA256=\$fence_sha256/u.test(step) &&
+      /\.mainHeadRevalidated == true/u.test(step) &&
+      /\.latestEligibleRunsRevalidated == true/u.test(step) &&
+      /\.edgeSnapshotShared == true/u.test(step) &&
+      /\.edge\.staging\.operation \| test\("\^\(apply\|verify\)\$"\)/u.test(
+        step,
+      ) &&
+      /\.edge\.production\.operation \| test\("\^\(apply\|verify\)\$"\)/u.test(
+        step,
+      ),
+  ) &&
+  deploymentStagingJobSource.indexOf(
+    "Reconcile an interrupted same-run staging greenfield recovery",
+  ) <
+    deploymentStagingJobSource.indexOf(
+      "Revalidate staging control-plane fence before new release mutation",
+    ) &&
+  deploymentStagingJobSource.indexOf(
+    "Revalidate staging control-plane fence before new release mutation",
+  ) <
+    deploymentStagingJobSource.indexOf(
+      "Enforce staging stack protection and fresh pre-deploy drift gate",
+    ) &&
+  deploymentProductionJobSource.indexOf(
+    "Reconcile an interrupted same-run production greenfield recovery",
+  ) <
+    deploymentProductionJobSource.indexOf(
+      "Revalidate production control-plane fence before new release mutation",
+    ) &&
+  deploymentProductionJobSource.indexOf(
+    "Revalidate production control-plane fence before new release mutation",
+  ) <
+    deploymentProductionJobSource.indexOf(
+      "Enforce production stack protection and fresh pre-deploy drift gate",
+    ) &&
+  (deploymentWorkflowSource.match(
+    /--slurpfile controlPlaneFence "\$CONTROL_PLANE_FENCE_FILE"/gmu,
+  ) ?? []).length === 2 &&
+  (deploymentWorkflowSource.match(
+    /test ! -L "\$CONTROL_PLANE_FENCE_FILE"/gmu,
+  ) ?? []).length === 2 &&
+  (deploymentWorkflowSource.match(
+    /controlPlaneReceiptFence:\r?\n\s*\(\$controlPlaneFence\[0\] \+ \{[\s\S]*?sha256: \$controlPlaneFenceSha256/gmu,
+  ) ?? []).length === 2 &&
+  /bash -n \.github\/scripts\/revalidate-aws-control-plane-fence\.sh/u.test(
+    foundationCiWorkflowSource,
+  );
+const foundationRetirementRetryAndIdempotencyValid =
+  /verify-retirement-retry/u.test(foundationMigrationAuthoritySource) &&
+  /verify-retirement-orphaned/u.test(foundationMigrationAuthoritySource) &&
+  /expected_stack_status=DELETE_FAILED/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /retirementRetryContractExact: \$retryExact/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /standardDeleteRetryEligible: \$retryExact/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /authority_role_present=false[\s\S]*?NoSuchEntity[\s\S]*?authority_verification_mode=verify-intrinsic[\s\S]*?if \[ "\$authority_stack_status" = "DELETE_FAILED" \]; then[\s\S]*?if \[ "\$authority_role_present" = "true" \]; then[\s\S]*?authority_verification_mode=verify-retirement-retry[\s\S]*?authority_verification_mode=verify-retirement-orphaned[\s\S]*?else[\s\S]*?test "\$authority_stack_status" = "CREATE_COMPLETE"[\s\S]*?test "\$authority_role_present" = "true"/u.test(
+    foundationRetireStep,
+  ) &&
+  /phase=already-retired-role-absence[\s\S]*?prove-foundation-storage-controls\.sh retired[\s\S]*?result: "one-time-authority-already-retired"[\s\S]*?destructiveActionsStarted: false/u.test(
+    foundationRetireStep,
+  ) &&
+  /authority_stack_status" = "DELETE_FAILED"[\s\S]*?authority_verification_mode=verify-retirement-retry[\s\S]*?retrying_delete_failed=true/u.test(
+    foundationRetireStep,
+  ) &&
+  /if \$mode == "verify-retirement-orphaned" then[\s\S]*?\.orphanedRetirementContractExact == true[\s\S]*?\.targetedRetainReconciliationEligible == true[\s\S]*?\.requiredRetainResources == \["FoundationMigrationRole"\][\s\S]*?\.authorityRolePresent == false[\s\S]*?\.roleAbsenceChecks == 2[\s\S]*?\.roleAttachmentInventorySha256 == null[\s\S]*?else[\s\S]*?if \$mode == "verify-retirement-retry" then[\s\S]*?\.retirementRetryContractExact == true[\s\S]*?\.standardDeleteRetryEligible == true/u.test(
+    foundationRetireStep,
+  ) &&
+  /one-time-authority-retired-after-standard-retry/u.test(
+    foundationRetireStep,
+  ) &&
+  /one-time-authority-orphaned-stack-reconciled/u.test(
+    foundationRetireStep,
+  ) &&
+  /standardDeleteRetryPerformed: \$standardDeleteRetry[\s\S]*?deletionMode: "STANDARD"[\s\S]*?forceDeleteUsed: false[\s\S]*?retainedResourcesUsed: \$orphanedReconciliation[\s\S]*?targetedRetainReconciliationPerformed:[\s\S]*?\$orphanedReconciliation[\s\S]*?retainedLogicalResourceIds:[\s\S]*?FoundationMigrationRole[\s\S]*?authorityRoleDeletedByThisRun:[\s\S]*?\(\$orphanedReconciliation \| not\)[\s\S]*?physicalRoleRetained: false[\s\S]*?stackRecordDeleted: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /terminalLifecycleSafetyContractVersion: 2/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /phase=authority-historical-source-binding[\s\S]*?\.sourceCommit \| select\(test\("\^\[0-9a-f\]\{40\}\$"\)\)[\s\S]*?compare\/\$\{authority_source_sha\}\.\.\.\$\{TARGET_SHA\}[\s\S]*?\.merge_base_commit\.sha == \$base[\s\S]*?\.head_commit\.sha == \$head[\s\S]*?historical_authority_source_sha256[\s\S]*?\^\[0-9a-f\]\{64\}\$/u.test(
+    foundationRetireStep,
+  ) &&
+  /historicalAuthoritySource: \{[\s\S]*?commit: \$authoritySourceSha[\s\S]*?ancestorOfTarget: true[\s\S]*?sourceFileSha256: \$historicalAuthoritySourceSha256[\s\S]*?recordedTemplateSha256:[\s\S]*?\$recordedAuthorityTemplateSha256[\s\S]*?sourceFetchedAsData: true[\s\S]*?sourceExecuted: false[\s\S]*?liveTemplateBound: true[\s\S]*?terminalLifecycleSafetyContractVersion: 2/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  !/env -i[^\r\n]*historical_authority_source|(?:bash|source|\.)\s+"?\$historical_authority_source/u.test(
+    foundationRetireStep,
+  ) &&
+  /result: "one-time-authority-already-retired"[\s\S]*?retiredAuthority: \{[\s\S]*?stackDeleted: false[\s\S]*?roleDeleted: false[\s\S]*?stackAbsent: true[\s\S]*?roleAbsent: true[\s\S]*?stackDeletedByThisRun: false[\s\S]*?roleDeletedByThisRun: false[\s\S]*?alreadyAbsentAtStart: true/u.test(
+    foundationRetireStep,
+  ) &&
+  /failure: \{phase: \$phase, strategy: \$strategy\}/u.test(
+    foundationRetireStep,
+  ) &&
+  /retirement_strategy=unclassified[\s\S]*?retirement_strategy=already-absent[\s\S]*?retirement_strategy=standard-delete-retry[\s\S]*?retirement_strategy=targeted-retain-orphan-reconciliation[\s\S]*?retirement_strategy=standard-delete/u.test(
+    foundationRetireStep,
+  ) &&
+  /authorityRoleAbsentBeforeRequest:[\s\S]*?\$authorityRoleAbsentBeforeRequest[\s\S]*?authorityRoleDeletedByThisRun:[\s\S]*?\(\$orphanedReconciliation \| not\)[\s\S]*?stackRecordDeleted: true[\s\S]*?stackDeletedByThisRun: true[\s\S]*?roleDeletedByThisRun:[\s\S]*?\(\$orphanedReconciliation \| not\)/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  !/--force-delete|FORCE_DELETE_STACK/u.test(foundationRetireStep) &&
+  (foundationRetireStep.match(/--retain-resources/gu) ?? []).length === 1 &&
+  (foundationRetireStep.match(/--deletion-mode STANDARD/gu) ?? []).length ===
+    2;
 const foundationPhaseZeroSource =
   foundationMigrationRunbookSource.match(
     /## Phase 0: create the one-time authority[\s\S]*?```bash\r?\n([\s\S]*?)\r?\n```/u,
@@ -914,6 +1375,31 @@ const foundationAuthorityTemplateDigestContractValid =
   !/aws cloudformation delete-stack/u.test(
     foundationMigrationAuthoritySource,
   ) &&
+  /all\(\s*\.PolicyDocument\.Statement\[\];[\s\S]*?index\("cloudformation:DeleteStack"\)\) == null[\s\S]*?index\("iam:PassRole"\)\) == null[\s\S]*?\)/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /Sid: "InspectAuthorityStack"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  !/Sid: "RetireAuthorityStack"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /selfDeletionAllowed: false/u.test(foundationMigrationAuthoritySource) &&
+  /permanentRetirementControllerRequired: true/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /\.Sid == "ManageExactNewFoundationRolesViaCloudFormation"[\s\S]*?\(\(\.Resource \| list\) \| index\(\$arn\)\) == null[\s\S]*?\(\(\.Resource \| list\) \| index\(\$executionArn\)\) != null[\s\S]*?index\("iam:CreateRole"\)\) != null[\s\S]*?index\("iam:DeleteRole"\)\) != null/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /\.Sid == "ModifyExactExistingFoundationRolesViaCloudFormation"[\s\S]*?\(\(\.Resource \| list\) \| index\(\$arn\)\) == null[\s\S]*?\(\(\.Resource \| list\) \| index\(\$promotionArn\)\) != null[\s\S]*?index\("iam:CreateRole"\)\) == null[\s\S]*?index\("iam:DeleteRole"\)\) == null/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /\.Sid == "InspectOwnAuthorityContract"[\s\S]*?index\("iam:ListAttachedRolePolicies"\)\) != null[\s\S]*?index\("iam:ListInstanceProfilesForRole"\)\) != null[\s\S]*?index\("iam:ListRolePolicies"\)\) != null/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /inlinePolicyNames: \$inline\[0\]\.PolicyNames[\s\S]*?inlinePoliciesTruncated: \(\$inline\[0\]\.IsTruncated \/\/ false\)[\s\S]*?attachedPolicies: \$attached\[0\]\.AttachedPolicies[\s\S]*?attachedPoliciesTruncated: \(\$attached\[0\]\.IsTruncated \/\/ false\)[\s\S]*?instanceProfiles: \$profiles\[0\]\.InstanceProfiles[\s\S]*?instanceProfilesTruncated: \(\$profiles\[0\]\.IsTruncated \/\/ false\)[\s\S]*?inlinePolicyNames: \[\$policy\][\s\S]*?inlinePoliciesTruncated: false[\s\S]*?attachedPolicies: \[\][\s\S]*?attachedPoliciesTruncated: false[\s\S]*?instanceProfiles: \[\][\s\S]*?instanceProfilesTruncated: false/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
   [
     "recordedAuthorityTemplateSha256",
     "canonicalAuthorityTemplateSha256",
@@ -937,12 +1423,11 @@ const foundationAuthorityTemplateDigestContractValid =
   /legacyTemplateDigestAccepted[\s\S]*?recordedTemplateTerminator != "none"/u.test(
     foundationAbortStep,
   ) &&
-  /jq -Scj -s[\s\S]*?expected exactly one historical JSON document/u.test(
+  /phase=historical-source-fetch[\s\S]*?foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?test -s "\$historical_authority_source"[\s\S]*?test ! -L "\$historical_authority_source"[\s\S]*?historical_authority_source_sha256[\s\S]*?\^\[0-9a-f\]\{64\}\$/u.test(
     foundationAbortStep,
   ) &&
-  /canonicalAuthorityTemplateSha256/u.test(foundationAbortStep) &&
-  /matchesCanonicalLiveTemplate: true/u.test(foundationAbortReceiptSource) &&
-  /recordedDigestCompatibilityVerified: true/u.test(
+  !/env -i|historical-template-render/u.test(foundationAbortStep) &&
+  /historicalAuthoritySource: \{[\s\S]*?sourceFileSha256: \$historicalAuthoritySourceSha256[\s\S]*?ancestorOfTarget: true[\s\S]*?sourceFetchedAsData: true[\s\S]*?sourceExecuted: false[\s\S]*?liveTemplateDigestBound: true[\s\S]*?terminalLifecycleSafetyContractVersion: 2/u.test(
     foundationAbortReceiptSource,
   ) &&
   !/matchesRecordedAndLiveTemplate/u.test(foundationAbortReceiptSource) &&
@@ -950,16 +1435,16 @@ const foundationAuthorityTemplateDigestContractValid =
   /destructiveActionsStarted: \$destructiveActionsStarted/u.test(
     foundationAbortStep,
   ) &&
-  /partialChangeSetCleanup:[\s\S]*?deletedCount: \(\$plans\[0\] \| length\)/u.test(
+  /partialChangeSetCleanup:[\s\S]*?attemptedCount: \(\$plans\[0\] \| length\)[\s\S]*?select\(\.deleted == true\)/u.test(
     foundationAbortStep,
   ) &&
-  /destructiveActionsStarted: true/u.test(foundationAbortReceiptSource) &&
   foundationAbortStep.indexOf("phase=authority-proof-contract") >= 0 &&
   foundationAbortStep.indexOf("phase=authority-proof-contract") <
     foundationAbortStep.indexOf("aws cloudformation delete-change-set") &&
-  foundationAbortStep.indexOf("phase=authority-proof-contract") <
-    foundationAbortStep.indexOf("aws cloudformation delete-stack") &&
-  /schemaVersion == 2[\s\S]*?verificationMode == "verify-intrinsic"[\s\S]*?recordedTemplateTerminator/u.test(
+  !/aws cloudformation delete-stack|iam delete-role/u.test(
+    foundationAbortStep,
+  ) &&
+  /schemaVersion == 2[\s\S]*?verificationMode == \$mode[\s\S]*?stackStatus == \$status[\s\S]*?roleIdSha256[\s\S]*?retirementRetryContractExact[\s\S]*?standardDeleteRetryEligible[\s\S]*?roleAttachmentInventorySha256[\s\S]*?terminalLifecycleSafetyContractVersion[\s\S]*?recordedTemplateTerminator/u.test(
     foundationRetireStep,
   );
 const foundationSameRunCleanupValid =
@@ -1013,7 +1498,7 @@ const foundationAbortContractValid =
   /options:\r?\n\s+- plan\r?\n\s+- apply\r?\n\s+- verify\r?\n\s+- abort\r?\n\s+- retire/u.test(
     foundationMigrationWorkflowSource,
   ) &&
-  /ABORT-FOUNDATION-MIGRATION-AND-RETIRE-AUTHORITY/u.test(
+  /ABORT-FOUNDATION-MIGRATION-CLEAN-PLANS/u.test(
     foundationAuthorizeStep,
   ) &&
   /test "\$GITHUB_SHA" = "\$TARGET_SHA"/u.test(foundationAuthorizeStep) &&
@@ -1029,12 +1514,13 @@ const foundationAbortContractValid =
   /foundation-migration-authority\.sh verify-intrinsic/u.test(
     foundationAbortStep,
   ) &&
-  /authority_stack_id="\$\(jq -er '\.Stacks\[0\]\.StackId' "\$authority_stack"\)"[\s\S]*?printf '%s' "\$authority_stack_id" \|\s*sha256sum/u.test(
-    foundationAbortStep,
-  ) &&
   /\.verificationMode == "verify-intrinsic"/u.test(foundationAbortStep) &&
   /\.intrinsicSafetyContractVerified == true/u.test(foundationAbortStep) &&
   /\.creationBindingVerified == true/u.test(foundationAbortStep) &&
+  /\.selfDeletionAllowed == false/u.test(foundationAbortStep) &&
+  /\.permanentRetirementControllerRequired == true/u.test(
+    foundationAbortStep,
+  ) &&
   /\.resourceCount == 1/u.test(foundationAbortStep) &&
   /repos\/\$\{GITHUB_REPOSITORY\}\/commits\/\$\{authority_source\}/u.test(
     foundationAbortStep,
@@ -1058,8 +1544,38 @@ const foundationAbortContractValid =
   /sha256sum "\$source_template"[\s\S]*?plan_template_sha256/u.test(
     foundationAbortStep,
   ) &&
+  /plan_queue="\$\{RUNNER_TEMP:\?\}\/foundation-abort-plan-queue\.jsonl"/u.test(
+    foundationAbortStep,
+  ) &&
+  /sort_by\(\.ChangeSetName\)[\s\S]*?@base64[\s\S]*?' "\$plans" >"\$plan_queue"/u.test(
+    foundationAbortStep,
+  ) &&
+  /done <"\$plan_queue"/u.test(foundationAbortStep) &&
+  !/< <\(/u.test(foundationAbortStep) &&
+  /deletionRequestStarted: null,[\s\S]*?deletionRequestAccepted: false,[\s\S]*?deletionRequestOutcomeKnown: false,[\s\S]*?deleted: false,[\s\S]*?absenceVerified: false/u.test(
+    foundationAbortStep,
+  ) &&
+  foundationAbortStep.indexOf("destructive_actions_started=true") >= 0 &&
+  foundationAbortStep.indexOf("destructive_actions_started=true") <
+    foundationAbortStep.indexOf("deletionRequestStarted: null") &&
+  foundationAbortStep.indexOf("deletionRequestStarted: null") <
+    foundationAbortStep.indexOf("aws cloudformation delete-change-set") &&
+  /\.\[-1\]\.deletionRequestStarted = true[\s\S]*?\.\[-1\]\.deletionRequestAccepted = true[\s\S]*?\.\[-1\]\.deletionRequestOutcomeKnown = true/u.test(
+    foundationAbortStep,
+  ) &&
+  foundationAbortStep.indexOf("aws cloudformation delete-change-set") <
+    foundationAbortStep.indexOf(".[-1].deletionRequestStarted = true") &&
+  foundationAbortStep.indexOf(".[-1].deletionRequestStarted = true") <
+    foundationAbortStep.indexOf(".[-1].deleted = true") &&
+  /for \(\(attempt = 1; attempt <= 30; attempt\+\+\)\); do/u.test(
+    foundationAbortStep,
+  ) &&
+  !/for attempt in \$\(seq/u.test(foundationAbortStep) &&
+  /error\("missing in-flight plan journal"\)[\s\S]*?\.\[-1\]\.deleted = true[\s\S]*?\.\[-1\]\.absenceVerified = true/u.test(
+    foundationAbortStep,
+  ) &&
   /aws cloudformation delete-change-set/u.test(foundationAbortStep) &&
-  /absenceVerified: true/u.test(foundationAbortStep) &&
+  /\.\[-1\]\.absenceVerified = true/u.test(foundationAbortStep) &&
   /remainingCount: 0/u.test(foundationAbortReceiptSource) &&
   /\)" = "\$target_projection_sha256"/u.test(foundationAbortStep) &&
   /\)" = \\\r?\n\s+"\$target_template_sha256"/u.test(
@@ -1067,17 +1583,34 @@ const foundationAbortContractValid =
   ) &&
   /\)" = "\$target_policy_sha256"/u.test(foundationAbortStep) &&
   /\)" = "\$target_resources_sha256"/u.test(foundationAbortStep) &&
-  /proofStableUntilDeletion: true/u.test(foundationAbortReceiptSource) &&
-  /stackDeleted: true/u.test(foundationAbortReceiptSource) &&
-  /roleDeleted: true/u.test(foundationAbortReceiptSource) &&
-  /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id"/u.test(
+  !/aws cloudformation delete-stack|iam delete-role/u.test(
     foundationAbortStep,
   ) &&
-  (foundationAbortStep.match(/aws cloudformation delete-stack/gu) ?? [])
-    .length === 1 &&
-  /grep -Fq "NoSuchEntity" "\$role_error"/u.test(foundationAbortStep) &&
   foundationAbortReceiptOffset >= 0 &&
-  /clientRequestTokenSha256: \$clientTokenSha256/u.test(
+  /result: "migration-aborted-authority-retirement-required"/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  /changeSetCleanupOnly: true/u.test(foundationAbortReceiptSource) &&
+  /authorityMutationAttempted: false/u.test(foundationAbortReceiptSource) &&
+  /unchangedDuringAbort: true/u.test(foundationAbortReceiptSource) &&
+  /stackRetained: true/u.test(foundationAbortReceiptSource) &&
+  /roleRetained: true/u.test(foundationAbortReceiptSource) &&
+  /stackDeleted: false/u.test(foundationAbortReceiptSource) &&
+  /roleDeleted: false/u.test(foundationAbortReceiptSource) &&
+  /authorityRetired: false/u.test(foundationAbortReceiptSource) &&
+  /terminalRetirementEvidence: false/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  /externalAdministratorRetirementRequired: null/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  /externalAdministratorRequirementKnown: false/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  /nonSelfDeletingExecutorAvailableBeforeApply: null/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  /permanentRetirementControllerAvailabilityKnown: false/u.test(
     foundationAbortReceiptSource,
   ) &&
   !/AWS_ACCOUNT_ID|arn:aws:/u.test(foundationAbortReceiptSource) &&
@@ -1088,17 +1621,82 @@ const foundationAbortContractValid =
   /cloudformation:ListStackResources/u.test(
     foundationMigrationAuthoritySource,
   );
-const foundationDestructiveTransitionsValid =
-  /execution_started=false/u.test(foundationApplyStep) &&
-  /execution_started=true\s+aws cloudformation execute-change-set/u.test(
-    foundationApplyStep,
-  ) &&
-  /UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?set-stack-policy/u.test(
-    foundationApplyStep,
-  ) &&
-  /foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?env -i[\s\S]*?render-template/u.test(
+const foundationReceiptFailureSafetyValid =
+  /record_failure\(\)[\s\S]*?failure_status="\$\?"[\s\S]*?trap - EXIT[\s\S]*?set \+e[\s\S]*?mv -f "\$receipt_next" "\$receipt"[\s\S]*?return "\$failure_status"/u.test(
     foundationAbortStep,
   ) &&
+  /trap record_failure EXIT/u.test(foundationAbortStep) &&
+  /record_failure\(\)[\s\S]*?failure_status="\$\?"[\s\S]*?trap - EXIT[\s\S]*?set \+e[\s\S]*?mv -f "\$receipt_next" "\$receipt"[\s\S]*?return "\$failure_status"/u.test(
+    foundationRetireStep,
+  ) &&
+  /trap record_failure EXIT/u.test(foundationRetireStep) &&
+  /if: always\(\)/u.test(foundationAbortFailureFinalizerStep) &&
+  /\.result == "abort-pending"/u.test(foundationAbortFailureFinalizerStep) &&
+  /result: "abort-failed"/u.test(foundationAbortFailureFinalizerStep) &&
+  /destructiveActionsStarted: null/u.test(
+    foundationAbortFailureFinalizerStep,
+  ) &&
+  /destructiveStateKnown: false/u.test(
+    foundationAbortFailureFinalizerStep,
+  ) &&
+  /failure: \{phase: "pre-main-or-untrapped-failure"\}/u.test(
+    foundationAbortFailureFinalizerStep,
+  ) &&
+  /pendingReceiptFinalized: true/u.test(
+    foundationAbortFailureFinalizerStep,
+  ) &&
+  foundationAbortJob.indexOf(
+    "Finalize any untrapped abort failure receipt",
+  ) < foundationAbortJob.indexOf("Upload sanitized abort receipt") &&
+  /if: always\(\)/u.test(foundationRetirementFailureFinalizerStep) &&
+  /\.result == "retire-pending"/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  /result: "retire-failed"/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  /destructiveActionsStarted: null/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  /destructiveStateKnown: false/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  /failure: \{phase: "pre-main-or-untrapped-failure"\}/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  /pendingReceiptFinalized: true/u.test(
+    foundationRetirementFailureFinalizerStep,
+  ) &&
+  foundationRetireJob.indexOf(
+    "Finalize any untrapped retirement failure receipt",
+  ) < foundationRetireJob.indexOf("Upload sanitized retirement receipt");
+const foundationDestructiveTransitionsValid =
+  /get-stack-policy[\s\S]*?CURRENT_STACK_POLICY_BODY_FILE[\s\S]*?bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?aws cloudformation execute-change-set[\s\S]*?UPDATE_COMPLETE[\s\S]*?set-stack-policy[\s\S]*?file:\/\/aws\/bootstrap-stack-policy\.json[\s\S]*?foundation-immediate-protected-policy/u.test(
+    foundationExecuteStep,
+  ) &&
+  foundationExecuteStep.indexOf("get-stack-policy") <
+    foundationExecuteStep.indexOf("aws cloudformation execute-change-set") &&
+  (foundationExecuteStep.match(/aws cloudformation set-stack-policy/gu) ?? [])
+    .length === 2 &&
+  /for \(\(attempt = 1; attempt <= 120; attempt\+\+\)\); do/u.test(
+    foundationExecuteStep,
+  ) &&
+  /UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?Foundation migration rolled back\.[\s\S]*?false/u.test(
+    foundationExecuteStep,
+  ) &&
+  /if: always\(\) && inputs\.operation == 'apply'/u.test(
+    foundationPromotePolicyStep,
+  ) &&
+  /case "\$stack_status" in[\s\S]*?UPDATE_COMPLETE\|UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?terminal=true[\s\S]*?CANDIDATE_TEMPLATE_DIGEST[\s\S]*?\(\$live == \$legacy\[0\] or \$live == \$target\[0\]\)[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?if \[ "\$candidate_present" = "true" \]; then[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.json[\s\S]*?aws cloudformation set-stack-policy[\s\S]*?\(\.StackPolicyBody \| fromjson\) == \$expected\[0\][\s\S]*?test "\$candidate_present" = "true"/u.test(
+    foundationPromotePolicyStep,
+  ) &&
+  foundationMigrationWorkflowSource.indexOf(
+    "Execute under rollback-safe policy and protect success immediately",
+  ) <
+    foundationMigrationWorkflowSource.indexOf(
+      "Reconcile candidate and rollback-safe stack-policy state",
+    ) &&
+  !/env -i|historical-template-render/u.test(foundationAbortStep) &&
   (foundationAbortStep.match(/\(\.Summaries \/\/ \[\]\) \| length == 0/gu) ?? [])
     .length >= 2 &&
   /cloudformation:DetectStackResourceDrift/u.test(
@@ -1107,38 +1705,164 @@ const foundationDestructiveTransitionsValid =
   /prove-foundation-storage-controls\.sh[\s\S]*?detect-stack-resource-drift[\s\S]*?StackResourceDriftStatus == "IN_SYNC"[\s\S]*?\(\.Summaries \/\/ \[\]\) \| length == 0[\s\S]*?fresh_retirement_proof_sha256[\s\S]*?aws cloudformation delete-stack/u.test(
     foundationRetireStep,
   ) &&
+  foundationRetireStep.indexOf('target_stack_id="$(jq -er') >= 0 &&
+  foundationRetireStep.indexOf('target_stack_id="$(jq -er') <
+    foundationRetireStep.indexOf(
+      "--logical-resource-id FoundationPromotionRole",
+    ) &&
   /freshRetirementProofBound: true/u.test(foundationRetireStep) &&
   /finalAuthorityProofSha256/u.test(foundationRetireStep) &&
+  /authority_stack_id="\$\([\s\S]*?jq -ejr '\.Stacks\[0\]\.StackId' "\$authority_stack"[\s\S]*?\)"[\s\S]*?printf '%s' "\$authority_stack_id"[\s\S]*?sha256sum/u.test(
+    foundationRetireStep,
+  ) &&
+  /test "\$authority_stack_id_sha256" = \\\r?\n\s+"\$\(jq -er '\.authorityStackIdSha256' "\$final_authority_proof"\)"/u.test(
+    foundationRetireStep,
+  ) &&
+  /phase=authority-delete[\s\S]*?destructive_actions_started=true[\s\S]*?aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id" \\\r?\n\s+--role-arn "\$execution_role_arn"/u.test(
+    foundationRetireStep,
+  ) &&
+  /for \(\(attempt = 1; attempt <= 90; attempt\+\+\)\); do/u.test(
+    foundationRetireStep,
+  ) &&
+  /for \(\(attempt = 1; attempt <= 30; attempt\+\+\)\); do/u.test(
+    foundationRetireStep,
+  ) &&
+  !/for attempt in \$\(seq/u.test(foundationRetireStep) &&
+  /phase=authority-role-absence[\s\S]*?NoSuchEntity[\s\S]*?test "\$role_absent" = "true"/u.test(
+    foundationRetireStep,
+  ) &&
+  /phase=controller-executor-persistence[\s\S]*?permanent_role_after[\s\S]*?execution_role_after[\s\S]*?permanent_role_sha256[\s\S]*?execution_role_sha256/u.test(
+    foundationRetireStep,
+  ) &&
+  foundationRetireReceiptOffset >= 0 &&
+  /controllerRoleArnSha256[\s\S]*?cloudFormationExecutionRoleArnSha256[\s\S]*?authorityRoleArnSha256/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /cloudFormationServiceRoleBound: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /controllerExecutionRoleSeparated: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /nonSelfDeletingExecutor: true/u.test(foundationRetireReceiptSource) &&
+  /selfDeletion: false/u.test(foundationRetireReceiptSource) &&
+  /controllerPersistedAfterDeletion: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /executionRolePersistedAfterDeletion: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  /phase=post-retirement-controls[\s\S]*?bash aws\/prove-foundation-storage-controls\.sh retired[\s\S]*?\.migrationAuthority\.retired == true[\s\S]*?\.migrationAuthority\.selfDeletionAllowed == false[\s\S]*?\.foundationAuthorityRetirement\.cloudFormationServiceRoleBound[\s\S]*?== true[\s\S]*?\.foundationAuthorityRetirement\.controllerExecutionRoleSeparated[\s\S]*?== true[\s\S]*?\.foundationAuthorityRetirement\.selfDeletion == false[\s\S]*?post_retirement_controls_sha256/u.test(
+    foundationRetireStep,
+  ) &&
+  /postRetirementControlsSha256:[\s\S]*?\$postRetirementControlsSha256[\s\S]*?postRetirementControlsBound: true/u.test(
+    foundationRetireReceiptSource,
+  ) &&
+  !/AWS_ACCOUNT_ID|arn:aws:/u.test(foundationRetireReceiptSource) &&
   /finalAuthorityProofBoundImmediatelyBeforeDeletion: true/u.test(
     foundationRetireStep,
   ) &&
-  foundationRetireStep.lastIndexOf(
-    "bash aws/foundation-migration-authority.sh verify-intrinsic",
-  ) >= 0 &&
-  !/\n\s+(?:aws|git)\s/u.test(
-    foundationRetireStep.slice(
-      foundationRetireStep.lastIndexOf(
-        "bash aws/foundation-migration-authority.sh verify-intrinsic",
-      ),
-      foundationRetireStep.indexOf(
-        "aws cloudformation delete-stack",
-        foundationRetireStep.lastIndexOf(
-          "bash aws/foundation-migration-authority.sh verify-intrinsic",
-        ),
-      ),
-    ),
+  foundationFinalAuthorityProofOffset >= 0 &&
+  foundationAuthorityDeleteOffset > foundationFinalAuthorityProofOffset &&
+  /"\$authority_verification_mode" >"\$final_authority_proof"/u.test(
+    foundationFinalAuthorityProofSource,
+  ) &&
+  /phase=final-authority-stack-binding[\s\S]*?aws cloudformation describe-stacks[\s\S]*?authority_stack_id_sha256/u.test(
+    foundationFinalAuthorityProofSource,
+  ) &&
+  !/\n\s+git\s|cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u.test(
+    foundationFinalAuthorityProofSource,
+  );
+const foundationRetirementRolesValid =
+  /RoleName: !Sub "\$\{AppName\}-foundation-authority-retirement-execution"/u.test(
+    foundationAuthorityRetirementExecutionRoleSource,
+  ) &&
+  /MaxSessionDuration: 3600[\s\S]*?Principal:\s*\r?\n\s+Service: cloudformation\.amazonaws\.com\r?\n\s+Action: sts:AssumeRole/u.test(
+    foundationAuthorityRetirementExecutionRoleSource,
+  ) &&
+  /PolicyName: retire-one-time-foundation-authority/u.test(
+    foundationAuthorityRetirementExecutionRoleSource,
+  ) &&
+  /Sid: DeleteOnlyOneTimeFoundationMigrationRole[\s\S]*?Action:\s*\r?\n\s+- iam:DeleteRole\r?\n\s+- iam:DeleteRolePolicy\r?\n\s+- iam:GetRole\r?\n\s+- iam:GetRolePolicy\r?\n\s+- iam:ListAttachedRolePolicies\r?\n\s+- iam:ListInstanceProfilesForRole\r?\n\s+- iam:ListRolePolicies\r?\n\s+Resource: !Sub >-\r?\n\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration/u.test(
+    foundationAuthorityRetirementExecutionRoleSource,
+  ) &&
+  (foundationAuthorityRetirementExecutionRoleSource.match(/PolicyName:/gu) ?? [])
+    .length === 1 &&
+  (foundationAuthorityRetirementExecutionRoleSource.match(/\n\s+- Sid:/gu) ?? [])
+    .length === 1 &&
+  !/iam:PassRole|cloudformation:DeleteStack|Resource:\s*"\*"|AssumeRoleWithWebIdentity/u.test(
+    foundationAuthorityRetirementExecutionRoleSource,
+  ) &&
+  /Sid: RetireOneTimeFoundationMigrationAuthorityStack[\s\S]*?Action: cloudformation:DeleteStack[\s\S]*?stack\/\$\{AppName\}-foundation-migration-authority\/\*[\s\S]*?ArnEquals:\s*\r?\n\s+cloudformation:RoleArn: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn/u.test(
+    foundationPromotionRoleSource,
+  ) &&
+  /Sid: PassOnlyFoundationAuthorityRetirementExecutionRole[\s\S]*?Action: iam:PassRole[\s\S]*?Resource: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn[\s\S]*?StringEquals:\s*\r?\n\s+iam:PassedToService: cloudformation\.amazonaws\.com/u.test(
+    foundationPromotionRoleSource,
+  ) &&
+  /Sid: InspectOneTimeFoundationMigrationAuthority[\s\S]*?Action:\s*\r?\n\s+- iam:GetRole\r?\n\s+- iam:GetRolePolicy\r?\n\s+- iam:ListAttachedRolePolicies\r?\n\s+- iam:ListInstanceProfilesForRole\r?\n\s+- iam:ListRolePolicies[\s\S]*?role\/\$\{AppName\}-github-foundation-migration/u.test(
+    foundationPromotionRoleSource,
+  ) &&
+  /Sid: InspectFoundationMigrationState[\s\S]*?Action:\s*\r?\n\s+- cloudformation:DetectStackResourceDrift\r?\n\s+- cloudformation:ListChangeSets\r?\n\s+Resource: !Sub >-\r?\n\s+arn:\$\{AWS::Partition\}:cloudformation:\$\{AWS::Region\}:\$\{AWS::AccountId\}:stack\/\$\{AppName\}-delivery-bootstrap\/\*/u.test(
+    foundationPromotionRoleSource,
+  ) &&
+  (foundationPromotionRoleSource.match(/cloudformation:DeleteStack/gu) ?? [])
+    .length === 1 &&
+  (foundationPromotionRoleSource.match(/iam:PassRole/gu) ?? []).length === 1 &&
+  !/iam:DeleteRole(?:Policy)?/u.test(foundationPromotionRoleSource) &&
+  /FoundationAuthorityRetirementExecutionRoleArn:\r?\n\s+Value: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn/u.test(
+    foundationBootstrapSource,
+  );
+const foundationRetirementProtectionAndProofValid =
+  /"logicalResourceId": "FoundationAuthorityRetirementExecutionRole",\s*"resourceType": "AWS::IAM::Role"/u.test(
+    foundationRequiredNewResourcesSource,
+  ) &&
+  (foundationRequiredNewResourcesSource.match(
+    /FoundationAuthorityRetirementExecutionRole/gu,
+  ) ?? []).length === 1 &&
+  !/FoundationAuthorityRetirementExecutionRole/u.test(
+    foundationAllowedModificationsSource,
+  ) &&
+  /"Action": \[[\s\S]*?"Update:Delete",\s*"Update:Replace"[\s\S]*?"LogicalResourceId\/FoundationAuthorityRetirementExecutionRole"/u.test(
+    foundationBootstrapStackPolicySource,
+  ) &&
+  (foundationBootstrapStackPolicySource.match(
+    /LogicalResourceId\/FoundationAuthorityRetirementExecutionRole/gu,
+  ) ?? []).length === 1 &&
+  /foundationAuthorityRetirement: \{[\s\S]*?cloudFormationServiceRoleBound: true,[\s\S]*?controllerExecutionRoleSeparated: true,[\s\S]*?directIamDeletionByController: false,[\s\S]*?unexpectedAttachmentsFailClosed: true,[\s\S]*?selfDeletion: false/u.test(
+    foundationStorageProofSource,
+  ) &&
+  /statement\("InspectOneTimeFoundationMigrationAuthority"\)[\s\S]*?"iam:ListAttachedRolePolicies"[\s\S]*?"iam:ListInstanceProfilesForRole"[\s\S]*?"iam:ListRolePolicies"[\s\S]*?resources == \[\$authorityRoleArn\]/u.test(
+    foundationStorageProofSource,
+  ) &&
+  /statement\("InspectFoundationMigrationState"\)[\s\S]*?"cloudformation:DetectStackResourceDrift"[\s\S]*?"cloudformation:ListChangeSets"[\s\S]*?stack\/" \+ \$app \+ "-delivery-bootstrap\/\*"/u.test(
+    foundationStorageProofSource,
+  ) &&
+  /migrationAuthority: \{[\s\S]*?retirementRequired: true,[\s\S]*?selfDeletionAllowed: false,[\s\S]*?retired: \$migrationAuthorityRetired/u.test(
+    foundationStorageProofSource,
+  ) &&
+  /\.proof\.storage\.migrationAuthority\.retired[\s\S]*?== true[\s\S]*?\.proof\.storage\.migrationAuthority\.selfDeletionAllowed[\s\S]*?== false[\s\S]*?\.proof\.storage\.foundationAuthorityRetirement\.cloudFormationServiceRoleBound[\s\S]*?== true[\s\S]*?\.proof\.storage\.foundationAuthorityRetirement\.controllerExecutionRoleSeparated[\s\S]*?== true[\s\S]*?\.proof\.storage\.foundationAuthorityRetirement\.selfDeletion[\s\S]*?== false/u.test(
+    deploymentWorkflowSource,
   );
 const foundationLifecycleSemanticsValid =
   foundationLifecycleFilesValid &&
+  sharedAwsMutationConcurrencyValid &&
+  foundationPolicyCanonicalAndQuotaValid &&
+  foundationProofIdentityContractValid &&
+  foundationReceiptSelectionContractValid &&
+  deploymentControlPlaneFenceContractValid &&
+  foundationRetirementRetryAndIdempotencyValid &&
   foundationPhaseZeroContractValid &&
   foundationAuthorityTemplateDigestContractValid &&
   foundationSameRunCleanupValid &&
   foundationAbortContractValid &&
-  foundationDestructiveTransitionsValid;
+  foundationReceiptFailureSafetyValid &&
+  foundationDestructiveTransitionsValid &&
+  foundationRetirementRolesValid &&
+  foundationRetirementProtectionAndProofValid;
 check(
   "foundation-migration-lifecycle-source",
   foundationLifecycleSemanticsValid,
-  "The one-time foundation authority is bound to committed source and its canonical template, failed same-run plans are safely removed, and abort rejects unexpected/executing plans before unchanged-foundation cleanup and authority retirement.",
+  "The one-time authority cannot self-delete; abort only journals and cleans exact unexecuted plans, while a protected permanent controller passes a dedicated CloudFormation execution role for terminal retirement with fail-closed receipts.",
 );
 
 const wa04 = controls.find((control) => control.id === "WA-04");
@@ -1314,7 +2038,7 @@ const edgeFinalizeLifecycleValid =
   /if: inputs\.operation == 'apply' && env\.EDGE_APPLY_MODE == 'execute'/u.test(
     edgeExecutePlanStep,
   ) &&
-  /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+  /if: \(always\(\) && inputs\.operation == 'apply'\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u.test(
     edgePreProtectionProofStep,
   ) &&
   /\(\.StackResourceSummaries \| length\) == 9/u.test(
@@ -1323,7 +2047,7 @@ const edgeFinalizeLifecycleValid =
   /sha256sum "\$lifecycle_template"[\s\S]*?EDGE_PROTECTION_TEMPLATE_DIGEST/u.test(
     edgePreProtectionProofStep,
   ) &&
-  /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'finalize'/u.test(
+  /if: \(always\(\) && inputs\.operation == 'apply' && env\.EDGE_BOUND_STACK_ID != ''\) \|\| \(success\(\) && inputs\.operation == 'finalize'\)/u.test(
     edgeSetProtectionStep,
   ) &&
   /aws cloudformation set-stack-policy/u.test(edgeSetProtectionStep) &&

@@ -1,7 +1,8 @@
 # WAF and public-demo abuse response
 
-Status: repository-prepared; live activation, delivery drills, and human paging
-require explicit approval and hosted evidence.
+Status: repository-prepared, including cancellation-safe edge lifecycle
+reconciliation; live activation, delivery drills, and human paging require
+explicit approval and hosted evidence.
 
 ## Prepared control contract
 
@@ -112,10 +113,16 @@ The lifecycle boundaries are deliberately narrow:
 - `plan` creates or reuses only the source-bound non-replacement change set. A
   greenfield CREATE plan can leave a CloudFormation shell in
   `REVIEW_IN_PROGRESS`; it has no deployed stack resources.
-- `apply` re-proves and executes the exact available plan. If the exact current
-  template is already deployed but stack policy or termination-protection setup
-  was interrupted, a later `apply` switches to the same proof-and-finalize path
-  instead of creating or executing another change set.
+- `apply` re-proves and executes the exact available plan. Its `always()`
+  lifecycle reconciler waits boundedly for an interrupted CloudFormation
+  create, update, or rollback to reach a supported terminal state. Before any
+  protection mutation it proves the exact stack ID, source template digest,
+  parameters, no service role/tags/notifications/capabilities, and the complete
+  nine-resource inventory. It then installs and re-reads the exact stack policy
+  and termination protection. If the exact current template is already
+  deployed but lifecycle setup was interrupted, a later `apply` switches to
+  this same proof-and-finalize path instead of creating or executing another
+  change set.
 - `verify` is read-only and requires the exact template, parameters, nine
   resources, stack policy, termination protection, WebACL, logging routes,
   EventBridge archive route, and three action-free alarms to match.
@@ -124,7 +131,9 @@ The lifecycle boundaries are deliberately narrow:
   resource is `DELETE_COMPLETE`. It intrinsically recovers the originating
   commit and template digest from the single CREATE change set, fetches that
   historical repository commit, and compares both the source and CloudFormation
-  template. Immediately before deletion it refreshes current `main`, then
+  template. Historical templates and policies are treated only as data; no
+  fetched historical source is executed or sourced. Immediately before
+  deletion it refreshes current `main`, then
   repeats the complete AWS stack, resource, change-set, template, and source
   binding checks; `DeleteStack` is the next external action. Success requires a
   subsequent name lookup to return CloudFormation `NotFound`. The receipt
@@ -152,6 +161,12 @@ five operations generates probe traffic, queries the alarm archive, pages a
 human, or proves alarm delivery. Their receipts keep
 `alarmDeliveryDrill` as `not-run`, `humanPagingDestination` as
 `not-configured-by-this-stack`, and `humanAcknowledgement` as `not-claimed`.
+An interrupted `apply` remains a failed run. Its final `always()` receipt step
+reports `apply-failed-candidate-lifecycle-protected` only when the exact
+candidate and both lifecycle protections were re-proved; otherwise it reports
+`apply-failed-state-unknown` with `destructiveStateKnown=false`. Only the full
+post-protection live WAF proof can clear the pending marker and produce a
+successful apply receipt.
 
 A separate explicitly approved hosted drill is required before any alarm
 delivery or response claim. It must use a dedicated, short-lived reader role

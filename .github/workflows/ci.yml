@@ -642,6 +642,7 @@ jobs:
           bash -n aws/restore-cloudformation-stack.sh
           bash -n aws/verify-durable-recovery-bundle.sh
           bash -n aws/verify-durable-recovery-receipt.sh
+          bash -n .github/scripts/revalidate-aws-control-plane-fence.sh
           jq -e '.Statement | length == 2' aws/bootstrap-stack-policy.json >/dev/null
           cfn-lint aws/bootstrap-oidc.yaml
           sam validate --lint --template-file aws/template.yaml --region eu-west-1

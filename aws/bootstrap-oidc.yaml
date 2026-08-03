@@ -2592,6 +2592,45 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
+  FoundationAuthorityRetirementExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-foundation-authority-retirement-execution"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retire-one-time-foundation-authority
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DeleteOnlyOneTimeFoundationMigrationRole
+                Effect: Allow
+                Action:
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRolePolicies
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-migration
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: bootstrap
+        - Key: Lifecycle
+          Value: permanent-authority-retirement-execution
+        - Key: ManagedBy
+          Value: CloudFormation
+
   FoundationPromotionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -2666,6 +2705,38 @@ Resources:
                       arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
                   - !Sub >-
                       arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-foundation-migration-authority/*
+              - Sid: InspectFoundationMigrationState
+                Effect: Allow
+                Action:
+                  - cloudformation:DetectStackResourceDrift
+                  - cloudformation:ListChangeSets
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-delivery-bootstrap/*
+              - Sid: InspectOneTimeFoundationMigrationAuthority
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRolePolicies
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-migration
+              - Sid: RetireOneTimeFoundationMigrationAuthorityStack
+                Effect: Allow
+                Action: cloudformation:DeleteStack
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppName}-foundation-migration-authority/*
+                Condition:
+                  ArnEquals:
+                    cloudformation:RoleArn: !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
+              - Sid: PassOnlyFoundationAuthorityRetirementExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
               - Sid: PublishImmutableFoundationTemplate
                 Effect: Allow
                 Action:
@@ -2757,6 +2828,7 @@ Resources:
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-alarm-routing-cloudformation-execution
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-promotion
+                  - !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-migration
                   - !Sub >-
@@ -2798,6 +2870,24 @@ Resources:
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-alarm-routing-controls
                   - !Sub >-
                     arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-alarm-routing-cloudformation-execution
+              - Sid: InspectFoundationRetirementRoleMetadata
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRolePolicies
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-promotion
+                  - !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
+              - Sid: InspectFoundationRetirementRolePolicies
+                Effect: Allow
+                Action: iam:GetRolePolicy
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppName}-github-foundation-promotion
+                  - !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
               - Sid: ResolveExactFoundationAutomationRule
                 Effect: Allow
                 Action: securityhub:ListTagsForResource
@@ -3387,6 +3477,12 @@ Outputs:
     Value: !GetAtt AlarmRoutingCloudFormationExecutionRole.Arn
   FoundationPromotionRoleArn:
     Value: !GetAtt FoundationPromotionRole.Arn
+  FoundationPromotionRoleId:
+    Value: !GetAtt FoundationPromotionRole.RoleId
+  FoundationAuthorityRetirementExecutionRoleArn:
+    Value: !GetAtt FoundationAuthorityRetirementExecutionRole.Arn
+  FoundationAuthorityRetirementExecutionRoleId:
+    Value: !GetAtt FoundationAuthorityRetirementExecutionRole.RoleId
   StagingDeployRoleArn:
     Value: !GetAtt StagingDeployRole.Arn
   StagingExecutionRoleArn:

@@ -31,6 +31,7 @@
         "LogicalResourceId/EdgeControlRole",
         "LogicalResourceId/FinOpsCloudFormationExecutionRole",
         "LogicalResourceId/FinOpsControlRole",
+        "LogicalResourceId/FoundationAuthorityRetirementExecutionRole",
         "LogicalResourceId/FoundationPromotionRole",
         "LogicalResourceId/GitHubOidcProvider",
         "LogicalResourceId/ProductionAlarmArchiveQueue",

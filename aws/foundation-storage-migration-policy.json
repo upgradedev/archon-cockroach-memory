@@ -157,6 +157,10 @@
       "resourceType": "AWS::IAM::Role"
     },
     {
+      "logicalResourceId": "FoundationAuthorityRetirementExecutionRole",
+      "resourceType": "AWS::IAM::Role"
+    },
+    {
       "logicalResourceId": "ProductionOriginVerifySecret",
       "resourceType": "AWS::SecretsManager::Secret"
     },

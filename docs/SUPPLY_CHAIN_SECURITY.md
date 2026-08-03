@@ -120,19 +120,21 @@ predates that schema field and emits a `syntax-check` diagnostic even though
 GitHub accepts the workflow.
 
 The pipeline does not remove `queue: max`, apply a regular-expression ignore,
-or treat arbitrary syntax diagnostics as acceptable. It permits exactly six
-known source locations represented by five anchor contracts in these files and
+or treat arbitrary syntax diagnostics as acceptable. It permits exactly
+fourteen known source locations represented by ten anchor contracts in these files and
 nowhere else:
 
-- `.github/workflows/bootstrap-aws.yml`;
-- `.github/workflows/deploy-aws.yml`;
-- `.github/workflows/foundation-migration.yml`;
+- `.github/workflows/bootstrap-aws.yml` (delivery and shared-mutation anchors);
+- `.github/workflows/deploy-aws.yml` (delivery and two shared-mutation anchors);
+- `.github/workflows/edge-controls.yml` (edge and shared-mutation anchors);
+- `.github/workflows/foundation-migration.yml` (foundation and three
+  shared-mutation anchors);
 - `.github/workflows/recover-aws.yml` (one recovery-watchdog anchor and two
-  recovery-mutation anchors).
+  shared-mutation anchors).
 
 The analyzer must still be version 1.7.12; its raw exit code must be 1; all
-six diagnostics must have the exact message, kind, indentation-derived
-column/indicator, and file-specific line. Three workflows remain bound to the
+fourteen diagnostics must have the exact message, kind, indentation-derived
+column/indicator, and file-specific line. Bootstrap and Deploy retain the
 original delivery anchor:
 
 ```yaml
@@ -142,8 +144,9 @@ concurrency:
   queue: max
 ```
 
-`Recover AWS` uses one top-level watchdog-only anchor so GitHub-only preflight
-cannot block delivery, plus two job-level delivery anchors used only after a
+Every AWS mutation job also joins the shared control-plane group. `Recover AWS`
+keeps a top-level watchdog-only anchor so GitHub-only preflight cannot block
+delivery; its two mutation jobs join the same shared group only after a
 recovery candidate has been proved:
 
 ```yaml
@@ -155,18 +158,18 @@ concurrency:
 jobs:
   recover-staging:
     concurrency:
-      group: aws-production-delivery
+      group: aws-shared-control-plane-mutation
       cancel-in-progress: false
       queue: max
 ```
 
 The raw JSON and normalized compatibility records are retained. After removing
-only those six source-validated parser diagnostics, the effective actionlint
+only those fourteen source-validated parser diagnostics, the effective actionlint
 finding count must be zero. An additional diagnostic, changed path, duplicate
 or missing diagnostic, source drift, analyzer upgrade, malformed JSON, or
 unexpected exit code fails closed. This is a versioned tool/schema
 compatibility boundary, not an entry in the vulnerability waiver ledger. The
-exact-main receipt records both the six raw diagnostics and zero effective
+exact-main receipt records both the fourteen raw diagnostics and zero effective
 findings.
 
 ### Exact Trivy IaC parser compatibility boundaries

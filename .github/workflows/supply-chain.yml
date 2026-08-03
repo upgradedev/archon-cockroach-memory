@@ -133,11 +133,43 @@ jobs:
               "count":1
             },
             {
+              "path":".github/workflows/bootstrap-aws.yml",
+              "concurrency":"    concurrency:",
+              "group":"      group: aws-shared-control-plane-mutation",
+              "cancel":"      cancel-in-progress: false",
+              "queue":"      queue: max",
+              "count":1
+            },
+            {
               "path":".github/workflows/deploy-aws.yml",
               "concurrency":"concurrency:",
               "group":"  group: aws-production-delivery",
               "cancel":"  cancel-in-progress: false",
               "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/deploy-aws.yml",
+              "concurrency":"    concurrency:",
+              "group":"      group: aws-shared-control-plane-mutation",
+              "cancel":"      cancel-in-progress: false",
+              "queue":"      queue: max",
+              "count":2
+            },
+            {
+              "path":".github/workflows/edge-controls.yml",
+              "concurrency":"concurrency:",
+              "group":"  group: aws-edge-controls",
+              "cancel":"  cancel-in-progress: false",
+              "queue":"  queue: max",
+              "count":1
+            },
+            {
+              "path":".github/workflows/edge-controls.yml",
+              "concurrency":"    concurrency:",
+              "group":"      group: aws-shared-control-plane-mutation",
+              "cancel":"      cancel-in-progress: false",
+              "queue":"      queue: max",
               "count":1
             },
             {
@@ -147,6 +179,14 @@ jobs:
               "cancel":"  cancel-in-progress: false",
               "queue":"  queue: max",
               "count":1
+            },
+            {
+              "path":".github/workflows/foundation-migration.yml",
+              "concurrency":"    concurrency:",
+              "group":"      group: aws-shared-control-plane-mutation",
+              "cancel":"      cancel-in-progress: false",
+              "queue":"      queue: max",
+              "count":3
             },
             {
               "path":".github/workflows/recover-aws.yml",
@@ -159,7 +199,7 @@ jobs:
             {
               "path":".github/workflows/recover-aws.yml",
               "concurrency":"    concurrency:",
-              "group":"      group: aws-production-delivery",
+              "group":"      group: aws-shared-control-plane-mutation",
               "cancel":"      cancel-in-progress: false",
               "queue":"      queue: max",
               "count":2
@@ -253,7 +293,7 @@ jobs:
             ' <<<"null" >/dev/null
           test "$(
             jq -er 'length' <<<"$expected_queue_diagnostics"
-          )" -eq 6
+          )" -eq 14
 
           set +e
           actionlint -format '{{json .}}' > "$REPORT_DIR/actionlint.raw.json"
@@ -351,8 +391,8 @@ jobs:
               "$REPORT_DIR/actionlint-blocking-findings.json"
           )"
           test "$raw_status" -eq 1
-          test "$raw_findings" -eq 6
-          test "$compatibility_diagnostics" -eq 6
+          test "$raw_findings" -eq 14
+          test "$compatibility_diagnostics" -eq 14
           test "$blocking_findings" -eq 0
 
           jq -n \
@@ -435,23 +475,24 @@ jobs:
             '.mode == "blocking-exact-parser-compatibility" and
              .effectiveExitCode == 0 and
              .rawExitCode == 1 and
-             .rawFindings == 6 and
+             .rawFindings == 14 and
              .blockingFindings == 0 and
              .compatibility.analyzer == "actionlint" and
              .compatibility.version == "1.7.12" and
              .compatibility.feature == "concurrency.queue" and
-             .compatibility.acceptedDiagnostics == 6 and
+             .compatibility.acceptedDiagnostics == 14 and
              .compatibility.expectedPaths == [
                ".github/workflows/bootstrap-aws.yml",
                ".github/workflows/deploy-aws.yml",
+               ".github/workflows/edge-controls.yml",
                ".github/workflows/foundation-migration.yml",
                ".github/workflows/recover-aws.yml"
              ] and
-             (.compatibility.expectedDiagnostics | length) == 6 and
+             (.compatibility.expectedDiagnostics | length) == 14 and
              ([.compatibility.expectedDiagnostics[].filepath] | unique) ==
                .compatibility.expectedPaths and
-             (.compatibility.sourceAnchors | length) == 5 and
-             ([.compatibility.sourceAnchors[].count] | add) == 6 and
+             (.compatibility.sourceAnchors | length) == 10 and
+             ([.compatibility.sourceAnchors[].count] | add) == 14 and
              ([.compatibility.sourceAnchors[]
                | select(
                    .path == ".github/workflows/recover-aws.yml" and
@@ -461,7 +502,7 @@ jobs:
              ([.compatibility.sourceAnchors[]
                | select(
                    .path == ".github/workflows/recover-aws.yml" and
-                   .group == "      group: aws-production-delivery" and
+                   .group == "      group: aws-shared-control-plane-mutation" and
                    .count == 2
                  )] | length) == 1' \
             "$REPORT_DIR/actionlint-status.json" >/dev/null
@@ -472,9 +513,9 @@ jobs:
             "$REPORT_DIR/zizmor-status.json" >/dev/null
           test -s "$REPORT_DIR/shellcheck.xml"
           test -s "$REPORT_DIR/actionlint.raw.json"
-          jq -e 'length == 6' \
+          jq -e 'length == 14' \
             "$REPORT_DIR/actionlint-all.json" >/dev/null
-          jq -e 'length == 6' \
+          jq -e 'length == 14' \
             "$REPORT_DIR/actionlint-queue-compatibility.json" >/dev/null
           jq -e 'length == 0' \
             "$REPORT_DIR/actionlint-blocking-findings.json" >/dev/null
@@ -490,8 +531,8 @@ jobs:
             echo
             echo "- Enforcement: **blocking**"
             echo "- Any ShellCheck or zizmor finding blocks."
-            echo "- Any actionlint diagnostic blocks except the six exact source-validated \`concurrency.queue\` schema diagnostics represented by five AWS serialization-anchor contracts under pinned actionlint 1.7.12."
-            echo "- The six raw compatibility diagnostics remain in evidence; the effective actionlint finding count must be zero."
+            echo "- Any actionlint diagnostic blocks except the fourteen exact source-validated \`concurrency.queue\` schema diagnostics represented by ten AWS serialization-anchor contracts under pinned actionlint 1.7.12."
+            echo "- The fourteen raw compatibility diagnostics remain in evidence; the effective actionlint finding count must be zero."
             echo "- The exact waiver ledger is empty; the parser compatibility boundary is not a finding waiver."
             echo "- See \`docs/SUPPLY_CHAIN_SECURITY.md\` before citing this run."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1814,32 +1855,33 @@ jobs:
             '.mode == "blocking-exact-parser-compatibility" and
              .effectiveExitCode == 0 and
              .rawExitCode == 1 and
-             .rawFindings == 6 and
+             .rawFindings == 14 and
              .blockingFindings == 0 and
              .compatibility.analyzer == "actionlint" and
              .compatibility.version == "1.7.12" and
              .compatibility.feature == "concurrency.queue" and
              .compatibility.diagnostic ==
                "unexpected key \"queue\" for \"concurrency\" section. expected one of \"cancel-in-progress\", \"group\"" and
-             .compatibility.acceptedDiagnostics == 6 and
+             .compatibility.acceptedDiagnostics == 14 and
              .compatibility.expectedPaths == [
                ".github/workflows/bootstrap-aws.yml",
                ".github/workflows/deploy-aws.yml",
+               ".github/workflows/edge-controls.yml",
                ".github/workflows/foundation-migration.yml",
                ".github/workflows/recover-aws.yml"
              ] and
-             (.compatibility.expectedDiagnostics | length) == 6 and
+             (.compatibility.expectedDiagnostics | length) == 14 and
              ([.compatibility.expectedDiagnostics[].filepath] | unique) ==
                .compatibility.expectedPaths and
-             (.compatibility.sourceAnchors | length) == 5 and
-             ([.compatibility.sourceAnchors[].count] | add) == 6' \
+             (.compatibility.sourceAnchors | length) == 10 and
+             ([.compatibility.sourceAnchors[].count] | add) == 14' \
             "$EVIDENCE_ROOT/static/actionlint-status.json" >/dev/null
           jq --slurp -e \
             --slurpfile status \
               "$EVIDENCE_ROOT/static/actionlint-status.json" '
             length == 1 and
             (.[0] | type) == "array" and
-            (.[0] | length) == 6 and
+            (.[0] | length) == 14 and
             (.[0] as $findings |
               all($status[0].compatibility.expectedDiagnostics[];
                 . as $site |
@@ -1859,7 +1901,7 @@ jobs:
             --slurpfile status \
               "$EVIDENCE_ROOT/static/actionlint-status.json" '
             . as $findings |
-            length == 6 and
+            length == 14 and
             all($status[0].compatibility.expectedDiagnostics[];
               . as $site |
               any($findings[];
@@ -1875,7 +1917,7 @@ jobs:
           ' \
             "$EVIDENCE_ROOT/static/actionlint-queue-compatibility.json" \
             >/dev/null
-          jq -e 'length == 6' \
+          jq -e 'length == 14' \
             "$EVIDENCE_ROOT/static/actionlint-all.json" >/dev/null
           jq -e 'length == 0' \
             "$EVIDENCE_ROOT/static/actionlint-blocking-findings.json" \
@@ -2351,11 +2393,12 @@ jobs:
                     analyzer: "actionlint",
                     version: "1.7.12",
                     feature: "concurrency.queue",
-                    rawDiagnostics: 6,
+                    rawDiagnostics: 14,
                     effectiveFindings: 0,
                     exactPaths: [
                       ".github/workflows/bootstrap-aws.yml",
                       ".github/workflows/deploy-aws.yml",
+                      ".github/workflows/edge-controls.yml",
                       ".github/workflows/foundation-migration.yml",
                       ".github/workflows/recover-aws.yml"
                     ],
@@ -2491,11 +2534,12 @@ jobs:
                 "analyzer":"actionlint",
                 "version":"1.7.12",
                 "feature":"concurrency.queue",
-                "rawDiagnostics":6,
+                "rawDiagnostics":14,
                 "effectiveFindings":0,
                 "exactPaths":[
                   ".github/workflows/bootstrap-aws.yml",
                   ".github/workflows/deploy-aws.yml",
+                  ".github/workflows/edge-controls.yml",
                   ".github/workflows/foundation-migration.yml",
                   ".github/workflows/recover-aws.yml"
                 ],

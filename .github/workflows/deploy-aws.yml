@@ -63,6 +63,12 @@ jobs:
       memory_evaluation_run_attempt: ${{ steps.memory_evaluation.outputs.run_attempt }}
       supply_chain_run_id: ${{ steps.supply_chain.outputs.run_id }}
       supply_chain_run_attempt: ${{ steps.supply_chain.outputs.run_attempt }}
+      foundation_control_run_id: ${{ steps.control_receipts.outputs.foundation_run_id }}
+      foundation_control_run_attempt: ${{ steps.control_receipts.outputs.foundation_run_attempt }}
+      staging_edge_control_run_id: ${{ steps.control_receipts.outputs.staging_edge_run_id }}
+      staging_edge_control_run_attempt: ${{ steps.control_receipts.outputs.staging_edge_run_attempt }}
+      production_edge_control_run_id: ${{ steps.control_receipts.outputs.production_edge_run_id }}
+      production_edge_control_run_attempt: ${{ steps.control_receipts.outputs.production_edge_run_attempt }}
     steps:
       - name: Require successful exact-main push CI source
         id: source_ci
@@ -117,7 +123,7 @@ jobs:
                       .path == ".github/workflows/ci.yml"
                     )
                   ] |
-                  sort_by(.run_number, .run_attempt) |
+                  sort_by(.updated_at, .run_number, .run_attempt) |
                   last // {}
                 '
             )"
@@ -180,7 +186,7 @@ jobs:
                       .path == ".github/workflows/supply-chain.yml"
                     )
                   ] |
-                  sort_by(.run_number, .run_attempt) |
+                  sort_by(.updated_at, .run_number, .run_attempt) |
                   last // {}
                 '
             )"
@@ -242,7 +248,7 @@ jobs:
                       .path == ".github/workflows/memory-evaluation.yml"
                     )
                   ] |
-                  sort_by(.run_number, .run_attempt) |
+                  sort_by(.updated_at, .run_number, .run_attempt) |
                   last // {}
                 '
             )"
@@ -381,6 +387,7 @@ jobs:
           exit 1
 
       - name: Require exact-SHA foundation and edge-control receipts
+        id: control_receipts
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -390,47 +397,104 @@ jobs:
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           evidence_root="${RUNNER_TEMP:?}/aws-control-plane-prerequisites"
           mkdir -p "$evidence_root"
+          EDGE_CONTROL_RUNS=
 
           prove_foundation_receipt() {
-            local artifact artifacts destination expected_name id receipt
-            local run_attempt runs
-            runs="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/foundation-migration.yml/runs?branch=main&event=workflow_dispatch&per_page=100"
-            )"
-            while IFS=$'\t' read -r id run_attempt; do
-              [[ "$id" =~ ^[1-9][0-9]*$ ]]
-              [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
-              expected_name="foundation-storage-migration-verify-${EXPECTED_SHA}-${id}-${run_attempt}"
-              artifacts="$(
+            local artifact artifacts candidate conclusion destination
+            local expected_name head_sha id operation receipt run_attempt runs
+            if ! runs="$(
                 gh api \
-                  "repos/$GITHUB_REPOSITORY/actions/runs/${id}/artifacts?per_page=100"
-              )"
-              artifact="$(
+                  --paginate \
+                  --slurp \
+                  "repos/$GITHUB_REPOSITORY/actions/workflows/foundation-migration.yml/runs?per_page=100"
+              )"; then
+              return 1
+            fi
+            if ! candidate="$(
                 jq -er \
-                  --arg name "$expected_name" \
                   '
                     [
-                      .artifacts[]
+                      .[].workflow_runs[]
                       | select(
-                          .name == $name
-                          and .expired == false
+                          (.head_sha | test("^[0-9a-f]{40}$"))
+                          and .head_branch == "main"
+                          and .event == "workflow_dispatch"
+                          and .name == "Foundation Storage Migration"
+                          and .path
+                            == ".github/workflows/foundation-migration.yml"
+                          and (
+                            .head_sha as $head
+                            | .display_title == ("Foundation plan " + $head)
+                            or .display_title == ("Foundation apply " + $head)
+                            or .display_title == ("Foundation verify " + $head)
+                            or .display_title == ("Foundation abort " + $head)
+                            or .display_title == ("Foundation retire " + $head)
+                          )
                         )
+                      | . + {
+                          evidenceOperation: (
+                            .display_title | split(" ")[1]
+                          )
+                        }
                     ]
+                    | sort_by(.updated_at, .run_number, .run_attempt)
+                    | last
+                    | select(. != null)
+                    | [
+                        .id,
+                        .run_attempt,
+                        (.conclusion // "pending"),
+                        .evidenceOperation,
+                        .head_sha
+                      ]
+                    | @tsv
+                  ' <<<"$runs" 2>/dev/null
+              )"; then
+              return 1
+            fi
+            IFS=$'\t' read -r id run_attempt conclusion operation head_sha \
+              <<<"$candidate"
+            [[ "$id" =~ ^[1-9][0-9]*$ ]] || return 1
+            [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || return 1
+            if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+              CONTROL_RECEIPT_SUPERSEDED=true
+              return 1
+            fi
+            [ "$operation" = "verify" ] || return 1
+            [ "$conclusion" = "success" ] || return 1
+            expected_name="foundation-storage-migration-verify-${EXPECTED_SHA}-${id}-${run_attempt}"
+            if ! artifacts="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/runs/${id}/artifacts?per_page=100"
+              )"; then
+              return 1
+            fi
+            if ! artifact="$(
+                jq -er \
+                  --arg name "$expected_name" \
+                  '[.artifacts[] | select(.name == $name and .expired == false)]
                     | select(length == 1)
-                    | .[0].name
-                  ' <<<"$artifacts" 2>/dev/null || true
-              )"
-              if [ "$artifact" != "$expected_name" ]; then
-                continue
-              fi
-              destination="$evidence_root/foundation-${id}-${run_attempt}"
-              mkdir -p "$destination"
-              gh run download "$id" \
+                    | .[0].name' \
+                  <<<"$artifacts" 2>/dev/null
+              )"; then
+              return 1
+            fi
+            [ "$artifact" = "$expected_name" ] || return 1
+            if ! destination="$(
+                mktemp -d \
+                  "$evidence_root/foundation-${id}-${run_attempt}-XXXXXX"
+              )"; then
+              return 1
+            fi
+            if ! gh run download "$id" \
+                --repo "$GITHUB_REPOSITORY" \
                 --name "$artifact" \
-                --dir "$destination"
-              receipt="$destination/foundation-storage-migration-receipt.json"
-              jq -e \
+                --dir "$destination"; then
+              return 1
+            fi
+            receipt="$destination/foundation-storage-migration-receipt.json"
+            [ -f "$receipt" ] || return 1
+            if ! jq -e \
                 --arg sha "$EXPECTED_SHA" \
                 '
                   .schema
@@ -443,77 +507,143 @@ jobs:
                   and .proof.storage.ok == true
                   and .proof.storage.migrationAuthority.retired
                     == true
+                  and .proof.storage.migrationAuthority.selfDeletionAllowed
+                    == false
+                  and .proof.storage.foundationAuthorityRetirement.cloudFormationServiceRoleBound
+                    == true
+                  and .proof.storage.foundationAuthorityRetirement.controllerExecutionRoleSeparated
+                    == true
+                  and .proof.storage.foundationAuthorityRetirement.controllerAttachmentContractVerified
+                    == true
+                  and .proof.storage.foundationAuthorityRetirement.executionAttachmentContractVerified
+                    == true
+                  and .proof.storage.foundationAuthorityRetirement.unexpectedAttachmentsFailClosed
+                    == true
+                  and .proof.storage.foundationAuthorityRetirement.cloudFormationDriftInSync
+                    == true
+                  and (.proof.storage.foundationAuthorityRetirement.controllerRoleIdSha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.executionRoleIdSha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.controllerInventorySha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.executionInventorySha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.controllerPolicySha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.executionPolicySha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.controllerDriftSha256
+                    | test("^[0-9a-f]{64}$"))
+                  and (.proof.storage.foundationAuthorityRetirement.executionDriftSha256
+                    | test("^[0-9a-f]{64}$"))
+                  and .proof.storage.foundationAuthorityRetirement.selfDeletion
+                    == false
                   and .proof.accessLogging.ok == true
-                ' "$receipt" >/dev/null
-              return 0
-            done < <(
-              jq -r \
-                --arg sha "$EXPECTED_SHA" \
-                '
-                  [
-                    .workflow_runs[]
-                    | select(
-                        .head_sha == $sha
-                        and .head_branch == "main"
-                        and .event == "workflow_dispatch"
-                        and .name
-                          == "Foundation Storage Migration"
-                        and .path
-                          == ".github/workflows/foundation-migration.yml"
-                        and .conclusion == "success"
-                      )
-                  ]
-                  | sort_by(.run_number, .run_attempt)
-                  | reverse[]
-                  | [.id, .run_attempt]
-                  | @tsv
-                ' <<<"$runs"
-            )
-            return 1
+                ' "$receipt" >/dev/null; then
+              return 1
+            fi
+            PROVED_FOUNDATION_RUN_ID="$id"
+            PROVED_FOUNDATION_RUN_ATTEMPT="$run_attempt"
+            return 0
           }
 
           prove_edge_receipt() {
-            local artifact artifacts destination environment expected_name
-            local id operation receipt run_attempt runs
+            local artifact artifacts candidate conclusion destination
+            local environment expected_name head_sha id operation receipt
+            local run_attempt
             environment="$1"
-            runs="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/edge-controls.yml/runs?branch=main&event=workflow_dispatch&per_page=100"
-            )"
-            while IFS=$'\t' read -r id run_attempt; do
-              [[ "$id" =~ ^[1-9][0-9]*$ ]]
-              [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]
-              artifacts="$(
+            [[ "$environment" =~ ^(staging|production)$ ]] || return 1
+            if ! candidate="$(
+                jq -er \
+                  --arg environment "$environment" \
+                  '
+                    [
+                      .[].workflow_runs[]
+                      | select(
+                          (.head_sha | test("^[0-9a-f]{40}$"))
+                          and .head_branch == "main"
+                          and .event == "workflow_dispatch"
+                          and .name == "Manage AWS Edge Controls"
+                          and .path == ".github/workflows/edge-controls.yml"
+                          and (
+                            .head_sha as $head
+                            | .display_title ==
+                              ("Edge " + $environment + " plan " + $head)
+                            or .display_title ==
+                              ("Edge " + $environment + " apply " + $head)
+                            or .display_title ==
+                              ("Edge " + $environment + " verify " + $head)
+                            or .display_title ==
+                              ("Edge " + $environment + " cleanup " + $head)
+                            or .display_title ==
+                              ("Edge " + $environment + " finalize " + $head)
+                          )
+                        )
+                      | . + {
+                          evidenceOperation: (
+                            .display_title | split(" ")[2]
+                          )
+                        }
+                    ]
+                    | sort_by(.updated_at, .run_number, .run_attempt)
+                    | last
+                    | select(. != null)
+                    | [
+                        .id,
+                        .run_attempt,
+                        (.conclusion // "pending"),
+                        .evidenceOperation,
+                        .head_sha
+                      ]
+                    | @tsv
+                  ' <<<"$EDGE_CONTROL_RUNS" 2>/dev/null
+              )"; then
+              return 1
+            fi
+            IFS=$'\t' read -r id run_attempt conclusion operation head_sha \
+              <<<"$candidate"
+            [[ "$id" =~ ^[1-9][0-9]*$ ]] || return 1
+            [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || return 1
+            if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+              CONTROL_RECEIPT_SUPERSEDED=true
+              return 1
+            fi
+            [[ "$operation" =~ ^(verify|apply)$ ]] || return 1
+            [ "$conclusion" = "success" ] || return 1
+            if ! artifacts="$(
                 gh api \
                   "repos/$GITHUB_REPOSITORY/actions/runs/${id}/artifacts?per_page=100"
-              )"
-              for operation in verify apply; do
-                expected_name="edge-controls-${environment}-${operation}-${EXPECTED_SHA}-${id}-${run_attempt}"
-                artifact="$(
-                  jq -er \
-                    --arg name "$expected_name" \
-                    '
-                      [
-                        .artifacts[]
-                        | select(
-                            .name == $name
-                            and .expired == false
-                          )
-                      ]
-                      | select(length == 1)
-                      | .[0].name
-                    ' <<<"$artifacts" 2>/dev/null || true
-                )"
-                if [ "$artifact" != "$expected_name" ]; then
-                  continue
-                fi
-                destination="$evidence_root/edge-${environment}-${id}-${run_attempt}"
-                mkdir -p "$destination"
-                gh run download "$id" \
-                  --name "$artifact" \
-                  --dir "$destination"
-                receipt="$destination/edge-controls-receipt.json"
-                jq -e \
+              )"; then
+              return 1
+            fi
+            expected_name="edge-controls-${environment}-${operation}-${EXPECTED_SHA}-${id}-${run_attempt}"
+            if ! artifact="$(
+                jq -er \
+                  --arg name "$expected_name" \
+                  '[.artifacts[] | select(.name == $name and .expired == false)]
+                    | select(length == 1)
+                    | .[0].name' \
+                  <<<"$artifacts" 2>/dev/null
+              )"; then
+              return 1
+            fi
+            [ "$artifact" = "$expected_name" ] || return 1
+            if ! destination="$(
+                mktemp -d \
+                  "$evidence_root/edge-${environment}-${id}-${run_attempt}-XXXXXX"
+              )"; then
+              return 1
+            fi
+            if ! gh run download "$id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "$artifact" \
+                --dir "$destination"; then
+              return 1
+            fi
+            receipt="$destination/edge-controls-receipt.json"
+            [ -f "$receipt" ] || return 1
+            if ! jq -e \
                   --arg sha "$EXPECTED_SHA" \
                   --arg environment "$environment" \
                   --arg operation "$operation" \
@@ -525,6 +655,7 @@ jobs:
                     and (
                       .result == "verified"
                       or .result == "applied-and-proved"
+                      or .result == "apply-finalized-and-proved"
                     )
                     and .environment == $environment
                     and .commit == $sha
@@ -544,35 +675,35 @@ jobs:
                     )
                     and (has("webAclArn") | not)
                     and (has("webAclId") | not)
-                  ' "$receipt" >/dev/null
-                return 0
-              done
-            done < <(
-              jq -r \
-                --arg sha "$EXPECTED_SHA" \
-                '
-                  [
-                    .workflow_runs[]
-                    | select(
-                        .head_sha == $sha
-                        and .head_branch == "main"
-                        and .event == "workflow_dispatch"
-                        and .name == "Manage AWS Edge Controls"
-                        and .path
-                          == ".github/workflows/edge-controls.yml"
-                        and .conclusion == "success"
-                      )
-                  ]
-                  | sort_by(.run_number, .run_attempt)
-                  | reverse[]
-                  | [.id, .run_attempt]
-                  | @tsv
-                ' <<<"$runs"
-            )
-            return 1
+                  ' "$receipt" >/dev/null; then
+              return 1
+            fi
+            if [ "$environment" = "staging" ]; then
+              PROVED_STAGING_EDGE_RUN_ID="$id"
+              PROVED_STAGING_EDGE_RUN_ATTEMPT="$run_attempt"
+            else
+              PROVED_PRODUCTION_EDGE_RUN_ID="$id"
+              PROVED_PRODUCTION_EDGE_RUN_ATTEMPT="$run_attempt"
+            fi
+            return 0
           }
 
+          CONTROL_RECEIPT_SUPERSEDED=false
           for _ in {1..180}; do
+            if ! EDGE_CONTROL_RUNS="$(
+                gh api \
+                  --paginate \
+                  --slurp \
+                  "repos/$GITHUB_REPOSITORY/actions/workflows/edge-controls.yml/runs?per_page=100"
+              )"; then
+              EDGE_CONTROL_RUNS='[]'
+            fi
+            PROVED_FOUNDATION_RUN_ID=
+            PROVED_FOUNDATION_RUN_ATTEMPT=
+            PROVED_STAGING_EDGE_RUN_ID=
+            PROVED_STAGING_EDGE_RUN_ATTEMPT=
+            PROVED_PRODUCTION_EDGE_RUN_ID=
+            PROVED_PRODUCTION_EDGE_RUN_ATTEMPT=
             foundation_ready=false
             staging_ready=false
             production_ready=false
@@ -585,9 +716,30 @@ jobs:
             if prove_edge_receipt production; then
               production_ready=true
             fi
+            if [ "$CONTROL_RECEIPT_SUPERSEDED" = "true" ]; then
+              echo "A newer foundation or edge-control run superseded $EXPECTED_SHA." >&2
+              exit 1
+            fi
             if [ "$foundation_ready" = "true" ] &&
                 [ "$staging_ready" = "true" ] &&
                 [ "$production_ready" = "true" ]; then
+              current_main="$(
+                gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"
+              )"
+              jq -e \
+                --arg sha "$EXPECTED_SHA" '
+                  .ref == "refs/heads/main"
+                  and .object.type == "commit"
+                  and .object.sha == $sha
+                ' <<<"$current_main" >/dev/null
+              {
+                echo "foundation_run_id=$PROVED_FOUNDATION_RUN_ID"
+                echo "foundation_run_attempt=$PROVED_FOUNDATION_RUN_ATTEMPT"
+                echo "staging_edge_run_id=$PROVED_STAGING_EDGE_RUN_ID"
+                echo "staging_edge_run_attempt=$PROVED_STAGING_EDGE_RUN_ATTEMPT"
+                echo "production_edge_run_id=$PROVED_PRODUCTION_EDGE_RUN_ID"
+                echo "production_edge_run_attempt=$PROVED_PRODUCTION_EDGE_RUN_ATTEMPT"
+              } >>"$GITHUB_OUTPUT"
               exit 0
             fi
             sleep 15
@@ -1010,6 +1162,10 @@ jobs:
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
     timeout-minutes: 105
+    concurrency:
+      group: aws-shared-control-plane-mutation
+      cancel-in-progress: false
+      queue: max
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-staging' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/staging/database' }}
@@ -1019,6 +1175,12 @@ jobs:
       AWS_LAMBDA_EXECUTION_ROLE_ARN: ${{ vars.AWS_LAMBDA_EXECUTION_ROLE_ARN }}
       AWS_CODEDEPLOY_SERVICE_ROLE_ARN: ${{ vars.AWS_CODEDEPLOY_SERVICE_ROLE_ARN }}
       COCKROACH_SQL_DNS: ${{ needs.database-release.outputs.cockroach_sql_dns || '' }}
+      FOUNDATION_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.foundation_control_run_id }}
+      FOUNDATION_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.foundation_control_run_attempt }}
+      STAGING_EDGE_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.staging_edge_control_run_id }}
+      STAGING_EDGE_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.staging_edge_control_run_attempt }}
+      PRODUCTION_EDGE_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.production_edge_control_run_id }}
+      PRODUCTION_EDGE_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.production_edge_control_run_attempt }}
     steps:
       - name: Check out the exact promoted source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1833,7 +1995,7 @@ jobs:
                     "upgradedev/archon-cockroach-memory"
                 )
             ]
-            | sort_by(.run_number, .run_attempt)
+            | sort_by(.updated_at, .run_number, .run_attempt)
             | last
             | select(
                 (.id | type == "number" and . > 0)
@@ -1925,6 +2087,74 @@ jobs:
             echo "source_run_attempt=$source_run_attempt"
             echo "source_receipt_artifact_digest=$artifact_digest"
           } >>"$GITHUB_OUTPUT"
+
+      - name: Revalidate staging control-plane fence before new release mutation
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_FOUNDATION_RUN_ID: ${{ needs.source-gate.outputs.foundation_control_run_id }}
+          EXPECTED_FOUNDATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.foundation_control_run_attempt }}
+          EXPECTED_STAGING_EDGE_RUN_ID: ${{ needs.source-gate.outputs.staging_edge_control_run_id }}
+          EXPECTED_STAGING_EDGE_RUN_ATTEMPT: ${{ needs.source-gate.outputs.staging_edge_control_run_attempt }}
+          EXPECTED_PRODUCTION_EDGE_RUN_ID: ${{ needs.source-gate.outputs.production_edge_control_run_id }}
+          EXPECTED_PRODUCTION_EDGE_RUN_ATTEMPT: ${{ needs.source-gate.outputs.production_edge_control_run_attempt }}
+          FENCE_ENVIRONMENT: staging
+          FENCE_JOB_ID: deploy-staging
+          FENCE_MUTEX_GROUP: aws-shared-control-plane-mutation
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fence="${RUNNER_TEMP:?}/staging-control-plane-receipt-fence.json"
+          bash .github/scripts/revalidate-aws-control-plane-fence.sh \
+            >"$fence"
+          jq -e \
+            --arg environment "$FENCE_ENVIRONMENT" \
+            --arg foundationAttempt "$EXPECTED_FOUNDATION_RUN_ATTEMPT" \
+            --arg foundationId "$EXPECTED_FOUNDATION_RUN_ID" \
+            --arg job "$FENCE_JOB_ID" \
+            --arg mutex "$FENCE_MUTEX_GROUP" \
+            --arg productionAttempt "$EXPECTED_PRODUCTION_EDGE_RUN_ATTEMPT" \
+            --arg productionId "$EXPECTED_PRODUCTION_EDGE_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg sha "$EXPECTED_SHA" \
+            --arg stagingAttempt "$EXPECTED_STAGING_EDGE_RUN_ATTEMPT" \
+            --arg stagingId "$EXPECTED_STAGING_EDGE_RUN_ID" '
+              .schema == "archon.aws.control-plane-receipt-fence"
+              and .schemaVersion == 1
+              and .ok == true
+              and .sourceSha == $sha
+              and .mainHeadSha == $sha
+              and .mainHeadRevalidated == true
+              and .mutationMutexHeldByCaller == true
+              and .latestEligibleRunsRevalidated == true
+              and .edgeSnapshotShared == true
+              and .mutex == {group:$mutex, heldByCaller:true}
+              and .deployment == {
+                environment:$environment,
+                jobId:$job,
+                runId:($runId | tonumber),
+                runAttempt:($runAttempt | tonumber)
+              }
+              and .foundation == {
+                runId:($foundationId | tonumber),
+                runAttempt:($foundationAttempt | tonumber),
+                operation:"verify"
+              }
+              and .edge.staging.runId == ($stagingId | tonumber)
+              and .edge.staging.runAttempt == ($stagingAttempt | tonumber)
+              and (.edge.staging.operation | test("^(apply|verify)$"))
+              and .edge.production.runId == ($productionId | tonumber)
+              and .edge.production.runAttempt == ($productionAttempt | tonumber)
+              and (.edge.production.operation | test("^(apply|verify)$"))
+              and (.checkedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+            ' "$fence" >/dev/null
+          fence_sha256="$(sha256sum "$fence" | awk '{print $1}')"
+          [[ "$fence_sha256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "CONTROL_PLANE_FENCE_FILE=$fence"
+            echo "CONTROL_PLANE_FENCE_SHA256=$fence_sha256"
+          } >>"$GITHUB_ENV"
 
       - name: Enforce staging stack protection and fresh pre-deploy drift gate
         env:
@@ -3919,17 +4149,32 @@ jobs:
             sha256sum "$terminal_proof" | awk '{print $1}'
           )"
           test "$terminal_proof_sha256" = "$EXPECTED_PROOF_SHA256"
+          test -f "$CONTROL_PLANE_FENCE_FILE"
+          test ! -L "$CONTROL_PLANE_FENCE_FILE"
+          test "$(sha256sum "$CONTROL_PLANE_FENCE_FILE" | awk '{print $1}')" = \
+            "$CONTROL_PLANE_FENCE_SHA256"
           verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           jq -e \
             --slurpfile apiStage api-stage-proof.json \
             --slurpfile cfnPreflight "$preflight_control" \
             --slurpfile cfnTerminal "$terminal_control" \
+            --slurpfile controlPlaneFence "$CONTROL_PLANE_FENCE_FILE" \
             --slurpfile s3Preflight application-s3-access-logging-preflight.json \
             --slurpfile s3Proof "$terminal_proof" \
             --arg environment staging \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
+            --arg sourceSha "${{ github.sha }}" \
+            --arg controlPlaneFenceSha256 "$CONTROL_PLANE_FENCE_SHA256" \
+            --arg deployRunId "$GITHUB_RUN_ID" \
+            --arg deployRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg foundationControlRunId "$FOUNDATION_CONTROL_RUN_ID" \
+            --arg foundationControlRunAttempt "$FOUNDATION_CONTROL_RUN_ATTEMPT" \
+            --arg stagingEdgeControlRunId "$STAGING_EDGE_CONTROL_RUN_ID" \
+            --arg stagingEdgeControlRunAttempt "$STAGING_EDGE_CONTROL_RUN_ATTEMPT" \
+            --arg productionEdgeControlRunId "$PRODUCTION_EDGE_CONTROL_RUN_ID" \
+            --arg productionEdgeControlRunAttempt "$PRODUCTION_EDGE_CONTROL_RUN_ATTEMPT" \
             --arg preMutationReproved "$PRE_MUTATION_REPROVED" \
             --arg stackState "$EXPECTED_STACK_STATE" \
             --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
@@ -3940,6 +4185,7 @@ jobs:
             'if (($apiStage | length) == 1 and
                  ($cfnPreflight | length) == 1 and
                  ($cfnTerminal | length) == 1 and
+                 ($controlPlaneFence | length) == 1 and
                  ($s3Preflight | length) == 1 and
                  ($s3Proof | length) == 1 and
                  $apiStage[0].ok == true and
@@ -3990,6 +4236,54 @@ jobs:
                  $s3Proof[0].preflightIntegrity ==
                    $s3Preflight[0].integrity and
                  $preMutationReproved == "true" and
+                 ($controlPlaneFenceSha256 | test("^[0-9a-f]{64}$")) and
+                 all([
+                   $foundationControlRunId,
+                   $foundationControlRunAttempt,
+                   $stagingEdgeControlRunId,
+                   $stagingEdgeControlRunAttempt,
+                   $productionEdgeControlRunId,
+                    $productionEdgeControlRunAttempt
+                  ][]; test("^[1-9][0-9]*$")) and
+                 $controlPlaneFence[0].schema ==
+                   "archon.aws.control-plane-receipt-fence" and
+                 $controlPlaneFence[0].schemaVersion == 1 and
+                 $controlPlaneFence[0].ok == true and
+                 $controlPlaneFence[0].sourceSha == $sourceSha and
+                 $controlPlaneFence[0].mainHeadSha == $sourceSha and
+                 $controlPlaneFence[0].mainHeadRevalidated == true and
+                 $controlPlaneFence[0].latestEligibleRunsRevalidated == true and
+                 $controlPlaneFence[0].edgeSnapshotShared == true and
+                 $controlPlaneFence[0].mutationMutexHeldByCaller == true and
+                 $controlPlaneFence[0].mutex == {
+                   group:"aws-shared-control-plane-mutation",
+                   heldByCaller:true
+                 } and
+                 $controlPlaneFence[0].deployment == {
+                   environment:$environment,
+                   jobId:"deploy-staging",
+                   runId:($deployRunId | tonumber),
+                   runAttempt:($deployRunAttempt | tonumber)
+                 } and
+                 $controlPlaneFence[0].foundation == {
+                   runId:($foundationControlRunId | tonumber),
+                   runAttempt:($foundationControlRunAttempt | tonumber),
+                   operation:"verify"
+                 } and
+                 $controlPlaneFence[0].edge.staging.runId ==
+                   ($stagingEdgeControlRunId | tonumber) and
+                 $controlPlaneFence[0].edge.staging.runAttempt ==
+                   ($stagingEdgeControlRunAttempt | tonumber) and
+                 ($controlPlaneFence[0].edge.staging.operation |
+                   test("^(apply|verify)$")) and
+                 $controlPlaneFence[0].edge.production.runId ==
+                   ($productionEdgeControlRunId | tonumber) and
+                 $controlPlaneFence[0].edge.production.runAttempt ==
+                   ($productionEdgeControlRunAttempt | tonumber) and
+                 ($controlPlaneFence[0].edge.production.operation |
+                   test("^(apply|verify)$")) and
+                 ($controlPlaneFence[0].checkedAt |
+                   test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
                  ($previousReleaseSha256 | test("^[0-9a-f]{64}$")) and
                  ($frontendRecoverySha256 | test("^[0-9a-f]{64}$")) and
                  ($terminalProofSha256 | test("^[0-9a-f]{64}$")) and
@@ -4008,6 +4302,10 @@ jobs:
                 manifestSha256: $previousReleaseSha256,
                 frontendSha256: $frontendRecoverySha256
               },
+              controlPlaneReceiptFence:
+                ($controlPlaneFence[0] + {
+                  sha256: $controlPlaneFenceSha256
+                }),
               cloudFormationControls: {
                 preflight: $cfnPreflight[0],
                 terminal: $cfnTerminal[0]
@@ -4637,6 +4935,10 @@ jobs:
       id-token: write
     # Reserve a complete second CloudFormation/CloudFront cycle for recovery.
     timeout-minutes: 105
+    concurrency:
+      group: aws-shared-control-plane-mutation
+      cancel-in-progress: false
+      queue: max
     env:
       STACK_NAME: ${{ vars.AWS_STACK_NAME || 'archon-memory-production' }}
       DATABASE_SECRET_ID: ${{ vars.DATABASE_SECRET_ID || 'archon-memory/production/database' }}
@@ -4646,6 +4948,12 @@ jobs:
       AWS_LAMBDA_EXECUTION_ROLE_ARN: ${{ vars.AWS_LAMBDA_EXECUTION_ROLE_ARN }}
       AWS_CODEDEPLOY_SERVICE_ROLE_ARN: ${{ vars.AWS_CODEDEPLOY_SERVICE_ROLE_ARN }}
       COCKROACH_SQL_DNS: ${{ needs.database-release.outputs.cockroach_sql_dns }}
+      FOUNDATION_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.foundation_control_run_id }}
+      FOUNDATION_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.foundation_control_run_attempt }}
+      STAGING_EDGE_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.staging_edge_control_run_id }}
+      STAGING_EDGE_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.staging_edge_control_run_attempt }}
+      PRODUCTION_EDGE_CONTROL_RUN_ID: ${{ needs.source-gate.outputs.production_edge_control_run_id }}
+      PRODUCTION_EDGE_CONTROL_RUN_ATTEMPT: ${{ needs.source-gate.outputs.production_edge_control_run_attempt }}
     steps:
       - name: Check out the exact promoted source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -5407,6 +5715,74 @@ jobs:
             echo "tags_sha256=$(jq -r '.tagsSha256 // ""' "$snapshot")"
             echo "greenfield_owner=$(jq -r '.greenfieldOwner // ""' "$snapshot")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Revalidate production control-plane fence before new release mutation
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_FOUNDATION_RUN_ID: ${{ needs.source-gate.outputs.foundation_control_run_id }}
+          EXPECTED_FOUNDATION_RUN_ATTEMPT: ${{ needs.source-gate.outputs.foundation_control_run_attempt }}
+          EXPECTED_STAGING_EDGE_RUN_ID: ${{ needs.source-gate.outputs.staging_edge_control_run_id }}
+          EXPECTED_STAGING_EDGE_RUN_ATTEMPT: ${{ needs.source-gate.outputs.staging_edge_control_run_attempt }}
+          EXPECTED_PRODUCTION_EDGE_RUN_ID: ${{ needs.source-gate.outputs.production_edge_control_run_id }}
+          EXPECTED_PRODUCTION_EDGE_RUN_ATTEMPT: ${{ needs.source-gate.outputs.production_edge_control_run_attempt }}
+          FENCE_ENVIRONMENT: production
+          FENCE_JOB_ID: deploy-production
+          FENCE_MUTEX_GROUP: aws-shared-control-plane-mutation
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fence="${RUNNER_TEMP:?}/production-control-plane-receipt-fence.json"
+          bash .github/scripts/revalidate-aws-control-plane-fence.sh \
+            >"$fence"
+          jq -e \
+            --arg environment "$FENCE_ENVIRONMENT" \
+            --arg foundationAttempt "$EXPECTED_FOUNDATION_RUN_ATTEMPT" \
+            --arg foundationId "$EXPECTED_FOUNDATION_RUN_ID" \
+            --arg job "$FENCE_JOB_ID" \
+            --arg mutex "$FENCE_MUTEX_GROUP" \
+            --arg productionAttempt "$EXPECTED_PRODUCTION_EDGE_RUN_ATTEMPT" \
+            --arg productionId "$EXPECTED_PRODUCTION_EDGE_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg sha "$EXPECTED_SHA" \
+            --arg stagingAttempt "$EXPECTED_STAGING_EDGE_RUN_ATTEMPT" \
+            --arg stagingId "$EXPECTED_STAGING_EDGE_RUN_ID" '
+              .schema == "archon.aws.control-plane-receipt-fence"
+              and .schemaVersion == 1
+              and .ok == true
+              and .sourceSha == $sha
+              and .mainHeadSha == $sha
+              and .mainHeadRevalidated == true
+              and .mutationMutexHeldByCaller == true
+              and .latestEligibleRunsRevalidated == true
+              and .edgeSnapshotShared == true
+              and .mutex == {group:$mutex, heldByCaller:true}
+              and .deployment == {
+                environment:$environment,
+                jobId:$job,
+                runId:($runId | tonumber),
+                runAttempt:($runAttempt | tonumber)
+              }
+              and .foundation == {
+                runId:($foundationId | tonumber),
+                runAttempt:($foundationAttempt | tonumber),
+                operation:"verify"
+              }
+              and .edge.staging.runId == ($stagingId | tonumber)
+              and .edge.staging.runAttempt == ($stagingAttempt | tonumber)
+              and (.edge.staging.operation | test("^(apply|verify)$"))
+              and .edge.production.runId == ($productionId | tonumber)
+              and .edge.production.runAttempt == ($productionAttempt | tonumber)
+              and (.edge.production.operation | test("^(apply|verify)$"))
+              and (.checkedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+            ' "$fence" >/dev/null
+          fence_sha256="$(sha256sum "$fence" | awk '{print $1}')"
+          [[ "$fence_sha256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "CONTROL_PLANE_FENCE_FILE=$fence"
+            echo "CONTROL_PLANE_FENCE_SHA256=$fence_sha256"
+          } >>"$GITHUB_ENV"
 
       - name: Enforce production stack protection and fresh pre-deploy drift gate
         env:
@@ -6750,18 +7126,33 @@ jobs:
             sha256sum "$terminal_proof" | awk '{print $1}'
           )"
           test "$terminal_proof_sha256" = "$EXPECTED_PROOF_SHA256"
+          test -f "$CONTROL_PLANE_FENCE_FILE"
+          test ! -L "$CONTROL_PLANE_FENCE_FILE"
+          test "$(sha256sum "$CONTROL_PLANE_FENCE_FILE" | awk '{print $1}')" = \
+            "$CONTROL_PLANE_FENCE_SHA256"
           verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           jq -e \
             --slurpfile apiStage api-stage-proof.json \
             --slurpfile cfnPreflight "$preflight_control" \
             --slurpfile cfnTerminal "$terminal_control" \
+            --slurpfile controlPlaneFence "$CONTROL_PLANE_FENCE_FILE" \
             --slurpfile s3Preflight application-s3-access-logging-preflight.json \
             --slurpfile s3Proof "$terminal_proof" \
             --arg environment production \
             --arg stackName "$STACK_NAME" \
             --arg applicationUrl "$APPLICATION_URL" \
-            --arg preMutationReproved "$PRE_MUTATION_REPROVED" \
+            --arg sourceSha "${{ github.sha }}" \
+            --arg controlPlaneFenceSha256 "$CONTROL_PLANE_FENCE_SHA256" \
+            --arg deployRunId "$GITHUB_RUN_ID" \
+            --arg deployRunAttempt "$GITHUB_RUN_ATTEMPT" \
+             --arg foundationControlRunId "$FOUNDATION_CONTROL_RUN_ID" \
+             --arg foundationControlRunAttempt "$FOUNDATION_CONTROL_RUN_ATTEMPT" \
+             --arg stagingEdgeControlRunId "$STAGING_EDGE_CONTROL_RUN_ID" \
+             --arg stagingEdgeControlRunAttempt "$STAGING_EDGE_CONTROL_RUN_ATTEMPT" \
+             --arg productionEdgeControlRunId "$PRODUCTION_EDGE_CONTROL_RUN_ID" \
+             --arg productionEdgeControlRunAttempt "$PRODUCTION_EDGE_CONTROL_RUN_ATTEMPT" \
+             --arg preMutationReproved "$PRE_MUTATION_REPROVED" \
             --arg stackState "$EXPECTED_STACK_STATE" \
             --arg previousReleaseSha256 "$PREVIOUS_RELEASE_SHA256" \
             --arg frontendRecoverySha256 "$FRONTEND_RECOVERY_SHA256" \
@@ -6771,6 +7162,7 @@ jobs:
             'if (($apiStage | length) == 1 and
                  ($cfnPreflight | length) == 1 and
                  ($cfnTerminal | length) == 1 and
+                 ($controlPlaneFence | length) == 1 and
                  ($s3Preflight | length) == 1 and
                  ($s3Proof | length) == 1 and
                  $apiStage[0].ok == true and
@@ -6821,6 +7213,54 @@ jobs:
                  $s3Proof[0].preflightIntegrity ==
                    $s3Preflight[0].integrity and
                  $preMutationReproved == "true" and
+                 ($controlPlaneFenceSha256 | test("^[0-9a-f]{64}$")) and
+                  all([
+                    $foundationControlRunId,
+                    $foundationControlRunAttempt,
+                    $stagingEdgeControlRunId,
+                    $stagingEdgeControlRunAttempt,
+                    $productionEdgeControlRunId,
+                    $productionEdgeControlRunAttempt
+                  ][]; test("^[1-9][0-9]*$")) and
+                 $controlPlaneFence[0].schema ==
+                   "archon.aws.control-plane-receipt-fence" and
+                 $controlPlaneFence[0].schemaVersion == 1 and
+                 $controlPlaneFence[0].ok == true and
+                 $controlPlaneFence[0].sourceSha == $sourceSha and
+                 $controlPlaneFence[0].mainHeadSha == $sourceSha and
+                 $controlPlaneFence[0].mainHeadRevalidated == true and
+                 $controlPlaneFence[0].latestEligibleRunsRevalidated == true and
+                 $controlPlaneFence[0].edgeSnapshotShared == true and
+                 $controlPlaneFence[0].mutationMutexHeldByCaller == true and
+                 $controlPlaneFence[0].mutex == {
+                   group:"aws-shared-control-plane-mutation",
+                   heldByCaller:true
+                 } and
+                 $controlPlaneFence[0].deployment == {
+                   environment:$environment,
+                   jobId:"deploy-production",
+                   runId:($deployRunId | tonumber),
+                   runAttempt:($deployRunAttempt | tonumber)
+                 } and
+                 $controlPlaneFence[0].foundation == {
+                   runId:($foundationControlRunId | tonumber),
+                   runAttempt:($foundationControlRunAttempt | tonumber),
+                   operation:"verify"
+                 } and
+                 $controlPlaneFence[0].edge.staging.runId ==
+                   ($stagingEdgeControlRunId | tonumber) and
+                 $controlPlaneFence[0].edge.staging.runAttempt ==
+                   ($stagingEdgeControlRunAttempt | tonumber) and
+                 ($controlPlaneFence[0].edge.staging.operation |
+                   test("^(apply|verify)$")) and
+                 $controlPlaneFence[0].edge.production.runId ==
+                   ($productionEdgeControlRunId | tonumber) and
+                 $controlPlaneFence[0].edge.production.runAttempt ==
+                   ($productionEdgeControlRunAttempt | tonumber) and
+                 ($controlPlaneFence[0].edge.production.operation |
+                   test("^(apply|verify)$")) and
+                 ($controlPlaneFence[0].checkedAt |
+                   test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
                  ($previousReleaseSha256 | test("^[0-9a-f]{64}$")) and
                  ($frontendRecoverySha256 | test("^[0-9a-f]{64}$")) and
                  ($terminalProofSha256 | test("^[0-9a-f]{64}$")) and
@@ -6835,11 +7275,15 @@ jobs:
               canaryTrafficProbe: "weighted-alias-proof-and-recall",
               deployAlarm: "candidate-executed-version-errors",
               recallGate: "post-promotion-with-explicit-restore",
-              recoverySnapshot: {
-                manifestSha256: $previousReleaseSha256,
-                frontendSha256: $frontendRecoverySha256
-              },
-              cloudFormationControls: {
+               recoverySnapshot: {
+                 manifestSha256: $previousReleaseSha256,
+                 frontendSha256: $frontendRecoverySha256
+               },
+               controlPlaneReceiptFence:
+                 ($controlPlaneFence[0] + {
+                   sha256: $controlPlaneFenceSha256
+                 }),
+               cloudFormationControls: {
                 preflight: $cfnPreflight[0],
                 terminal: $cfnTerminal[0]
               },

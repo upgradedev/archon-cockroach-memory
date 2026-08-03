@@ -1,8 +1,11 @@
 # AWS Well-Architected evidence contract
 
-Status: repository evidence implemented, including the protected WA-03 audit
-source; account-wide controls are not activated and no live WA-03 receipt is
-claimed by this batch.
+Status: repository evidence is prepared for the declared controls, including
+the protected WA-03 audit source. The foundation v2 lifecycle is not live, and
+the known legacy `DELETE_FAILED` authority remains external-admin-only while
+the new v2 source contract awaits exact-main CI validation. Account-wide
+controls are not activated; no live foundation,
+edge/WAF, legacy-recovery, or WA-03 receipt is claimed by this batch.
 
 This package turns the Well-Architected review into reproducible evidence
 without treating documentation as proof of live AWS state. It follows the six
@@ -98,14 +101,20 @@ commit and template digest are both stack parameters and the only two stack
 tags. The template contains one resource, `FoundationMigrationRole`; its trust,
 inline policy, original template, parameters, tags, and inventory are all
 proved before use. A pre-contract authority cannot be adopted: it requires
-administrator deletion and Phase 0 recreation. No authority has been created
-by this repository work.
+administrator deletion and Phase 0 recreation. The current live residual is a
+`DELETE_FAILED` authority shell whose physical temporary role is already
+absent; it is not evidence of a successful retirement. Its recovery contract
+is not source-final and no recovery command is authorized by this evidence
+package.
 
 `.github/workflows/foundation-migration.yml` exposes exact-current-green-main
 `plan|apply|verify|abort|retire` operations. Apply, abort, and retirement require
-their exact confirmation phrases. The one-time policy includes the bounded
+their exact confirmation phrases; abort uses
+`ABORT-FOUNDATION-MIGRATION-CLEAN-PLANS`. The one-time policy includes the bounded
 `ListChangeSets` and `ListStackResources` reads required to prove complete plan
-and resource inventories; those reads do not authorize broader mutation.
+and resource inventories; those reads do not authorize broader mutation. The
+temporary role has no `DeleteStack`, `PassRole`, or direct self-delete
+permission.
 
 The plan/apply job has a same-run `always()` cleanup when an exact change-set
 ID was captured but plan creation, loading, or exact inspection failed. It
@@ -116,13 +125,16 @@ projection. The receipt hashes the plan ARN, name, and description. It never
 executes an unverified plan. A final adjacent re-description must still show
 the exact ID in `CREATE_COMPLETE`/`AVAILABLE`, UPDATE, non-importing state.
 
-`abort` is a separate terminal authority-cleanup operation and does not require
-the post-migration permanent foundation role. It first intrinsically proves the
+`abort` is a separate stop operation that cleans only authorized, unexecuted
+migration plans and does not require the post-migration permanent foundation
+role. It first intrinsically proves the
 historical authority source binding, digest-bound original template, exact
 repository trust, bounded/subset-safe inline policy, and single live resource.
-The recorded source must be a verified ancestor; only that commit's exact
-generator `render-template` mode runs in a credential-free environment, and its
-canonical digest must match the recorded and live authority template.
+The required v2 boundary treats fetched historical source as inert data: the
+recorded commit must be a verified ancestor, its bytes are hashed and bound,
+and the file is never sourced or executed. Repository source now enforces that
+no-execution boundary; `abort` remains operationally pending until exact-main
+CI proves the source contract and a separately approved dispatch is authorized.
 It then proves the target foundation stable and snapshots digests for its full
 stack projection, original template, stack policy, and resource inventory.
 Before its deletion loop, the complete change-set inventory must contain only
@@ -131,22 +143,67 @@ Before its deletion loop, the complete change-set inventory must contain only
 executing plan rejects the whole abort. Every eligible plan is independently
 bound to its historical committed source/template and exact UPDATE contract,
 deleted, and proved absent. The target foundation digests must remain identical
-after cleanup. Immediately before authority deletion, a second complete
-all-change-set inventory must be empty; any concurrent unrelated or executing
-plan fails closed. Finally the exact authority stack is deleted and both stack and
-role absence are proved. The sanitized receipt contains hashes and committed
-source/template digests, not account IDs or account-bearing ARNs.
+after cleanup. A second complete all-change-set inventory must be empty; any
+concurrent unrelated or executing plan fails closed. Abort never calls
+`DeleteStack` and preserves the authority stack and role for explicit
+administrator retirement. The sanitized receipt contains hashes and committed
+source/template digests, not account IDs or account-bearing ARNs, and records
+`authorityRetired=false` and `unchangedDuringAbort=true`. It does not invent an
+administrator or controller capability before one is proved:
+`externalAdministratorRetirementRequired` and
+`nonSelfDeletingExecutorAvailableBeforeApply` are `null`, while their
+corresponding known/availability booleans are `false`.
+`preMigrationStateVerified` reflects only evidence actually established by the
+run. A failure receipt records the last completed phase, whether any destructive
+call started, and only the sanitized plan records already proved; it cannot
+claim authority retirement.
 
-The normal `retire` path remains stronger after a completed migration: it first
-requires the permanent foundation role to prove the migrated live controls.
-The destructive job then repeats the live proof immediately before deletion,
-matches its digest to the preceding proof, compares the exact deployed template
-and stack policy, requires the permanent role's source-bound trust/policy and
-CloudFormation resource drift to be `IN_SYNC`, proves the full change-set
-inventory empty, and binds a fresh composite proof digest into the receipt.
-After `ExecuteChangeSet` is dispatched, the failure trap cannot restore the old
-stack policy; restoration is allowed only before dispatch or after an observed
-`UPDATE_ROLLBACK_COMPLETE` terminal state.
+The normal `retire` path uses the permanent `FoundationPromotionRole` as its
+controller after a completed migration. The foundation also contains a
+dedicated `FoundationAuthorityRetirementExecutionRole` that trusts only
+CloudFormation and may remove only the exact temporary role and its inline
+policy. The controller may delete only the exact authority stack and may pass
+only that execution role, conditioned on
+`iam:PassedToService=cloudformation.amazonaws.com`; the workflow binds the same
+role explicitly with CloudFormation's `--role-arn`. Before deletion it proves
+the migrated live controls, matches the fresh digest to the preceding proof,
+compares the exact deployed template and stack policy, and requires both
+permanent roles' source-bound trust/policy, attachment inventory, stable IAM
+RoleId, and CloudFormation resource drift to be exact and `IN_SYNC`. The eight
+required hashes are the controller and execution variants of
+`RoleIdSha256|PolicySha256|InventorySha256|DriftSha256`. It proves the full
+change-set inventory empty and binds a fresh composite proof digest into the
+receipt. The v2 proof records
+`terminalLifecycleSafetyContractVersion=2`. For a normal `CREATE_COMPLETE`
+authority it uses `verify-intrinsic`; a v2, role-present `DELETE_FAILED` retry
+uses `verify-retirement-retry` and standard deletion only. A canonical v2,
+role-absent `DELETE_FAILED` shell uses `verify-retirement-orphaned`, two exact
+`NoSuchEntity` checks, and targeted `STANDARD --retain-resources
+FoundationMigrationRole` reconciliation; its receipt explicitly states that
+the role was already absent and was not deleted by the run. Historical
+authority source is fetched from the recorded ancestor as inert data,
+ancestry-checked, byte-hashed, and never executed. The receipt records the identity and control
+hashes, exact service-role binding, `selfDeletion=false`, and temporary
+stack/role absence without exposing raw account-bearing ARNs. It is initialized
+before AWS access; its failure form records the last completed phase and
+whether deletion began, retains only facts already proved, and never represents
+an unknown deletion outcome as success.
+
+The current legacy `DELETE_FAILED` shell is still ineligible for the finalized
+v2 orphan workflow: its temporary role is absent but its historical template
+lacks the mandatory v2 terminal-safety contract. It therefore remains an
+external-admin recovery prerequisite; no retain-resource or force-delete
+action is claimed for that live legacy state. See
+[`FOUNDATION_STORAGE_MIGRATION.md`](./FOUNDATION_STORAGE_MIGRATION.md).
+
+Immediately before `ExecuteChangeSet`, the workflow installs and re-reads the
+legacy rollback-safe policy so newly added resources can still be removed by a
+legitimate rollback. After observed success it installs and re-reads the final
+policy. An `always()` reconciler waits for a terminal stack state, hashes the
+live original template, keeps the rollback-safe policy when the candidate is
+absent, and selects the final policy only when the candidate digest is live.
+It re-reads the selected policy and permits apply success only for the exact
+candidate. A rerun can finish reconciliation without replaying the migration.
 Neither `abort` nor same-run plan cleanup rolls back or otherwise mutates the
 foundation stack. See
 [`FOUNDATION_STORAGE_MIGRATION.md`](./FOUNDATION_STORAGE_MIGRATION.md).
@@ -208,6 +265,24 @@ is selected. Although `plan` has no typed confirmation, it still runs behind
 the protected environment and may materialize only that empty CloudFormation
 shell; it cannot deploy a stack resource.
 
+Edge apply is also cancellation-safe at the lifecycle boundary. An `always()`
+reconciliation step waits boundedly for an interrupted create/update/rollback
+to reach a supported terminal state, then proves the exact stack ID, source
+template digest, parameters, no service role/tags/notifications/capabilities,
+and the exact nine-resource inventory before it can mutate lifecycle controls.
+It installs and re-reads the source-bound stack policy and termination
+protection, then requires the complete live WAF proof before success. The final
+`always()` receipt step cannot turn interruption into success: it records
+`apply-failed-candidate-lifecycle-protected` with known protected state only
+after that reconciliation proof, otherwise
+`apply-failed-state-unknown` with `destructiveStateKnown=false`.
+
+Bootstrap, Foundation Migration, Edge Controls, staging/production Deploy, and
+Recover AWS mutation jobs share the queued
+`aws-shared-control-plane-mutation` mutex. Source-gate and read-only audit jobs
+do not hold it, avoiding a receipt-wait deadlock while closing cross-workflow
+control-plane TOCTOU races.
+
 Recovery from partial lifecycle progress is bounded rather than manual. The
 `cleanup` operation accepts only an unprotected `REVIEW_IN_PROGRESS` shell with
 zero resources or an unprotected `ROLLBACK_COMPLETE` stack for which every
@@ -251,6 +326,25 @@ receipts. Deploy AWS fails before mutation unless the same SHA has:
 - staging and production live edge-control receipts; and
 - direct edge-stack output validation for account, name, environment, region,
   rate limits, status, stack-role absence, and termination protection.
+
+Each staging and production mutation job holds the shared
+`aws-shared-control-plane-mutation` mutex. Immediately before any new release
+mutation, it paginates all eligible foundation and environment-specific edge
+runs, uses one shared edge snapshot, selects the global latest run before
+comparing SHA, and requires the exact source-gate run IDs/attempts, successful
+foundation `verify`, successful
+edge `apply|verify`, and the same current `main` head. The canonical fence proof
+binds its checked time, deployment environment/job/run/attempt, mutex group,
+source SHA, and exact operations. The terminal deployment receipt embeds that
+exact proof plus its SHA-256; extracting the object, deleting only `sha256`, and
+serializing with `jq -cS` reproduces the digest.
+
+The only mutation allowed before this new-release fence is fail-safe
+reconciliation of an interrupted same-run greenfield stack. It requires exact
+cryptographic ownership and recovery evidence and may only restore/delete that
+orphaned candidate; it cannot deploy a candidate or alter foundation/edge
+controls. This recovery exception prevents a stale failed run from blocking
+safe cleanup while preserving the fence for every new release transition.
 
 No edge lifecycle operation generates a probe, queries the alarm archive, or
 contacts a human. In particular, `cleanup` proves only the eligible shell's
@@ -340,6 +434,12 @@ exact-green-main `plan|apply|verify` workflow. The template is hard-bound to
 the `us-east-1` billing control plane; it creates no application workload
 outside `eu-west-1`.
 
+The permanent `FoundationAuthorityRetirementExecutionRole` adds
+`$0.00/month` in fixed IAM charges. Its inclusion leaves the approved
+incremental fixed control-plane ceiling unchanged at `$26.00/month`; request,
+logging, storage, and other usage-based charges remain variable and separately
+evidenced.
+
 Live evidence requires a separately approved billing-authorized pipeline,
 validated SNS delivery to an accountable human, observed budget/monitor state,
 and a sanitized exact-SHA receipt. Repository and pipeline scans prove only
@@ -410,6 +510,9 @@ The repository records, but does not enable:
   that receipt;
 - the repository-prepared WAF, CloudFront access logging, origin restriction,
   and their live alarm drill;
+- the foundation migration and v2 authority retirement; the legacy
+  `DELETE_FAILED` authority shell still has no source-final recovery path and
+  requires a separately approved, source-bound external-administrator action;
 - a completed protected two-principal database credential rotation; the runtime
   refresh and pipeline are repository-prepared, but no live receipt is claimed;
 - the repository-prepared staging fault-injected recovery sequence, including

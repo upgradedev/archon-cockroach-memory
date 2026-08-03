@@ -336,7 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 65
     concurrency:
-      group: aws-production-delivery
+      group: aws-shared-control-plane-mutation
       cancel-in-progress: false
       queue: max
     environment:
@@ -751,7 +751,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 65
     concurrency:
-      group: aws-production-delivery
+      group: aws-shared-control-plane-mutation
       cancel-in-progress: false
       queue: max
     environment:

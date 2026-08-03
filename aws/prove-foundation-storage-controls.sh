@@ -63,6 +63,20 @@ alarm_control_role_file="$work_dir/alarm-control-role.json"
 alarm_control_policy_file="$work_dir/alarm-control-policy.json"
 alarm_execution_role_file="$work_dir/alarm-execution-role.json"
 alarm_execution_policy_file="$work_dir/alarm-execution-policy.json"
+foundation_promotion_role_file="$work_dir/foundation-promotion-role.json"
+foundation_promotion_policy_file="$work_dir/foundation-promotion-policy.json"
+foundation_promotion_inline_policies_file="$work_dir/foundation-promotion-inline-policies.json"
+foundation_promotion_attached_policies_file="$work_dir/foundation-promotion-attached-policies.json"
+foundation_promotion_instance_profiles_file="$work_dir/foundation-promotion-instance-profiles.json"
+foundation_promotion_inventory_file="$work_dir/foundation-promotion-inventory.json"
+foundation_promotion_drift_file="$work_dir/foundation-promotion-drift.json"
+foundation_retirement_role_file="$work_dir/foundation-retirement-role.json"
+foundation_retirement_policy_file="$work_dir/foundation-retirement-policy.json"
+foundation_retirement_inline_policies_file="$work_dir/foundation-retirement-inline-policies.json"
+foundation_retirement_attached_policies_file="$work_dir/foundation-retirement-attached-policies.json"
+foundation_retirement_instance_profiles_file="$work_dir/foundation-retirement-instance-profiles.json"
+foundation_retirement_inventory_file="$work_dir/foundation-retirement-inventory.json"
+foundation_retirement_drift_file="$work_dir/foundation-retirement-drift.json"
 
 aws cloudformation describe-stacks \
   --stack-name "$stack_name" \
@@ -80,6 +94,7 @@ jq -e \
     )
   ' "$stack_file" >/dev/null
 stack_status="$(jq -er '.Stacks[0].StackStatus' "$stack_file")"
+stack_id="$(jq -er '.Stacks[0].StackId | strings | select(length > 0)' "$stack_file")"
 alarm_routing_active="$(
   jq -r '
     [
@@ -127,6 +142,23 @@ alarm_execution_role_arn="$(
   jq -er '.AlarmRoutingCloudFormationExecutionRoleArn | strings' \
     "$outputs_file"
 )"
+foundation_promotion_role_arn="$(
+  jq -er '.FoundationPromotionRoleArn | strings' "$outputs_file"
+)"
+foundation_promotion_role_id="$(
+  jq -er '.FoundationPromotionRoleId | strings | select(length > 0)' \
+    "$outputs_file"
+)"
+foundation_retirement_role_arn="$(
+  jq -er \
+    '.FoundationAuthorityRetirementExecutionRoleArn | strings' \
+    "$outputs_file"
+)"
+foundation_retirement_role_id="$(
+  jq -er \
+    '.FoundationAuthorityRetirementExecutionRoleId | strings | select(length > 0)' \
+    "$outputs_file"
+)"
 
 jq -e \
   --arg executionRole "$alarm_execution_role_arn" \
@@ -154,6 +186,8 @@ jq -e \
   --arg app "$APP_NAME" \
   --arg artifact "$artifact_bucket" \
   --arg cloudfrontLogs "$cloudfront_log_bucket" \
+  --arg promotionRoleId "$foundation_promotion_role_id" \
+  --arg retirementRoleId "$foundation_retirement_role_id" \
   '
     .ArtifactBucketName == $artifact
     and .CloudFrontAccessLogBucketName == $cloudfrontLogs
@@ -188,6 +222,20 @@ jq -e \
         + ":role/" + $app
         + "-alarm-routing-cloudformation-execution"
       )
+    and .FoundationPromotionRoleArn
+      == (
+        "arn:aws:iam::" + $account
+        + ":role/" + $app + "-github-foundation-promotion"
+      )
+    and .FoundationPromotionRoleId == $promotionRoleId
+    and .FoundationAuthorityRetirementExecutionRoleArn
+      == (
+        "arn:aws:iam::" + $account
+        + ":role/" + $app
+        + "-foundation-authority-retirement-execution"
+      )
+    and .FoundationAuthorityRetirementExecutionRoleId
+      == $retirementRoleId
     and (
       .ApplicationStorageKeyArn
       | test(
@@ -1329,6 +1377,381 @@ jq -e \
     )
   ' "$alarm_execution_policy_file" >/dev/null
 
+aws iam get-role \
+  --role-name "${APP_NAME}-github-foundation-promotion" \
+  --output json >"$foundation_promotion_role_file"
+aws iam get-role-policy \
+  --role-name "${APP_NAME}-github-foundation-promotion" \
+  --policy-name promote-foundation-logging \
+  --output json >"$foundation_promotion_policy_file"
+aws iam list-role-policies \
+  --role-name "${APP_NAME}-github-foundation-promotion" \
+  --no-paginate \
+  --output json >"$foundation_promotion_inline_policies_file"
+aws iam list-attached-role-policies \
+  --role-name "${APP_NAME}-github-foundation-promotion" \
+  --no-paginate \
+  --output json >"$foundation_promotion_attached_policies_file"
+aws iam list-instance-profiles-for-role \
+  --role-name "${APP_NAME}-github-foundation-promotion" \
+  --no-paginate \
+  --output json >"$foundation_promotion_instance_profiles_file"
+aws iam get-role \
+  --role-name "${APP_NAME}-foundation-authority-retirement-execution" \
+  --output json >"$foundation_retirement_role_file"
+aws iam get-role-policy \
+  --role-name "${APP_NAME}-foundation-authority-retirement-execution" \
+  --policy-name retire-one-time-foundation-authority \
+  --output json >"$foundation_retirement_policy_file"
+aws iam list-role-policies \
+  --role-name "${APP_NAME}-foundation-authority-retirement-execution" \
+  --no-paginate \
+  --output json >"$foundation_retirement_inline_policies_file"
+aws iam list-attached-role-policies \
+  --role-name "${APP_NAME}-foundation-authority-retirement-execution" \
+  --no-paginate \
+  --output json >"$foundation_retirement_attached_policies_file"
+aws iam list-instance-profiles-for-role \
+  --role-name "${APP_NAME}-foundation-authority-retirement-execution" \
+  --no-paginate \
+  --output json >"$foundation_retirement_instance_profiles_file"
+aws cloudformation detect-stack-resource-drift \
+  --stack-name "$stack_name" \
+  --logical-resource-id FoundationPromotionRole \
+  --region "$AWS_REGION" \
+  --output json >"$foundation_promotion_drift_file"
+aws cloudformation detect-stack-resource-drift \
+  --stack-name "$stack_name" \
+  --logical-resource-id FoundationAuthorityRetirementExecutionRole \
+  --region "$AWS_REGION" \
+  --output json >"$foundation_retirement_drift_file"
+
+jq -n \
+  --slurpfile inline "$foundation_promotion_inline_policies_file" \
+  --slurpfile attached "$foundation_promotion_attached_policies_file" \
+  --slurpfile profiles "$foundation_promotion_instance_profiles_file" \
+  '{
+    inlinePolicyNames: $inline[0].PolicyNames,
+    inlinePoliciesTruncated: ($inline[0].IsTruncated // false),
+    attachedPolicies: $attached[0].AttachedPolicies,
+    attachedPoliciesTruncated: ($attached[0].IsTruncated // false),
+    instanceProfiles: $profiles[0].InstanceProfiles,
+    instanceProfilesTruncated: ($profiles[0].IsTruncated // false)
+  }' >"$foundation_promotion_inventory_file"
+jq -e '
+  . == {
+    inlinePolicyNames: ["promote-foundation-logging"],
+    inlinePoliciesTruncated: false,
+    attachedPolicies: [],
+    attachedPoliciesTruncated: false,
+    instanceProfiles: [],
+    instanceProfilesTruncated: false
+  }
+' "$foundation_promotion_inventory_file" >/dev/null
+
+jq -n \
+  --slurpfile inline "$foundation_retirement_inline_policies_file" \
+  --slurpfile attached "$foundation_retirement_attached_policies_file" \
+  --slurpfile profiles "$foundation_retirement_instance_profiles_file" \
+  '{
+    inlinePolicyNames: $inline[0].PolicyNames,
+    inlinePoliciesTruncated: ($inline[0].IsTruncated // false),
+    attachedPolicies: $attached[0].AttachedPolicies,
+    attachedPoliciesTruncated: ($attached[0].IsTruncated // false),
+    instanceProfiles: $profiles[0].InstanceProfiles,
+    instanceProfilesTruncated: ($profiles[0].IsTruncated // false)
+  }' >"$foundation_retirement_inventory_file"
+jq -e '
+  . == {
+    inlinePolicyNames: ["retire-one-time-foundation-authority"],
+    inlinePoliciesTruncated: false,
+    attachedPolicies: [],
+    attachedPoliciesTruncated: false,
+    instanceProfiles: [],
+    instanceProfilesTruncated: false
+  }
+' "$foundation_retirement_inventory_file" >/dev/null
+
+jq -e \
+  --arg stackId "$stack_id" \
+  --arg role "${APP_NAME}-github-foundation-promotion" \
+  '
+    .StackResourceDrift.StackId == $stackId
+    and .StackResourceDrift.LogicalResourceId == "FoundationPromotionRole"
+    and .StackResourceDrift.PhysicalResourceId == $role
+    and .StackResourceDrift.ResourceType == "AWS::IAM::Role"
+    and .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC"
+    and (.StackResourceDrift.PropertyDifferences // []) == []
+  ' "$foundation_promotion_drift_file" >/dev/null
+jq -e \
+  --arg stackId "$stack_id" \
+  --arg role "${APP_NAME}-foundation-authority-retirement-execution" \
+  '
+    .StackResourceDrift.StackId == $stackId
+    and .StackResourceDrift.LogicalResourceId
+      == "FoundationAuthorityRetirementExecutionRole"
+    and .StackResourceDrift.PhysicalResourceId == $role
+    and .StackResourceDrift.ResourceType == "AWS::IAM::Role"
+    and .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC"
+    and (.StackResourceDrift.PropertyDifferences // []) == []
+  ' "$foundation_retirement_drift_file" >/dev/null
+
+jq -e \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  --arg provider "arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com" \
+  --arg repository "$GITHUB_REPOSITORY" \
+  --arg repositoryId "$GITHUB_REPOSITORY_ID" \
+  --arg ownerId "$GITHUB_REPOSITORY_OWNER_ID" \
+  --arg roleId "$foundation_promotion_role_id" \
+  '
+    def tag_map:
+      map({key:.Key, value:.Value}) | from_entries;
+    .Role.RoleName == ($app + "-github-foundation-promotion")
+    and .Role.Arn == (
+      "arn:aws:iam::" + $account + ":role/" + $app
+      + "-github-foundation-promotion"
+    )
+    and .Role.RoleId == $roleId
+    and .Role.MaxSessionDuration == 3600
+    and ((.Role.PermissionsBoundary // null) == null)
+    and ((.Role.Description // null) == null)
+    and .Role.AssumeRolePolicyDocument == {
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: {Federated:$provider},
+        Action: "sts:AssumeRoleWithWebIdentity",
+        Condition: {StringEquals: {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub":
+            ("repo:" + $repository + ":environment:bootstrap"),
+          "token.actions.githubusercontent.com:repository": $repository,
+          "token.actions.githubusercontent.com:repository_id": $repositoryId,
+          "token.actions.githubusercontent.com:repository_owner_id": $ownerId,
+          "token.actions.githubusercontent.com:ref": "refs/heads/main",
+          "token.actions.githubusercontent.com:environment": "bootstrap",
+          "token.actions.githubusercontent.com:workflow": [
+            "Bootstrap AWS Foundation",
+            "Foundation Storage Migration"
+          ]
+        }}
+      }]
+    }
+    and ((.Role.Tags // []) | tag_map) == {
+      Application: $app,
+      Environment: "bootstrap",
+      ManagedBy: "CloudFormation"
+    }
+  ' "$foundation_promotion_role_file" >/dev/null
+
+jq -e \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  --arg role "${APP_NAME}-github-foundation-promotion" \
+  --arg executionRoleArn "$foundation_retirement_role_arn" \
+  --arg authorityRoleArn "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration" \
+  '
+    def actions:
+      .Action | if type == "array" then . else [.] end;
+    def resources:
+      .Resource | if type == "array" then . else [.] end;
+    def normalized_actions:
+      actions | map(if type == "string" then ascii_downcase else "" end);
+    def expected_statement_keys:
+      if has("Condition") then
+        ["Action", "Condition", "Effect", "Resource", "Sid"]
+      else
+        ["Action", "Effect", "Resource", "Sid"]
+      end;
+    def action_is_generically_safe:
+      if type != "string" then false
+      else
+        ascii_downcase as $action
+        | $action != "*"
+          and ($action | endswith(":*") | not)
+          and ($action | startswith("iam:delete") | not)
+      end;
+    def statement($sid):
+      .PolicyDocument.Statement
+      | map(select(.Sid == $sid))
+      | if length == 1 then .[0] else error($sid) end;
+    .RoleName == $role
+    and .PolicyName == "promote-foundation-logging"
+    and .PolicyDocument.Version == "2012-10-17"
+    and all(.PolicyDocument.Statement[]; .Effect == "Allow")
+    and all(
+      .PolicyDocument.Statement[];
+      (keys | sort) == (expected_statement_keys | sort)
+      and all(actions[]; action_is_generically_safe)
+      and all(resources[]; type == "string" and . != "*")
+    )
+    and (.PolicyDocument.Statement | map(.Sid) | sort) == ([
+      "ActivateArtifactBucketLoggingWithoutReplacement",
+      "CreatePinnedBootstrapChangeSet",
+      "EncryptImmutableFoundationTemplate",
+      "ExecuteOnlyBootstrapLoggingChangeSets",
+      "InspectArtifactAndArchiveBuckets",
+      "InspectBootstrapStackAndChangeSets",
+      "InspectFoundationAutomationRule",
+      "InspectFoundationMigrationState",
+      "InspectFoundationRetirementRoleMetadata",
+      "InspectFoundationRetirementRolePolicies",
+      "InspectOneTimeFoundationMigrationAuthority",
+      "InspectOriginVerificationSecretMetadata",
+      "InspectPermanentControlRoleMetadata",
+      "InspectPermanentControlRolePolicies",
+      "PassOnlyFoundationAuthorityRetirementExecutionRole",
+      "PublishImmutableFoundationTemplate",
+      "ResolveExactCloudFormationExecutionRoles",
+      "ResolveExactFoundationAutomationRule",
+      "ResolveExactFoundationRoleAttributes",
+      "RetireOneTimeFoundationMigrationAuthorityStack"
+    ] | sort)
+    and (
+      statement("RetireOneTimeFoundationMigrationAuthorityStack")
+      | actions == ["cloudformation:DeleteStack"]
+      and .Resource == (
+        "arn:aws:cloudformation:eu-west-1:" + $account
+        + ":stack/" + $app + "-foundation-migration-authority/*"
+      )
+      and .Condition.ArnEquals["cloudformation:RoleArn"]
+        == $executionRoleArn
+    )
+    and (
+      statement("PassOnlyFoundationAuthorityRetirementExecutionRole")
+      | actions == ["iam:PassRole"]
+      and .Resource == $executionRoleArn
+      and .Condition.StringEquals["iam:PassedToService"]
+        == "cloudformation.amazonaws.com"
+    )
+    and (
+      statement("InspectOneTimeFoundationMigrationAuthority")
+      | (actions | sort) == ([
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:ListRolePolicies"
+        ] | sort)
+      and resources == [$authorityRoleArn]
+    )
+    and (
+      statement("InspectFoundationMigrationState")
+      | (actions | sort) == ([
+          "cloudformation:DetectStackResourceDrift",
+          "cloudformation:ListChangeSets"
+        ] | sort)
+      and resources == [
+        "arn:aws:cloudformation:eu-west-1:" + $account
+        + ":stack/" + $app + "-delivery-bootstrap/*"
+      ]
+    )
+    and (
+      statement("InspectFoundationRetirementRoleMetadata")
+      | (actions | sort) == ([
+          "iam:GetRole",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:ListRolePolicies"
+        ] | sort)
+      and (resources | sort) == ([
+        $executionRoleArn,
+        "arn:aws:iam::" + $account + ":role/" + $app
+        + "-github-foundation-promotion"
+      ] | sort)
+    )
+    and (
+      statement("InspectFoundationRetirementRolePolicies")
+      | actions == ["iam:GetRolePolicy"]
+      and (resources | sort) == ([
+        $executionRoleArn,
+        "arn:aws:iam::" + $account + ":role/" + $app
+        + "-github-foundation-promotion"
+      ] | sort)
+    )
+    and ([
+      .PolicyDocument.Statement[]
+      | select(
+          (normalized_actions | index("cloudformation:deletestack")) != null
+        )
+      | .Sid
+    ]) == ["RetireOneTimeFoundationMigrationAuthorityStack"]
+    and ([
+      .PolicyDocument.Statement[]
+      | select((normalized_actions | index("iam:passrole")) != null)
+      | .Sid
+    ]) == ["PassOnlyFoundationAuthorityRetirementExecutionRole"]
+    and all(
+      .PolicyDocument.Statement[];
+      all(
+        normalized_actions[];
+        (startswith("iam:delete") | not)
+      )
+    )
+  ' "$foundation_promotion_policy_file" >/dev/null
+
+jq -e \
+  --arg account "$AWS_ACCOUNT_ID" \
+  --arg app "$APP_NAME" \
+  --arg roleId "$foundation_retirement_role_id" \
+  '
+    def tag_map:
+      map({key:.Key, value:.Value}) | from_entries;
+    .Role.RoleName
+      == ($app + "-foundation-authority-retirement-execution")
+    and .Role.Arn == (
+      "arn:aws:iam::" + $account + ":role/" + $app
+      + "-foundation-authority-retirement-execution"
+    )
+    and .Role.RoleId == $roleId
+    and .Role.MaxSessionDuration == 3600
+    and ((.Role.PermissionsBoundary // null) == null)
+    and ((.Role.Description // null) == null)
+    and .Role.AssumeRolePolicyDocument == {
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: {Service:"cloudformation.amazonaws.com"},
+        Action: "sts:AssumeRole"
+      }]
+    }
+    and ((.Role.Tags // []) | tag_map) == {
+      Application: $app,
+      Environment: "bootstrap",
+      Lifecycle: "permanent-authority-retirement-execution",
+      ManagedBy: "CloudFormation"
+    }
+  ' "$foundation_retirement_role_file" >/dev/null
+
+jq -e \
+  --arg role "${APP_NAME}-foundation-authority-retirement-execution" \
+  --arg authorityRoleArn "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration" \
+  '
+    .RoleName == $role
+    and .PolicyName == "retire-one-time-foundation-authority"
+    and .PolicyDocument == {
+      Version: "2012-10-17",
+      Statement: [{
+        Sid: "DeleteOnlyOneTimeFoundationMigrationRole",
+        Effect: "Allow",
+        Action: [
+          "iam:DeleteRole",
+          "iam:DeleteRolePolicy",
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:ListRolePolicies"
+        ],
+        Resource: $authorityRoleArn
+      }]
+    }
+  ' "$foundation_retirement_policy_file" >/dev/null
+
+test "$foundation_promotion_role_arn" != \
+  "$foundation_retirement_role_arn"
+
 migration_authority_retired=false
 if [ "$authority_state" = "retired" ]; then
   authority_stack_error="$work_dir/authority-stack.err"
@@ -1549,6 +1972,76 @@ jq -n \
       sha256sum |
       awk '{print $1}'
   )" \
+  --arg foundationPromotionRoleArnSha256 "$(
+    printf '%s' "$foundation_promotion_role_arn" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationPromotionRoleIdSha256 "$(
+    printf '%s' "$foundation_promotion_role_id" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationRetirementRoleArnSha256 "$(
+    printf '%s' "$foundation_retirement_role_arn" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationRetirementRoleIdSha256 "$(
+    printf '%s' "$foundation_retirement_role_id" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationPromotionPolicySha256 "$(
+    jq -Sc '{RoleName, PolicyName, PolicyDocument}' \
+      "$foundation_promotion_policy_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationPromotionInventorySha256 "$(
+    jq -Sc . "$foundation_promotion_inventory_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationPromotionDriftSha256 "$(
+    jq -Sc '.StackResourceDrift | {
+      StackId,
+      LogicalResourceId,
+      PhysicalResourceId,
+      ResourceType,
+      ExpectedProperties,
+      ActualProperties,
+      PropertyDifferences,
+      StackResourceDriftStatus
+    }' "$foundation_promotion_drift_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationRetirementPolicySha256 "$(
+    jq -Sc '{RoleName, PolicyName, PolicyDocument}' \
+      "$foundation_retirement_policy_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationRetirementInventorySha256 "$(
+    jq -Sc . "$foundation_retirement_inventory_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
+  --arg foundationRetirementDriftSha256 "$(
+    jq -Sc '.StackResourceDrift | {
+      StackId,
+      LogicalResourceId,
+      PhysicalResourceId,
+      ResourceType,
+      ExpectedProperties,
+      ActualProperties,
+      PropertyDifferences,
+      StackResourceDriftStatus
+    }' "$foundation_retirement_drift_file" |
+      sha256sum |
+      awk '{print $1}'
+  )" \
   --argjson alarmRoutingActive "$alarm_routing_active" \
   --argjson migrationAuthorityRetired \
     "$migration_authority_retired" \
@@ -1625,8 +2118,29 @@ jq -n \
       liveActivationPerformed: $alarmRoutingActive,
       liveDeliveryDrillPerformed: false
     },
+    foundationAuthorityRetirement: {
+      controllerRoleArnSha256: $foundationPromotionRoleArnSha256,
+      controllerRoleIdSha256: $foundationPromotionRoleIdSha256,
+      controllerPolicySha256: $foundationPromotionPolicySha256,
+      controllerInventorySha256: $foundationPromotionInventorySha256,
+      controllerDriftSha256: $foundationPromotionDriftSha256,
+      executionRoleArnSha256: $foundationRetirementRoleArnSha256,
+      executionRoleIdSha256: $foundationRetirementRoleIdSha256,
+      executionPolicySha256: $foundationRetirementPolicySha256,
+      executionInventorySha256: $foundationRetirementInventorySha256,
+      executionDriftSha256: $foundationRetirementDriftSha256,
+      cloudFormationServiceRoleBound: true,
+      cloudFormationDriftInSync: true,
+      controllerExecutionRoleSeparated: true,
+      directIamDeletionByController: false,
+      controllerAttachmentContractVerified: true,
+      executionAttachmentContractVerified: true,
+      unexpectedAttachmentsFailClosed: true,
+      selfDeletion: false
+    },
     migrationAuthority: {
       retirementRequired: true,
+      selfDeletionAllowed: false,
       retired: $migrationAuthorityRetired
     }
   }'
