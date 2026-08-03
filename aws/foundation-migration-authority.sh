@@ -545,6 +545,60 @@ render_template() {
     }'
 }
 
+# Hash exactly one compact, recursively key-sorted JSON object without a line
+# terminator so the creation binding is identical on Linux and Windows.
+canonical_json_bytes() {
+  jq -Scj -s '
+    if length != 1 then
+      error("expected exactly one JSON document")
+    elif (.[0] | type) != "object" then
+      error("expected one JSON object")
+    else
+      .[0]
+    end
+  ' "$@"
+}
+
+canonical_template_body_bytes() {
+  jq -Scj -s '
+    if length != 1 then
+      error("expected exactly one template response")
+    else
+      (
+        .[0].TemplateBody
+        | if type == "string" then fromjson else . end
+      ) as $body
+      | if ($body | type) != "object" then
+          error("expected one template object")
+        else
+          $body
+        end
+    end
+  ' "$@"
+}
+
+canonical_json_sha256() {
+  canonical_json_bytes "$@" | sha256sum | awk '{print $1}'
+}
+
+canonical_template_body_sha256() {
+  canonical_template_body_bytes "$@" | sha256sum | awk '{print $1}'
+}
+
+legacy_lf_template_body_sha256() {
+  canonical_template_body_bytes "$@" |
+    { cat; printf '\n'; } |
+    sha256sum |
+    awk '{print $1}'
+}
+
+legacy_crlf_template_body_sha256() {
+  canonical_template_body_bytes "$@" |
+    { cat; printf '\r\n'; } |
+    sha256sum |
+    awk '{print $1}'
+}
+
 case "$mode" in
   render-trust)
     render_trust
@@ -556,7 +610,7 @@ case "$mode" in
     render_template
     ;;
   render-template-sha256)
-    render_template | jq -Sc . | sha256sum | awk '{print $1}'
+    render_template | canonical_json_sha256
     ;;
   verify|verify-intrinsic)
     : "${AWS_FOUNDATION_MIGRATION_ROLE_ARN:?}"
@@ -603,14 +657,15 @@ case "$mode" in
       --output json >"$live_resources"
 
     expected_template_digest="$(
-      jq -Sc . "$expected_template" | sha256sum | awk '{print $1}'
+      canonical_json_sha256 "$expected_template"
     )"
     live_template_digest="$(
-      jq -Sc '
-        .TemplateBody
-        | if type == "string" then fromjson else . end
-      ' "$live_template" | sha256sum | awk '{print $1}'
+      canonical_template_body_sha256 "$live_template"
     )"
+    proof_template_digest="$live_template_digest"
+    recorded_template_terminator="none"
+    template_canonicalization="jq-sort-compact-no-terminator-v1"
+    legacy_template_digest_accepted=false
 
     if [ "$mode" = "verify" ]; then
       test "$live_template_digest" = "$expected_template_digest"
@@ -717,7 +772,30 @@ case "$mode" in
           | select(test("^[0-9a-f]{64}$"))
         ' "$live_stack"
       )"
-      test "$live_template_digest" = "$recorded_template_digest"
+      # Retirement-only compatibility for authorities created by the previous
+      # implementation. All three candidates hash the same guarded canonical
+      # object and differ only by an exact trailing byte sequence.
+      legacy_lf_template_digest="$(
+        legacy_lf_template_body_sha256 "$live_template"
+      )"
+      legacy_crlf_template_digest="$(
+        legacy_crlf_template_body_sha256 "$live_template"
+      )"
+      if [ "$recorded_template_digest" = "$live_template_digest" ]; then
+        recorded_template_terminator="none"
+      elif [ "$recorded_template_digest" = "$legacy_lf_template_digest" ]; then
+        recorded_template_terminator="lf"
+        legacy_template_digest_accepted=true
+      elif [ "$recorded_template_digest" = "$legacy_crlf_template_digest" ]; then
+        recorded_template_terminator="crlf"
+        legacy_template_digest_accepted=true
+      else
+        echo \
+          "foundation authority verification failed: template-digest-binding" \
+          >&2
+        exit 1
+      fi
+      proof_template_digest="$recorded_template_digest"
 
       jq -e \
         --arg account "$AWS_ACCOUNT_ID" \
@@ -948,7 +1026,12 @@ case "$mode" in
       )" \
       --arg trustSha256 "$trust_digest" \
       --arg policySha256 "$policy_digest" \
-      --arg templateSha256 "$live_template_digest" \
+      --arg recordedTemplateSha256 "$proof_template_digest" \
+      --arg canonicalTemplateSha256 "$live_template_digest" \
+      --arg templateCanonicalization "$template_canonicalization" \
+      --arg recordedTemplateTerminator "$recorded_template_terminator" \
+      --argjson legacyTemplateDigestAccepted \
+        "$legacy_template_digest_accepted" \
       --arg stackIdSha256 "$(
         jq -er '.Stacks[0].StackId' "$live_stack" |
           sha256sum |
@@ -972,13 +1055,18 @@ case "$mode" in
       )" \
       '{
         schema: "archon.aws.foundation-migration-authority",
-        schemaVersion: 1,
+        schemaVersion: 2,
         ok: true,
         oneTime: true,
         roleArnSha256: $roleArnSha256,
         trustPolicySha256: $trustSha256,
         permissionsPolicySha256: $policySha256,
-        authorityTemplateSha256: $templateSha256,
+        authorityTemplateSha256: $recordedTemplateSha256,
+        recordedAuthorityTemplateSha256: $recordedTemplateSha256,
+        canonicalAuthorityTemplateSha256: $canonicalTemplateSha256,
+        templateCanonicalization: $templateCanonicalization,
+        recordedTemplateTerminator: $recordedTemplateTerminator,
+        legacyTemplateDigestAccepted: $legacyTemplateDigestAccepted,
         authorityStackIdSha256: $stackIdSha256,
         sourceCommit: $sourceCommit,
         stackStatus: $stackStatus,

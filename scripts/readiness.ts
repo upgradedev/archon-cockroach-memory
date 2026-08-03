@@ -2575,6 +2575,10 @@ function sourceChecks(): SourceCheck[] {
     foundationMigrationWorkflow,
     "Delete an unverified foundation migration plan"
   );
+  const foundationProveAuthorityStep = extractNamedWorkflowStep(
+    foundationMigrationWorkflow,
+    "Prove exact one-time migration authority"
+  );
   const foundationAbortJob = extractNamedWorkflowJob(
     foundationMigrationWorkflow,
     "abort-authority"
@@ -2611,6 +2615,8 @@ function sourceChecks(): SourceCheck[] {
     /authority_template=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template\s*\)/u.test(
       foundationPhaseZeroSource
     ) &&
+    /jq -Scj/u.test(foundationPhaseZeroSource) &&
+    !/jq -Sc \./u.test(foundationPhaseZeroSource) &&
     /ParameterKey=SourceCommit,ParameterValue=\$\{SOURCE_COMMIT\}/u.test(
       foundationPhaseZeroSource
     ) &&
@@ -2640,7 +2646,26 @@ function sourceChecks(): SourceCheck[] {
     /cloudformation:ListStackResources/u.test(
       foundationMigrationAuthority
     ) &&
-    /No authority stack has been created as part of[\s\S]*?repository work/u.test(
+    /canonical_json_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /canonical_template_body_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /render-template-sha256\)\s*render_template \| canonical_json_sha256/u.test(
+      foundationMigrationAuthority
+    ) &&
+    (foundationMigrationAuthority.match(
+      /legacy_lf_template_body_sha256/gu
+    ) ?? []).length === 2 &&
+    (foundationMigrationAuthority.match(
+      /legacy_crlf_template_body_sha256/gu
+    ) ?? []).length === 2 &&
+    /template-digest-binding/u.test(foundationMigrationAuthority) &&
+    !/aws cloudformation delete-stack/u.test(
+      foundationMigrationAuthority
+    ) &&
+    /Repository[\s\S]*?source and CI never create this authority/u.test(
       foundationMigrationRunbook
     ) &&
     /pre-binding contract cannot be[\s\S]*?administrator must delete it and[\s\S]*?recreate it from Phase 0/u.test(
@@ -2693,11 +2718,42 @@ function sourceChecks(): SourceCheck[] {
     !/Configure permanent narrow foundation authority/u.test(
       foundationAbortJob
     ) &&
+    /\.verificationMode == "verify"/u.test(
+      foundationProveAuthorityStep
+    ) &&
+    /\.recordedAuthorityTemplateSha256\s*== \.canonicalAuthorityTemplateSha256/u.test(
+      foundationProveAuthorityStep
+    ) &&
+    /\.recordedTemplateTerminator == "none"/u.test(
+      foundationProveAuthorityStep
+    ) &&
+    /\.legacyTemplateDigestAccepted == false/u.test(
+      foundationProveAuthorityStep
+    ) &&
     /foundation-migration-authority\.sh verify-intrinsic/u.test(
       foundationAbortStep
     ) &&
     /\.creationBindingVerified == true/u.test(foundationAbortStep) &&
     /\.resourceCount == 1/u.test(foundationAbortStep) &&
+    /recordedTemplateTerminator \| IN\("none", "lf", "crlf"\)/u.test(
+      foundationAbortStep
+    ) &&
+    /legacyTemplateDigestAccepted[\s\S]*?recordedTemplateTerminator != "none"/u.test(
+      foundationAbortStep
+    ) &&
+    /jq -Scj -s[\s\S]*?expected exactly one historical JSON document/u.test(
+      foundationAbortStep
+    ) &&
+    /matchesCanonicalLiveTemplate: true/u.test(
+      foundationAbortReceiptSource
+    ) &&
+    /recordedDigestCompatibilityVerified: true/u.test(
+      foundationAbortReceiptSource
+    ) &&
+    /destructive_actions_started=false/u.test(foundationAbortStep) &&
+    /partialChangeSetCleanup:[\s\S]*?deletedCount: \(\$plans\[0\] \| length\)/u.test(
+      foundationAbortStep
+    ) &&
     /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u.test(
       foundationAbortStep
     ) &&
@@ -2722,6 +2778,9 @@ function sourceChecks(): SourceCheck[] {
     ) &&
     /stackDeleted: true/u.test(foundationAbortReceiptSource) &&
     /roleDeleted: true/u.test(foundationAbortReceiptSource) &&
+    /destructiveActionsStarted: true/u.test(
+      foundationAbortReceiptSource
+    ) &&
     foundationAbortReceiptOffset >= 0 &&
     !/AWS_ACCOUNT_ID|arn:aws:/u.test(foundationAbortReceiptSource) &&
     !/cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u.test(
@@ -2745,6 +2804,9 @@ function sourceChecks(): SourceCheck[] {
       foundationRetireStep
     ) &&
     /finalAuthorityProofBoundImmediatelyBeforeDeletion: true/u.test(
+      foundationRetireStep
+    ) &&
+    /schemaVersion == 2[\s\S]*?verificationMode == "verify-intrinsic"[\s\S]*?recordedTemplateTerminator/u.test(
       foundationRetireStep
     ) &&
     !/\n\s+(?:aws|git)\s/u.test(

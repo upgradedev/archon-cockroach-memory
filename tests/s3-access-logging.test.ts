@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdtempSync,
@@ -25,8 +26,13 @@ const FOUNDATION_MIGRATION_WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "foundation-migration.yml"),
   "utf8"
 );
+const FOUNDATION_MIGRATION_AUTHORITY_SCRIPT = join(
+  ROOT,
+  "aws",
+  "foundation-migration-authority.sh"
+);
 const FOUNDATION_MIGRATION_AUTHORITY_SOURCE = readFileSync(
-  join(ROOT, "aws", "foundation-migration-authority.sh"),
+  FOUNDATION_MIGRATION_AUTHORITY_SCRIPT,
   "utf8"
 );
 const DEPLOY_WORKFLOW = readFileSync(
@@ -320,6 +326,25 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
   assert.match(abortJob, /Configure exact one-time migration authority/u);
   assert.doesNotMatch(abortJob, /Configure permanent narrow foundation authority/u);
   assert.match(abort, /foundation-migration-authority\.sh verify-intrinsic/u);
+  for (const field of [
+    "recordedAuthorityTemplateSha256",
+    "canonicalAuthorityTemplateSha256",
+    "templateCanonicalization",
+    "recordedTemplateTerminator",
+  ]) {
+    assert.ok(abort.includes(field), field);
+  }
+  assert.match(
+    abort,
+    /recordedTemplateTerminator \| IN\("none", "lf", "crlf"\)/u
+  );
+  assert.match(abort, /matchesCanonicalLiveTemplate: true/u);
+  assert.match(abort, /recordedDigestCompatibilityVerified: true/u);
+  assert.doesNotMatch(abort, /matchesRecordedAndLiveTemplate/u);
+  assert.match(abort, /destructive_actions_started=false/u);
+  assert.match(abort, /destructiveActionsStarted: \$destructiveActionsStarted/u);
+  assert.match(abort, /partialChangeSetCleanup:/u);
+  assert.match(abort, /deletedCount: \(\$plans\[0\] \| length\)/u);
   assert.match(
     abort,
     /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u
@@ -345,6 +370,10 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
     (abort.match(/aws cloudformation delete-stack/gu) ?? []).length,
     1
   );
+  const digestGate = abort.indexOf("phase=authority-proof-contract");
+  assert.ok(digestGate >= 0);
+  assert.ok(digestGate < abort.indexOf("aws cloudformation delete-change-set"));
+  assert.ok(digestGate < abort.indexOf("aws cloudformation delete-stack"));
   assert.doesNotMatch(
     abort,
     /cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u
@@ -358,6 +387,7 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
     "remainingCount: 0",
     "stackDeleted: true",
     "roleDeleted: true",
+    "destructiveActionsStarted: true",
   ]) {
     assert.ok(receipt.includes(expected), expected);
   }
@@ -444,6 +474,17 @@ test("foundation destructive transitions use adjacent fresh fail-closed proofs",
   );
   assert.ok(finalAuthorityProof >= 0);
   assert.ok(authorityDelete > finalAuthorityProof);
+  for (const field of [
+    "recordedAuthorityTemplateSha256",
+    "canonicalAuthorityTemplateSha256",
+    "templateCanonicalization",
+    "recordedTemplateTerminator",
+  ]) {
+    assert.ok(
+      retire.slice(finalAuthorityProof, authorityDelete).includes(field),
+      field
+    );
+  }
   assert.doesNotMatch(
     retire.slice(finalAuthorityProof, authorityDelete),
     /\n\s+(?:aws|git)\s/u
@@ -452,6 +493,335 @@ test("foundation destructive transitions use adjacent fresh fail-closed proofs",
     FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
     /cloudformation:DetectStackResourceDrift/u
   );
+});
+
+type AuthorityDigestRepresentation =
+  | "none"
+  | "lf"
+  | "crlf"
+  | "space"
+  | "cr"
+  | "double-lf"
+  | "tab"
+  | "bom";
+
+interface AuthorityProofFixture {
+  mode: "verify" | "verify-intrinsic";
+  representation?: AuthorityDigestRepresentation;
+  recordedDigest?: string;
+  mutateTemplate?: boolean;
+}
+
+const AUTHORITY_SOURCE_COMMIT = "a".repeat(40);
+
+function authorityEnvironment() {
+  return {
+    ...process.env,
+    APP_NAME: APP,
+    AWS_ACCOUNT_ID: ACCOUNT,
+    AWS_REGION: REGION,
+    GITHUB_ORGANIZATION: "upgradedev",
+    GITHUB_REPOSITORY_ID: "1285750381",
+    GITHUB_REPOSITORY_NAME: "archon-cockroach-memory",
+    GITHUB_REPOSITORY_OWNER_ID: "25751981",
+    GITHUB_OIDC_PROVIDER_ARN:
+      `arn:aws:iam::${ACCOUNT}:oidc-provider/` +
+      "token.actions.githubusercontent.com",
+  };
+}
+
+function renderAuthorityJson(
+  mode: "render-trust" | "render-policy" | "render-template"
+): Record<string, unknown> {
+  const result = spawnSync(
+    "bash",
+    [FOUNDATION_MIGRATION_AUTHORITY_SCRIPT, mode],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: authorityEnvironment(),
+    }
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    return `{${Object.keys(source)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson(source[key])}`
+      )
+      .join(",")}}`;
+  }
+  const primitive = JSON.stringify(value);
+  if (primitive === undefined) {
+    throw new TypeError("canonical JSON fixture contains an invalid value");
+  }
+  return primitive;
+}
+
+function sha256Utf8(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function representedAuthorityBytes(
+  canonical: string,
+  representation: AuthorityDigestRepresentation
+): string {
+  switch (representation) {
+    case "none":
+      return canonical;
+    case "lf":
+      return `${canonical}\n`;
+    case "crlf":
+      return `${canonical}\r\n`;
+    case "space":
+      return `${canonical} `;
+    case "cr":
+      return `${canonical}\r`;
+    case "double-lf":
+      return `${canonical}\n\n`;
+    case "tab":
+      return `${canonical}\t`;
+    case "bom":
+      return `\uFEFF${canonical}`;
+  }
+}
+
+function runAuthorityProof(fixture: AuthorityProofFixture) {
+  const fakeBin = mkdtempSync(
+    join(tmpdir(), "archon-foundation-authority-proof-")
+  );
+  try {
+    const trust = renderAuthorityJson("render-trust");
+    const policy = renderAuthorityJson("render-policy");
+    const expectedTemplate = renderAuthorityJson("render-template");
+    const liveTemplate = JSON.parse(
+      JSON.stringify(expectedTemplate)
+    ) as Record<string, unknown>;
+    if (fixture.mutateTemplate) {
+      liveTemplate.Description = `${String(liveTemplate.Description)} drift`;
+    }
+    const liveCanonical = canonicalJson(liveTemplate);
+    const representation = fixture.representation ?? "none";
+    const recordedDigest =
+      fixture.recordedDigest ??
+      sha256Utf8(representedAuthorityBytes(liveCanonical, representation));
+    const roleName = `${APP}-github-foundation-migration`;
+    const roleArn = `arn:aws:iam::${ACCOUNT}:role/${roleName}`;
+    const stackName = `${APP}-foundation-migration-authority`;
+    const stackId =
+      `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${stackName}/` +
+      "11111111-2222-3333-4444-555555555555";
+    const role = {
+      Role: {
+        Arn: roleArn,
+        MaxSessionDuration: 3600,
+        AssumeRolePolicyDocument: trust,
+        Tags: [
+          { Key: "Application", Value: APP },
+          { Key: "Environment", Value: "bootstrap" },
+          { Key: "Lifecycle", Value: "one-time-migration-authority" },
+          { Key: "ManagedBy", Value: "CloudFormation" },
+          { Key: "SourceCommit", Value: AUTHORITY_SOURCE_COMMIT },
+          {
+            Key: "AuthorityTemplateSha256",
+            Value: recordedDigest,
+          },
+        ],
+      },
+    };
+    const rolePolicy = {
+      RoleName: roleName,
+      PolicyName: "protected-foundation-storage-migration",
+      PolicyDocument: policy,
+    };
+    const stack = {
+      Stacks: [
+        {
+          StackName: stackName,
+          StackId: stackId,
+          StackStatus: "CREATE_COMPLETE",
+          EnableTerminationProtection: false,
+          NotificationARNs: [],
+          Capabilities: ["CAPABILITY_NAMED_IAM"],
+          Parameters: [
+            {
+              ParameterKey: "SourceCommit",
+              ParameterValue: AUTHORITY_SOURCE_COMMIT,
+            },
+            {
+              ParameterKey: "AuthorityTemplateSha256",
+              ParameterValue: recordedDigest,
+            },
+          ],
+          Tags: [
+            { Key: "SourceCommit", Value: AUTHORITY_SOURCE_COMMIT },
+            {
+              Key: "AuthorityTemplateSha256",
+              Value: recordedDigest,
+            },
+          ],
+          Outputs: [
+            {
+              OutputKey: "FoundationMigrationRoleArn",
+              OutputValue: roleArn,
+            },
+          ],
+        },
+      ],
+    };
+    const resources = {
+      StackResourceSummaries: [
+        {
+          LogicalResourceId: "FoundationMigrationRole",
+          PhysicalResourceId: roleName,
+          ResourceType: "AWS::IAM::Role",
+          ResourceStatus: "CREATE_COMPLETE",
+        },
+      ],
+    };
+    const traceFile = join(fakeBin, "trace.log");
+    writeFileSync(traceFile, "", "utf8");
+    executable(
+      join(fakeBin, "aws"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${FAKE_AUTHORITY_TRACE:?}"
+case "$*" in
+  *"iam get-role-policy"*) printf '%s\\n' "\${FAKE_AUTHORITY_POLICY:?}" ;;
+  *"iam get-role"*) printf '%s\\n' "\${FAKE_AUTHORITY_ROLE:?}" ;;
+  *"cloudformation describe-stacks"*) printf '%s\\n' "\${FAKE_AUTHORITY_STACK:?}" ;;
+  *"cloudformation get-template"*) printf '%s\\n' "\${FAKE_AUTHORITY_TEMPLATE:?}" ;;
+  *"cloudformation list-stack-resources"*) printf '%s\\n' "\${FAKE_AUTHORITY_RESOURCES:?}" ;;
+  *) echo "Unexpected aws invocation" >&2; exit 97 ;;
+esac
+`
+    );
+
+    const execution = spawnSync(
+      "bash",
+      [FOUNDATION_MIGRATION_AUTHORITY_SCRIPT, fixture.mode],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        env: {
+          ...authorityEnvironment(),
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          AWS_FOUNDATION_MIGRATION_ROLE_ARN: roleArn,
+          TARGET_SHA: AUTHORITY_SOURCE_COMMIT,
+          FAKE_AUTHORITY_TRACE: traceFile,
+          FAKE_AUTHORITY_ROLE: JSON.stringify(role),
+          FAKE_AUTHORITY_POLICY: JSON.stringify(rolePolicy),
+          FAKE_AUTHORITY_STACK: JSON.stringify(stack),
+          FAKE_AUTHORITY_TEMPLATE: JSON.stringify({
+            TemplateBody: liveTemplate,
+          }),
+          FAKE_AUTHORITY_RESOURCES: JSON.stringify(resources),
+        },
+      }
+    );
+    return {
+      execution,
+      trace: readFileSync(traceFile, "utf8"),
+      recordedDigest,
+      canonicalDigest: sha256Utf8(liveCanonical),
+    };
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+  }
+}
+
+test("foundation authority future digest is canonical and has no terminator", () => {
+  const template = renderAuthorityJson("render-template");
+  const digest = spawnSync(
+    "bash",
+    [FOUNDATION_MIGRATION_AUTHORITY_SCRIPT, "render-template-sha256"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: authorityEnvironment(),
+    }
+  );
+  assert.equal(digest.status, 0, digest.stderr);
+  const canonical = canonicalJson(template);
+  assert.equal(digest.stdout.trim(), sha256Utf8(canonical));
+  assert.notEqual(digest.stdout.trim(), sha256Utf8(`${canonical}\n`));
+  assert.notEqual(digest.stdout.trim(), sha256Utf8(`${canonical}\r\n`));
+});
+
+test("foundation intrinsic retirement accepts only exact none, LF, or CRLF bindings", () => {
+  for (const representation of ["none", "lf", "crlf"] as const) {
+    const result = runAuthorityProof({
+      mode: "verify-intrinsic",
+      representation,
+    });
+    assert.equal(result.execution.status, 0, result.execution.stderr);
+    const proof = JSON.parse(result.execution.stdout);
+    assert.equal(proof.schemaVersion, 2);
+    assert.equal(proof.recordedAuthorityTemplateSha256, result.recordedDigest);
+    assert.equal(proof.canonicalAuthorityTemplateSha256, result.canonicalDigest);
+    assert.equal(proof.recordedTemplateTerminator, representation);
+    assert.equal(
+      proof.templateCanonicalization,
+      "jq-sort-compact-no-terminator-v1"
+    );
+    assert.equal(proof.legacyTemplateDigestAccepted, representation !== "none");
+    assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
+  }
+
+  for (const representation of [
+    "space",
+    "cr",
+    "double-lf",
+    "tab",
+    "bom",
+  ] as const) {
+    const result = runAuthorityProof({
+      mode: "verify-intrinsic",
+      representation,
+    });
+    assert.notEqual(result.execution.status, 0, representation);
+    assert.match(result.execution.stderr, /template-digest-binding/u);
+    assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
+  }
+});
+
+test("foundation strict verification rejects legacy or modified authority bindings", () => {
+  const exact = runAuthorityProof({ mode: "verify", representation: "none" });
+  assert.equal(exact.execution.status, 0, exact.execution.stderr);
+  assert.equal(
+    JSON.parse(exact.execution.stdout).recordedTemplateTerminator,
+    "none"
+  );
+
+  for (const representation of ["lf", "crlf"] as const) {
+    const legacy = runAuthorityProof({ mode: "verify", representation });
+    assert.notEqual(legacy.execution.status, 0, representation);
+    assert.doesNotMatch(legacy.trace, /cloudformation delete-stack/u);
+  }
+
+  const unrelated = runAuthorityProof({
+    mode: "verify-intrinsic",
+    recordedDigest: "0".repeat(64),
+  });
+  assert.notEqual(unrelated.execution.status, 0);
+  assert.match(unrelated.execution.stderr, /template-digest-binding/u);
+  assert.doesNotMatch(unrelated.trace, /cloudformation delete-stack/u);
+
+  const modified = runAuthorityProof({
+    mode: "verify-intrinsic",
+    mutateTemplate: true,
+  });
+  assert.notEqual(modified.execution.status, 0);
+  assert.doesNotMatch(modified.trace, /cloudformation delete-stack/u);
 });
 
 test("legacy foundation workflow receipts hash change-set ARNs and S3 version IDs", () => {

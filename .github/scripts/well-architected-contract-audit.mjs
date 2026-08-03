@@ -789,6 +789,10 @@ const foundationFailedPlanCleanupStep = extractNamedWorkflowStep(
   foundationMigrationWorkflowSource,
   "Delete an unverified foundation migration plan",
 );
+const foundationProveAuthorityStep = extractNamedWorkflowStep(
+  foundationMigrationWorkflowSource,
+  "Prove exact one-time migration authority",
+);
 const foundationAbortJob = extractNamedWorkflowJob(
   foundationMigrationWorkflowSource,
   "abort-authority",
@@ -828,6 +832,8 @@ const foundationPhaseZeroContractValid =
   /authority_template=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template\s*\)/u.test(
     foundationPhaseZeroSource,
   ) &&
+  /jq -Scj/u.test(foundationPhaseZeroSource) &&
+  !/jq -Sc \./u.test(foundationPhaseZeroSource) &&
   /ParameterKey=SourceCommit,ParameterValue=\$\{SOURCE_COMMIT\}/u.test(
     foundationPhaseZeroSource,
   ) &&
@@ -864,11 +870,94 @@ const foundationPhaseZeroContractValid =
   /\(\.StackResourceSummaries \| length\) == 1/u.test(
     foundationMigrationAuthoritySource,
   ) &&
-  /No authority stack has been created as part of[\s\S]*?repository work/u.test(
+  /Repository[\s\S]*?source and CI never create this authority/u.test(
     foundationMigrationRunbookSource,
   ) &&
   /pre-binding contract cannot be[\s\S]*?administrator must delete it and[\s\S]*?recreate it from Phase 0/u.test(
     foundationMigrationRunbookSource,
+  );
+const foundationAuthorityTemplateDigestContractValid =
+  /canonical_json_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /canonical_template_body_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /render-template-sha256\)\s*render_template \| canonical_json_sha256/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /live_template_digest="\$\(\s*canonical_template_body_sha256 "\$live_template"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  (foundationMigrationAuthoritySource.match(
+    /legacy_lf_template_body_sha256/gu,
+  ) ?? []).length === 2 &&
+  (foundationMigrationAuthoritySource.match(
+    /legacy_crlf_template_body_sha256/gu,
+  ) ?? []).length === 2 &&
+  /recorded_template_terminator="none"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /recorded_template_terminator="lf"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /recorded_template_terminator="crlf"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /template_canonicalization="jq-sort-compact-no-terminator-v1"/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  /template-digest-binding/u.test(foundationMigrationAuthoritySource) &&
+  !/aws cloudformation delete-stack/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
+  [
+    "recordedAuthorityTemplateSha256",
+    "canonicalAuthorityTemplateSha256",
+    "templateCanonicalization",
+    "recordedTemplateTerminator",
+    "legacyTemplateDigestAccepted",
+  ].every((field) => foundationMigrationAuthoritySource.includes(field)) &&
+  /\.verificationMode == "verify"/u.test(foundationProveAuthorityStep) &&
+  /\.recordedAuthorityTemplateSha256\s*== \.canonicalAuthorityTemplateSha256/u.test(
+    foundationProveAuthorityStep,
+  ) &&
+  /\.recordedTemplateTerminator == "none"/u.test(
+    foundationProveAuthorityStep,
+  ) &&
+  /\.legacyTemplateDigestAccepted == false/u.test(
+    foundationProveAuthorityStep,
+  ) &&
+  /recordedTemplateTerminator \| IN\("none", "lf", "crlf"\)/u.test(
+    foundationAbortStep,
+  ) &&
+  /legacyTemplateDigestAccepted[\s\S]*?recordedTemplateTerminator != "none"/u.test(
+    foundationAbortStep,
+  ) &&
+  /jq -Scj -s[\s\S]*?expected exactly one historical JSON document/u.test(
+    foundationAbortStep,
+  ) &&
+  /canonicalAuthorityTemplateSha256/u.test(foundationAbortStep) &&
+  /matchesCanonicalLiveTemplate: true/u.test(foundationAbortReceiptSource) &&
+  /recordedDigestCompatibilityVerified: true/u.test(
+    foundationAbortReceiptSource,
+  ) &&
+  !/matchesRecordedAndLiveTemplate/u.test(foundationAbortReceiptSource) &&
+  /destructive_actions_started=false/u.test(foundationAbortStep) &&
+  /destructiveActionsStarted: \$destructiveActionsStarted/u.test(
+    foundationAbortStep,
+  ) &&
+  /partialChangeSetCleanup:[\s\S]*?deletedCount: \(\$plans\[0\] \| length\)/u.test(
+    foundationAbortStep,
+  ) &&
+  /destructiveActionsStarted: true/u.test(foundationAbortReceiptSource) &&
+  foundationAbortStep.indexOf("phase=authority-proof-contract") >= 0 &&
+  foundationAbortStep.indexOf("phase=authority-proof-contract") <
+    foundationAbortStep.indexOf("aws cloudformation delete-change-set") &&
+  foundationAbortStep.indexOf("phase=authority-proof-contract") <
+    foundationAbortStep.indexOf("aws cloudformation delete-stack") &&
+  /schemaVersion == 2[\s\S]*?verificationMode == "verify-intrinsic"[\s\S]*?recordedTemplateTerminator/u.test(
+    foundationRetireStep,
   );
 const foundationSameRunCleanupValid =
   /always\(\)/u.test(foundationFailedPlanCleanupStep) &&
@@ -1036,6 +1125,7 @@ const foundationDestructiveTransitionsValid =
 const foundationLifecycleSemanticsValid =
   foundationLifecycleFilesValid &&
   foundationPhaseZeroContractValid &&
+  foundationAuthorityTemplateDigestContractValid &&
   foundationSameRunCleanupValid &&
   foundationAbortContractValid &&
   foundationDestructiveTransitionsValid;
