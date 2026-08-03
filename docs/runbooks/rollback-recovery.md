@@ -26,7 +26,8 @@ A measured drill duration is evidence, not an approved objective by itself.
    it has no environment, OIDC permission, AWS role, or AWS API access.
 3. Treat active deploys, proved durable commits, and successful receipt-bound
    watchdog runs as `noop`. A routine `noop` exits before a protected
-   environment or the shared `aws-production-delivery` serialization group.
+   environment or the shared `aws-shared-control-plane-mutation` serialization
+   group.
    Only the documented GitHub active statuses are accepted; unknown statuses,
    incomplete job inventories, or more than one API page fail closed.
 4. For a GitHub candidate, require the matching protected `staging` or
@@ -34,7 +35,7 @@ A measured drill duration is evidence, not an approved objective by itself.
    that protected job, re-read the private S3 ledger and require `recover` with
    the exact same source run ID, attempt, and candidate SHA before claiming a
    lease or performing any mutation.
-5. The mutation job alone joins `aws-production-delivery`; the recovery
+5. The mutation job alone joins `aws-shared-control-plane-mutation`; the recovery
    watchdog has its own queue so it cannot deadlock normal delivery while
    performing read-only classification.
 6. Verify application health, immutable receipt, lease release, idempotent
@@ -110,6 +111,25 @@ The credential-free watchdog also proves complete `total_count`-bound run,
 job, and artifact inventories. It accepts trusted historical `workflow_run`
 deployments and lease owners during migration, while never classifying a
 manual dispatch as a production recovery candidate.
+
+## New-release control-plane fence
+
+Both deployment mutation jobs hold the shared
+`aws-shared-control-plane-mutation` mutex. After any exact-owner reconciliation
+of an interrupted same-run greenfield stack, but before stack-protection or any
+new release mutation, the job revalidates the paginated global-latest
+foundation and staging/production edge runs from one shared edge snapshot. It
+fails closed unless their source SHA, run IDs/attempts, conclusions, and allowed
+operations match the
+source-gate receipts and the candidate is still the current `main` head.
+
+That pre-fence same-run reconciliation is a deliberate recovery-only exception:
+it may restore/delete only an orphaned candidate whose cryptographic owner and
+recovery evidence match the current delivery run. It cannot deploy a candidate
+or mutate foundation/edge controls. The canonical, timestamped fence proof is
+bound to environment, job, deploy run/attempt, mutex group, main SHA, and exact
+control operations; the final deployment receipt embeds it with a reproducible
+SHA-256.
 
 No recovery path may introduce an application or recovery workload in
 `us-west-2`.

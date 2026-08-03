@@ -1,4 +1,5 @@
 name: Manage AWS Edge Controls
+run-name: Edge ${{ inputs.environment }} ${{ inputs.operation }} ${{ inputs.target_sha }}
 
 on:
   workflow_dispatch:
@@ -36,6 +37,7 @@ on:
 concurrency:
   group: aws-edge-controls
   cancel-in-progress: false
+  queue: max
 
 permissions:
   actions: read
@@ -394,6 +396,10 @@ jobs:
     needs: authorize
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      group: aws-shared-control-plane-mutation
+      cancel-in-progress: false
+      queue: max
     environment: ${{ inputs.operation == 'cleanup' && 'edge-cleanup' || 'edge-controls' }}
     permissions:
       actions: read
@@ -1740,10 +1746,15 @@ jobs:
           echo "EXECUTION_CLIENT_TOKEN=$client_token" >>"$GITHUB_ENV"
 
       - name: Prove exact deployed stack before lifecycle protection
-        if: inputs.operation == 'apply' || inputs.operation == 'finalize'
+        if: (always() && inputs.operation == 'apply') || (success() && inputs.operation == 'finalize')
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${EDGE_STACK_NAME:-}"
+          test -n "${EDGE_PROTECTION_TEMPLATE:-}"
+          test -n "${EDGE_PROTECTION_TEMPLATE_DIGEST:-}"
+          test -n "${EDGE_PROTECTION_POLICY:-}"
+          test -n "${EDGE_PROTECTION_POLICY_DIGEST:-}"
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           test "$(sha256sum "$EDGE_PROTECTION_TEMPLATE" | awk '{print $1}')" = \
             "$EDGE_PROTECTION_TEMPLATE_DIGEST"
@@ -1754,10 +1765,55 @@ jobs:
           lifecycle_resources="${RUNNER_TEMP:?}/edge-lifecycle-resources.json"
           lifecycle_template_response="${RUNNER_TEMP:?}/edge-lifecycle-template-response.json"
           lifecycle_template="${RUNNER_TEMP:?}/edge-lifecycle-template.yaml"
-          aws cloudformation describe-stacks \
-            --stack-name "$EDGE_STACK_NAME" \
-            --region "$AWS_REGION" \
-            --output json >"$lifecycle_stack"
+          lifecycle_error="${RUNNER_TEMP:?}/edge-lifecycle-stack.err"
+          lifecycle_terminal=false
+          lifecycle_status=UNKNOWN
+          for ((attempt = 1; attempt <= 120; attempt++)); do
+            if aws cloudformation describe-stacks \
+                --stack-name "$EDGE_STACK_NAME" \
+                --region "$AWS_REGION" \
+                --output json >"$lifecycle_stack" 2>"$lifecycle_error"; then
+              jq -e '(.Stacks | length) == 1' \
+                "$lifecycle_stack" >/dev/null
+              lifecycle_status="$(
+                jq -er '.Stacks[0].StackStatus' "$lifecycle_stack"
+              )"
+              case "$lifecycle_status" in
+                CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE|\
+                ROLLBACK_COMPLETE|REVIEW_IN_PROGRESS)
+                  lifecycle_terminal=true
+                  break
+                  ;;
+                CREATE_IN_PROGRESS|ROLLBACK_IN_PROGRESS|\
+                UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS|\
+                UPDATE_ROLLBACK_IN_PROGRESS|\
+                UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
+                  ;;
+                CREATE_FAILED|ROLLBACK_FAILED|UPDATE_FAILED|\
+                UPDATE_ROLLBACK_FAILED)
+                  echo \
+                    "Edge lifecycle reconciliation reached $lifecycle_status." \
+                    >&2
+                  false
+                  ;;
+                *)
+                  echo \
+                    "Unexpected edge lifecycle state: $lifecycle_status" \
+                    >&2
+                  false
+                  ;;
+              esac
+            elif grep -Fq "ValidationError" "$lifecycle_error" &&
+                grep -Fq "does not exist" "$lifecycle_error"; then
+              echo "The exact edge candidate stack does not exist." >&2
+              false
+            else
+              false
+            fi
+            test "$attempt" -lt 120
+            sleep 5
+          done
+          test "$lifecycle_terminal" = "true"
           lifecycle_stack_id="$(
             jq -er '.Stacks[0].StackId' "$lifecycle_stack"
           )"
@@ -1894,11 +1950,13 @@ jobs:
           } >>"$GITHUB_ENV"
 
       - name: Set exact edge stack lifecycle protections
-        if: inputs.operation == 'apply' || inputs.operation == 'finalize'
+        if: (always() && inputs.operation == 'apply' && env.EDGE_BOUND_STACK_ID != '') || (success() && inputs.operation == 'finalize')
         shell: bash
         run: |
           set -euo pipefail
           lifecycle_probe="${RUNNER_TEMP:?}/edge-lifecycle-before-mutation.json"
+          lifecycle_protected="${RUNNER_TEMP:?}/edge-lifecycle-protected.json"
+          lifecycle_policy="${RUNNER_TEMP:?}/edge-lifecycle-protected-policy.json"
           aws cloudformation describe-stacks \
             --stack-name "$EDGE_BOUND_STACK_ID" \
             --region "$AWS_REGION" \
@@ -1926,6 +1984,52 @@ jobs:
             --stack-name "$EDGE_BOUND_STACK_ID" \
             --enable-termination-protection \
             --region "$AWS_REGION"
+          aws cloudformation describe-stacks \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_protected"
+          aws cloudformation get-stack-policy \
+            --stack-name "$EDGE_BOUND_STACK_ID" \
+            --region "$AWS_REGION" \
+            --output json >"$lifecycle_policy"
+          jq -e \
+            --arg stack "$EDGE_STACK_NAME" \
+            --arg stackId "$EDGE_BOUND_STACK_ID" \
+            '
+              (.Stacks | length) == 1
+              and .Stacks[0].StackName == $stack
+              and .Stacks[0].StackId == $stackId
+              and .Stacks[0].EnableTerminationProtection == true
+              and ((.Stacks[0].RoleARN // null) == null)
+              and (
+                .Stacks[0].StackStatus == "CREATE_COMPLETE"
+                or .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                or .Stacks[0].StackStatus
+                  == "UPDATE_ROLLBACK_COMPLETE"
+              )
+            ' "$lifecycle_protected" >/dev/null
+          jq -e \
+            --slurpfile expected "$EDGE_PROTECTION_POLICY" \
+            '(.StackPolicyBody | fromjson) == $expected[0]' \
+            "$lifecycle_policy" >/dev/null
+
+          if [ "$OPERATION" = "apply" ] &&
+              [ -f "${RECEIPT_FILE:-}" ]; then
+            receipt_next="${RUNNER_TEMP:?}/edge-lifecycle-reconciled-receipt.json"
+            jq \
+              --arg stackIdSha256 "$EDGE_BOUND_STACK_ID_SHA256" \
+              '.reconciliation = {
+                performed: true,
+                exactCandidateTemplate: true,
+                exactResourceInventory: 9,
+                stackIdSha256: $stackIdSha256,
+                stackPolicyProtected: true,
+                terminationProtection: true,
+                cancellationSafeLifecycleProtection: true,
+                fullLiveControlProofPending: true
+              }' "$RECEIPT_FILE" >"$receipt_next"
+            mv "$receipt_next" "$RECEIPT_FILE"
+          fi
 
       - name: Prove historical finalize protection without current-control claims
         if: inputs.operation == 'finalize' && env.EDGE_HISTORICAL_FINALIZE == 'true' && env.EDGE_CURRENT_SEMANTICS_MATCH == 'false'
@@ -2920,8 +3024,58 @@ jobs:
                   live: true
                 }
               }
+              | if .operation == "apply"
+                  and .reconciliation.cancellationSafeLifecycleProtection
+                    == true
+                then .reconciliation.fullLiveControlProofPending = false
+                  | .reconciliation.fullLiveControlProofCompleted = true
+                else .
+                end
             ' "$RECEIPT_FILE" >"$receipt_next"
           mv "$receipt_next" "$RECEIPT_FILE"
+
+      - name: Finalize any pending edge apply receipt
+        if: always() && inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP:?}/edge-controls-receipt.json"
+          receipt_next="${RUNNER_TEMP:?}/edge-apply-finalizer.json"
+          generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -f "$receipt" ] && jq -e '
+              .operation == "apply"
+              and .result == "apply-pending"
+            ' "$receipt" >/dev/null; then
+            lifecycle_protected="$(
+              jq -r '.reconciliation.cancellationSafeLifecycleProtection // false' \
+                "$receipt"
+            )"
+            result=apply-failed-state-unknown
+            destructive_state_known=false
+            if [ "$lifecycle_protected" = "true" ]; then
+              result=apply-failed-candidate-lifecycle-protected
+              destructive_state_known=true
+            fi
+            jq \
+              --arg generatedAt "$generated_at" \
+              --arg result "$result" \
+              --argjson destructiveStateKnown "$destructive_state_known" \
+              '. + {
+                ok: false,
+                result: $result,
+                generatedAt: $generatedAt,
+                destructiveStateKnown: $destructiveStateKnown,
+                pendingReceiptFinalized: true,
+                failure: {
+                  phase: "pre-terminal-live-proof-or-interrupted"
+                }
+              }
+              | if .reconciliation.cancellationSafeLifecycleProtection == true
+                then .reconciliation.fullLiveControlProofPending = true
+                else .
+                end' "$receipt" >"$receipt_next"
+            mv "$receipt_next" "$receipt"
+          fi
 
       - name: Upload sanitized edge-control receipt
         if: always()

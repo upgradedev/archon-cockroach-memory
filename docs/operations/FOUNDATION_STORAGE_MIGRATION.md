@@ -1,8 +1,12 @@
 # Protected foundation storage migration
 
-Status: source-complete; no live migration has been run. Creating the one-time
-authority, applying the foundation change set, and retiring that authority are
-external AWS mutations and require explicit human approval.
+Status: no foundation change set has been applied. A legacy self-deleting abort
+attempt removed the temporary IAM role but left its CloudFormation stack in
+`DELETE_FAILED`. Do not rerun that path. The v2 non-self-deleting lifecycle is
+repository-prepared, but recovery of the legacy orphaned stack remains pending
+because that historical stack is not v2-eligible; the new source contract also
+still requires exact-main CI validation. No foundation mutation or legacy
+recovery is claimed complete by this document.
 
 ## Purpose
 
@@ -17,13 +21,21 @@ the application:
 - generated staging and production origin-verification secrets whose values
   are never read by the workflow;
 - deterministic, repository-bound edge and FinOps control roles, including a
-  separate FinOps CloudFormation execution role; and
+  separate FinOps CloudFormation execution role;
+- a permanent `FoundationPromotionRole` controller and a dedicated
+  `FoundationAuthorityRetirementExecutionRole` used by CloudFormation only to
+  retire the temporary authority; and
 - a target stack policy that prevents replacement or deletion of the new
   control-plane resources.
 
 The application workload remains in `eu-west-1`. `us-east-1` is used only by
 CloudFront WAF and AWS billing control planes. This procedure creates nothing
 in `us-west-2`.
+
+All AWS mutation jobs join the queued
+`aws-shared-control-plane-mutation` job-level concurrency group. This serializes
+bootstrap, foundation migration/abort/retirement, edge controls, application
+deployment, and recovery without locking the read-only Deploy source gate.
 
 The approved incremental fixed control-plane ceiling is `$26.00/month`. The
 source cost contract is `$22.40/month` initially and at most `$24.40/month`
@@ -33,6 +45,9 @@ alarms, two Secrets Manager secrets, and the single application KMS key. WAF
 requests, log ingestion/storage, S3, and EventBridge usage remain variable
 and are not represented as fixed cost. Any source change that exceeds the
 ceiling must fail CI and requires a new explicit approval before AWS planning.
+IAM roles have no fixed monthly charge, so the dedicated retirement execution
+role adds `$0` to this projection and the approved ceiling remains
+`$26.00/month`.
 
 ## Authority model
 
@@ -49,7 +64,45 @@ IDs, `refs/heads/main`, the protected `bootstrap` environment, and the
 `Foundation Storage Migration` workflow. Its inline policy is generated from
 [`aws/foundation-migration-authority.sh`](../../aws/foundation-migration-authority.sh)
 and permits only the enumerated additive migration, its encrypted recovery
-anchor, and its own retirement.
+anchor, read-only inspection of its own stack, and bounded cleanup of verified
+unexecuted migration plans. It has no `cloudformation:DeleteStack`,
+`iam:PassRole`, or direct permission to delete itself.
+
+Authority retirement is deliberately split across two permanent roles in the
+foundation stack. `FoundationPromotionRole` is the controller: it may call
+`DeleteStack` only for the exact authority stack and may pass only
+`FoundationAuthorityRetirementExecutionRole`, only to
+`cloudformation.amazonaws.com`, enforced by the
+`iam:PassedToService=cloudformation.amazonaws.com` condition. The workflow
+supplies that exact execution role ARN through CloudFormation's `--role-arn`;
+it never relies on a default or mutable role. The execution role trusts only
+CloudFormation and can remove only the exact temporary migration role and its
+inline policy. The controller, service role, stack policy, and workflow all
+enforce this separation, so the temporary authority never deletes the
+credentials executing its own retirement.
+
+The terminal authority proof is schema v2 and records
+`terminalLifecycleSafetyContractVersion=2`. Both permanent roles are bound by
+stable IAM identity, policy, attachment inventory, and CloudFormation drift
+evidence. The storage proof and every promotion/retirement gate require all
+eight sanitized fields:
+
+- `controllerRoleIdSha256`, `controllerPolicySha256`,
+  `controllerInventorySha256`, and `controllerDriftSha256`; and
+- `executionRoleIdSha256`, `executionPolicySha256`,
+  `executionInventorySha256`, and `executionDriftSha256`.
+
+An ARN hash alone is insufficient because an IAM role name and ARN can be
+reused after deletion. The RoleId and inventory hashes bind the live principal
+and its attachment state, while the drift hashes bind both roles to their exact
+CloudFormation resources.
+
+Historical authority source is untrusted input at the destructive boundary.
+The v2 retirement path fetches the recorded ancestor file only as inert data,
+proves its ancestry, hashes its bytes, and binds that hash and the recorded
+template digest into the receipt. It never sources, invokes, or marks the
+fetched file executable. This no-execution boundary is also required by abort
+and the canonical v2 orphan-reconciliation path.
 
 No mutable GitHub role-ARN variable is used. The workflow derives the exact ARN
 from the validated AWS account and application name.
@@ -155,23 +208,24 @@ green main SHA:
    [`aws/foundation-storage-migration-policy.json`](../../aws/foundation-storage-migration-policy.json).
    Any remove, import, replacement, unexpected parameter, tag, role ARN,
    notification ARN, rollback trigger, or resource fails closed.
-3. If the one-time authority must be retired without continuing the normal
-   plan/apply/retire sequence, dispatch `abort` from the current green `main`
-   SHA with
-   `ABORT-FOUNDATION-MIGRATION-AND-RETIRE-AUTHORITY`. This is a terminal
-   authority-cleanup path, not a foundation rollback. It does not require the
-   permanent foundation role. The job intrinsically proves the historical
-   authority creation binding, trust, policy, template, and single resource.
-   It fetches the generator from the recorded, verified ancestor commit, runs
-   only its `render-template` mode in a credential-free environment, and
-   requires its no-terminator canonical digest to equal the live canonical
-   template digest. The recorded binding must independently equal that same
-   canonical byte sequence with exactly `none`, LF, or CRLF termination; legacy
-   termination is accepted only by this intrinsic retirement path. It then
+3. If the migration must stop before `apply`, dispatch `abort` from the current
+   green `main` SHA with
+   `ABORT-FOUNDATION-MIGRATION-CLEAN-PLANS`. This operation only removes
+   authorized, unexecuted migration plans; it is neither a foundation rollback
+   nor authority retirement. It does not require the post-migration permanent
+   role. The job must intrinsically prove the historical authority creation
+   binding, trust, policy, template, and single resource. Historical source is
+   fetched only as data from the recorded, verified ancestor, byte-hashed, and
+   never executed or sourced. The recorded template binding must equal the
+   canonical live template byte sequence with exactly `none`, LF, or CRLF
+   termination; legacy termination is accepted only by this intrinsic stop
+   path. The workflow source now enforces that no-execution boundary; until
+   exact-main CI proves it, do not dispatch `abort`. Once proved, the job
    proves the target foundation is stable; and snapshots its stack, template,
-   policy, and resource inventory. If `abort` succeeds, stop this sequence.
+   policy, and resource inventory. If `abort` succeeds, stop this sequence and
+   arrange explicit administrator retirement of the preserved authority.
    Any digest, representation, historical-source, or body mismatch produces a
-   sanitized failure phase and stops before change-set or authority deletion.
+   sanitized failure phase and stops before change-set deletion.
    Failure receipts also state whether a destructive call was attempted and
    preserve only already-proved, sanitized deleted-plan records.
 4. Before deleting anything, `abort` enumerates every target-stack change set.
@@ -182,13 +236,21 @@ green main SHA:
    its description, historical repository commit, source-template digest,
    parameters, tags, target stack, and non-importing UPDATE contract. It then
    re-describes the exact ID and safe state immediately before every deletion.
-   A second complete inventory must be empty immediately before authority
-   deletion, so a concurrent unrelated, pending, or executing plan fails closed.
-   The target foundation projection, original
+   A second complete inventory must be empty before completion, so a concurrent
+   unrelated, pending, or executing plan fails closed. The target foundation
+   projection, original
    template, stack policy, and resource inventory must remain byte-digest
-   identical before and after cleanup. Finally the exact authority stack is
-   deleted and both its stack and role are proved absent; only sanitized hashes
-   and source digests enter the receipt.
+   identical before and after cleanup. `abort` never calls `DeleteStack` and
+   leaves both the authority stack and role unchanged. Its receipt explicitly
+   records `authorityRetired=false` and `unchangedDuringAbort=true`. It does not
+   infer who can retire the authority: before the post-migration controller is
+   proved it records `externalAdministratorRetirementRequired=null`,
+   `externalAdministratorRequirementKnown=false`,
+   `nonSelfDeletingExecutorAvailableBeforeApply=null`, and
+   `permanentRetirementControllerAvailabilityKnown=false`.
+   `preMigrationStateVerified` records only what the run actually proved and is
+   never inferred from an empty plan inventory. Only sanitized hashes and
+   source digests enter the receipt.
 5. Otherwise dispatch `apply` for the same SHA with
    `APPLY-PROTECTED-FOUNDATION-STORAGE-MIGRATION`.
 6. Review the live storage, secret-metadata, role, bucket-policy,
@@ -200,8 +262,30 @@ green main SHA:
    stack-policy comparisons, permanent-role trust/policy and CloudFormation
    `IN_SYNC` drift proof, and the empty all-change-set inventory. It requires
    the fresh controls digest to match the preceding permanent-role proof and
-   binds a fresh composite digest into the receipt. The temporary stack then
-   deletes itself and the workflow proves both stack and role are absent.
+   binds a fresh composite digest into the receipt. The workflow assumes
+   `FoundationPromotionRole`, proves both permanent roles and their exact
+   RoleIds, policies, attachment inventories, and `IN_SYNC` drift hashes, and
+   calls `DeleteStack` for the exact authority stack with the
+   exact `FoundationAuthorityRetirementExecutionRole` ARN. CloudFormation—not
+   the temporary role—removes the temporary role and stack. The workflow then
+   proves both are absent while the permanent controller and execution role
+   remain exact and available. A sanitized retirement receipt is initialized
+   before AWS access; on any failure it records the last completed phase,
+   whether deletion started, and only controller/service-role digests and
+   absence facts already proved. It never turns an ambiguous deletion outcome
+   into a successful retirement claim.
+   A `CREATE_COMPLETE` v2 authority is checked with `verify-intrinsic`. A v2
+   `DELETE_FAILED` authority whose temporary role still exists may use the
+   narrow `verify-retirement-retry` contract and only a standard delete retry.
+   A canonical v2 `DELETE_FAILED` authority whose role is already absent uses
+   `verify-retirement-orphaned`, two exact `GetRole -> NoSuchEntity` proofs,
+   and `STANDARD --retain-resources FoundationMigrationRole`. The targeted
+   retain protects against deleting a same-name role recreated during the
+   proof-to-delete interval; the receipt states that no physical role was
+   deleted or retained by that run.
+   The recorded historical source is fetched and hashed as data; it is never
+   executed. All three modes reject the known legacy orphan because its
+   authority template does not contain the v2 terminal-safety contract.
 8. Dispatch `verify` for the same SHA with an empty confirmation. This uses
    only the permanent foundation role and produces the exact receipt consumed
    by the application deployment source gate.
@@ -217,15 +301,31 @@ versioned foundation artifact namespace. The receipt binds its object version,
 checksum, encryption mode, and manifest digest.
 
 That archive is evidence and a recovery input; it is not an automatic rollback
-promise. The stack policy is restored automatically only before execution is
-dispatched, or after the workflow observes the exact terminal
-`UPDATE_ROLLBACK_COMPLETE` state. After dispatch, ambiguous CLI, network, or
-polling failures retain the target policy and fail closed; the error trap never
-restores the old policy. A post-success reversion is a
-separate destructive change, requires a new approved recovery procedure, and
-must account for the retained application KMS key and alias, secrets, buckets,
-and IAM roles.
+promise. Immediately before `ExecuteChangeSet`, the workflow installs and
+re-reads the exact legacy rollback-safe policy, even if a prior interrupted run
+had already installed the final policy. That leaves candidate resources
+removable by a legitimate CloudFormation rollback. After an observed
+`UPDATE_COMPLETE`, the execution step immediately installs and re-reads the
+final protective policy. A separate `always()` reconciliation step then waits
+for a terminal `UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE`, hashes the live
+original template, selects the final policy only when the candidate digest is
+live and otherwise selects the rollback-safe policy, applies it, and re-reads
+it. The apply run succeeds only when the candidate is present. Re-running
+`apply` can finish protection reconciliation without replaying an already-live
+migration. A post-success reversion is a separate destructive change, requires
+a new approved recovery procedure, and must account for the retained
+application KMS key and alias, secrets, buckets, and IAM roles.
 Never improvise deletion or replacement of retained resources.
+
+The repository now contains a pipeline-owned orphan reconciliation only for a
+canonical v2 authority. The known legacy `DELETE_FAILED` authority remains an
+unresolved incident because its physical role is absent and its historical
+template predates the v2 terminal-safety marker; fail-closed verification
+therefore rejects it before mutation. Do not issue a manual `DeleteStack`,
+`--retain-resources`, or force-delete command from this runbook. Recovering that
+legacy shell still requires a separately approved, source-bound external-admin
+procedure with stop-on-diff evidence proving both stack-record and physical-role
+absence.
 
 The `plan`/`apply` job also has same-run `always()` cleanup for a plan that was
 created or loaded but failed creation, loading, or exact inspection. Cleanup
@@ -254,9 +354,13 @@ All uploaded evidence is SHA-bound and sanitized:
   proofs, plus S3-managed `AES256` CloudFront-log encryption, bucket-policy,
   lifecycle, logging, secret-metadata, and OIDC trust proofs;
 - edge and FinOps controller/execution role ARN digests, never raw ARNs; and
-- proof that the temporary authority was retired, either after the migrated
-  permanent authority was proved or through the bounded no-foundation-mutation
-  `abort` path.
+- permanent controller and CloudFormation retirement-execution-role RoleId,
+  policy, attachment-inventory, and drift digests; exact
+  `PassRole`/service-role binding; `selfDeletion=false`; historical-source byte
+  and ancestry binding without source execution; and proof that normal
+  retirement removed the temporary stack and role; or, for `abort`, explicit
+  `authorityRetired=false` plus truthful unknown administrator/controller
+  availability fields.
 
 Secret values, account IDs, account-bearing ARNs, credentials, and rendered
 temporary templates must not be placed in repository files, logs, or uploaded

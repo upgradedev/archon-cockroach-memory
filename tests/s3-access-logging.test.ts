@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { parse as parseYaml } from "yaml";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BOOTSTRAP = readFileSync(
@@ -37,6 +38,28 @@ const FOUNDATION_MIGRATION_AUTHORITY_SOURCE = readFileSync(
 );
 const DEPLOY_WORKFLOW = readFileSync(
   join(ROOT, ".github", "workflows", "deploy-aws.yml"),
+  "utf8"
+);
+const EDGE_CONTROLS_WORKFLOW = readFileSync(
+  join(ROOT, ".github", "workflows", "edge-controls.yml"),
+  "utf8"
+);
+const RECOVERY_WORKFLOW = readFileSync(
+  join(ROOT, ".github", "workflows", "recover-aws.yml"),
+  "utf8"
+);
+const CI_WORKFLOW = readFileSync(
+  join(ROOT, ".github", "workflows", "ci.yml"),
+  "utf8"
+);
+const CONTROL_PLANE_FENCE_SCRIPT = join(
+  ROOT,
+  ".github",
+  "scripts",
+  "revalidate-aws-control-plane-fence.sh"
+);
+const CONTROL_PLANE_FENCE_SOURCE = readFileSync(
+  CONTROL_PLANE_FENCE_SCRIPT,
   "utf8"
 );
 const PROOF_SCRIPT = join(ROOT, "aws", "prove-s3-access-logging.sh");
@@ -115,6 +138,32 @@ function workflowJob(source: string, id: string): string {
     )?.[0] ?? ""
   );
 }
+
+test("AWS control-plane mutation jobs share one queued mutex", () => {
+  const mutationJobs: Array<[string, string]> = [
+    [WORKFLOW, "foundation"],
+    [FOUNDATION_MIGRATION_WORKFLOW, "migrate"],
+    [FOUNDATION_MIGRATION_WORKFLOW, "abort-authority"],
+    [FOUNDATION_MIGRATION_WORKFLOW, "retire-authority"],
+    [EDGE_CONTROLS_WORKFLOW, "edge"],
+    [DEPLOY_WORKFLOW, "deploy-staging"],
+    [DEPLOY_WORKFLOW, "deploy-production"],
+    [RECOVERY_WORKFLOW, "recover-staging"],
+    [RECOVERY_WORKFLOW, "recover-production"],
+  ];
+  const mutex =
+    /    concurrency:\r?\n      group: aws-shared-control-plane-mutation\r?\n      cancel-in-progress: false\r?\n      queue: max/u;
+
+  for (const [source, jobId] of mutationJobs) {
+    const job = workflowJob(source, jobId);
+    assert.ok(job.length > 0, jobId);
+    assert.match(job, mutex, jobId);
+  }
+  assert.doesNotMatch(
+    workflowJob(DEPLOY_WORKFLOW, "source-gate"),
+    /aws-shared-control-plane-mutation/u
+  );
+});
 
 test("S3 logging IaC retains and hardens the non-recursive archive", () => {
   assert.match(
@@ -286,7 +335,7 @@ test("foundation migration receipts hash account-bearing evidence locators", () 
   );
 });
 
-test("foundation migration cleanup and abort inventory plans before sanitized retirement", () => {
+test("foundation migration cleanup and abort preserve authority for separate retirement", () => {
   const sameRunCleanup = workflowStep(
     FOUNDATION_MIGRATION_WORKFLOW,
     "Delete an unverified foundation migration plan"
@@ -297,11 +346,16 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
   );
   const abort = workflowStep(
     abortJob,
-    "Prove stable foundation, clean safe plans, and delete authority"
+    "Prove stable foundation and clean only authorized unexecuted plans"
+  );
+  const abortFinalizer = workflowStep(
+    abortJob,
+    "Finalize any untrapped abort failure receipt"
   );
   assert.ok(sameRunCleanup.length > 0);
   assert.ok(abortJob.length > 0);
   assert.ok(abort.length > 0);
+  assert.ok(abortFinalizer.length > 0);
 
   assert.match(sameRunCleanup, /always\(\)/u);
   assert.match(sameRunCleanup, /steps\.create_plan\.outcome == 'failure'/u);
@@ -320,8 +374,78 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
   );
   assert.match(
     FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
-    /Sid: "RetireAuthorityStack"[\s\S]*?"cloudformation:ListStackResources"/u
+    /Sid: "InspectAuthorityStack"[\s\S]*?"cloudformation:DescribeStackEvents"[\s\S]*?"cloudformation:DescribeStacks"[\s\S]*?"cloudformation:GetTemplate"[\s\S]*?"cloudformation:ListStackResources"/u
   );
+  const renderedAuthority = renderAuthorityJson("render-policy") as {
+    Statement: Array<{
+      Sid: string;
+      Action: string | string[];
+      Resource: string | string[];
+    }>;
+  };
+  const renderedAuthorityPolicy = JSON.stringify(renderedAuthority);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(renderedAuthority), "utf8") <= 10_240,
+    "FoundationMigrationRole aggregate inline policy exceeds 10,240 characters"
+  );
+  assert.doesNotMatch(
+    renderedAuthorityPolicy,
+    /cloudformation:DeleteStack|iam:PassRole/u
+  );
+  const newRoleAuthority = renderedAuthority.Statement.find(
+    ({ Sid }) => Sid === "ManageExactNewFoundationRolesViaCloudFormation"
+  );
+  const existingRoleAuthority = renderedAuthority.Statement.find(
+    ({ Sid }) => Sid === "ModifyExactExistingFoundationRolesViaCloudFormation"
+  );
+  const ownAuthorityInspection = renderedAuthority.Statement.find(
+    ({ Sid }) => Sid === "InspectOwnAuthorityContract"
+  );
+  const authorityStackInspection = renderedAuthority.Statement.find(
+    ({ Sid }) => Sid === "InspectAuthorityStack"
+  );
+  assert.ok(newRoleAuthority);
+  assert.ok(existingRoleAuthority);
+  assert.ok(ownAuthorityInspection);
+  assert.ok(authorityStackInspection);
+  const actionList = (statement: { Action: string | string[] }) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+  const resourceList = (statement: { Resource: string | string[] }) =>
+    Array.isArray(statement.Resource)
+      ? statement.Resource
+      : [statement.Resource];
+  assert.ok(actionList(newRoleAuthority).includes("iam:CreateRole"));
+  assert.ok(actionList(newRoleAuthority).includes("iam:DeleteRole"));
+  assert.ok(
+    resourceList(newRoleAuthority).some((resource) =>
+      resource.endsWith("-foundation-authority-retirement-execution")
+    )
+  );
+  assert.ok(
+    resourceList(newRoleAuthority).every(
+      (resource) => !resource.endsWith("-github-foundation-migration")
+    )
+  );
+  assert.ok(!actionList(existingRoleAuthority).includes("iam:CreateRole"));
+  assert.ok(!actionList(existingRoleAuthority).includes("iam:DeleteRole"));
+  assert.ok(
+    resourceList(existingRoleAuthority).some((resource) =>
+      resource.endsWith("-github-foundation-promotion")
+    )
+  );
+  assert.deepEqual([...actionList(ownAuthorityInspection)].sort(), [
+    "iam:GetRole",
+    "iam:GetRolePolicy",
+    "iam:ListAttachedRolePolicies",
+    "iam:ListInstanceProfilesForRole",
+    "iam:ListRolePolicies",
+  ]);
+  assert.deepEqual([...actionList(authorityStackInspection)].sort(), [
+    "cloudformation:DescribeStackEvents",
+    "cloudformation:DescribeStacks",
+    "cloudformation:GetTemplate",
+    "cloudformation:ListStackResources",
+  ]);
   assert.match(abortJob, /needs: authorize/u);
   assert.match(abortJob, /Configure exact one-time migration authority/u);
   assert.doesNotMatch(abortJob, /Configure permanent narrow foundation authority/u);
@@ -338,13 +462,20 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
     abort,
     /recordedTemplateTerminator \| IN\("none", "lf", "crlf"\)/u
   );
-  assert.match(abort, /matchesCanonicalLiveTemplate: true/u);
-  assert.match(abort, /recordedDigestCompatibilityVerified: true/u);
+  assert.match(abort, /sourceFetchedAsData: true/u);
+  assert.match(abort, /sourceExecuted: false/u);
+  assert.match(abort, /liveTemplateDigestBound: true/u);
+  assert.match(abort, /terminalLifecycleSafetyContractVersion: 2/u);
   assert.doesNotMatch(abort, /matchesRecordedAndLiveTemplate/u);
   assert.match(abort, /destructive_actions_started=false/u);
   assert.match(abort, /destructiveActionsStarted: \$destructiveActionsStarted/u);
   assert.match(abort, /partialChangeSetCleanup:/u);
-  assert.match(abort, /deletedCount: \(\$plans\[0\] \| length\)/u);
+  assert.match(abort, /attemptedCount: \(\$plans\[0\] \| length\)/u);
+  assert.match(
+    abort,
+    /deletedCount: \(\s*\[\$plans\[0\]\[\] \| select\(\.deleted == true\)\] \| length\s*\)/u
+  );
+  assert.match(abort, /deletedCount: \$planCount/u);
   assert.match(
     abort,
     /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u
@@ -354,6 +485,7 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
     /contents\/aws\/bootstrap-oidc\.yaml\?ref=\$\{plan_source\}/u
   );
   assert.match(abort, /aws cloudformation delete-change-set/u);
+  assert.doesNotMatch(abort, /aws cloudformation delete-stack/u);
   for (const digest of [
     "target_projection_sha256",
     "target_policy_sha256",
@@ -362,42 +494,82 @@ test("foundation migration cleanup and abort inventory plans before sanitized re
     assert.ok(abort.includes(`)" = "$${digest}"`), digest);
   }
   assert.match(abort, /\)" = \\\r?\n\s+"\$target_template_sha256"/u);
-  assert.match(
-    abort,
-    /aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id"/u
-  );
-  assert.equal(
-    (abort.match(/aws cloudformation delete-stack/gu) ?? []).length,
-    1
-  );
   const digestGate = abort.indexOf("phase=authority-proof-contract");
   assert.ok(digestGate >= 0);
   assert.ok(digestGate < abort.indexOf("aws cloudformation delete-change-set"));
-  assert.ok(digestGate < abort.indexOf("aws cloudformation delete-stack"));
   assert.doesNotMatch(
     abort,
     /cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u
   );
+  for (const expected of [
+    "record_failure()",
+    "trap record_failure EXIT",
+    "receiptRecoveryFallback: true",
+    'plan_queue="${RUNNER_TEMP:?}/foundation-abort-plan-queue.jsonl"',
+    "' \"$plans\" >\"$plan_queue\"",
+    "while IFS= read -r encoded; do",
+    'done <"$plan_queue"',
+    "for ((attempt = 1; attempt <= 30; attempt++)); do",
+    "deletionRequestStarted: true",
+    "deleted: false",
+    "absenceVerified: false",
+    'error("missing in-flight plan journal")',
+    ".[-1].deleted = true",
+    ".[-1].absenceVerified = true",
+  ]) {
+    assert.ok(abort.includes(expected), expected);
+  }
+  assert.doesNotMatch(abort, /done < <\(/u);
+  const journalStarted = abort.indexOf("deletionRequestStarted: true");
+  const planDelete = abort.indexOf("aws cloudformation delete-change-set");
+  const journalCompleted = abort.indexOf(".[-1].deleted = true");
+  assert.ok(journalStarted >= 0 && journalStarted < planDelete);
+  assert.ok(planDelete < journalCompleted);
   const receiptOffset = abort.lastIndexOf("          phase=receipt");
   assert.ok(receiptOffset >= 0);
   const receipt = abort.slice(receiptOffset);
   for (const expected of [
     "stackProjectionSha256: $targetProjectionSha256",
-    "clientRequestTokenSha256: $clientTokenSha256",
     "remainingCount: 0",
-    "stackDeleted: true",
-    "roleDeleted: true",
-    "destructiveActionsStarted: true",
+    'result: "migration-aborted-authority-retirement-required"',
+    "changeSetCleanupOnly: true",
+    "authorityMutationAttempted: false",
+    "unchangedDuringAbort: true",
+    "stackRetained: true",
+    "roleRetained: true",
+    "stackDeleted: false",
+    "roleDeleted: false",
+    "authorityRetired: false",
+    "terminalRetirementEvidence: false",
+    "externalRetirementRequired: true",
+    "externalAdministratorRetirementRequired: null",
+    "externalAdministratorRequirementKnown: false",
+    "nonSelfDeletingExecutorAvailableBeforeApply: null",
+    "permanentRetirementControllerAvailabilityKnown: false",
   ]) {
     assert.ok(receipt.includes(expected), expected);
   }
   assert.doesNotMatch(receipt, /AWS_ACCOUNT_ID|arn:aws:/u);
+  assert.match(abortFinalizer, /if: always\(\)/u);
+  assert.match(abortFinalizer, /\.result == "abort-pending"/u);
+  assert.match(abortFinalizer, /result: "abort-failed"/u);
+  assert.match(abortFinalizer, /destructiveActionsStarted: null/u);
+  assert.match(abortFinalizer, /destructiveStateKnown: false/u);
+  assert.match(
+    abortFinalizer,
+    /failure: \{phase: "pre-main-or-untrapped-failure"\}/u
+  );
+  assert.match(abortFinalizer, /pendingReceiptFinalized: true/u);
 });
 
 test("foundation destructive transitions use adjacent fresh fail-closed proofs", () => {
   const apply = workflowStep(
     FOUNDATION_MIGRATION_WORKFLOW,
-    "Apply target stack policy and execute the inspected plan"
+    "Execute under rollback-safe policy and protect success immediately"
+  );
+  const finalizePolicy = workflowStep(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "Reconcile candidate and rollback-safe stack-policy state"
   );
   const cleanup = workflowStep(
     FOUNDATION_MIGRATION_WORKFLOW,
@@ -405,25 +577,38 @@ test("foundation destructive transitions use adjacent fresh fail-closed proofs",
   );
   const abort = workflowStep(
     workflowJob(FOUNDATION_MIGRATION_WORKFLOW, "abort-authority"),
-    "Prove stable foundation, clean safe plans, and delete authority"
+    "Prove stable foundation and clean only authorized unexecuted plans"
+  );
+  const retireJob = workflowJob(
+    FOUNDATION_MIGRATION_WORKFLOW,
+    "retire-authority"
   );
   const retire = workflowStep(
-    workflowJob(FOUNDATION_MIGRATION_WORKFLOW, "retire-authority"),
+    retireJob,
     "Verify and retire the exact authority stack"
   );
+  const retireFinalizer = workflowStep(
+    retireJob,
+    "Finalize any untrapped retirement failure receipt"
+  );
 
-  assert.match(apply, /execution_started=false/u);
+  assert.ok(apply.length > 0);
+  assert.ok(finalizePolicy.length > 0);
   assert.match(
     apply,
-    /execution_started=true\s+aws cloudformation execute-change-set/u
+    /cloudformation get-stack-policy[\s\S]*?--slurpfile expected "\$CURRENT_STACK_POLICY_BODY_FILE"[\s\S]*?bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?aws cloudformation execute-change-set[\s\S]*?UPDATE_COMPLETE[\s\S]*?cloudformation set-stack-policy[\s\S]*?file:\/\/aws\/bootstrap-stack-policy\.json/u
   );
   assert.match(
-    apply,
-    /UPDATE_ROLLBACK_COMPLETE\)[\s\S]*?set-stack-policy[\s\S]*?execution_started=false/u
+    finalizePolicy,
+    /if: always\(\) && inputs\.operation == 'apply'[\s\S]*?for \(\(attempt = 1; attempt <= 120; attempt\+\+\)\)[\s\S]*?UPDATE_COMPLETE\|UPDATE_ROLLBACK_COMPLETE[\s\S]*?CANDIDATE_TEMPLATE_DIGEST[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.pre-storage-migration\.json[\s\S]*?policy_source=aws\/bootstrap-stack-policy\.json[\s\S]*?aws cloudformation set-stack-policy[\s\S]*?\(\.StackPolicyBody \| fromjson\) == \$expected\[0\][\s\S]*?test "\$candidate_present" = "true"/u
   );
-  assert.match(
-    apply,
-    /\[ "\$execution_started" = "false" \][\s\S]*?set-stack-policy/u
+  assert.ok(
+    FOUNDATION_MIGRATION_WORKFLOW.indexOf(
+      "Execute under rollback-safe policy and protect success immediately"
+    ) <
+      FOUNDATION_MIGRATION_WORKFLOW.indexOf(
+        "Reconcile candidate and rollback-safe stack-policy state"
+      )
   );
 
   for (const step of [cleanup, abort]) {
@@ -446,27 +631,176 @@ test("foundation destructive transitions use adjacent fresh fail-closed proofs",
   }
   assert.match(
     abort,
-    /foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?env -i[\s\S]*?render-template[\s\S]*?historical_authority_template_sha256/u
+    /phase=historical-source-fetch[\s\S]*?foundation-migration-authority\.sh\?ref=\$\{authority_source\}[\s\S]*?test -s "\$historical_authority_source"[\s\S]*?test ! -L "\$historical_authority_source"[\s\S]*?historical_authority_source_sha256[\s\S]*?\^\[0-9a-f\]\{64\}\$/u
+  );
+  assert.doesNotMatch(
+    abort,
+    /env -i|historical-template-render|(?:bash|source) "\$historical_authority_source"/u
+  );
+  assert.match(
+    abort,
+    /historicalAuthoritySource: \{[\s\S]*?sourceFileSha256: \$historicalAuthoritySourceSha256[\s\S]*?ancestorOfTarget: true[\s\S]*?sourceFetchedAsData: true[\s\S]*?sourceExecuted: false[\s\S]*?liveTemplateDigestBound: true[\s\S]*?terminalLifecycleSafetyContractVersion: 2/u
   );
   assert.ok(
     (abort.match(/\(\.Summaries \/\/ \[\]\) \| length == 0/gu) ?? [])
       .length >= 2
   );
+  assert.equal(
+    (abort.match(/aws cloudformation delete-stack/gu) ?? []).length,
+    0
+  );
 
   for (const expected of [
     "prove-foundation-storage-controls.sh",
     "detect-stack-resource-drift",
+    'target_stack_id="$(jq -er',
+    "--logical-resource-id FoundationPromotionRole",
     'StackResourceDriftStatus == "IN_SYNC"',
     '(.Summaries // []) | length == 0',
     "fresh_retirement_proof_sha256",
     "freshRetirementProofBound: true",
     "finalAuthorityProofSha256",
     "finalAuthorityProofBoundImmediatelyBeforeDeletion: true",
+    "destructive_actions_started=false",
+    "destructive_actions_started=true",
+    "--stack-name \"$authority_stack_id\"",
+    "--role-arn \"$execution_role_arn\"",
+    "for ((attempt = 1; attempt <= 90; attempt++)); do",
+    "for ((attempt = 1; attempt <= 30; attempt++)); do",
+    "phase=controller-executor-persistence",
+    '"$permanent_role_after"',
+    '"$permanent_role_policy_after"',
+    '"$execution_role_after"',
+    '"$execution_role_policy_after"',
+    "clientRequestTokenSha256: $clientTokenSha256",
+    "controllerRoleArnSha256: $controllerRoleArnSha256",
+    "cloudFormationExecutionRoleArnSha256:",
+    "$executionRoleArnSha256",
+    "authorityRoleArnSha256: $authorityRoleArnSha256",
+    "cloudFormationServiceRoleBound: true",
+    "controllerExecutionRoleSeparated: true",
+    "nonSelfDeletingExecutor: true",
+    "selfDeletion: false",
+    "controllerPersistedAfterDeletion: true",
+    "executionRolePersistedAfterDeletion: true",
+    "bash aws/prove-foundation-storage-controls.sh retired",
+    ".migrationAuthority.retired == true",
+    "post_retirement_controls_sha256",
+    "postRetirementControlsSha256:",
+    "$postRetirementControlsSha256",
+    "postRetirementControlsBound: true",
   ]) {
     assert.ok(retire.includes(expected), expected);
   }
+  assert.ok(
+    retire.indexOf('target_stack_id="$(jq -er') <
+      retire.indexOf("--logical-resource-id FoundationPromotionRole"),
+    "the permanent-role drift proof must not read target_stack_id before assignment"
+  );
+  assert.match(
+    retireJob,
+    /Configure permanent non-self-deleting retirement authority[\s\S]*?role-to-assume: arn:aws:iam::\$\{\{ env\.AWS_ACCOUNT_ID \}\}:role\/\$\{\{ env\.APP_NAME \}\}-github-foundation-promotion/u
+  );
+  assert.doesNotMatch(
+    retireJob,
+    /Configure exact one-time migration authority|role-to-assume: \$\{\{ env\.AWS_FOUNDATION_MIGRATION_ROLE_ARN \}\}/u
+  );
+  assert.match(
+    retire,
+    /authority_stack_id="\$\(\s*jq -ejr '\.Stacks\[0\]\.StackId' "\$authority_stack"\s*\)"/u
+  );
+  assert.match(
+    retire,
+    /destructive_actions_started=true[\s\S]*?aws cloudformation delete-stack \\\r?\n\s+--stack-name "\$authority_stack_id" \\\r?\n\s+--role-arn "\$execution_role_arn"/u
+  );
+  assert.doesNotMatch(retire, /--force-delete|FORCE_DELETE_STACK/u);
+  assert.doesNotMatch(
+    retire,
+    /env -i|historical-template-render|(?:bash|source) "\$historical_authority_source"/u
+  );
+  for (const strategy of [
+    "unclassified",
+    "already-absent",
+    "standard-delete-retry",
+    "targeted-retain-orphan-reconciliation",
+    "standard-delete",
+  ]) {
+    assert.ok(
+      retire.includes(`retirement_strategy=${strategy}`),
+      `retirement strategy ${strategy}`
+    );
+  }
+  assert.match(retire, /failure: \{phase: \$phase, strategy: \$strategy\}/u);
+
+  const alreadyAbsentReceiptStart = retire.indexOf(
+    'result: "one-time-authority-already-retired"'
+  );
+  const alreadyAbsentReceiptEnd = retire.indexOf(
+    "            exit 0",
+    alreadyAbsentReceiptStart
+  );
+  assert.ok(alreadyAbsentReceiptStart >= 0);
+  assert.ok(alreadyAbsentReceiptEnd > alreadyAbsentReceiptStart);
+  const alreadyAbsentReceipt = retire.slice(
+    alreadyAbsentReceiptStart,
+    alreadyAbsentReceiptEnd
+  );
+  for (const expected of [
+    "stackDeleted: false",
+    "roleDeleted: false",
+    "stackAbsent: true",
+    "roleAbsent: true",
+    "stackDeletedByThisRun: false",
+    "roleDeletedByThisRun: false",
+    "alreadyAbsentAtStart: true",
+  ]) {
+    assert.ok(alreadyAbsentReceipt.includes(expected), expected);
+  }
+  assert.equal((retire.match(/--deletion-mode STANDARD/gu) ?? []).length, 2);
+  assert.equal((retire.match(/--retain-resources/gu) ?? []).length, 1);
+  assert.match(
+    retire,
+    /verify-retirement-orphaned[\s\S]*?phase=orphaned-authority-final-role-absence[\s\S]*?--retain-resources FoundationMigrationRole/u
+  );
+  assert.match(
+    retire.slice(retire.lastIndexOf("          phase=receipt")),
+    /one-time-authority-orphaned-stack-reconciled[\s\S]*?targetedRetainReconciliationPerformed:[\s\S]*?retainedLogicalResourceIds:[\s\S]*?FoundationMigrationRole[\s\S]*?authorityRoleAbsentBeforeRequest:[\s\S]*?authorityRoleAbsentAfter: true[\s\S]*?authorityRoleDeletedByThisRun:[\s\S]*?physicalRoleRetained: false[\s\S]*?stackRecordDeleted: true/u
+  );
+  const retirementReceipt = retire.slice(
+    retire.lastIndexOf("          phase=receipt")
+  );
+  assert.match(
+    retirementReceipt,
+    /authorityRoleAbsentBeforeRequest:\s+\$authorityRoleAbsentBeforeRequest[\s\S]*?authorityRoleAbsentAfter: true[\s\S]*?authorityRoleDeletedByThisRun:\s+\(\$orphanedReconciliation \| not\)[\s\S]*?physicalRoleRetained: false[\s\S]*?stackRecordDeleted: true/u
+  );
+  assert.match(
+    retirementReceipt,
+    /retiredAuthority: \([\s\S]*?stackDeleted: true[\s\S]*?roleDeleted: \(\$orphanedReconciliation \| not\)[\s\S]*?stackAbsent: true[\s\S]*?roleAbsent: true[\s\S]*?stackDeletedByThisRun: true[\s\S]*?roleDeletedByThisRun:\s+\(\$orphanedReconciliation \| not\)/u
+  );
+  assert.doesNotMatch(
+    retire.slice(retire.lastIndexOf("          phase=receipt")),
+    /clientRequestToken:|controllerRoleArn:|cloudFormationExecutionRoleArn:|authorityRoleArn:|AWS_ACCOUNT_ID|arn:aws:/u
+  );
+  assert.match(retireFinalizer, /if: always\(\)/u);
+  assert.match(retireFinalizer, /\.result == "retire-pending"/u);
+  assert.match(retireFinalizer, /result: "retire-failed"/u);
+  assert.match(retireFinalizer, /destructiveActionsStarted: null/u);
+  assert.match(retireFinalizer, /destructiveStateKnown: false/u);
+  assert.match(
+    retireFinalizer,
+    /failure: \{phase: "pre-main-or-untrapped-failure"\}/u
+  );
+  assert.match(retireFinalizer, /pendingReceiptFinalized: true/u);
+  assert.ok(
+    retire.indexOf("phase=controller-executor-persistence") <
+      retire.indexOf("phase=post-retirement-controls")
+  );
+  assert.ok(
+    retire.indexOf("phase=post-retirement-controls") <
+      retire.lastIndexOf("          phase=receipt")
+  );
   const finalAuthorityProof = retire.lastIndexOf(
-    "bash aws/foundation-migration-authority.sh verify-intrinsic"
+    "bash aws/foundation-migration-authority.sh"
   );
   const authorityDelete = retire.indexOf(
     "aws cloudformation delete-stack",
@@ -485,13 +819,47 @@ test("foundation destructive transitions use adjacent fresh fail-closed proofs",
       field
     );
   }
+  assert.match(
+    retire.slice(finalAuthorityProof, authorityDelete),
+    /phase=final-authority-stack-binding[\s\S]*?aws cloudformation describe-stacks[\s\S]*?authority_stack_id="\$\(\s*jq -ejr '\.Stacks\[0\]\.StackId' "\$authority_stack"\s*\)"[\s\S]*?authority_stack_id_sha256/u
+  );
   assert.doesNotMatch(
     retire.slice(finalAuthorityProof, authorityDelete),
-    /\n\s+(?:aws|git)\s/u
+    /\n\s+git\s|cloudformation (?:create|execute)-change-set|cloudformation set-stack-policy|cloudformation update-stack/u
   );
   assert.match(
     FOUNDATION_MIGRATION_AUTHORITY_SOURCE,
     /cloudformation:DetectStackResourceDrift/u
+  );
+});
+
+test("foundation retirement service role is permanent and exact", () => {
+  const executionRole = resourceBlock(
+    "FoundationAuthorityRetirementExecutionRole"
+  );
+  assert.match(
+    executionRole,
+    /RoleName: !Sub "\$\{AppName\}-foundation-authority-retirement-execution"/u
+  );
+  assert.match(
+    executionRole,
+    /Principal:\s+Service: cloudformation\.amazonaws\.com\s+Action: sts:AssumeRole/u
+  );
+  assert.match(
+    executionRole,
+    /PolicyName: retire-one-time-foundation-authority/u
+  );
+  assert.match(
+    executionRole,
+    /Sid: DeleteOnlyOneTimeFoundationMigrationRole[\s\S]*?iam:DeleteRole[\s\S]*?iam:DeleteRolePolicy[\s\S]*?iam:GetRole[\s\S]*?iam:GetRolePolicy[\s\S]*?iam:ListAttachedRolePolicies[\s\S]*?iam:ListInstanceProfilesForRole[\s\S]*?iam:ListRolePolicies[\s\S]*?role\/\$\{AppName\}-github-foundation-migration/u
+  );
+  assert.doesNotMatch(
+    executionRole,
+    /cloudformation:|iam:CreateRole|iam:PassRole|Resource: "\*"|role\/\*/u
+  );
+  assert.match(
+    executionRole,
+    /Key: Lifecycle\s+Value: permanent-authority-retirement-execution/u
   );
 });
 
@@ -506,10 +874,108 @@ type AuthorityDigestRepresentation =
   | "bom";
 
 interface AuthorityProofFixture {
-  mode: "verify" | "verify-intrinsic";
+  mode:
+    | "verify"
+    | "verify-intrinsic"
+    | "verify-retirement-retry"
+    | "verify-retirement-orphaned";
   representation?: AuthorityDigestRepresentation;
   recordedDigest?: string;
   mutateTemplate?: boolean;
+  extraInlinePolicy?: boolean;
+  attachedPolicy?: boolean;
+  instanceProfile?: boolean;
+  orphanRoleState?:
+    | "absent"
+    | "present"
+    | "access-denied"
+    | "absent-then-present"
+    | "absent-then-access-denied";
+}
+
+interface InlinePolicyDocument {
+  Version: string;
+  Statement: Array<{
+    Sid: string;
+    Effect: string;
+    Action: string | string[];
+    Resource: string | string[];
+    Condition?: unknown;
+  }>;
+}
+
+function renderedFoundationPromotionPolicy(): InlinePolicyDocument {
+  const template = parseYaml(BOOTSTRAP) as {
+    Resources: Record<
+      string,
+      {
+        Properties?: {
+          Policies?: Array<{
+            PolicyName: string;
+            PolicyDocument: InlinePolicyDocument;
+          }>;
+        };
+      }
+    >;
+  };
+  const policy = template.Resources.FoundationPromotionRole.Properties?.Policies
+    ?.find(({ PolicyName }) => PolicyName === "promote-foundation-logging")
+    ?.PolicyDocument;
+  assert.ok(policy);
+
+  const app = "a".repeat(17);
+  const account = "123456789012";
+  const region = "eu-west-1";
+  const values: Record<string, string> = {
+    "AWS::Partition": "aws",
+    "AWS::AccountId": account,
+    "AWS::Region": region,
+    AppName: app,
+    "ArtifactBucket.Arn": `arn:aws:s3:::${app}-artifacts-${account}-${region}`,
+    "CloudFrontAccessLogBucket.Arn":
+      `arn:aws:s3:::${app}-cloudfront-access-logs-${account}-${region}`,
+    "S3AccessLogArchive.Arn":
+      `arn:aws:s3:::${app}-s3-access-logs-${account}-${region}`,
+    "ApplicationStorageKey.Arn":
+      `arn:aws:kms:${region}:${account}:key/` +
+      "11111111-2222-3333-4444-555555555555",
+    "FoundationAuthorityRetirementExecutionRole.Arn":
+      `arn:aws:iam::${account}:role/` +
+      `${app}-foundation-authority-retirement-execution`,
+    "S3AccessLogArchiveS39Suppression.RuleArn":
+      `arn:aws:securityhub:${region}:${account}:automation-rule/` +
+      "11111111-2222-3333-4444-555555555555",
+    StagingOriginVerifySecret:
+      `arn:aws:secretsmanager:${region}:${account}:secret:` +
+      `${app}/staging/origin-verification-ABCDEF`,
+    ProductionOriginVerifySecret:
+      `arn:aws:secretsmanager:${region}:${account}:secret:` +
+      `${app}/production/origin-verification-ABCDEF`,
+  };
+
+  const resolveIntrinsicValues = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      const exact = values[value];
+      if (exact !== undefined) return exact;
+      return value.replace(/\$\{([^}]+)\}/gu, (_match, key: string) => {
+        const replacement = values[key];
+        assert.ok(replacement, `unresolved CloudFormation value ${key}`);
+        return replacement;
+      });
+    }
+    if (Array.isArray(value)) return value.map(resolveIntrinsicValues);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [
+          key,
+          resolveIntrinsicValues(entry),
+        ])
+      );
+    }
+    return value;
+  };
+
+  return resolveIntrinsicValues(policy) as InlinePolicyDocument;
 }
 
 const AUTHORITY_SOURCE_COMMIT = "a".repeat(40);
@@ -616,12 +1082,15 @@ function runAuthorityProof(fixture: AuthorityProofFixture) {
       sha256Utf8(representedAuthorityBytes(liveCanonical, representation));
     const roleName = `${APP}-github-foundation-migration`;
     const roleArn = `arn:aws:iam::${ACCOUNT}:role/${roleName}`;
+    const roleId = "AROA11111111111111111";
     const stackName = `${APP}-foundation-migration-authority`;
     const stackId =
       `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${stackName}/` +
       "11111111-2222-3333-4444-555555555555";
     const role = {
       Role: {
+        RoleName: roleName,
+        RoleId: roleId,
         Arn: roleArn,
         MaxSessionDuration: 3600,
         AssumeRolePolicyDocument: trust,
@@ -643,12 +1112,55 @@ function runAuthorityProof(fixture: AuthorityProofFixture) {
       PolicyName: "protected-foundation-storage-migration",
       PolicyDocument: policy,
     };
+    const inlinePolicies = {
+      PolicyNames: fixture.extraInlinePolicy
+        ? ["protected-foundation-storage-migration", "unexpected-policy"]
+        : ["protected-foundation-storage-migration"],
+      IsTruncated: false,
+    };
+    const attachedPolicies = {
+      AttachedPolicies: fixture.attachedPolicy
+        ? [
+            {
+              PolicyName: "unexpected-attached-policy",
+              PolicyArn:
+                `arn:aws:iam::${ACCOUNT}:policy/unexpected-attached-policy`,
+            },
+          ]
+        : [],
+      IsTruncated: false,
+    };
+    const instanceProfiles = {
+      InstanceProfiles: fixture.instanceProfile
+        ? [
+            {
+              InstanceProfileName: "unexpected-instance-profile",
+              Arn:
+                `arn:aws:iam::${ACCOUNT}:instance-profile/` +
+                "unexpected-instance-profile",
+            },
+          ]
+        : [],
+      IsTruncated: false,
+    };
     const stack = {
       Stacks: [
         {
           StackName: stackName,
           StackId: stackId,
-          StackStatus: "CREATE_COMPLETE",
+          StackStatus:
+            fixture.mode === "verify-retirement-retry" ||
+            fixture.mode === "verify-retirement-orphaned"
+              ? "DELETE_FAILED"
+              : "CREATE_COMPLETE",
+          ...(fixture.mode === "verify-retirement-retry" ||
+            fixture.mode === "verify-retirement-orphaned"
+            ? {
+                RoleARN:
+                  `arn:aws:iam::${ACCOUNT}:role/` +
+                  `${APP}-foundation-authority-retirement-execution`,
+              }
+            : {}),
           EnableTerminationProtection: false,
           NotificationARNs: [],
           Capabilities: ["CAPABILITY_NAMED_IAM"],
@@ -674,6 +1186,10 @@ function runAuthorityProof(fixture: AuthorityProofFixture) {
               OutputKey: "FoundationMigrationRoleArn",
               OutputValue: roleArn,
             },
+            {
+              OutputKey: "FoundationMigrationRoleId",
+              OutputValue: roleId,
+            },
           ],
         },
       ],
@@ -684,12 +1200,18 @@ function runAuthorityProof(fixture: AuthorityProofFixture) {
           LogicalResourceId: "FoundationMigrationRole",
           PhysicalResourceId: roleName,
           ResourceType: "AWS::IAM::Role",
-          ResourceStatus: "CREATE_COMPLETE",
+          ResourceStatus:
+            fixture.mode === "verify-retirement-retry" ||
+            fixture.mode === "verify-retirement-orphaned"
+              ? "DELETE_FAILED"
+              : "CREATE_COMPLETE",
         },
       ],
     };
     const traceFile = join(fakeBin, "trace.log");
+    const roleStateFile = join(fakeBin, "role-state.count");
     writeFileSync(traceFile, "", "utf8");
+    writeFileSync(roleStateFile, "0", "utf8");
     executable(
       join(fakeBin, "aws"),
       `#!/usr/bin/env bash
@@ -697,7 +1219,37 @@ set -euo pipefail
 printf '%s\\n' "$*" >>"\${FAKE_AUTHORITY_TRACE:?}"
 case "$*" in
   *"iam get-role-policy"*) printf '%s\\n' "\${FAKE_AUTHORITY_POLICY:?}" ;;
-  *"iam get-role"*) printf '%s\\n' "\${FAKE_AUTHORITY_ROLE:?}" ;;
+  *"iam list-role-policies"*) printf '%s\\n' "\${FAKE_AUTHORITY_INLINE_POLICIES:?}" ;;
+  *"iam list-attached-role-policies"*) printf '%s\\n' "\${FAKE_AUTHORITY_ATTACHED_POLICIES:?}" ;;
+  *"iam list-instance-profiles-for-role"*) printf '%s\\n' "\${FAKE_AUTHORITY_INSTANCE_PROFILES:?}" ;;
+  *"iam get-role"*)
+    role_state="\${FAKE_AUTHORITY_ROLE_STATE:-present}"
+    case "$role_state" in
+      absent-then-present|absent-then-access-denied)
+        role_state_call="$(<"\${FAKE_AUTHORITY_ROLE_STATE_FILE:?}")"
+        printf '%s' "$((role_state_call + 1))" >"$FAKE_AUTHORITY_ROLE_STATE_FILE"
+        if [ "$role_state_call" -eq 0 ]; then
+          role_state=absent
+        elif [ "$role_state" = "absent-then-present" ]; then
+          role_state=present
+        else
+          role_state=access-denied
+        fi
+        ;;
+    esac
+    case "$role_state" in
+      absent)
+        echo "An error occurred (NoSuchEntity) when calling the GetRole operation: The role with name \${FAKE_AUTHORITY_ROLE_NAME:?} cannot be found." >&2
+        exit 254
+        ;;
+      access-denied)
+        echo "An error occurred (AccessDenied) when calling the GetRole operation: denied for \${FAKE_AUTHORITY_ROLE_NAME:?}" >&2
+        exit 254
+        ;;
+      present) printf '%s\\n' "\${FAKE_AUTHORITY_ROLE:?}" ;;
+      *) exit 98 ;;
+    esac
+    ;;
   *"cloudformation describe-stacks"*) printf '%s\\n' "\${FAKE_AUTHORITY_STACK:?}" ;;
   *"cloudformation get-template"*) printf '%s\\n' "\${FAKE_AUTHORITY_TEMPLATE:?}" ;;
   *"cloudformation list-stack-resources"*) printf '%s\\n' "\${FAKE_AUTHORITY_RESOURCES:?}" ;;
@@ -718,8 +1270,22 @@ esac
           AWS_FOUNDATION_MIGRATION_ROLE_ARN: roleArn,
           TARGET_SHA: AUTHORITY_SOURCE_COMMIT,
           FAKE_AUTHORITY_TRACE: traceFile,
+          FAKE_AUTHORITY_ROLE_STATE_FILE: roleStateFile,
           FAKE_AUTHORITY_ROLE: JSON.stringify(role),
+          FAKE_AUTHORITY_ROLE_NAME: roleName,
+          FAKE_AUTHORITY_ROLE_STATE:
+            fixture.orphanRoleState ??
+            (fixture.mode === "verify-retirement-orphaned"
+              ? "absent"
+              : "present"),
           FAKE_AUTHORITY_POLICY: JSON.stringify(rolePolicy),
+          FAKE_AUTHORITY_INLINE_POLICIES: JSON.stringify(inlinePolicies),
+          FAKE_AUTHORITY_ATTACHED_POLICIES: JSON.stringify(
+            attachedPolicies
+          ),
+          FAKE_AUTHORITY_INSTANCE_PROFILES: JSON.stringify(
+            instanceProfiles
+          ),
           FAKE_AUTHORITY_STACK: JSON.stringify(stack),
           FAKE_AUTHORITY_TEMPLATE: JSON.stringify({
             TemplateBody: liveTemplate,
@@ -778,6 +1344,17 @@ test("foundation intrinsic retirement accepts only exact none, LF, or CRLF bindi
       "jq-sort-compact-no-terminator-v1"
     );
     assert.equal(proof.legacyTemplateDigestAccepted, representation !== "none");
+    assert.equal(proof.roleAttachmentContractVerified, true);
+    assert.equal(proof.terminalLifecycleSafetyContractVersion, 2);
+    assert.equal(proof.standardDeleteRetryEligible, false);
+    assert.match(proof.roleIdSha256, /^[0-9a-f]{64}$/u);
+    for (const call of [
+      "iam list-role-policies",
+      "iam list-attached-role-policies",
+      "iam list-instance-profiles-for-role",
+    ]) {
+      assert.ok(result.trace.includes(call), call);
+    }
     assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
   }
 
@@ -795,6 +1372,124 @@ test("foundation intrinsic retirement accepts only exact none, LF, or CRLF bindi
     assert.notEqual(result.execution.status, 0, representation);
     assert.match(result.execution.stderr, /template-digest-binding/u);
     assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
+  }
+});
+
+test("foundation DELETE_FAILED retirement retry is intrinsic and standard-only eligible", () => {
+  const result = runAuthorityProof({
+    mode: "verify-retirement-retry",
+    representation: "none",
+  });
+  assert.equal(result.execution.status, 0, result.execution.stderr);
+  const proof = JSON.parse(result.execution.stdout);
+  assert.equal(proof.verificationMode, "verify-retirement-retry");
+  assert.equal(proof.stackStatus, "DELETE_FAILED");
+  assert.equal(proof.liveContractExact, false);
+  assert.equal(proof.cloudFormationCreationContractExact, false);
+  assert.equal(proof.retirementRetryContractExact, true);
+  assert.equal(proof.standardDeleteRetryEligible, true);
+  assert.equal(proof.terminalLifecycleSafetyContractVersion, 2);
+  assert.doesNotMatch(result.trace, /--deletion-mode|retain-resources/u);
+});
+
+test("foundation orphaned DELETE_FAILED proof is canonical, absence-fresh, and retain-only eligible", () => {
+  const result = runAuthorityProof({
+    mode: "verify-retirement-orphaned",
+    representation: "none",
+  });
+  assert.equal(result.execution.status, 0, result.execution.stderr);
+  const proof = JSON.parse(result.execution.stdout);
+  assert.equal(proof.verificationMode, "verify-retirement-orphaned");
+  assert.equal(proof.stackStatus, "DELETE_FAILED");
+  assert.equal(proof.resourceStatus, "DELETE_FAILED");
+  assert.equal(proof.authorityRolePresent, false);
+  assert.equal(proof.roleAbsenceVerified, true);
+  assert.equal(proof.roleAbsenceErrorCode, "NoSuchEntity");
+  assert.equal(proof.roleAbsenceChecks, 2);
+  assert.equal(proof.roleAbsenceFreshAtProofEmission, true);
+  assert.equal(proof.roleIdentityEvidenceSource, "cloudformation-output");
+  assert.equal(proof.roleIdLiveVerified, false);
+  assert.equal(proof.trustPolicyEvidenceSource, "cloudformation-template");
+  assert.equal(
+    proof.permissionsPolicyEvidenceSource,
+    "cloudformation-template"
+  );
+  assert.equal(proof.roleRuntimeContractVerified, false);
+  assert.equal(proof.roleAttachmentContractVerified, false);
+  assert.equal(proof.roleAttachmentInventorySha256, null);
+  assert.equal(proof.retirementRetryContractExact, false);
+  assert.equal(proof.standardDeleteRetryEligible, false);
+  assert.equal(proof.orphanedRetirementContractExact, true);
+  assert.equal(proof.targetedRetainReconciliationEligible, true);
+  assert.deepEqual(proof.requiredRetainResources, [
+    "FoundationMigrationRole",
+  ]);
+  assert.equal(proof.forceDeleteEligible, false);
+  assert.equal(
+    (result.trace.match(/iam get-role/gu) ?? []).length,
+    2
+  );
+  assert.doesNotMatch(
+    result.trace,
+    /iam get-role-policy|iam list-role-policies|iam list-attached-role-policies|iam list-instance-profiles-for-role/u
+  );
+  assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
+});
+
+test("foundation orphaned proof rejects non-canonical, present, and ambiguous role states", () => {
+  const legacy = runAuthorityProof({
+    mode: "verify-retirement-orphaned",
+    representation: "lf",
+  });
+  assert.notEqual(legacy.execution.status, 0);
+  assert.match(legacy.execution.stderr, /orphaned-template-not-canonical/u);
+
+  const present = runAuthorityProof({
+    mode: "verify-retirement-orphaned",
+    representation: "none",
+    orphanRoleState: "present",
+  });
+  assert.notEqual(present.execution.status, 0);
+  assert.match(present.execution.stderr, /orphaned-role-present/u);
+
+  const denied = runAuthorityProof({
+    mode: "verify-retirement-orphaned",
+    representation: "none",
+    orphanRoleState: "access-denied",
+  });
+  assert.notEqual(denied.execution.status, 0);
+  assert.match(denied.execution.stderr, /orphaned-role-absence-unproven/u);
+  assert.doesNotMatch(
+    denied.trace,
+    /iam get-role-policy|iam list-role-policies|iam list-attached-role-policies|iam list-instance-profiles-for-role/u
+  );
+
+  for (const transition of [
+    {
+      state: "absent-then-present",
+      error: /orphaned-role-reappeared/u,
+    },
+    {
+      state: "absent-then-access-denied",
+      error: /final-orphaned-role-absence-unproven/u,
+    },
+  ] as const) {
+    const result = runAuthorityProof({
+      mode: "verify-retirement-orphaned",
+      representation: "none",
+      orphanRoleState: transition.state,
+    });
+    assert.notEqual(result.execution.status, 0, transition.state);
+    assert.match(result.execution.stderr, transition.error);
+    assert.equal(
+      (result.trace.match(/iam get-role/gu) ?? []).length,
+      2,
+      transition.state
+    );
+    assert.doesNotMatch(
+      result.trace,
+      /iam get-role-policy|iam list-role-policies|iam list-attached-role-policies|iam list-instance-profiles-for-role|cloudformation delete-stack/u
+    );
   }
 });
 
@@ -826,6 +1521,22 @@ test("foundation strict verification rejects legacy or modified authority bindin
   });
   assert.notEqual(modified.execution.status, 0);
   assert.doesNotMatch(modified.trace, /cloudformation delete-stack/u);
+});
+
+test("foundation authority rejects extra policies and instance profiles", () => {
+  for (const fixture of [
+    { extraInlinePolicy: true },
+    { attachedPolicy: true },
+    { instanceProfile: true },
+  ]) {
+    const result = runAuthorityProof({
+      mode: "verify-intrinsic",
+      representation: "none",
+      ...fixture,
+    });
+    assert.notEqual(result.execution.status, 0, JSON.stringify(fixture));
+    assert.doesNotMatch(result.trace, /cloudformation delete-stack/u);
+  }
 });
 
 test("legacy foundation workflow receipts hash change-set ARNs and S3 version IDs", () => {
@@ -954,8 +1665,696 @@ test("S3 log delivery policy binds each source to only its own prefix", () => {
   );
 });
 
+test("foundation promotion policy stays canonical, narrow, and within IAM quota", () => {
+  const policy = renderedFoundationPromotionPolicy();
+  const expectedSids = [
+    "CreatePinnedBootstrapChangeSet",
+    "ExecuteOnlyBootstrapLoggingChangeSets",
+    "InspectBootstrapStackAndChangeSets",
+    "InspectFoundationMigrationState",
+    "InspectOneTimeFoundationMigrationAuthority",
+    "RetireOneTimeFoundationMigrationAuthorityStack",
+    "PassOnlyFoundationAuthorityRetirementExecutionRole",
+    "PublishImmutableFoundationTemplate",
+    "EncryptImmutableFoundationTemplate",
+    "InspectOriginVerificationSecretMetadata",
+    "InspectArtifactAndArchiveBuckets",
+    "ActivateArtifactBucketLoggingWithoutReplacement",
+    "InspectFoundationAutomationRule",
+    "ResolveExactCloudFormationExecutionRoles",
+    "ResolveExactFoundationRoleAttributes",
+    "InspectPermanentControlRoleMetadata",
+    "InspectPermanentControlRolePolicies",
+    "InspectFoundationRetirementRoleMetadata",
+    "InspectFoundationRetirementRolePolicies",
+    "ResolveExactFoundationAutomationRule",
+  ];
+  assert.equal(policy.Version, "2012-10-17");
+  assert.deepEqual(
+    policy.Statement.map(({ Sid }) => Sid),
+    expectedSids
+  );
+  assert.equal(new Set(expectedSids).size, expectedSids.length);
+  assert.ok(policy.Statement.every(({ Effect }) => Effect === "Allow"));
+
+  const actions = (statement: InlinePolicyDocument["Statement"][number]) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+  const resources = (statement: InlinePolicyDocument["Statement"][number]) =>
+    Array.isArray(statement.Resource)
+      ? statement.Resource
+      : [statement.Resource];
+  assert.ok(
+    policy.Statement.every(
+      (statement) =>
+        !actions(statement).some(
+          (action) =>
+            action === "*" ||
+            action === "cloudformation:*" ||
+            action === "iam:*" ||
+            action.startsWith("iam:Delete")
+        ) && !resources(statement).includes("*")
+    )
+  );
+
+  const retirement = policy.Statement.find(
+    ({ Sid }) => Sid === "RetireOneTimeFoundationMigrationAuthorityStack"
+  );
+  const passRole = policy.Statement.find(
+    ({ Sid }) =>
+      Sid === "PassOnlyFoundationAuthorityRetirementExecutionRole"
+  );
+  assert.ok(retirement);
+  assert.ok(passRole);
+  assert.deepEqual(actions(retirement), ["cloudformation:DeleteStack"]);
+  assert.deepEqual(actions(passRole), ["iam:PassRole"]);
+  assert.equal(
+    policy.Statement.filter((statement) =>
+      actions(statement).includes("cloudformation:DeleteStack")
+    ).length,
+    1
+  );
+  assert.equal(
+    policy.Statement.filter((statement) =>
+      actions(statement).includes("iam:PassRole")
+    ).length,
+    1
+  );
+
+  const compactPolicy = JSON.stringify(policy);
+  assert.doesNotMatch(compactPolicy, /\$\{|Foundation[A-Za-z]+\.Arn/u);
+  assert.ok(
+    Buffer.byteLength(compactPolicy, "utf8") <= 10_240,
+    "FoundationPromotionRole aggregate inline policy exceeds 10,240 characters"
+  );
+});
+
+test("deploy gate rejects stale or superseded foundation and edge receipts", () => {
+  const gate = workflowStep(
+    DEPLOY_WORKFLOW,
+    "Require exact-SHA foundation and edge-control receipts"
+  );
+  assert.ok(gate.length > 0);
+  for (const expected of [
+    "prove_foundation_receipt()",
+    "prove_edge_receipt()",
+    "EDGE_CONTROL_RUNS=",
+    '<<<"$EDGE_CONTROL_RUNS"',
+    '.head_sha as $head',
+    '.display_title == ("Foundation plan " + $head)',
+    '.display_title == ("Foundation apply " + $head)',
+    '.display_title == ("Foundation verify " + $head)',
+    '.display_title == ("Foundation abort " + $head)',
+    '.display_title == ("Foundation retire " + $head)',
+    '("Edge " + $environment + " cleanup " + $head)',
+    '("Edge " + $environment + " finalize " + $head)',
+    "actions/workflows/foundation-migration.yml/runs?per_page=100",
+    "actions/workflows/edge-controls.yml/runs?per_page=100",
+    "--paginate",
+    "--slurp",
+    "sort_by(.updated_at, .run_number, .run_attempt)",
+    "CONTROL_RECEIPT_SUPERSEDED=true",
+    'if [ "$CONTROL_RECEIPT_SUPERSEDED" = "true" ]; then',
+    'gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"',
+    '.ref == "refs/heads/main"',
+    '.object.sha == $sha',
+    '[ "$operation" = "verify" ] || return 1',
+    '[[ "$operation" =~ ^(verify|apply)$ ]] || return 1',
+    'or .result == "apply-finalized-and-proved"',
+    "controllerRoleIdSha256",
+    "controllerPolicySha256",
+    "controllerInventorySha256",
+    "controllerDriftSha256",
+    "executionRoleIdSha256",
+    "executionPolicySha256",
+    "executionInventorySha256",
+    "executionDriftSha256",
+  ]) {
+    assert.ok(gate.includes(expected), expected);
+  }
+  assert.doesNotMatch(
+    gate,
+    /runs\?[^"\r\n]*(?:branch|event)=|--branch[ =]|--event[ =]/u
+  );
+  assert.equal((gate.match(/--paginate/gu) ?? []).length, 2);
+  assert.equal((gate.match(/--slurp/gu) ?? []).length, 2);
+  assert.equal(
+    (gate.match(/foundation-migration\.yml\/runs\?per_page=100/gu) ?? [])
+      .length,
+    1
+  );
+  assert.equal(
+    (gate.match(/edge-controls\.yml\/runs\?per_page=100/gu) ?? []).length,
+    1
+  );
+  assert.equal((gate.match(/if ! runs="\$\(/gmu) ?? []).length, 1);
+  assert.equal(
+    (gate.match(/if ! EDGE_CONTROL_RUNS="\$\(/gmu) ?? []).length,
+    1
+  );
+  assert.equal(
+    (gate.match(/CONTROL_RECEIPT_SUPERSEDED=true/gmu) ?? []).length,
+    2
+  );
+  assert.match(
+    gate,
+    /if \[ "\$CONTROL_RECEIPT_SUPERSEDED" = "true" \]; then[\s\S]*?superseded \$EXPECTED_SHA[\s\S]*?exit 1/u
+  );
+  assert.ok(
+    gate.indexOf('current_main="$(') <
+      gate.indexOf('echo "foundation_run_id=$PROVED_FOUNDATION_RUN_ID"')
+  );
+  assert.equal(
+    (gate.match(/if ! gh run download "\$id"/gmu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (
+      gate.match(
+        /gh run download "\$id" \\\r?\n\s+--repo "\$GITHUB_REPOSITORY"/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal((gate.match(/\[ "\$conclusion" = "success" \]/gmu) ?? []).length, 2);
+});
+
+type FenceControlOperation =
+  | "plan"
+  | "apply"
+  | "verify"
+  | "abort"
+  | "retire"
+  | "cleanup"
+  | "finalize";
+
+interface ControlPlaneFenceFixture {
+  foundationRuns?: Array<Record<string, unknown>>;
+  edgeRuns?: Array<Record<string, unknown>>;
+  mainSha?: string;
+  expectedFoundationRunId?: string;
+  expectedFoundationRunAttempt?: string;
+  expectedStagingRunId?: string;
+  expectedStagingRunAttempt?: string;
+  expectedProductionRunId?: string;
+  expectedProductionRunAttempt?: string;
+  environment?: "staging" | "production";
+  jobId?: "deploy-staging" | "deploy-production";
+}
+
+const CONTROL_PLANE_FENCE_SHA = "b".repeat(40);
+
+function foundationFenceRun({
+  id,
+  sha = CONTROL_PLANE_FENCE_SHA,
+  attempt = 1,
+  conclusion = "success",
+  operation = "verify",
+  updatedAt,
+}: {
+  id: number;
+  sha?: string;
+  attempt?: number;
+  conclusion?: string | null;
+  operation?: FenceControlOperation;
+  updatedAt: string;
+}): Record<string, unknown> {
+  return {
+    id,
+    run_attempt: attempt,
+    run_number: id,
+    updated_at: updatedAt,
+    conclusion,
+    head_sha: sha,
+    head_branch: "main",
+    event: "workflow_dispatch",
+    name: "Foundation Storage Migration",
+    path: ".github/workflows/foundation-migration.yml",
+    display_title: `Foundation ${operation} ${sha}`,
+  };
+}
+
+function edgeFenceRun({
+  id,
+  environment,
+  sha = CONTROL_PLANE_FENCE_SHA,
+  attempt = 1,
+  conclusion = "success",
+  operation = "verify",
+  updatedAt,
+}: {
+  id: number;
+  environment: "staging" | "production";
+  sha?: string;
+  attempt?: number;
+  conclusion?: string | null;
+  operation?: FenceControlOperation;
+  updatedAt: string;
+}): Record<string, unknown> {
+  return {
+    id,
+    run_attempt: attempt,
+    run_number: id,
+    updated_at: updatedAt,
+    conclusion,
+    head_sha: sha,
+    head_branch: "main",
+    event: "workflow_dispatch",
+    name: "Manage AWS Edge Controls",
+    path: ".github/workflows/edge-controls.yml",
+    display_title: `Edge ${environment} ${operation} ${sha}`,
+  };
+}
+
+function defaultFoundationFenceRuns(): Array<Record<string, unknown>> {
+  return [
+    foundationFenceRun({
+      id: 90,
+      sha: "a".repeat(40),
+      updatedAt: "2026-07-31T23:59:59Z",
+    }),
+    foundationFenceRun({
+      id: 101,
+      attempt: 2,
+      updatedAt: "2026-08-01T00:00:00Z",
+    }),
+  ];
+}
+
+function defaultEdgeFenceRuns(): Array<Record<string, unknown>> {
+  return [
+    edgeFenceRun({
+      id: 190,
+      environment: "staging",
+      operation: "plan",
+      updatedAt: "2026-07-31T23:59:58Z",
+    }),
+    edgeFenceRun({
+      id: 201,
+      environment: "staging",
+      operation: "apply",
+      updatedAt: "2026-08-01T00:00:01Z",
+    }),
+    edgeFenceRun({
+      id: 301,
+      environment: "production",
+      attempt: 3,
+      operation: "verify",
+      updatedAt: "2026-08-01T00:00:02Z",
+    }),
+  ];
+}
+
+function runControlPlaneFence(fixture: ControlPlaneFenceFixture = {}) {
+  const fakeBin = mkdtempSync(join(tmpdir(), "archon-control-plane-fence-"));
+  try {
+    const traceFile = join(fakeBin, "trace.log");
+    writeFileSync(traceFile, "", "utf8");
+    executable(
+      join(fakeBin, "gh"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${FAKE_FENCE_TRACE:?}"
+case "$*" in
+  *"foundation-migration.yml/runs"*)
+    printf '%s\\n' "\${FAKE_FOUNDATION_RUNS:?}"
+    ;;
+  *"edge-controls.yml/runs"*)
+    printf '%s\\n' "\${FAKE_EDGE_RUNS:?}"
+    ;;
+  *"git/ref/heads/main"*)
+    printf '%s\\n' "\${FAKE_MAIN_REF:?}"
+    ;;
+  *)
+    echo "Unexpected gh invocation" >&2
+    exit 97
+    ;;
+esac
+`
+    );
+    const environment = fixture.environment ?? "staging";
+    const jobId =
+      fixture.jobId ??
+      (environment === "staging" ? "deploy-staging" : "deploy-production");
+    const execution = spawnSync("bash", [CONTROL_PLANE_FENCE_SCRIPT], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        EXPECTED_SHA: CONTROL_PLANE_FENCE_SHA,
+        EXPECTED_FOUNDATION_RUN_ID:
+          fixture.expectedFoundationRunId ?? "101",
+        EXPECTED_FOUNDATION_RUN_ATTEMPT:
+          fixture.expectedFoundationRunAttempt ?? "2",
+        EXPECTED_STAGING_EDGE_RUN_ID:
+          fixture.expectedStagingRunId ?? "201",
+        EXPECTED_STAGING_EDGE_RUN_ATTEMPT:
+          fixture.expectedStagingRunAttempt ?? "1",
+        EXPECTED_PRODUCTION_EDGE_RUN_ID:
+          fixture.expectedProductionRunId ?? "301",
+        EXPECTED_PRODUCTION_EDGE_RUN_ATTEMPT:
+          fixture.expectedProductionRunAttempt ?? "3",
+        FENCE_ENVIRONMENT: environment,
+        FENCE_JOB_ID: jobId,
+        FENCE_MUTEX_GROUP: "aws-shared-control-plane-mutation",
+        GH_TOKEN: "pipeline-test-token",
+        GITHUB_REPOSITORY: "upgradedev/archon-cockroach-memory",
+        GITHUB_RUN_ID: "9001",
+        GITHUB_RUN_ATTEMPT: "4",
+        FAKE_FENCE_TRACE: traceFile,
+        FAKE_FOUNDATION_RUNS: JSON.stringify([
+          {
+            workflow_runs:
+              fixture.foundationRuns ?? defaultFoundationFenceRuns(),
+          },
+        ]),
+        FAKE_EDGE_RUNS: JSON.stringify([
+          { workflow_runs: fixture.edgeRuns ?? defaultEdgeFenceRuns() },
+        ]),
+        FAKE_MAIN_REF: JSON.stringify({
+          ref: "refs/heads/main",
+          object: {
+            type: "commit",
+            sha: fixture.mainSha ?? CONTROL_PLANE_FENCE_SHA,
+          },
+        }),
+      },
+    });
+    return {
+      execution,
+      trace: readFileSync(traceFile, "utf8"),
+    };
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+  }
+}
+
+test("deploy receipt fence is globally latest, paginated, context-bound, and CI parsed", () => {
+  assert.equal(
+    (CONTROL_PLANE_FENCE_SOURCE.match(/--paginate/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (CONTROL_PLANE_FENCE_SOURCE.match(/--slurp/gu) ?? []).length,
+    2
+  );
+  for (const endpoint of [
+    "actions/workflows/foundation-migration.yml/runs?per_page=100",
+    "actions/workflows/edge-controls.yml/runs?per_page=100",
+  ]) {
+    assert.ok(CONTROL_PLANE_FENCE_SOURCE.includes(endpoint), endpoint);
+    assert.equal(
+      (CONTROL_PLANE_FENCE_SOURCE.match(
+        new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "gu")
+      ) ?? []).length,
+      1,
+      endpoint
+    );
+  }
+  assert.equal(
+    (CONTROL_PLANE_FENCE_SOURCE.match(/<<<"\$edge_runs"/gu) ?? []).length,
+    1
+  );
+  assert.doesNotMatch(
+    CONTROL_PLANE_FENCE_SOURCE,
+    /runs\?[^"\r\n]*(?:branch|event)=|--branch[ =]|--event[ =]/u
+  );
+  assert.equal(
+    (CONTROL_PLANE_FENCE_SOURCE.match(/\.\[\]\.workflow_runs\[\]/gu) ?? [])
+      .length,
+    2
+  );
+  assert.equal(
+    (
+      CONTROL_PLANE_FENCE_SOURCE.match(
+        /sort_by\(\.updated_at, \.run_number, \.run_attempt\)[\s\S]*?\| last/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.doesNotMatch(
+    CONTROL_PLANE_FENCE_SOURCE,
+    /--arg sha "\$EXPECTED_SHA"/u
+  );
+  for (const expected of [
+    '.head_sha as $head',
+    '("Foundation verify " + $head)',
+    '("Edge " + $environment + " cleanup " + $head)',
+    'test "$foundation_id" = "$EXPECTED_FOUNDATION_RUN_ID"',
+    'test "$foundation_attempt" = "$EXPECTED_FOUNDATION_RUN_ATTEMPT"',
+    'test "$foundation_sha" = "$EXPECTED_SHA"',
+    'test "$actual_id" = "$expected_id"',
+    'test "$actual_attempt" = "$expected_attempt"',
+    'test "$actual_sha" = "$EXPECTED_SHA"',
+    'test "$(jq -er \'.object.sha\' <<<"$main_ref")" = "$EXPECTED_SHA"',
+    'test "$FENCE_MUTEX_GROUP" = "aws-shared-control-plane-mutation"',
+    "staging:deploy-staging|production:deploy-production",
+    '[[ "$operation" =~ ^(apply|verify)$ ]]',
+    'operation:$stagingEdgeOperation',
+    'operation:$productionEdgeOperation',
+    "edgeSnapshotShared:true",
+    "jq -cS -n",
+  ]) {
+    assert.ok(CONTROL_PLANE_FENCE_SOURCE.includes(expected), expected);
+  }
+  assert.doesNotMatch(CONTROL_PLANE_FENCE_SOURCE, /(?:^|\n)\s*aws\s/u);
+  assert.match(
+    CI_WORKFLOW,
+    /bash -n \.github\/scripts\/revalidate-aws-control-plane-fence\.sh/u
+  );
+
+  const result = runControlPlaneFence();
+  assert.equal(result.execution.status, 0, result.execution.stderr);
+  const proof = JSON.parse(result.execution.stdout);
+  assert.equal(result.execution.stdout.trim(), canonicalJson(proof));
+  assert.equal(proof.sourceSha, CONTROL_PLANE_FENCE_SHA);
+  assert.equal(proof.mainHeadSha, CONTROL_PLANE_FENCE_SHA);
+  assert.equal(proof.mainHeadRevalidated, true);
+  assert.equal(proof.edgeSnapshotShared, true);
+  assert.deepEqual(proof.mutex, {
+    group: "aws-shared-control-plane-mutation",
+    heldByCaller: true,
+  });
+  assert.deepEqual(proof.deployment, {
+    environment: "staging",
+    jobId: "deploy-staging",
+    runAttempt: 4,
+    runId: 9001,
+  });
+  assert.deepEqual(proof.foundation, {
+    operation: "verify",
+    runAttempt: 2,
+    runId: 101,
+  });
+  assert.deepEqual(proof.edge, {
+    production: { operation: "verify", runAttempt: 3, runId: 301 },
+    staging: { operation: "apply", runAttempt: 1, runId: 201 },
+  });
+  assert.equal((result.trace.match(/--paginate --slurp/gu) ?? []).length, 2);
+  assert.doesNotMatch(
+    result.trace,
+    /runs\?[^"\r\n]*(?:branch|event)=|--branch[ =]|--event[ =]/u
+  );
+  assert.equal((result.trace.match(/git\/ref\/heads\/main/gu) ?? []).length, 1);
+});
+
+test("deploy receipt fence fails closed on global supersession and binding drift", () => {
+  const newerSha = "c".repeat(40);
+  const cases: Array<[string, ReturnType<typeof runControlPlaneFence>]> = [
+    [
+      "newer foundation SHA",
+      runControlPlaneFence({
+        foundationRuns: [
+          ...defaultFoundationFenceRuns(),
+          foundationFenceRun({
+            id: 401,
+            sha: newerSha,
+            operation: "plan",
+            updatedAt: "2026-08-02T00:00:00Z",
+          }),
+        ],
+      }),
+    ],
+    [
+      "newer staging cleanup",
+      runControlPlaneFence({
+        edgeRuns: [
+          ...defaultEdgeFenceRuns(),
+          edgeFenceRun({
+            id: 402,
+            environment: "staging",
+            operation: "cleanup",
+            updatedAt: "2026-08-02T00:00:00Z",
+          }),
+        ],
+      }),
+    ],
+    [
+      "newer production finalize",
+      runControlPlaneFence({
+        edgeRuns: [
+          ...defaultEdgeFenceRuns(),
+          edgeFenceRun({
+            id: 403,
+            environment: "production",
+            operation: "finalize",
+            updatedAt: "2026-08-02T00:00:01Z",
+          }),
+        ],
+      }),
+    ],
+    [
+      "pending latest foundation verify",
+      runControlPlaneFence({
+        foundationRuns: [
+          foundationFenceRun({
+            id: 101,
+            attempt: 2,
+            conclusion: null,
+            updatedAt: "2026-08-02T00:00:00Z",
+          }),
+        ],
+      }),
+    ],
+    [
+      "run-attempt mismatch",
+      runControlPlaneFence({ expectedFoundationRunAttempt: "9" }),
+    ],
+    [
+      "main-head mismatch",
+      runControlPlaneFence({ mainSha: newerSha }),
+    ],
+  ];
+  for (const [label, result] of cases) {
+    assert.notEqual(result.execution.status, 0, label);
+  }
+});
+
+test("deploy jobs revalidate exact source-gate outputs before release mutation and embed the canonical fence", () => {
+  const sourceGate = workflowJob(DEPLOY_WORKFLOW, "source-gate");
+  for (const expected of [
+    "id: control_receipts",
+    "foundation_control_run_id: ${{ steps.control_receipts.outputs.foundation_run_id }}",
+    "foundation_control_run_attempt: ${{ steps.control_receipts.outputs.foundation_run_attempt }}",
+    "staging_edge_control_run_id: ${{ steps.control_receipts.outputs.staging_edge_run_id }}",
+    "staging_edge_control_run_attempt: ${{ steps.control_receipts.outputs.staging_edge_run_attempt }}",
+    "production_edge_control_run_id: ${{ steps.control_receipts.outputs.production_edge_run_id }}",
+    "production_edge_control_run_attempt: ${{ steps.control_receipts.outputs.production_edge_run_attempt }}",
+    'echo "foundation_run_id=$PROVED_FOUNDATION_RUN_ID"',
+    'echo "foundation_run_attempt=$PROVED_FOUNDATION_RUN_ATTEMPT"',
+    'echo "staging_edge_run_id=$PROVED_STAGING_EDGE_RUN_ID"',
+    'echo "staging_edge_run_attempt=$PROVED_STAGING_EDGE_RUN_ATTEMPT"',
+    'echo "production_edge_run_id=$PROVED_PRODUCTION_EDGE_RUN_ID"',
+    'echo "production_edge_run_attempt=$PROVED_PRODUCTION_EDGE_RUN_ATTEMPT"',
+  ]) {
+    assert.ok(sourceGate.includes(expected), expected);
+  }
+  assert.doesNotMatch(
+    sourceGate,
+    /revalidate-aws-control-plane-fence\.sh/u
+  );
+
+  const contracts = [
+    {
+      environment: "staging",
+      jobId: "deploy-staging",
+      revalidateName:
+        "Revalidate staging control-plane fence before new release mutation",
+      firstMutationName:
+        "Enforce staging stack protection and fresh pre-deploy drift gate",
+      receiptName: "Build and validate sanitized staging deployment receipt",
+    },
+    {
+      environment: "production",
+      jobId: "deploy-production",
+      revalidateName:
+        "Revalidate production control-plane fence before new release mutation",
+      firstMutationName:
+        "Enforce production stack protection and fresh pre-deploy drift gate",
+      receiptName: "Build and validate sanitized production deployment receipt",
+    },
+  ] as const;
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /- name: Revalidate (?:staging|production) control-plane fence before new release mutation/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  assert.equal(
+    (
+      DEPLOY_WORKFLOW.match(
+        /bash \.github\/scripts\/revalidate-aws-control-plane-fence\.sh/gmu
+      ) ?? []
+    ).length,
+    2
+  );
+  for (const contract of contracts) {
+    const job = workflowJob(DEPLOY_WORKFLOW, contract.jobId);
+    const revalidate = workflowStep(job, contract.revalidateName);
+    const receipt = workflowStep(job, contract.receiptName);
+    assert.ok(job.length > 0, contract.jobId);
+    assert.match(
+      job,
+      /    concurrency:\r?\n      group: aws-shared-control-plane-mutation\r?\n      cancel-in-progress: false\r?\n      queue: max/u
+    );
+    assert.ok(revalidate.length > 0, contract.revalidateName);
+    assert.ok(receipt.length > 0, contract.receiptName);
+    assert.ok(
+      job.indexOf(contract.revalidateName) <
+        job.indexOf(contract.firstMutationName),
+      contract.environment
+    );
+    for (const expected of [
+      `FENCE_ENVIRONMENT: ${contract.environment}`,
+      `FENCE_JOB_ID: ${contract.jobId}`,
+      "FENCE_MUTEX_GROUP: aws-shared-control-plane-mutation",
+      "bash .github/scripts/revalidate-aws-control-plane-fence.sh",
+      'echo "CONTROL_PLANE_FENCE_FILE=$fence"',
+      'echo "CONTROL_PLANE_FENCE_SHA256=$fence_sha256"',
+    ]) {
+      assert.ok(revalidate.includes(expected), expected);
+    }
+    for (const expected of [
+      'test -f "$CONTROL_PLANE_FENCE_FILE"',
+      'test ! -L "$CONTROL_PLANE_FENCE_FILE"',
+      '--slurpfile controlPlaneFence "$CONTROL_PLANE_FENCE_FILE"',
+      "$controlPlaneFence[0].mainHeadRevalidated == true",
+      "$controlPlaneFence[0].latestEligibleRunsRevalidated == true",
+      "$controlPlaneFence[0].edgeSnapshotShared == true",
+      "$controlPlaneFence[0].mutationMutexHeldByCaller == true",
+      'group:"aws-shared-control-plane-mutation"',
+      `jobId:"${contract.jobId}"`,
+      'operation:"verify"',
+      'test("^(apply|verify)$")',
+      "controlPlaneReceiptFence:",
+      "$controlPlaneFence[0] + {",
+      "sha256: $controlPlaneFenceSha256",
+    ]) {
+      assert.ok(receipt.includes(expected), expected);
+    }
+  }
+  assert.equal(
+    (DEPLOY_WORKFLOW.match(/--slurpfile controlPlaneFence/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (DEPLOY_WORKFLOW.match(/controlPlaneReceiptFence:/gu) ?? []).length,
+    2
+  );
+});
+
 test("foundation activation role and workflow are narrow and fail closed", () => {
   const role = resourceBlock("FoundationPromotionRole");
+  const policySource = role.match(
+    /^      Policies:\r?\n(?<source>[\s\S]*?)(?=^      Tags:)/mu
+  )?.groups?.source;
+  assert.ok(policySource);
+  assert.equal(
+    sha256Utf8(policySource.replace(/\r\n/gu, "\n")),
+    "531346397675b5653a29481ab37c26119f7436d95be47656365c88f2e900ea69"
+  );
   for (const condition of [
     "token.actions.githubusercontent.com:aud: sts.amazonaws.com",
     "repo:${GitHubOrganization}/${GitHubRepository}:environment:bootstrap",
@@ -990,19 +2389,47 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.match(
     role,
+    /Sid: InspectOneTimeFoundationMigrationAuthority[\s\S]*?Action:\s+- iam:GetRole\s+- iam:GetRolePolicy\s+- iam:ListAttachedRolePolicies\s+- iam:ListInstanceProfilesForRole\s+- iam:ListRolePolicies\s+Resource: !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration/u
+  );
+  assert.match(
+    role,
+    /Sid: InspectBootstrapStackAndChangeSets[\s\S]*?cloudformation:DescribeChangeSet[\s\S]*?cloudformation:ListStackResources[\s\S]*?stack\/\$\{AppName\}-delivery-bootstrap\/\*[\s\S]*?stack\/\$\{AppName\}-foundation-migration-authority\/\*[\s\S]*?- Sid: InspectFoundationMigrationState/u
+  );
+  assert.match(
+    role,
+    /Sid: InspectFoundationMigrationState[\s\S]*?Action:\s+- cloudformation:DetectStackResourceDrift\s+- cloudformation:ListChangeSets\s+Resource: !Sub >-\s+arn:\$\{AWS::Partition\}:cloudformation:\$\{AWS::Region\}:\$\{AWS::AccountId\}:stack\/\$\{AppName\}-delivery-bootstrap\/\*/u
+  );
+  assert.match(
+    role,
+    /Sid: RetireOneTimeFoundationMigrationAuthorityStack[\s\S]*?Action: cloudformation:DeleteStack[\s\S]*?stack\/\$\{AppName\}-foundation-migration-authority\/\*[\s\S]*?ArnEquals:\s+cloudformation:RoleArn: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn/u
+  );
+  assert.match(
+    role,
+    /Sid: PassOnlyFoundationAuthorityRetirementExecutionRole[\s\S]*?Action: iam:PassRole[\s\S]*?Resource: !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn[\s\S]*?iam:PassedToService: cloudformation\.amazonaws\.com/u
+  );
+  assert.match(
+    role,
     /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(
     role,
-    /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u
+    /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole[\s\S]*?- !GetAtt FoundationAuthorityRetirementExecutionRole\.Arn[\s\S]*?Condition:[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
   );
   assert.match(
     role,
-    /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u
+    /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole[\s\S]*?github-alarm-routing-controls[\s\S]*?alarm-routing-cloudformation-execution[\s\S]*?- Sid: InspectPermanentControlRolePolicies/u
   );
   assert.match(
     role,
-    /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u
+    /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy[\s\S]*?github-alarm-routing-controls[\s\S]*?alarm-routing-cloudformation-execution[\s\S]*?- Sid: InspectFoundationRetirementRoleMetadata/u
+  );
+  assert.match(
+    role,
+    /Sid: InspectFoundationRetirementRoleMetadata[\s\S]*?Action:\s+- iam:GetRole\s+- iam:ListAttachedRolePolicies\s+- iam:ListInstanceProfilesForRole\s+- iam:ListRolePolicies[\s\S]*?github-foundation-promotion[\s\S]*?!GetAtt FoundationAuthorityRetirementExecutionRole\.Arn[\s\S]*?- Sid: InspectFoundationRetirementRolePolicies/u
+  );
+  assert.match(
+    role,
+    /Sid: InspectFoundationRetirementRolePolicies[\s\S]*?Action: iam:GetRolePolicy[\s\S]*?github-foundation-promotion[\s\S]*?!GetAtt FoundationAuthorityRetirementExecutionRole\.Arn[\s\S]*?- Sid: ResolveExactFoundationAutomationRule/u
   );
   assert.match(
     role,
@@ -1013,14 +2440,20 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
     1
   );
   assert.equal((role.match(/Action: iam:GetRole$/gmu) ?? []).length, 3);
-  assert.equal((role.match(/Action: iam:GetRolePolicy$/gmu) ?? []).length, 1);
+  assert.equal((role.match(/Action: iam:GetRolePolicy$/gmu) ?? []).length, 2);
+  assert.equal((role.match(/iam:ListRolePolicies/gmu) ?? []).length, 2);
+  assert.equal((role.match(/iam:ListAttachedRolePolicies/gmu) ?? []).length, 2);
+  assert.equal(
+    (role.match(/iam:ListInstanceProfilesForRole/gmu) ?? []).length,
+    2
+  );
   assert.equal(
     (
       role.match(
         /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
       ) ?? []
     ).length,
-    29
+    32
   );
   assert.equal(
     (role.match(/Action: securityhub:ListTagsForResource/gmu) ?? [])
@@ -1029,7 +2462,12 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
   );
   assert.doesNotMatch(
     role,
-    /iam:(?:Create|Delete|Update|Put|Attach|Detach|Pass|ListRoles|ListRolePolicies|ListAttachedRolePolicies|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:DeleteStack|UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
+    /iam:(?:Create|Delete|Update|Put|Attach|Detach|ListRoles|ListRoleTags)|securityhub:(?:Create|BatchUpdate|BatchDelete|ListAutomationRules)|cloudformation:(?:UpdateStack|SetStackPolicy)|role\/\*|automation-rule\/\*|Resource: "\*"/u
+  );
+  assert.equal((role.match(/Action: iam:PassRole/gmu) ?? []).length, 1);
+  assert.equal(
+    (role.match(/Action: cloudformation:DeleteStack/gmu) ?? []).length,
+    1
   );
   assert.equal(
     (
@@ -1156,6 +2594,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/EdgeControlRole",
       "LogicalResourceId/FinOpsCloudFormationExecutionRole",
       "LogicalResourceId/FinOpsControlRole",
+      "LogicalResourceId/FoundationAuthorityRetirementExecutionRole",
       "LogicalResourceId/FoundationPromotionRole",
       "LogicalResourceId/GitHubOidcProvider",
       "LogicalResourceId/ProductionAlarmArchiveQueue",

@@ -93,6 +93,10 @@ jobs:
     needs: authorize
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    concurrency:
+      group: aws-shared-control-plane-mutation
+      cancel-in-progress: false
+      queue: max
     environment: bootstrap
     permissions:
       actions: read
