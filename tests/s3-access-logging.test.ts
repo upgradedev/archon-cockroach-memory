@@ -778,6 +778,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/ArtifactBucketPolicy",
       "LogicalResourceId/CloudFrontAccessLogBucket",
       "LogicalResourceId/CloudFrontAccessLogBucketPolicy",
+      "LogicalResourceId/EdgeCleanupRole",
       "LogicalResourceId/EdgeControlRole",
       "LogicalResourceId/FinOpsCloudFormationExecutionRole",
       "LogicalResourceId/FinOpsControlRole",

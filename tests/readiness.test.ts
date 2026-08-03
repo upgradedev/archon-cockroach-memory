@@ -358,7 +358,7 @@ test("readiness: edge cleanup and finalization have bounded restart-safe lifecyc
   assert.match(setProtectionStep, /update-termination-protection/u);
   assert.match(
     liveProofStep,
-    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'verify' \|\| inputs\.operation == 'finalize'/u
+    /if: inputs\.operation == 'apply' \|\| inputs\.operation == 'verify' \|\| \(inputs\.operation == 'finalize' && env\.EDGE_CURRENT_SEMANTICS_MATCH == 'true'\)/u
   );
   assert.match(liveProofStep, /stackPolicyProtected: true/u);
   assert.match(liveProofStep, /terminationProtection: true/u);
@@ -5062,11 +5062,11 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   ]) {
     const expectedCount =
       action === "logs:DescribeLogStreams" ||
-      action === "logs:FilterLogEvents"
+      action === "logs:FilterLogEvents" ||
+      action === "logs:DescribeResourcePolicies"
         ? 3
         : action === "logs:CreateLogDelivery" ||
             action === "logs:DeleteLogDelivery" ||
-            action === "logs:DescribeResourcePolicies" ||
             action === "logs:PutResourcePolicy"
           ? 2
           : 1;
@@ -5078,6 +5078,10 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   assert.match(
     bootstrap,
     /Sid: ConfigureOnlyCloudFormationWafLogDelivery[\s\S]*?- logs:CreateLogDelivery\s+- logs:DeleteLogDelivery\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+- logs:PutResourcePolicy[\s\S]*?Resource: "\*"[\s\S]*?aws:RequestedRegion: us-east-1[\s\S]*?aws:CalledVia: cloudformation\.amazonaws\.com/u
+  );
+  assert.match(
+    bootstrap,
+    /Sid: DescribeOnlyUsEastOneEdgeLogs\s+Effect: Allow\s+Action:\s+- logs:DescribeLogGroups\s+- logs:DescribeResourcePolicies\s+Resource: "\*"\s+Condition:\s+StringEquals:\s+aws:RequestedRegion: us-east-1/u
   );
   assert.equal(
     (
