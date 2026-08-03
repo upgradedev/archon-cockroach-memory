@@ -56,10 +56,22 @@ from the validated AWS account and application name.
 
 The current authority contract requires the source commit and canonical
 authority-template digest as both exact stack parameters and the only two stack
-tags. An authority stack created from an older, pre-binding contract cannot be
-adopted or upgraded by this workflow: an administrator must delete it and
-recreate it from Phase 0 below. No authority stack has been created as part of
-this repository work.
+tags. Future creation and strict verification hash exactly one recursively
+key-sorted compact UTF-8 JSON object with no BOM and no trailing byte
+(`jq -Scj`), making the binding independent of the operator platform. An
+authority stack created from
+an older, pre-binding contract cannot be adopted or upgraded by this workflow:
+an administrator must delete it and recreate it from Phase 0 below. Repository
+source and CI never create this authority; Phase 0 is a separately approved
+external bootstrap action.
+
+`verify-intrinsic` has one retirement-only compatibility boundary for an
+already-bound authority created by the previous digest implementation: the
+recorded digest may match the same canonical object followed by exactly LF or
+CRLF. It does not normalize other whitespace, accept a BOM, change the live
+template, or authorize planning/apply. The proof records the canonical digest,
+the recorded digest, and `none|lf|crlf` independently. Normal `verify` accepts
+only the no-terminator contract.
 
 ## Phase 0: create the one-time authority
 
@@ -90,7 +102,18 @@ authority_template=$(
   bash aws/foundation-migration-authority.sh render-template
 )
 test "$(
-  printf '%s' "$authority_template" | jq -Sc . | sha256sum | awk '{print $1}'
+  printf '%s' "$authority_template" |
+    jq -Scj -s '
+      if length != 1 then
+        error("expected exactly one JSON document")
+      elif (.[0] | type) != "object" then
+        error("expected one JSON object")
+      else
+        .[0]
+      end
+    ' |
+    sha256sum |
+    awk '{print $1}'
 )" = "$AUTHORITY_TEMPLATE_SHA256"
 aws cloudformation create-stack \
   --stack-name "${APP_NAME}-foundation-migration-authority" \
@@ -140,9 +163,16 @@ green main SHA:
    authority creation binding, trust, policy, template, and single resource.
    It fetches the generator from the recorded, verified ancestor commit, runs
    only its `render-template` mode in a credential-free environment, and
-   requires that canonical digest to equal both the recorded and live template;
+   requires its no-terminator canonical digest to equal the live canonical
+   template digest. The recorded binding must independently equal that same
+   canonical byte sequence with exactly `none`, LF, or CRLF termination; legacy
+   termination is accepted only by this intrinsic retirement path. It then
    proves the target foundation is stable; and snapshots its stack, template,
    policy, and resource inventory. If `abort` succeeds, stop this sequence.
+   Any digest, representation, historical-source, or body mismatch produces a
+   sanitized failure phase and stops before change-set or authority deletion.
+   Failure receipts also state whether a destructive call was attempted and
+   preserve only already-proved, sanitized deleted-plan records.
 4. Before deleting anything, `abort` enumerates every target-stack change set.
    The complete inventory must contain only `foundation-storage-*` plans in
    `CREATE_COMPLETE` with `AVAILABLE|OBSOLETE` execution state and no import.
@@ -213,7 +243,9 @@ after its full inventory gate passes.
 
 All uploaded evidence is SHA-bound and sanitized:
 
-- one-time authority trust/policy/role digests;
+- one-time authority trust/policy/role digests, plus separate
+  `recordedAuthorityTemplateSha256`, `canonicalAuthorityTemplateSha256`,
+  `templateCanonicalization`, and `recordedTemplateTerminator` proof fields;
 - candidate template, parameter, stack-policy, change-set, and recovery-anchor
   digests;
 - explicit additive/non-replacement change classification;

@@ -553,11 +553,30 @@ jobs:
           bash aws/foundation-migration-authority.sh verify \
             >"$authority_proof"
           jq -e '
-            .ok == true
+            .schema == "archon.aws.foundation-migration-authority"
+            and .schemaVersion == 2
+            and .ok == true
             and .oneTime == true
+            and .verificationMode == "verify"
             and .liveContractExact == true
             and .cloudFormationCreationContractExact == true
             and .retirementRequired == true
+            and (
+              .recordedAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and (
+              .canonicalAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and .authorityTemplateSha256
+              == .recordedAuthorityTemplateSha256
+            and .recordedAuthorityTemplateSha256
+              == .canonicalAuthorityTemplateSha256
+            and .templateCanonicalization
+              == "jq-sort-compact-no-terminator-v1"
+            and .recordedTemplateTerminator == "none"
+            and .legacyTemplateDigestAccepted == false
           ' "$authority_proof" >/dev/null
           receipt_next="${RUNNER_TEMP:?}/foundation-authority-bound-receipt.json"
           jq \
@@ -1889,6 +1908,8 @@ jobs:
           final_plans="${RUNNER_TEMP:?}/foundation-abort-final-plans.json"
           plan_records="${RUNNER_TEMP:?}/foundation-abort-plan-records.json"
           phase=initial-proof
+          destructive_actions_started=false
+          printf '[]\n' >"$plan_records"
 
           record_failure() {
             failure_status="$?"
@@ -1896,9 +1917,17 @@ jobs:
             set +e
             jq \
               --arg phase "$phase" \
+              --argjson destructiveActionsStarted \
+                "$destructive_actions_started" \
+              --slurpfile plans "$plan_records" \
               '. + {
                 ok: false,
                 result: "abort-failed",
+                destructiveActionsStarted: $destructiveActionsStarted,
+                partialChangeSetCleanup: {
+                  deletedCount: ($plans[0] | length),
+                  plans: $plans[0]
+                },
                 failure: {phase: $phase}
               }' "$receipt" >"$receipt_next" &&
               mv "$receipt_next" "$receipt"
@@ -1913,6 +1942,7 @@ jobs:
           test "$AWS_FOUNDATION_MIGRATION_ROLE_ARN" = \
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-github-foundation-migration"
 
+          phase=caller-identity
           aws sts get-caller-identity --output json >"$identity"
           jq -e \
             --arg account "$AWS_ACCOUNT_ID" \
@@ -1922,10 +1952,14 @@ jobs:
               and (.Arn | contains(":assumed-role/" + $role + "/"))
             ' "$identity" >/dev/null
 
+          phase=authority-intrinsic
           bash aws/foundation-migration-authority.sh verify-intrinsic \
             >"$authority_proof"
+          phase=authority-proof-contract
           jq -e '
-            .ok == true
+            .schema == "archon.aws.foundation-migration-authority"
+            and .schemaVersion == 2
+            and .ok == true
             and .oneTime == true
             and .verificationMode == "verify-intrinsic"
             and .liveContractExact == false
@@ -1935,6 +1969,34 @@ jobs:
             and .trustRepositoryBound == true
             and .retirementRequired == true
             and .resourceCount == 1
+            and (.authorityTemplateSha256 | test("^[0-9a-f]{64}$"))
+            and (
+              .recordedAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and .authorityTemplateSha256
+              == .recordedAuthorityTemplateSha256
+            and (
+              .canonicalAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and .templateCanonicalization
+              == "jq-sort-compact-no-terminator-v1"
+            and (.recordedTemplateTerminator | IN("none", "lf", "crlf"))
+            and (.legacyTemplateDigestAccepted | type) == "boolean"
+            and (
+              .legacyTemplateDigestAccepted
+              == (.recordedTemplateTerminator != "none")
+            )
+            and (
+              if .recordedTemplateTerminator == "none" then
+                .recordedAuthorityTemplateSha256
+                  == .canonicalAuthorityTemplateSha256
+              else
+                .recordedAuthorityTemplateSha256
+                  != .canonicalAuthorityTemplateSha256
+              end
+            )
           ' "$authority_proof" >/dev/null
           authority_proof_sha256="$(
             jq -Sc . "$authority_proof" | sha256sum | awk '{print $1}'
@@ -1943,11 +2005,13 @@ jobs:
           [[ "$authority_source" =~ ^[0-9a-f]{40}$ ]]
           authority_commit="${RUNNER_TEMP:?}/foundation-authority-source-commit.json"
           authority_compare="${RUNNER_TEMP:?}/foundation-authority-source-compare.json"
+          phase=authority-source-commit
           gh api \
             "repos/${GITHUB_REPOSITORY}/commits/${authority_source}" \
             >"$authority_commit"
           jq -e --arg source "$authority_source" \
             '.sha == $source' "$authority_commit" >/dev/null
+          phase=authority-source-ancestry
           gh api \
             "repos/${GITHUB_REPOSITORY}/compare/${authority_source}...${TARGET_SHA}" \
             >"$authority_compare"
@@ -1957,6 +2021,7 @@ jobs:
               .merge_base_commit.sha == $source
               and (.status == "ahead" or .status == "identical")
             ' "$authority_compare" >/dev/null
+          phase=historical-generator-fetch
           gh api \
             -H "Accept: application/vnd.github.raw+json" \
             "repos/${GITHUB_REPOSITORY}/contents/aws/foundation-migration-authority.sh?ref=${authority_source}" \
@@ -1964,6 +2029,7 @@ jobs:
           # The only historical source execution is the exact generator mode
           # from the verified ancestor commit, under an empty credential-free
           # environment. No general script mode or sourced helper is allowed.
+          phase=historical-template-render
           env -i \
             PATH="/usr/bin:/bin" \
             APP_NAME="$APP_NAME" \
@@ -1976,13 +2042,22 @@ jobs:
             GITHUB_OIDC_PROVIDER_ARN="$GITHUB_OIDC_PROVIDER_ARN" \
             bash --noprofile --norc "$historical_authority_generator" \
               render-template >"$historical_authority_template"
+          phase=historical-template-binding
           historical_authority_template_sha256="$(
-            jq -Sc . "$historical_authority_template" |
+            jq -Scj -s '
+              if length != 1 then
+                error("expected exactly one historical JSON document")
+              elif (.[0] | type) != "object" then
+                error("expected one historical JSON object")
+              else
+                .[0]
+              end
+            ' "$historical_authority_template" |
               sha256sum |
               awk '{print $1}'
           )"
           test "$historical_authority_template_sha256" = \
-            "$(jq -er '.authorityTemplateSha256' "$authority_proof")"
+            "$(jq -er '.canonicalAuthorityTemplateSha256' "$authority_proof")"
 
           phase=target-before
           target_stack_name="${APP_NAME}-delivery-bootstrap"
@@ -2102,7 +2177,6 @@ jobs:
               and ((.ImportExistingResources // false) == false)
             )
           ' "$plans" >/dev/null
-          printf '[]\n' >"$plan_records"
           plan_count=0
           while IFS= read -r encoded; do
             summary="$(printf '%s' "$encoded" | base64 --decode)"
@@ -2267,6 +2341,7 @@ jobs:
               ' "$final_detail" >/dev/null
             observed_status="$(jq -er '.Status' "$final_detail")"
             observed_execution="$(jq -er '.ExecutionStatus' "$final_detail")"
+            destructive_actions_started=true
             aws cloudformation delete-change-set \
               --stack-name "$target_stack_name" \
               --change-set-name "$plan_id" \
@@ -2439,6 +2514,7 @@ jobs:
 
           phase=authority-delete
           client_token="abort-foundation-authority-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          destructive_actions_started=true
           aws cloudformation delete-stack \
             --stack-name "$authority_stack_id" \
             --client-request-token "$client_token" \
@@ -2495,6 +2571,7 @@ jobs:
                 ok: true,
                 result: "migration-aborted-authority-retired",
                 generatedAt: $generatedAt,
+                destructiveActionsStarted: true,
                 foundation: {
                   stackStatus: $targetStatus,
                   stackProjectionSha256: $targetProjectionSha256,
@@ -2513,10 +2590,15 @@ jobs:
                   sourceCommit: $authoritySourceCommit,
                   canonicalTemplateSha256:
                     $historicalAuthorityTemplateSha256,
+                  templateCanonicalization:
+                    $authority[0].templateCanonicalization,
+                  recordedTemplateTerminator:
+                    $authority[0].recordedTemplateTerminator,
                   verifiedAncestor: true,
                   boundedGeneratorMode: "render-template",
                   credentialFreeEnvironment: true,
-                  matchesRecordedAndLiveTemplate: true
+                  matchesCanonicalLiveTemplate: true,
+                  recordedDigestCompatibilityVerified: true
                 },
                 abortExecution: {
                   clientRequestTokenSha256: $clientTokenSha256
@@ -2677,7 +2759,31 @@ jobs:
           receipt="${RUNNER_TEMP:?}/foundation-storage-migration-receipt.json"
           bash aws/foundation-migration-authority.sh verify \
             >"$authority_proof"
-          jq -e '.ok == true and .retirementRequired == true' \
+          jq -e '
+            .schema == "archon.aws.foundation-migration-authority"
+            and .schemaVersion == 2
+            and .ok == true
+            and .verificationMode == "verify"
+            and .liveContractExact == true
+            and .cloudFormationCreationContractExact == true
+            and .retirementRequired == true
+            and (
+              .recordedAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and (
+              .canonicalAuthorityTemplateSha256
+              | test("^[0-9a-f]{64}$")
+            )
+            and .authorityTemplateSha256
+              == .recordedAuthorityTemplateSha256
+            and .recordedAuthorityTemplateSha256
+              == .canonicalAuthorityTemplateSha256
+            and .templateCanonicalization
+              == "jq-sort-compact-no-terminator-v1"
+            and .recordedTemplateTerminator == "none"
+            and .legacyTemplateDigestAccepted == false
+          ' \
             "$authority_proof" >/dev/null
           stack="${APP_NAME}-foundation-migration-authority"
           target_stack="${APP_NAME}-delivery-bootstrap"
@@ -2868,17 +2974,52 @@ jobs:
           jq -e \
             --slurpfile initial "$authority_proof" \
             '
-              .ok == true
+              .schema == "archon.aws.foundation-migration-authority"
+              and .schemaVersion == 2
+              and .ok == true
+              and .oneTime == true
               and .verificationMode == "verify-intrinsic"
+              and .liveContractExact == false
+              and .cloudFormationCreationContractExact == false
               and .intrinsicSafetyContractVerified == true
               and .creationBindingVerified == true
+              and .trustRepositoryBound == true
+              and .retirementRequired == true
               and .resourceCount == 1
+              and .authorityTemplateSha256
+                == .recordedAuthorityTemplateSha256
+              and (.recordedTemplateTerminator | IN("none", "lf", "crlf"))
+              and .templateCanonicalization
+                == "jq-sort-compact-no-terminator-v1"
+              and (
+                .legacyTemplateDigestAccepted
+                == (.recordedTemplateTerminator != "none")
+              )
+              and (
+                if .recordedTemplateTerminator == "none" then
+                  .recordedAuthorityTemplateSha256
+                    == .canonicalAuthorityTemplateSha256
+                else
+                  .recordedAuthorityTemplateSha256
+                    != .canonicalAuthorityTemplateSha256
+                end
+              )
               and .roleArnSha256 == $initial[0].roleArnSha256
               and .trustPolicySha256 == $initial[0].trustPolicySha256
               and .permissionsPolicySha256
                 == $initial[0].permissionsPolicySha256
               and .authorityTemplateSha256
                 == $initial[0].authorityTemplateSha256
+              and .recordedAuthorityTemplateSha256
+                == $initial[0].recordedAuthorityTemplateSha256
+              and .canonicalAuthorityTemplateSha256
+                == $initial[0].canonicalAuthorityTemplateSha256
+              and .templateCanonicalization
+                == $initial[0].templateCanonicalization
+              and .recordedTemplateTerminator
+                == $initial[0].recordedTemplateTerminator
+              and .legacyTemplateDigestAccepted
+                == $initial[0].legacyTemplateDigestAccepted
               and .authorityStackIdSha256
                 == $initial[0].authorityStackIdSha256
               and .sourceCommit == $initial[0].sourceCommit

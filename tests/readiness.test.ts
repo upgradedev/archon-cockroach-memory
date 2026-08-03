@@ -557,6 +557,7 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
     phaseZero,
     /authority_template=\$\(\s*bash aws\/foundation-migration-authority\.sh render-template\s*\)/u
   );
+  assert.match(phaseZero, /jq -Scj/u);
   for (const binding of [
     "ParameterKey=SourceCommit,ParameterValue=${SOURCE_COMMIT}",
     "ParameterKey=AuthorityTemplateSha256,ParameterValue=${AUTHORITY_TEMPLATE_SHA256}",
@@ -576,12 +577,43 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
   assert.match(authority, /cloudformation:ListChangeSets/u);
   assert.match(authority, /cloudformation:ListStackResources/u);
   assert.match(
+    authority,
+    /canonical_json_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u
+  );
+  assert.match(
+    authority,
+    /render-template-sha256\)\s*render_template \| canonical_json_sha256/u
+  );
+  assert.match(
+    authority,
+    /live_template_digest="\$\(\s*canonical_template_body_sha256 "\$live_template"/u
+  );
+  assert.equal(
+    (authority.match(/legacy_lf_template_body_sha256/gu) ?? []).length,
+    2
+  );
+  assert.equal(
+    (authority.match(/legacy_crlf_template_body_sha256/gu) ?? []).length,
+    2
+  );
+  for (const field of [
+    "recordedAuthorityTemplateSha256",
+    "canonicalAuthorityTemplateSha256",
+    "templateCanonicalization",
+    "recordedTemplateTerminator",
+    "legacyTemplateDigestAccepted",
+  ]) {
+    assert.ok(authority.includes(field), field);
+  }
+  assert.match(authority, /template-digest-binding/u);
+  assert.doesNotMatch(authority, /aws cloudformation delete-stack/u);
+  assert.match(
     runbook,
     /pre-binding contract cannot be[\s\S]*?administrator must delete it and[\s\S]*?recreate it from Phase 0/u
   );
   assert.match(
     runbook,
-    /No authority stack has been created as part of[\s\S]*?repository work/u
+    /Repository[\s\S]*?source and CI never create this authority/u
   );
 
   assert.match(failedPlanCleanupStep, /always\(\)/u);
@@ -628,6 +660,32 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
   );
   assert.match(abortStep, /\.creationBindingVerified == true/u);
   assert.match(abortStep, /\.resourceCount == 1/u);
+  for (const field of [
+    "recordedAuthorityTemplateSha256",
+    "canonicalAuthorityTemplateSha256",
+    "templateCanonicalization",
+    "recordedTemplateTerminator",
+  ]) {
+    assert.ok(abortStep.includes(field), field);
+  }
+  assert.match(
+    abortStep,
+    /recordedTemplateTerminator \| IN\("none", "lf", "crlf"\)/u
+  );
+  assert.match(
+    abortStep,
+    /jq -Scj -s[\s\S]*?expected exactly one historical JSON document/u
+  );
+  assert.match(abortStep, /matchesCanonicalLiveTemplate: true/u);
+  assert.match(abortStep, /recordedDigestCompatibilityVerified: true/u);
+  assert.doesNotMatch(abortStep, /matchesRecordedAndLiveTemplate/u);
+  assert.match(abortStep, /destructive_actions_started=false/u);
+  assert.match(
+    abortStep,
+    /destructiveActionsStarted: \$destructiveActionsStarted/u
+  );
+  assert.match(abortStep, /partialChangeSetCleanup:/u);
+  assert.match(abortStep, /deletedCount: \(\$plans\[0\] \| length\)/u);
   assert.match(
     abortStep,
     /all\(\s*\(\.Summaries \/\/ \[\]\)\[\];\s*\(\.ChangeSetName \| startswith\("foundation-storage-"\)\)\s*and \.Status == "CREATE_COMPLETE"\s*and \(\.ExecutionStatus \| IN\("AVAILABLE", "OBSOLETE"\)\)\s*and \(\(\.ImportExistingResources \/\/ false\) == false\)/u
@@ -667,6 +725,7 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
   assert.match(abortReceipt, /remainingCount: 0/u);
   assert.match(abortReceipt, /stackDeleted: true/u);
   assert.match(abortReceipt, /roleDeleted: true/u);
+  assert.match(abortReceipt, /destructiveActionsStarted: true/u);
   assert.doesNotMatch(abortReceipt, /AWS_ACCOUNT_ID|arn:aws:/u);
 
   assert.match(audit, /foundation-migration-lifecycle-source/u);
