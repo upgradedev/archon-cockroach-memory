@@ -733,6 +733,8 @@ esac
       trace: readFileSync(traceFile, "utf8"),
       recordedDigest,
       canonicalDigest: sha256Utf8(liveCanonical),
+      stackIdDigest: sha256Utf8(stackId),
+      stackIdDigestWithLf: sha256Utf8(`${stackId}\n`),
     };
   } finally {
     rmSync(fakeBin, { recursive: true, force: true });
@@ -768,6 +770,8 @@ test("foundation intrinsic retirement accepts only exact none, LF, or CRLF bindi
     assert.equal(proof.schemaVersion, 2);
     assert.equal(proof.recordedAuthorityTemplateSha256, result.recordedDigest);
     assert.equal(proof.canonicalAuthorityTemplateSha256, result.canonicalDigest);
+    assert.equal(proof.authorityStackIdSha256, result.stackIdDigest);
+    assert.notEqual(proof.authorityStackIdSha256, result.stackIdDigestWithLf);
     assert.equal(proof.recordedTemplateTerminator, representation);
     assert.equal(
       proof.templateCanonicalization,

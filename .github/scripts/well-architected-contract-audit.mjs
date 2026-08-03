@@ -889,6 +889,9 @@ const foundationAuthorityTemplateDigestContractValid =
   /live_template_digest="\$\(\s*canonical_template_body_sha256 "\$live_template"/u.test(
     foundationMigrationAuthoritySource,
   ) &&
+  /--arg stackIdSha256 "\$\(\s*jq -ejr '\.Stacks\[0\]\.StackId' "\$live_stack" \|\s*sha256sum/u.test(
+    foundationMigrationAuthoritySource,
+  ) &&
   (foundationMigrationAuthoritySource.match(
     /legacy_lf_template_body_sha256/gu,
   ) ?? []).length === 2 &&
@@ -1024,6 +1027,9 @@ const foundationAbortContractValid =
     foundationAbortJob,
   ) &&
   /foundation-migration-authority\.sh verify-intrinsic/u.test(
+    foundationAbortStep,
+  ) &&
+  /authority_stack_id="\$\(jq -er '\.Stacks\[0\]\.StackId' "\$authority_stack"\)"[\s\S]*?printf '%s' "\$authority_stack_id" \|\s*sha256sum/u.test(
     foundationAbortStep,
   ) &&
   /\.verificationMode == "verify-intrinsic"/u.test(foundationAbortStep) &&

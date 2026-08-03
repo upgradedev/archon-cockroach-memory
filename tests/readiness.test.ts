@@ -588,6 +588,10 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
     authority,
     /live_template_digest="\$\(\s*canonical_template_body_sha256 "\$live_template"/u
   );
+  assert.match(
+    authority,
+    /--arg stackIdSha256 "\$\(\s*jq -ejr '\.Stacks\[0\]\.StackId' "\$live_stack" \|\s*sha256sum/u
+  );
   assert.equal(
     (authority.match(/legacy_lf_template_body_sha256/gu) ?? []).length,
     2
@@ -657,6 +661,10 @@ test("readiness: foundation Phase 0, failed-plan cleanup, and abort are source-b
   assert.match(
     abortStep,
     /foundation-migration-authority\.sh verify-intrinsic/u
+  );
+  assert.match(
+    abortStep,
+    /authority_stack_id="\$\(jq -er '\.Stacks\[0\]\.StackId' "\$authority_stack"\)"[\s\S]*?printf '%s' "\$authority_stack_id" \|\s*sha256sum/u
   );
   assert.match(abortStep, /\.creationBindingVerified == true/u);
   assert.match(abortStep, /\.resourceCount == 1/u);

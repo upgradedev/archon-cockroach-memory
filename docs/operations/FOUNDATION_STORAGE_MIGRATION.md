@@ -71,7 +71,8 @@ recorded digest may match the same canonical object followed by exactly LF or
 CRLF. It does not normalize other whitespace, accept a BOM, change the live
 template, or authorize planning/apply. The proof records the canonical digest,
 the recorded digest, and `none|lf|crlf` independently. Normal `verify` accepts
-only the no-terminator contract.
+only the no-terminator contract. The proof also hashes the exact UTF-8 stack ID
+text with no trailing byte, matching the final pre-deletion binding.
 
 ## Phase 0: create the one-time authority
 
