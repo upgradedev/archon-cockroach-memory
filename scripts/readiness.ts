@@ -33,7 +33,7 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 213;
+export const EXPECTED_WORKFLOW_ACTION_REFS = 216;
 export const EXPECTED_SETUP_NODE_STEPS = 31;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 9;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
@@ -5014,8 +5014,8 @@ function sourceChecks(): SourceCheck[] {
         /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u.test(
           supplyChainWorkflow
         ) &&
-        /rawFindings == 3/u.test(supplyChainWorkflow) &&
-        /compatibilityFindings == 3/u.test(supplyChainWorkflow) &&
+        /rawFindings == 4/u.test(supplyChainWorkflow) &&
+        /compatibilityFindings == 4/u.test(supplyChainWorkflow) &&
         /rawFindings == 4/u.test(supplyChainWorkflow) &&
         /approvedBuildLicenseFindings == 4/u.test(supplyChainWorkflow) &&
         /blockingFindings == 0/u.test(supplyChainWorkflow) &&
@@ -5034,6 +5034,9 @@ function sourceChecks(): SourceCheck[] {
         /EXPECTED_TARGET = "aws\/template\.yaml"/u.test(
           trivyIacCompatibilityValidator
         ) &&
+        /EXPECTED_BOOTSTRAP_TARGET = "aws\/bootstrap-oidc\.yaml"/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
         /CloudFrontDefaultCertificate: true/u.test(
           trivyIacCompatibilityValidator
         ) &&
@@ -5050,6 +5053,13 @@ function sourceChecks(): SourceCheck[] {
           trivyIacCompatibilityValidator
         ) &&
         /keyRotation: true/u.test(trivyIacCompatibilityValidator) &&
+        /legacyCloudFrontStandardLogging: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /sseS3Aes256: true/u.test(trivyIacCompatibilityValidator) &&
+        /customerManagedKeyAbsent: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
         /captured Trivy version must be/u.test(
           trivyIacCompatibilityValidator
         ) &&
@@ -5687,7 +5697,9 @@ function sourceChecks(): SourceCheck[] {
         /name:\s*Manage AWS Edge Controls/u.test(
           edgeControlsWorkflow
         ) &&
-        /environment:\s*edge-controls/u.test(edgeControlsWorkflow) &&
+        /environment:\s*\$\{\{ inputs\.operation == 'cleanup' && 'edge-cleanup' \|\| 'edge-controls' \}\}/u.test(
+          edgeControlsWorkflow
+        ) &&
         /set-stack-policy/u.test(edgeControlsWorkflow) &&
         /update-termination-protection/u.test(edgeControlsWorkflow) &&
         /Prove exact deployed WAF controls/u.test(edgeControlsWorkflow) &&
@@ -6951,13 +6963,13 @@ function sourceChecks(): SourceCheck[] {
         /Sid: ResolveExactCloudFormationExecutionRoles[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-cloudformation\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-cloudformation\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
+        /Sid: ResolveExactFoundationRoleAttributes[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-lambda-runtime\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-staging-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-production-codedeploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-database-operator\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-promotion\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-foundation-migration\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-staging-deploy\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-production-deploy\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u.test(
+        /Sid: InspectPermanentControlRoleMetadata[\s\S]*?Action: iam:GetRole\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: InspectPermanentControlRolePolicies/u.test(
           foundationPromotionRole
         ) &&
-        /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u.test(
+        /Sid: InspectPermanentControlRolePolicies[\s\S]*?Action: iam:GetRolePolicy\s+Resource:\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-edge-cleanup\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-finops-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-finops-cloudformation-execution\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-github-alarm-routing-controls\s+- !Sub >-\s+arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-alarm-routing-cloudformation-execution\s+- Sid: ResolveExactFoundationAutomationRule/u.test(
           foundationPromotionRole
         ) &&
         /Sid: ResolveExactFoundationAutomationRule[\s\S]*?Action: securityhub:ListTagsForResource\s+Resource: !GetAtt S3AccessLogArchiveS39Suppression\.RuleArn\s+Condition:\s+"ForAnyValue:StringEquals":\s+aws:CalledVia: cloudformation\.amazonaws\.com/u.test(
@@ -6973,7 +6985,7 @@ function sourceChecks(): SourceCheck[] {
           foundationPromotionRole.match(
             /arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:role\/\$\{AppName\}-[a-z-]+/gmu
           ) ?? []
-        ).length === 25 &&
+        ).length === 29 &&
         (
           foundationPromotionRole.match(
             /Action: securityhub:ListTagsForResource/gmu

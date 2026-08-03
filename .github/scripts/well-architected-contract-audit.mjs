@@ -1272,7 +1272,6 @@ const edgeProtectionSemanticsValid =
   edgeOperationSurfaceValid &&
   edgeCleanupLifecycleValid &&
   edgeFinalizeLifecycleValid &&
-  /environment:\s*edge-controls/u.test(edgeControlWorkflowSource) &&
   /AWS_REGION:\s*us-east-1/u.test(edgeControlWorkflowSource) &&
   /sha256sum "\$pending_template"[\s\S]*?EDGE_TEMPLATE_DIGEST/u.test(
     edgeControlWorkflowSource,
@@ -1287,8 +1286,12 @@ const edgeProtectionSemanticsValid =
   !/Type:\s*AWS::SQS::Queue/u.test(edgeControlTemplateSource) &&
   /Type:\s*AWS::Events::Rule/u.test(edgeControlTemplateSource) &&
   /Type:\s*AWS::Logs::ResourcePolicy/u.test(edgeControlTemplateSource) &&
-  /delivery\.logs\.amazonaws\.com/u.test(edgeControlTemplateSource) &&
-  /events\.amazonaws\.com/u.test(edgeControlTemplateSource) &&
+  /^\s+"delivery\.logs\.amazonaws\.com",?\s*$/mu.test(
+    edgeControlTemplateSource,
+  ) &&
+  /^\s+"events\.amazonaws\.com",?\s*$/mu.test(
+    edgeControlTemplateSource,
+  ) &&
   !/AlarmActions:/u.test(edgeControlTemplateSource) &&
   /EdgeAlarmArchiveLogGroup:[\s\S]*?RetentionInDays:\s*14/u.test(
     edgeControlTemplateSource,

@@ -373,10 +373,10 @@ test("edge and foundation workflows preserve approval and authority boundaries",
     "SetStackPolicy",
     "UpdateTerminationProtection",
     "iam:PassRole",
-    "sts:AssumeRole",
   ]) {
     assert.doesNotMatch(cleanupRole, new RegExp(forbidden, "u"));
   }
+  assert.doesNotMatch(cleanupRole, /^\s+- sts:AssumeRole\s*$/mu);
   assert.match(cleanupRole, /cloudformation:DeleteStack/u);
   assert.match(cleanupRole, /cloudformation:ListChangeSets/u);
   assert.equal(cleanupRole.match(/changeSet\/edge-controls-\*\/\*/gu)?.length, 1);

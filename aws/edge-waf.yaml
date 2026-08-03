@@ -42,7 +42,8 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       # CloudWatch Logs encrypts log data at rest with AWS-owned AES-GCM by
-      # default. Omitting KmsKeyId preserves that managed encryption boundary.
+      # default. Omitting a customer-managed key reference preserves that
+      # managed encryption boundary.
       LogGroupClass: STANDARD
       LogGroupName: !Sub "aws-waf-logs-${AppName}-${Environment}-blocked"
       RetentionInDays: 30

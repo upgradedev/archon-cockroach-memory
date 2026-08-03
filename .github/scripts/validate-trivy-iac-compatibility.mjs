@@ -12,6 +12,7 @@ const EXPECTED_FINDING_TYPE = "CloudFormation Security Check";
 const EXPECTED_RULES = Object.freeze([
   Object.freeze({
     ruleId: "AWS-0011",
+    target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "Distribution",
     namespace: "builtin.aws.cloudfront.aws0011",
@@ -29,6 +30,7 @@ const EXPECTED_RULES = Object.freeze([
   }),
   Object.freeze({
     ruleId: "AWS-0013",
+    target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "Distribution",
     namespace: "builtin.aws.cloudfront.aws0013",
@@ -49,6 +51,7 @@ const EXPECTED_RULES = Object.freeze([
   }),
   Object.freeze({
     ruleId: "AWS-0132",
+    target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "SpaBucket",
     namespace: "builtin.aws.s3.aws0132",
@@ -66,6 +69,29 @@ const EXPECTED_RULES = Object.freeze([
       importExportBound: true,
       denyUnencryptedWrites: true,
       denyUnexpectedKeyWrites: true,
+    }),
+  }),
+  Object.freeze({
+    ruleId: "AWS-0132",
+    target: EXPECTED_BOOTSTRAP_TARGET,
+    legacyAlias: null,
+    logicalResource: "CloudFrontAccessLogBucket",
+    namespace: "builtin.aws.s3.aws0132",
+    title: "S3 encryption should use Customer Managed Keys",
+    primaryUrl: "https://avd.aquasec.com/misconfig/aws-0132",
+    sourceProperty: "SSEAlgorithm: AES256",
+    reason:
+      "CloudFront standard logging (legacy) requires its ACL-enabled destination bucket to use S3-managed AES256 encryption; the exact SSE-S3 boundary and compensating storage controls are source-validated.",
+    controls: Object.freeze({
+      legacyCloudFrontStandardLogging: true,
+      sseS3Aes256: true,
+      customerManagedKeyAbsent: true,
+      bucketOwnerPreferred: true,
+      publicAccessBlocked: true,
+      versioningEnabled: true,
+      serverAccessLogging: true,
+      lifecycleRetention: true,
+      denyInsecureTransport: true,
     }),
   }),
 ]);
@@ -340,6 +366,83 @@ function validateTemplateContract(templateSource, bootstrapSource) {
     "the foundation output must export the exact customer-managed key ARN consumed by SpaBucket"
   );
 
+  const cloudFrontAccessLogBucket = extractSingleTwoSpaceBlock(
+    normalizedBootstrap,
+    "CloudFrontAccessLogBucket"
+  );
+  const cloudFrontAccessLogBucketSource = cloudFrontAccessLogBucket.source;
+  invariant(
+    count(
+      cloudFrontAccessLogBucketSource,
+      /^\s{4}Type: AWS::S3::Bucket$/gmu
+    ) === 1 &&
+      /^\s{4}DeletionPolicy: RetainExceptOnCreate$/mu.test(
+        cloudFrontAccessLogBucketSource
+      ) &&
+      /^\s{4}UpdateReplacePolicy: Retain$/mu.test(
+        cloudFrontAccessLogBucketSource
+      ),
+    "CloudFrontAccessLogBucket must remain a retained S3 bucket"
+  );
+  invariant(
+    /\n      BucketEncryption:\n        ServerSideEncryptionConfiguration:\n          - ServerSideEncryptionByDefault:\n              SSEAlgorithm: AES256/u.test(
+      cloudFrontAccessLogBucketSource
+    ) &&
+      count(
+        cloudFrontAccessLogBucketSource,
+        /^\s{14}SSEAlgorithm: AES256$/gmu
+      ) === 1 &&
+      !/KMSMasterKeyID:|SSEAlgorithm: aws:kms|BucketKeyEnabled:/u.test(
+        cloudFrontAccessLogBucketSource
+      ),
+    "CloudFrontAccessLogBucket must retain its exact legacy standard-logging SSE-S3 AES256 boundary"
+  );
+  invariant(
+    /\n      OwnershipControls:\n        Rules:\n          - ObjectOwnership: BucketOwnerPreferred/u.test(
+      cloudFrontAccessLogBucketSource
+    ) &&
+      /\n      PublicAccessBlockConfiguration:\n        BlockPublicAcls: true\n        BlockPublicPolicy: true\n        IgnorePublicAcls: true\n        RestrictPublicBuckets: true/u.test(
+        cloudFrontAccessLogBucketSource
+      ) &&
+      /\n      VersioningConfiguration:\n        Status: Enabled/u.test(
+        cloudFrontAccessLogBucketSource
+      ),
+    "CloudFrontAccessLogBucket must retain ACL-compatible ownership, public-access blocks, and versioning"
+  );
+  invariant(
+    /\n      LoggingConfiguration:\n        DestinationBucketName: !Ref S3AccessLogArchive\n        LogFilePrefix: cloudfront-log-bucket\/\n        TargetObjectKeyFormat:\n          PartitionedPrefix:\n            PartitionDateSource: EventTime/u.test(
+      cloudFrontAccessLogBucketSource
+    ) &&
+      /\n      LifecycleConfiguration:\n        Rules:\n          - Id: RetireCloudFrontAccessLogs\n            Status: Enabled\n            Prefix: ""\n            ExpirationInDays: 365\n            NoncurrentVersionExpiration:\n              NoncurrentDays: 30\n            AbortIncompleteMultipartUpload:\n              DaysAfterInitiation: 7/u.test(
+        cloudFrontAccessLogBucketSource
+      ),
+    "CloudFrontAccessLogBucket must retain server-access evidence and bounded lifecycle retention"
+  );
+  const cloudFrontAccessLogBucketPolicy = extractSingleTwoSpaceBlock(
+    normalizedBootstrap,
+    "CloudFrontAccessLogBucketPolicy"
+  ).source;
+  const denyCloudFrontLogInsecureTransport = extractSinglePolicyStatement(
+    cloudFrontAccessLogBucketPolicy,
+    "DenyInsecureTransport"
+  );
+  invariant(
+    denyCloudFrontLogInsecureTransport ===
+      [
+        "          - Sid: DenyInsecureTransport",
+        "            Effect: Deny",
+        '            Principal: "*"',
+        "            Action: s3:*",
+        "            Resource:",
+        "              - !GetAtt CloudFrontAccessLogBucket.Arn",
+        '              - !Sub "${CloudFrontAccessLogBucket.Arn}/*"',
+        "            Condition:",
+        "              Bool:",
+        '                aws:SecureTransport: "false"',
+      ].join("\n"),
+    "CloudFrontAccessLogBucketPolicy must retain its exact insecure-transport deny"
+  );
+
   return {
     Distribution: {
       startLine: distribution.startLine,
@@ -348,6 +451,10 @@ function validateTemplateContract(templateSource, bootstrapSource) {
     SpaBucket: {
       startLine: spaBucket.startLine,
       endLine: spaBucket.endLine,
+    },
+    CloudFrontAccessLogBucket: {
+      startLine: cloudFrontAccessLogBucket.startLine,
+      endLine: cloudFrontAccessLogBucket.endLine,
     },
   };
 }
@@ -381,6 +488,10 @@ function expectedRange(rule, templateContract) {
   return templateContract[rule.logicalResource];
 }
 
+function findingKey(ruleId, target) {
+  return `${target}:${ruleId}`;
+}
+
 function validateJsonFindings(report, templateContract) {
   const findings = flattenMisconfigurations(report);
   invariant(
@@ -388,24 +499,31 @@ function validateJsonFindings(report, templateContract) {
     `raw Trivy JSON must contain exactly ${EXPECTED_RULES.length} findings`
   );
 
-  const byRuleId = new Map();
+  const byFindingKey = new Map();
   for (const entry of findings) {
     const { result, finding } = entry;
-    invariant(result.Target === EXPECTED_TARGET, "every finding target must be aws/template.yaml");
+    invariant(
+      result.Target === EXPECTED_TARGET ||
+        result.Target === EXPECTED_BOOTSTRAP_TARGET,
+      "every finding target must be an exact validated CloudFormation source"
+    );
     invariant(result.Class === "config", "every finding class must be config");
     invariant(result.Type === "cloudformation", "every finding type must be cloudformation");
     invariant(finding && typeof finding === "object", "every finding must be an object");
-    invariant(!byRuleId.has(finding.ID), `duplicate finding ${finding.ID}`);
-    byRuleId.set(finding.ID, entry);
+    const key = findingKey(finding.ID, result.Target);
+    invariant(!byFindingKey.has(key), `duplicate finding ${key}`);
+    byFindingKey.set(key, entry);
   }
   invariant(
-    [...byRuleId.keys()].sort().join(",") ===
-      EXPECTED_RULES.map((rule) => rule.ruleId).sort().join(","),
-    "raw Trivy JSON rule set must match the exact compatibility rule set"
+    [...byFindingKey.keys()].sort().join(",") ===
+      EXPECTED_RULES.map((rule) => findingKey(rule.ruleId, rule.target))
+        .sort()
+        .join(","),
+    "raw Trivy JSON target/rule set must match the exact compatibility finding set"
   );
 
   for (const rule of EXPECTED_RULES) {
-    const { finding } = byRuleId.get(rule.ruleId);
+    const { finding } = byFindingKey.get(findingKey(rule.ruleId, rule.target));
     const range = expectedRange(rule, templateContract);
     invariant(
       finding.Type === EXPECTED_FINDING_TYPE,
@@ -426,13 +544,13 @@ function validateJsonFindings(report, templateContract) {
       `${rule.ruleId} location must equal the complete ${rule.logicalResource} source block`
     );
     const scannerResource =
-      `${EXPECTED_TARGET}:${range.startLine}-${range.endLine}`;
+      `${rule.target}:${range.startLine}-${range.endLine}`;
     invariant(
       finding.CauseMetadata?.Resource === scannerResource,
       `${rule.ruleId} scanner resource must match the exact source range`
     );
   }
-  return byRuleId;
+  return byFindingKey;
 }
 
 function validateSarif(sarif, templateContract) {
@@ -453,39 +571,52 @@ function validateSarif(sarif, templateContract) {
   );
   invariant(Array.isArray(run.tool.driver.rules), "SARIF driver rules must be an array");
 
+  const expectedDescriptorIds = [
+    ...new Set(EXPECTED_RULES.map((rule) => rule.ruleId)),
+  ].sort();
   const descriptors = run.tool.driver.rules.filter((descriptor) =>
-    EXPECTED_RULES.some((rule) => rule.ruleId === descriptor?.id)
+    expectedDescriptorIds.includes(descriptor?.id)
   );
   invariant(
-    run.tool.driver.rules.length === EXPECTED_RULES.length &&
-      descriptors.length === EXPECTED_RULES.length &&
+    run.tool.driver.rules.length === expectedDescriptorIds.length &&
+      descriptors.length === expectedDescriptorIds.length &&
       [...new Set(descriptors.map((descriptor) => descriptor.id))].length ===
-        EXPECTED_RULES.length,
+        expectedDescriptorIds.length &&
+      descriptors
+        .map((descriptor) => descriptor.id)
+        .sort()
+        .join(",") === expectedDescriptorIds.join(","),
     "SARIF must contain exactly one descriptor for every compatibility rule"
   );
 
-  const resultsByRule = new Map();
+  const resultsByFindingKey = new Map();
   for (const result of run.results) {
-    invariant(!resultsByRule.has(result.ruleId), `duplicate SARIF result ${result.ruleId}`);
-    resultsByRule.set(result.ruleId, result);
-  }
-  invariant(
-    [...resultsByRule.keys()].sort().join(",") ===
-      EXPECTED_RULES.map((rule) => rule.ruleId).sort().join(","),
-    "SARIF result rule set must match the exact compatibility rule set"
-  );
-  for (const rule of EXPECTED_RULES) {
-    const result = resultsByRule.get(rule.ruleId);
-    const range = expectedRange(rule, templateContract);
-    invariant(result.level === "error", `HIGH ${rule.ruleId} must remain a SARIF error`);
     invariant(
       Array.isArray(result.locations) && result.locations.length === 1,
-      `${rule.ruleId} SARIF result must have exactly one location`
+      `${result.ruleId} SARIF result must have exactly one location`
     );
+    const target = result.locations[0]?.physicalLocation?.artifactLocation?.uri;
+    const key = findingKey(result.ruleId, target);
+    invariant(!resultsByFindingKey.has(key), `duplicate SARIF result ${key}`);
+    resultsByFindingKey.set(key, result);
+  }
+  invariant(
+    [...resultsByFindingKey.keys()].sort().join(",") ===
+      EXPECTED_RULES.map((rule) => findingKey(rule.ruleId, rule.target))
+        .sort()
+        .join(","),
+    "SARIF target/rule set must match the exact compatibility finding set"
+  );
+  for (const rule of EXPECTED_RULES) {
+    const result = resultsByFindingKey.get(
+      findingKey(rule.ruleId, rule.target)
+    );
+    const range = expectedRange(rule, templateContract);
+    invariant(result.level === "error", `HIGH ${rule.ruleId} must remain a SARIF error`);
     const location = result.locations[0].physicalLocation;
     invariant(
-      location?.artifactLocation?.uri === EXPECTED_TARGET,
-      `${rule.ruleId} SARIF location must be aws/template.yaml`
+      location?.artifactLocation?.uri === rule.target,
+      `${rule.ruleId} SARIF location must match ${rule.target}`
     );
     invariant(
       location.region?.startLine === range.startLine &&
@@ -526,18 +657,20 @@ function evaluate({ report, sarif, templateSource, bootstrapSource, toolLock, ve
   validateToolLock(toolLock);
   validateVersionOutput(versionOutput);
   const templateContract = validateTemplateContract(templateSource, bootstrapSource);
-  const findingsByRule = validateJsonFindings(report, templateContract);
+  const findingsByKey = validateJsonFindings(report, templateContract);
   validateSarif(sarif, templateContract);
 
   const compatibilityFindings = EXPECTED_RULES.map((rule) => {
-    const finding = findingsByRule.get(rule.ruleId).finding;
+    const finding = findingsByKey.get(
+      findingKey(rule.ruleId, rule.target)
+    ).finding;
     return {
       ruleId: rule.ruleId,
       findingType: EXPECTED_FINDING_TYPE,
       legacyAlias: rule.legacyAlias,
       severity: EXPECTED_SEVERITY,
       status: "FAIL",
-      target: EXPECTED_TARGET,
+      target: rule.target,
       logicalResource: rule.logicalResource,
       scannerResource: finding.CauseMetadata.Resource,
       namespace: rule.namespace,
@@ -677,6 +810,58 @@ function fixtureBootstrap() {
     Properties:
       AliasName: !Sub "alias/\${AppName}-storage"
       TargetKeyId: !Ref ApplicationStorageKey
+
+  CloudFrontAccessLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogArchive
+        LogFilePrefix: cloudfront-log-bucket/
+        TargetObjectKeyFormat:
+          PartitionedPrefix:
+            PartitionDateSource: EventTime
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetireCloudFrontAccessLogs
+            Status: Enabled
+            Prefix: ""
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  CloudFrontAccessLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudFrontAccessLogBucket.Arn
+              - !Sub "\${CloudFrontAccessLogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
 Outputs:
   ApplicationStorageKeyArn:
     Value: !GetAtt ApplicationStorageKey.Arn
@@ -686,33 +871,36 @@ Outputs:
 }
 
 function fixtureReport(templateSource = fixtureTemplate()) {
-  const contract = validateTemplateContract(templateSource, fixtureBootstrap());
+  const bootstrapSource = fixtureBootstrap();
+  const contract = validateTemplateContract(templateSource, bootstrapSource);
+  const byTarget = new Map();
+  for (const rule of EXPECTED_RULES) {
+    const range = contract[rule.logicalResource];
+    const misconfigurations = byTarget.get(rule.target) ?? [];
+    misconfigurations.push({
+      Type: EXPECTED_FINDING_TYPE,
+      ID: rule.ruleId,
+      Title: rule.title,
+      Namespace: rule.namespace,
+      Severity: EXPECTED_SEVERITY,
+      PrimaryURL: rule.primaryUrl,
+      Status: "FAIL",
+      CauseMetadata: {
+        Resource: `${rule.target}:${range.startLine}-${range.endLine}`,
+        StartLine: range.startLine,
+        EndLine: range.endLine,
+      },
+    });
+    byTarget.set(rule.target, misconfigurations);
+  }
   return {
     SchemaVersion: 2,
-    Results: [
-      {
-        Target: EXPECTED_TARGET,
-        Class: "config",
-        Type: "cloudformation",
-        Misconfigurations: EXPECTED_RULES.map((rule) => {
-          const range = contract[rule.logicalResource];
-          return {
-            Type: EXPECTED_FINDING_TYPE,
-            ID: rule.ruleId,
-            Title: rule.title,
-            Namespace: rule.namespace,
-            Severity: EXPECTED_SEVERITY,
-            PrimaryURL: rule.primaryUrl,
-            Status: "FAIL",
-            CauseMetadata: {
-              Resource: `${EXPECTED_TARGET}:${range.startLine}-${range.endLine}`,
-              StartLine: range.startLine,
-              EndLine: range.endLine,
-            },
-          };
-        }),
-      },
-    ],
+    Results: [...byTarget.entries()].map(([target, misconfigurations]) => ({
+      Target: target,
+      Class: "config",
+      Type: "cloudformation",
+      Misconfigurations: misconfigurations,
+    })),
   };
 }
 
@@ -726,7 +914,9 @@ function fixtureSarif(templateSource = fixtureTemplate()) {
           driver: {
             name: EXPECTED_SCANNER,
             version: EXPECTED_SCANNER_VERSION,
-            rules: EXPECTED_RULES.map((rule) => ({ id: rule.ruleId })),
+            rules: [...new Set(EXPECTED_RULES.map((rule) => rule.ruleId))].map(
+              (ruleId) => ({ id: ruleId })
+            ),
           },
         },
         results: EXPECTED_RULES.map((rule) => {
@@ -737,7 +927,7 @@ function fixtureSarif(templateSource = fixtureTemplate()) {
             locations: [
               {
                 physicalLocation: {
-                  artifactLocation: { uri: EXPECTED_TARGET },
+                  artifactLocation: { uri: rule.target },
                   region: {
                     startLine: range.startLine,
                     startColumn: 1,
@@ -776,12 +966,12 @@ function runSelfTest() {
     versionOutput: `Version: ${EXPECTED_SCANNER_VERSION}\n`,
   };
   const result = evaluate(base);
-  assert.equal(result.status.rawFindings, 3);
-  assert.equal(result.status.compatibilityFindings, 3);
+  assert.equal(result.status.rawFindings, 4);
+  assert.equal(result.status.compatibilityFindings, 4);
   assert.equal(result.status.blockingFindings, 0);
   assert.deepEqual(
     result.status.compatibilities.map((finding) => finding.ruleId),
-    ["AWS-0011", "AWS-0013", "AWS-0132"]
+    ["AWS-0011", "AWS-0013", "AWS-0132", "AWS-0132"]
   );
 
   const extraFindingReport = fixtureReport();
@@ -794,7 +984,7 @@ function runSelfTest() {
   const legacyAliasReport = fixtureReport();
   legacyAliasReport.Results[0].Misconfigurations[0].AVDID = "AVD-AWS-0011";
   const driftedSarif = fixtureSarif();
-  driftedSarif.runs[0].results[2].locations[0].physicalLocation.region.endLine -= 1;
+  driftedSarif.runs[0].results[3].locations[0].physicalLocation.region.endLine -= 1;
 
   const failures = [
     { ...base, report: extraFindingReport },
@@ -847,6 +1037,20 @@ function runSelfTest() {
       bootstrapSource: fixtureBootstrap().replace(
         "      EnableKeyRotation: true",
         "      EnableKeyRotation: false"
+      ),
+    },
+    {
+      ...base,
+      bootstrapSource: fixtureBootstrap().replace(
+        "              SSEAlgorithm: AES256",
+        "              SSEAlgorithm: aws:kms"
+      ),
+    },
+    {
+      ...base,
+      bootstrapSource: fixtureBootstrap().replace(
+        "          - ObjectOwnership: BucketOwnerPreferred",
+        "          - ObjectOwnership: BucketOwnerEnforced"
       ),
     },
     {

@@ -1998,7 +1998,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
     allCheckoutStepsDisableCredentialPersistence(workflows),
     true
   );
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 213);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 216);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -4001,8 +4001,8 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.ok(policyEffectiveTrivy);
   for (const contract of [
-    '.rawFindings == 3',
-    '.compatibilityFindings == 3',
+    '.rawFindings == 4',
+    '.compatibilityFindings == 4',
     '.blockingFindings == 0',
     '.acceptedWaivers == 0',
     'map(.namespace) == [',
@@ -4016,10 +4016,15 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     'WebACLId: !Ref CloudFrontWebAclArn',
     'CloudFrontDefaultCertificate: true',
     'KMSMasterKeyID: Fn::ImportValue \\"${AppName}-storage-kms-key-arn\\"',
+    'SSEAlgorithm: AES256',
     '"mandatoryWebAclParameter":true',
     '"customDomainAliases":false',
     '"foundationCustomerManagedKey":true',
     '"denyUnexpectedKeyWrites":true',
+    '"legacyCloudFrontStandardLogging":true',
+    '"sseS3Aes256":true',
+    '"customerManagedKeyAbsent":true',
+    '"denyInsecureTransport":true',
     '$location.artifactLocation.uri == $finding.target',
     '$location.region.startLine == $finding.startLine',
     '$location.region.endLine == $finding.endLine',
@@ -4027,8 +4032,8 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     '$location.region.endColumn == 1',
     '.results = [] |',
     '$run.results == []',
-    '"rawFindings":3',
-    '"compatibilityFindings":3',
+    '"rawFindings":4',
+    '"compatibilityFindings":4',
     '"blockingFindings":0',
     '"acceptedWaivers":0',
     '"rawEvidence":"trivy-iac.sarif"',
@@ -4050,7 +4055,7 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     policyEffectiveTrivy,
-    /\(\$run\.results \| length\) == 3[\s\S]*?\$location\.artifactLocation\.uri ==\s+\$contract\.target[\s\S]*?\$location\.region\.startLine ==\s+\$contract\.sourceRange\.startLine[\s\S]*?\$location\.region\.endLine ==\s+\$contract\.sourceRange\.endLine/u
+    /\(\$run\.results \| length\) == 4[\s\S]*?\$location\.artifactLocation\.uri ==\s+\$contract\.target[\s\S]*?\$location\.region\.startLine ==\s+\$contract\.sourceRange\.startLine[\s\S]*?\$location\.region\.endLine ==\s+\$contract\.sourceRange\.endLine/u
   );
   assert.match(
     policyEffectiveTrivy,
@@ -4071,8 +4076,8 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     supplyChain,
     /--version-file "\$REPORT_DIR\/trivy-version\.txt"/u
   );
-  assert.match(supplyChain, /rawFindings == 3/u);
-  assert.match(supplyChain, /compatibilityFindings == 3/u);
+  assert.match(supplyChain, /rawFindings == 4/u);
+  assert.match(supplyChain, /compatibilityFindings == 4/u);
   assert.match(supplyChain, /rawFindings == 4/u);
   assert.match(supplyChain, /approvedBuildLicenseFindings == 4/u);
   assert.match(supplyChain, /blockingFindings == 0/u);
@@ -4098,6 +4103,10 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     trivyIacCompatibilityValidator,
+    /EXPECTED_BOOTSTRAP_TARGET = "aws\/bootstrap-oidc\.yaml"/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
     /mandatoryWebAcl: true/u
   );
   assert.match(
@@ -4113,6 +4122,15 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     /foundationCustomerManagedKey: true/u
   );
   assert.match(trivyIacCompatibilityValidator, /keyRotation: true/u);
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /legacyCloudFrontStandardLogging: true/u
+  );
+  assert.match(trivyIacCompatibilityValidator, /sseS3Aes256: true/u);
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /customerManagedKeyAbsent: true/u
+  );
   assert.match(
     trivyIacCompatibilityValidator,
     /captured Trivy version must be/u
@@ -5018,7 +5036,7 @@ test("readiness: named HTTP API stage controls are proved from transform to live
   );
   assert.equal(
     (bootstrap.match(/- cloudformation:GetTemplate$/gmu) ?? []).length,
-    6
+    7
   );
   assert.equal(
     (bootstrap.match(/- cloudfront:GetDistribution$/gmu) ?? []).length,

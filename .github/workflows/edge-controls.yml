@@ -744,9 +744,11 @@ jobs:
                     and .Stacks[0].EnableTerminationProtection == false
                     and ((.Stacks[0].Tags // []) == [])
                   ' "$current" >/dev/null
-                echo "EDGE_STACK_EXISTS=false" >>"$GITHUB_ENV"
-                echo "CHANGE_SET_TYPE=CREATE" >>"$GITHUB_ENV"
-                echo "EDGE_APPLY_MODE=execute" >>"$GITHUB_ENV"
+                {
+                  echo "EDGE_STACK_EXISTS=false"
+                  echo "CHANGE_SET_TYPE=CREATE"
+                  echo "EDGE_APPLY_MODE=execute"
+                } >>"$GITHUB_ENV"
                 fi
                 ;;
               ROLLBACK_COMPLETE)
