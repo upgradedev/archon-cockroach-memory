@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -169,6 +170,70 @@ test("readiness: lifecycle fixed-cost ceiling is itemized and independently reco
   assert.match(audit, /evaluateIncrementalFixedCostContract/u);
   assert.match(audit, /incremental-fixed-cost-contract-arithmetic/u);
   assert.doesNotMatch(audit, /withinApprovedCeiling/u);
+});
+
+test("readiness: lifecycle workflow cost guards compile and evaluate", () => {
+  const jqVersion = spawnSync("jq", ["--version"], { encoding: "utf8" });
+  assert.equal(
+    jqVersion.status,
+    0,
+    jqVersion.error?.message ?? jqVersion.stderr
+  );
+
+  const policyPath = fileURLToPath(
+    new URL(
+      "../aws/foundation-storage-migration-policy.json",
+      import.meta.url
+    )
+  );
+  const workflowPaths = [
+    "../.github/workflows/foundation-migration.yml",
+    "../.github/workflows/edge-controls.yml",
+  ];
+  const filters: string[] = [];
+  for (const workflowPath of workflowPaths) {
+    const workflow = readFileSync(
+      new URL(workflowPath, import.meta.url),
+      "utf8"
+    );
+    const step = extractNamedWorkflowStep(
+      workflow,
+      "Validate the approved incremental fixed-cost contract"
+    );
+    assert.ok(step.length > 0, workflowPath);
+    const filter =
+      step.match(
+        /jq -e '([\s\S]*?)' aws\/foundation-storage-migration-policy\.json/u
+      )?.[1] ?? "";
+    assert.ok(filter.length > 0, workflowPath);
+    assert.doesNotMatch(
+      filter,
+      /all\(\s*\$[A-Za-z_][A-Za-z0-9_.]*\[\] as \$[A-Za-z_][A-Za-z0-9_]*;/u
+    );
+    assert.equal(
+      (filter.match(/\$cost\.lineItems\[\];\s*\. as \$item\s*\|/gu) ?? [])
+        .length,
+      1,
+      workflowPath
+    );
+    assert.equal(
+      (filter.match(/\$scenarioIds\[\];\s*\. as \$scenario\s*\|/gu) ?? [])
+        .length,
+      3,
+      workflowPath
+    );
+    const evaluated = spawnSync("jq", ["-e", filter, policyPath], {
+      encoding: "utf8",
+    });
+    assert.equal(
+      evaluated.status,
+      0,
+      `${workflowPath}: ${evaluated.error?.message ?? evaluated.stderr}`
+    );
+    filters.push(filter);
+  }
+  assert.equal(filters.length, 2);
+  assert.equal(filters[1], filters[0]);
 });
 
 test("readiness: edge cleanup and finalization have bounded restart-safe lifecycle contracts", () => {
