@@ -666,7 +666,10 @@ test("readiness: foundation authority lifecycle is source-bound and non-self-del
     authority,
     /\. == \{[\s\S]*?inlinePolicyNames: \[\$policy\][\s\S]*?inlinePoliciesTruncated: false[\s\S]*?attachedPolicies: \[\][\s\S]*?attachedPoliciesTruncated: false[\s\S]*?instanceProfiles: \[\][\s\S]*?instanceProfilesTruncated: false/u
   );
-  assert.match(authority, /roleAttachmentContractVerified: true/u);
+  assert.match(
+    authority,
+    /roleRuntimeContractVerified: \(\$orphanedRetirement \| not\),[\s\S]*?roleAttachmentContractVerified: \(\$orphanedRetirement \| not\)/u
+  );
   assert.match(
     authority,
     /canonical_json_bytes\(\)[\s\S]*?jq -Scj -s[\s\S]*?length != 1[\s\S]*?type\) != "object"/u
