@@ -56,6 +56,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Validate the approved incremental fixed-cost contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .incrementalFixedCostContract as $cost
+            | (
+                $cost.maximumAfterBilledKmsRotationsMonthlyUsd
+                < $cost.approvedCeilingMonthlyUsd
+              ) as $computedWithinCeiling
+            | $cost.currency == "USD"
+            and $cost.billingPeriod == "month"
+            and $cost.initialMonthlyUsd == 22.40
+            and $cost.maximumAfterBilledKmsRotationsMonthlyUsd == 24.40
+            and $cost.approvedCeilingMonthlyUsd == 26.00
+            and $computedWithinCeiling
+            and $cost.withinApprovedCeiling == $computedWithinCeiling
+          ' aws/foundation-storage-migration-policy.json >/dev/null
+
       - name: Fail closed unless dispatch targets current green main
         shell: bash
         env:
@@ -344,6 +363,12 @@ jobs:
                       }
                     )
                     and ((.IncludeNestedStacks // false) == false)
+                    and ((.ImportExistingResources // false) == false)
+                    and ((.Tags // []) == [])
+                    and (
+                      .OnStackFailure == null
+                      or .OnStackFailure == "ROLLBACK"
+                    )
                     and (.Parameters | parameter_map) == {
                       AppName: $app,
                       Environment: $environment,
@@ -531,14 +556,14 @@ jobs:
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveQueue",
-                resourceType: "AWS::SQS::Queue",
+                logicalResourceId: "EdgeAlarmArchiveLogGroup",
+                resourceType: "AWS::Logs::LogGroup",
                 action: "Add",
                 replacement: false
               },
               {
-                logicalResourceId: "EdgeAlarmArchiveQueuePolicy",
-                resourceType: "AWS::SQS::QueuePolicy",
+                logicalResourceId: "EdgeAlarmArchiveLogPolicy",
+                resourceType: "AWS::Logs::ResourcePolicy",
                 action: "Add",
                 replacement: false
               },
@@ -612,6 +637,16 @@ jobs:
                   RollbackTriggers: [],
                   MonitoringTimeInMinutes: 0
                 }
+              )
+              and ((.ImportExistingResources // false) == false)
+              and ((.Tags // []) == [])
+              and (
+                if $type == "CREATE"
+                then .OnStackFailure == null
+                  or .OnStackFailure == "ROLLBACK"
+                else $type == "UPDATE"
+                  and .OnStackFailure == null
+                end
               )
               and (.Parameters | parameter_map) == {
                 AppName: $app,
@@ -751,8 +786,9 @@ jobs:
           waf_logging="${RUNNER_TEMP:?}/edge-live-waf-logging.json"
           waf_log_group="${RUNNER_TEMP:?}/edge-live-waf-log-group.json"
           waf_log_group_tags="${RUNNER_TEMP:?}/edge-live-waf-log-group-tags.json"
-          alarm_queue="${RUNNER_TEMP:?}/edge-live-alarm-queue.json"
-          alarm_queue_tags="${RUNNER_TEMP:?}/edge-live-alarm-queue-tags.json"
+          alarm_archive_log_group="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-group.json"
+          alarm_archive_log_group_tags="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-group-tags.json"
+          alarm_archive_log_policies="${RUNNER_TEMP:?}/edge-live-alarm-archive-log-policies.json"
           alarm_event_rule="${RUNNER_TEMP:?}/edge-live-alarm-event-rule.json"
           alarm_event_rule_tags="${RUNNER_TEMP:?}/edge-live-alarm-event-rule-tags.json"
           alarm_event_targets="${RUNNER_TEMP:?}/edge-live-alarm-event-targets.json"
@@ -802,8 +838,8 @@ jobs:
                           + "-blocked"
                     )
                     and (
-                      output_map.EdgeAlarmArchiveQueueName
-                        == $app + "-" + $environment
+                      output_map.EdgeAlarmArchiveLogGroupName
+                        == "/aws/events/" + $app + "-" + $environment
                           + "-edge-waf-alarm-archive"
                     )
                     and (
@@ -1079,8 +1115,10 @@ jobs:
 
           log_group_name="aws-waf-logs-${APP_NAME}-${EDGE_ENVIRONMENT}-blocked"
           log_group_arn="arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:${log_group_name}"
-          queue_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
-          queue_arn="arn:aws:sqs:us-east-1:${AWS_ACCOUNT_ID}:${queue_name}"
+          alarm_archive_log_group_name="/aws/events/${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
+          alarm_archive_log_group_arn="arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:${alarm_archive_log_group_name}"
+          alarm_archive_log_stream_arn="${alarm_archive_log_group_arn}:*"
+          alarm_archive_policy_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-archive"
           event_rule_name="${APP_NAME}-${EDGE_ENVIRONMENT}-edge-waf-alarm-events"
           event_rule_arn="arn:aws:events:us-east-1:${AWS_ACCOUNT_ID}:rule/${event_rule_name}"
           any_block_alarm="${APP_NAME}-${EDGE_ENVIRONMENT}-waf-any-block"
@@ -1161,80 +1199,83 @@ jobs:
               )
             ' "$waf_logging" >/dev/null
 
-          queue_url="$(
-            aws sqs get-queue-url \
-              --queue-name "$queue_name" \
-              --region "$AWS_REGION" \
-              --query QueueUrl \
-              --output text
-          )"
-          test -n "$queue_url"
-          aws sqs get-queue-attributes \
-            --queue-url "$queue_url" \
-            --attribute-names All \
+          aws logs describe-log-groups \
+            --log-group-name-prefix "$alarm_archive_log_group_name" \
             --region "$AWS_REGION" \
-            --output json >"$alarm_queue"
-          aws sqs list-queue-tags \
-            --queue-url "$queue_url" \
+            --output json >"$alarm_archive_log_group"
+          aws logs list-tags-for-resource \
+            --resource-arn "$alarm_archive_log_group_arn" \
             --region "$AWS_REGION" \
-            --output json >"$alarm_queue_tags"
+            --output json >"$alarm_archive_log_group_tags"
+          aws logs describe-resource-policies \
+            --policy-scope ACCOUNT \
+            --region "$AWS_REGION" \
+            --output json >"$alarm_archive_log_policies"
           jq -e \
-            --arg queueArn "$queue_arn" \
-            --arg eventRuleArn "$event_rule_arn" \
-            --arg account "$AWS_ACCOUNT_ID" \
+            --arg name "$alarm_archive_log_group_name" \
+            --arg groupArn "$alarm_archive_log_group_arn" \
+            --arg streamArn "$alarm_archive_log_stream_arn" \
             '
-              (.Attributes.Policy | fromjson).Statement as $statements
-              | .Attributes.QueueArn == $queueArn
-              and .Attributes.SqsManagedSseEnabled == "true"
-              and (.Attributes | has("KmsMasterKeyId") | not)
-              and (.Attributes | has("KmsDataKeyReusePeriodSeconds") | not)
-              and .Attributes.MessageRetentionPeriod == "1209600"
-              and .Attributes.ReceiveMessageWaitTimeSeconds == "20"
-              and .Attributes.VisibilityTimeout == "60"
-              and ($statements | length) == 3
-              and any(
-                $statements[];
-                .Sid == "AllowOnlyExactAlarmEventRule"
-                and .Effect == "Allow"
-                and .Principal.Service == "events.amazonaws.com"
-                and .Action == "sqs:SendMessage"
-                and .Resource == $queueArn
-                and .Condition.ArnEquals["aws:SourceArn"] == $eventRuleArn
-                and .Condition.StringEquals["aws:SourceAccount"]
-                  == $account
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyUnexpectedAlarmInjection"
-                and .Effect == "Deny"
-                and .Principal == "*"
-                and .Action == "sqs:SendMessage"
-                and .Resource == $queueArn
-                and .Condition.ArnNotLike["aws:SourceArn"] == $eventRuleArn
-              )
-              and any(
-                $statements[];
-                .Sid == "DenyInsecureTransport"
-                and .Effect == "Deny"
-                and .Principal == "*"
-                and .Action == "sqs:*"
-                and .Resource == $queueArn
-                and (
-                  .Condition.Bool["aws:SecureTransport"] | tostring
-                ) == "false"
-              )
-            ' "$alarm_queue" >/dev/null
+              [
+                .logGroups[]
+                | select(.logGroupName == $name)
+                | select(
+                    .arn == $streamArn
+                    and (
+                      (has("logGroupArn") | not)
+                      or .logGroupArn == $groupArn
+                    )
+                    and (has("kmsKeyId") | not)
+                    and .retentionInDays == 14
+                    and .logGroupClass == "STANDARD"
+                  )
+              ] | length == 1
+            ' "$alarm_archive_log_group" >/dev/null
           jq -e \
             --arg app "$APP_NAME" \
             --arg environment "$EDGE_ENVIRONMENT" \
             '
-              .Tags == {
+              .tags == {
                 Application: $app,
+                DataClassification: "alarm-state-security-evidence",
                 Environment: $environment,
-                EvidenceRoute: "waf-alarm-archive",
                 ManagedBy: "CloudFormation"
               }
-            ' "$alarm_queue_tags" >/dev/null
+            ' "$alarm_archive_log_group_tags" >/dev/null
+          jq -e \
+            --arg policyName "$alarm_archive_policy_name" \
+            --arg streamArn "$alarm_archive_log_stream_arn" \
+            --arg eventRuleArn "$event_rule_arn" \
+            --arg account "$AWS_ACCOUNT_ID" \
+            '
+              [
+                .resourcePolicies[]
+                | select(.policyName == $policyName)
+              ] as $matching
+              | ($matching | length) == 1
+              and ($matching[0].policyDocument | fromjson) == {
+                Version: "2012-10-17",
+                Statement: [{
+                  Sid: "AllowExactEventBridgeAlarmArchive",
+                  Effect: "Allow",
+                  Principal: {
+                    Service: [
+                      "delivery.logs.amazonaws.com",
+                      "events.amazonaws.com"
+                    ]
+                  },
+                  Action: [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  Resource: $streamArn,
+                  Condition: {
+                    ArnEquals: {"aws:SourceArn": $eventRuleArn},
+                    StringEquals: {"aws:SourceAccount": $account}
+                  }
+                }]
+              }
+            ' "$alarm_archive_log_policies" >/dev/null
 
           aws events describe-rule \
             --name "$event_rule_name" \
@@ -1278,11 +1319,11 @@ jobs:
               and ($pattern.detail.state.value | sort) == ["ALARM", "OK"]
             ' "$alarm_event_rule" >/dev/null
           jq -e \
-            --arg queueArn "$queue_arn" \
+            --arg logGroupArn "$alarm_archive_log_group_arn" \
             '
               .Targets == [{
-                Arn: $queueArn,
-                Id: "EdgeAlarmArchiveQueue"
+                Arn: $logGroupArn,
+                Id: "EdgeAlarmArchiveLogGroup"
               }]
             ' "$alarm_event_targets" >/dev/null
           jq -e \
@@ -1414,11 +1455,22 @@ jobs:
           event_rule_arn_sha256="$(
             printf '%s' "$event_rule_arn" | sha256sum | awk '{print $1}'
           )"
+          alarm_archive_log_group_arn_sha256="$(
+            printf '%s' "$alarm_archive_log_group_arn" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           alarm_route_sha256="$(
             {
               printf '%s\n' "$log_group_arn"
               printf '%s\n' "$event_rule_arn"
-              printf '%s\n' "$queue_arn"
+              printf '%s\n' "$alarm_archive_log_group_arn"
+              jq -Sc --arg policyName "$alarm_archive_policy_name" \
+                '[
+                  .resourcePolicies[]
+                  | select(.policyName == $policyName)
+                ][0].policyDocument | fromjson' \
+                "$alarm_archive_log_policies"
               jq -r '.MetricAlarms | sort_by(.AlarmName)[] | .AlarmArn' \
                 "$waf_alarms"
             } | sha256sum | awk '{print $1}'
@@ -1434,6 +1486,8 @@ jobs:
             --arg webAclArnSha256 "$web_acl_arn_sha256" \
             --arg webAclIdSha256 "$web_acl_id_sha256" \
             --arg eventRuleArnSha256 "$event_rule_arn_sha256" \
+            --arg alarmArchiveLogGroupArnSha256 \
+              "$alarm_archive_log_group_arn_sha256" \
             --arg alarmRouteSha256 "$alarm_route_sha256" \
             --arg clientToken "${EXECUTION_CLIENT_TOKEN:-}" \
             --arg runId "$GITHUB_RUN_ID" \
@@ -1474,11 +1528,16 @@ jobs:
                   cloudWatchLogKmsKeyConfigured: false,
                   wafAlarms: 3,
                   alarmActionsConfigured: false,
-                  alarmArchiveTransport: "EventBridge",
+                  alarmArchiveTransport:
+                    "EventBridge-to-CloudWatch-Logs",
                   eventBridgeAlarmArchive: true,
                   eventRuleArnSha256: $eventRuleArnSha256,
-                  alarmArchiveEncryption: "SQS-managed-SSE",
-                  sqsManagedSseEnabled: true,
+                  alarmArchiveDestination: "CloudWatch Logs",
+                  alarmArchiveLogGroupArnSha256:
+                    $alarmArchiveLogGroupArnSha256,
+                  alarmArchiveEncryption:
+                    "AWS-owned-service-managed-default",
+                  alarmArchiveKmsKeyConfigured: false,
                   alarmArchiveRetentionDays: 14,
                   alarmRouteSha256: $alarmRouteSha256,
                   alarmDeliveryDrill: "not-run",

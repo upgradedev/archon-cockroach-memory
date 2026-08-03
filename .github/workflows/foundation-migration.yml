@@ -61,15 +61,18 @@ jobs:
         run: |
           set -euo pipefail
           jq -e '
-            .incrementalFixedCostContract
-            | .initialMonthlyUsd == 22.40
-            and .maximumAfterBilledKmsRotationsMonthlyUsd == 24.40
-            and .approvedCeilingMonthlyUsd == 26.00
-            and .withinApprovedCeiling == true
-            and (
-              .maximumAfterBilledKmsRotationsMonthlyUsd
-              < .approvedCeilingMonthlyUsd
-            )
+            .incrementalFixedCostContract as $cost
+            | (
+                $cost.maximumAfterBilledKmsRotationsMonthlyUsd
+                < $cost.approvedCeilingMonthlyUsd
+              ) as $computedWithinCeiling
+            | $cost.currency == "USD"
+            and $cost.billingPeriod == "month"
+            and $cost.initialMonthlyUsd == 22.40
+            and $cost.maximumAfterBilledKmsRotationsMonthlyUsd == 24.40
+            and $cost.approvedCeilingMonthlyUsd == 26.00
+            and $computedWithinCeiling
+            and $cost.withinApprovedCeiling == $computedWithinCeiling
           ' aws/foundation-storage-migration-policy.json >/dev/null
 
       - name: Fail closed unless the dispatch targets current green main
@@ -992,11 +995,14 @@ jobs:
             | sort_by(.logicalResourceId, .action)
           ' "$change_set" >"$canonical_changes"
 
+          change_set_arn_sha256="$(
+            printf '%s' "$CHANGE_SET_ID" | sha256sum | awk '{print $1}'
+          )"
           receipt_next="${RUNNER_TEMP:?}/foundation-plan-receipt.json"
           jq \
             --arg result \
               "$([ "$OPERATION" = "plan" ] && printf inspected-plan || printf apply-pending)" \
-            --arg changeSetId "$CHANGE_SET_ID" \
+            --arg changeSetArnSha256 "$change_set_arn_sha256" \
             --arg changeSetName "$CHANGE_SET_NAME" \
             --arg templateVersionId "$TEMPLATE_VERSION_ID" \
             --arg templateChecksum "$TEMPLATE_CHECKSUM" \
@@ -1013,7 +1019,7 @@ jobs:
                   encryption: $bootstrapEncryption
                 },
                 changeSet: {
-                  id: $changeSetId,
+                  arnSha256: $changeSetArnSha256,
                   name: $changeSetName,
                   status: "CREATE_COMPLETE",
                   executionStatus: "AVAILABLE",
