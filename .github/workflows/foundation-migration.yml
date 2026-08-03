@@ -852,8 +852,13 @@ jobs:
               and .Capabilities == ["CAPABILITY_NAMED_IAM"]
               and .RoleARN == null
               and .NotificationARNs == []
-              and .RollbackConfiguration.RollbackTriggers == []
-              and .RollbackConfiguration.MonitoringTimeInMinutes == 0
+              and (
+                .RollbackConfiguration == {}
+                or .RollbackConfiguration == {
+                  RollbackTriggers: [],
+                  MonitoringTimeInMinutes: 0
+                }
+              )
               and ((.ImportExistingResources // false) == false)
               and (
                 (.Tags // [] | sort_by(.Key))
@@ -888,10 +893,24 @@ jobs:
                   .Changes[];
                   .ResourceChange as $change
                   | ($policy.forbiddenActions | index($change.Action)) == null
-                  and $change.Replacement == "False"
-                  and all(
-                    ($change.Details // [])[];
-                    .Target.RequiresRecreation == "Never"
+                  and (
+                    if $change.Action == "Add"
+                    then $change.Replacement == null
+                      and (
+                        ($change | has("Details") | not)
+                        or $change.Details == null
+                        or $change.Details == []
+                      )
+                    elif $change.Action == "Modify"
+                    then $change.Replacement == "False"
+                      and ($change.Details | type) == "array"
+                      and ($change.Details | length) > 0
+                      and all(
+                        $change.Details[];
+                        .Target.RequiresRecreation == "Never"
+                      )
+                    else false
+                    end
                   )
                   and (
                     if $change.Action == "Add"

@@ -336,8 +336,13 @@ jobs:
                     and .RoleARN == null
                     and ((.Capabilities // []) == [])
                     and .NotificationARNs == []
-                    and .RollbackConfiguration.RollbackTriggers == []
-                    and .RollbackConfiguration.MonitoringTimeInMinutes == 0
+                    and (
+                      .RollbackConfiguration == {}
+                      or .RollbackConfiguration == {
+                        RollbackTriggers: [],
+                        MonitoringTimeInMinutes: 0
+                      }
+                    )
                     and ((.IncludeNestedStacks // false) == false)
                     and (.Parameters | parameter_map) == {
                       AppName: $app,
@@ -601,8 +606,13 @@ jobs:
               and (.Capabilities // []) == []
               and .RoleARN == null
               and .NotificationARNs == []
-              and .RollbackConfiguration.RollbackTriggers == []
-              and .RollbackConfiguration.MonitoringTimeInMinutes == 0
+              and (
+                .RollbackConfiguration == {}
+                or .RollbackConfiguration == {
+                  RollbackTriggers: [],
+                  MonitoringTimeInMinutes: 0
+                }
+              )
               and (.Parameters | parameter_map) == {
                 AppName: $app,
                 Environment: $environment,
@@ -612,11 +622,23 @@ jobs:
               and normalized_changes == $expected[0]
               and all(
                 .Changes[].ResourceChange;
-                .Replacement == "False"
-                and all(
-                  (.Details // [])[];
-                  .Target.RequiresRecreation == "Never"
-                )
+                if .Action == "Add"
+                then .Replacement == null
+                  and (
+                    (has("Details") | not)
+                    or .Details == null
+                    or .Details == []
+                  )
+                elif .Action == "Modify"
+                then .Replacement == "False"
+                  and (.Details | type) == "array"
+                  and (.Details | length) > 0
+                  and all(
+                    .Details[];
+                    .Target.RequiresRecreation == "Never"
+                  )
+                else false
+                end
               )
             ' "$change_set" >/dev/null
 
