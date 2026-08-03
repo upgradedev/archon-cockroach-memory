@@ -1033,7 +1033,7 @@ case "$mode" in
       --argjson legacyTemplateDigestAccepted \
         "$legacy_template_digest_accepted" \
       --arg stackIdSha256 "$(
-        jq -er '.Stacks[0].StackId' "$live_stack" |
+        jq -ejr '.Stacks[0].StackId' "$live_stack" |
           sha256sum |
           awk '{print $1}'
       )" \

@@ -2655,6 +2655,9 @@ function sourceChecks(): SourceCheck[] {
     /render-template-sha256\)\s*render_template \| canonical_json_sha256/u.test(
       foundationMigrationAuthority
     ) &&
+    /--arg stackIdSha256 "\$\(\s*jq -ejr '\.Stacks\[0\]\.StackId' "\$live_stack" \|\s*sha256sum/u.test(
+      foundationMigrationAuthority
+    ) &&
     (foundationMigrationAuthority.match(
       /legacy_lf_template_body_sha256/gu
     ) ?? []).length === 2 &&
@@ -2731,6 +2734,9 @@ function sourceChecks(): SourceCheck[] {
       foundationProveAuthorityStep
     ) &&
     /foundation-migration-authority\.sh verify-intrinsic/u.test(
+      foundationAbortStep
+    ) &&
+    /authority_stack_id="\$\(jq -er '\.Stacks\[0\]\.StackId' "\$authority_stack"\)"[\s\S]*?printf '%s' "\$authority_stack_id" \|\s*sha256sum/u.test(
       foundationAbortStep
     ) &&
     /\.creationBindingVerified == true/u.test(foundationAbortStep) &&
