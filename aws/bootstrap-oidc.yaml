@@ -670,7 +670,15 @@ Resources:
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: "*"
-            Action: sns:*
+            Action:
+              - sns:AddPermission
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:RemovePermission
+              - sns:SetTopicAttributes
+              - sns:Subscribe
             Resource: !Ref StagingAlarmTopic
             Condition:
               Bool:
@@ -716,7 +724,15 @@ Resources:
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: "*"
-            Action: sns:*
+            Action:
+              - sns:AddPermission
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:RemovePermission
+              - sns:SetTopicAttributes
+              - sns:Subscribe
             Resource: !Ref ProductionAlarmTopic
             Condition:
               Bool:
