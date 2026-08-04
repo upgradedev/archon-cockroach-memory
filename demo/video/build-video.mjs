@@ -165,7 +165,7 @@ function sanitizedToolVersion(executable, label) {
   const firstLine = stdout.split(/\r?\n/u)[0]?.trim() ?? "";
   if (
     !firstLine.startsWith(`${label} version `) ||
-    !firstLine.includes("998de74adf")
+    !firstLine.includes("1fdbca85aa")
   ) {
     throw new Error(`${label} does not match the pinned Archon build`);
   }
@@ -204,11 +204,11 @@ export function buildVideo({
     toolchain.version !== 1 ||
     toolchain.passed !== true ||
     toolchain.provider !== "BtbN/FFmpeg-Builds" ||
-    toolchain.releaseTag !== "autobuild-2026-07-19-13-12" ||
-    toolchain.ffmpegVersion !== "n7.1.5-2-g998de74adf" ||
+    toolchain.releaseTag !== "autobuild-2026-08-03-14-02" ||
+    toolchain.ffmpegVersion !== "n7.1.5-12-g1fdbca85aa" ||
     toolchain.archive?.bytes !== 119_354_960 ||
     toolchain.archive?.sha256 !==
-      "b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61" ||
+      "2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242" ||
     toolchain.binaries?.ffmpegSha256 !== sha256File(ffmpeg) ||
     toolchain.binaries?.ffprobeSha256 !== sha256File(ffprobe) ||
     toolchain.capabilities?.gpl !== true ||

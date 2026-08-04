@@ -6,11 +6,11 @@ set -euo pipefail
 : "${GITHUB_ENV:?GITHUB_ENV is required}"
 
 readonly provider="BtbN/FFmpeg-Builds"
-readonly release_tag="autobuild-2026-07-19-13-12"
-readonly ffmpeg_version="n7.1.5-2-g998de74adf"
-readonly asset="ffmpeg-n7.1.5-2-g998de74adf-linux64-gpl-7.1.tar.xz"
-readonly expected_bytes="119354960"
-readonly expected_sha256="b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61"
+readonly release_tag="autobuild-2026-08-03-14-02"
+readonly ffmpeg_version="n7.1.5-12-g1fdbca85aa"
+readonly asset="ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz"
+readonly expected_bytes="119011268"
+readonly expected_sha256="2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242"
 readonly download_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/${release_tag}/${asset}"
 
 if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then

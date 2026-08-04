@@ -797,7 +797,7 @@ jobs:
         run: |
           set -euo pipefail
           test "${DEMO_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-demo-video"
-          toolchain_root="${RUNNER_TEMP}/archon-demo-video-toolchain-b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61"
+          toolchain_root="${RUNNER_TEMP}/archon-demo-video-toolchain-2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242"
           test "${toolchain_root}" != "${RUNNER_TEMP}"
           rm -rf -- "${DEMO_VIDEO_ROOT}" "${toolchain_root}"
       - name: Require a clean source checkout

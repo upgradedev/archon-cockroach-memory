@@ -639,8 +639,8 @@ Weekly scheduled and manual DAST runs remain independent production audits.
 
 ## Pinned release evidence
 
-The latest fully evidenced feature-bearing release baseline recorded before
-this documentation-only update is
+The deployed production baseline — the most recent commit with a complete hosted
+release chain — is
 [`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
 It is jointly bound to the successful
 [main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157603),
@@ -651,9 +651,8 @@ It is jointly bound to the successful
 and [manual dual-environment recovery audit](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552).
 The exact artifact IDs and SHA-256 digests are recorded in
 [the judge-application evidence ledger](./docs/DEMO_URL.md).
-The ledger is immutable historical evidence for that exact SHA; later
-documentation-only commits must earn their own pipeline evidence and do not
-rewrite this baseline.
+The ledger is immutable historical evidence for that exact SHA; later commits
+must earn their own pipeline evidence and never rewrite this baseline.
 
 | Evidence | State |
 |---|---|

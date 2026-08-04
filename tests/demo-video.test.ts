@@ -945,16 +945,16 @@ test("build filter and source bind subtitles, exact encoding, and full verificat
 
 test("pinned installer is immutable, path-confined, and avoids pipefail SIGPIPE", () => {
   const installer = readFileSync(INSTALLER, "utf8");
-  assert.match(installer, /autobuild-2026-07-19-13-12/u);
-  assert.match(installer, /n7\.1\.5-2-g998de74adf/u);
+  assert.match(installer, /autobuild-2026-08-03-14-02/u);
+  assert.match(installer, /n7\.1\.5-12-g1fdbca85aa/u);
   assert.match(
     installer,
-    /ffmpeg-n7\.1\.5-2-g998de74adf-linux64-gpl-7\.1\.tar\.xz/u
+    /ffmpeg-n7\.1\.5-12-g1fdbca85aa-linux64-gpl-7\.1\.tar\.xz/u
   );
-  assert.match(installer, /119354960/u);
+  assert.match(installer, /119011268/u);
   assert.match(
     installer,
-    /b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61/u
+    /2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242/u
   );
   assert.match(installer, /archive-entries\.txt/u);
   assert.doesNotMatch(installer, /tar -tJf "\$\{archive\}" \|/u);

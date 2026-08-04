@@ -8589,10 +8589,10 @@ function sourceChecks(): SourceCheck[] {
         /caption/iu.test(demoVideoMediaSelfTest) &&
         /mismatch|tamper/iu.test(demoVideoMediaSelfTest) &&
         /sha256/iu.test(demoVideoReceiptGate) &&
-        /autobuild-2026-07-19-13-12/u.test(
+        /autobuild-2026-08-03-14-02/u.test(
           demoVideoFfmpegInstaller
         ) &&
-        /b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61/u.test(
+        /2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242/u.test(
           demoVideoFfmpegInstaller
         ) &&
         demoVideoCapture.includes(
