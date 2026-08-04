@@ -554,8 +554,6 @@ require_jq \
   --arg environment "$ENVIRONMENT" \
   --arg keyArn "$key_arn" \
   --arg rootArn "arn:aws:iam::${AWS_ACCOUNT_ID}:root" \
-  --arg stagingArn "$staging_topic_arn" \
-  --arg productionArn "$production_topic_arn" \
   --arg stagingSource \
     "arn:aws:cloudwatch:${AWS_REGION}:${AWS_ACCOUNT_ID}:alarm:${APP_NAME}-staging-*" \
   --arg productionSource \
@@ -565,17 +563,43 @@ require_jq \
       if type == "array" then . else [.] end
       | map(ascii_downcase)
       | sort;
+    def resource_list:
+      if type == "array" then . else [.] end
+      | sort;
     def exact_keys($expected):
       (keys | sort) == ($expected | sort);
-    (.Attributes.Policy | fromjson | .Statement) as $statements
-    | ($statements | length) == 4
+    def topic_actions:
+      [
+        "sns:addpermission",
+        "sns:deletetopic",
+        "sns:gettopicattributes",
+        "sns:listsubscriptionsbytopic",
+        "sns:publish",
+        "sns:removepermission",
+        "sns:settopicattributes",
+        "sns:subscribe"
+      ]
+      | sort;
+    (
+      if $environment == "staging"
+      then "AllowStagingCloudWatchAlarmPublish"
+      else "AllowProductionCloudWatchAlarmPublish"
+      end
+    ) as $publishSid
+    | (
+      if $environment == "staging"
+      then $stagingSource
+      else $productionSource
+      end
+    ) as $publishSource
+    | (.Attributes.Policy | fromjson | .Statement) as $statements
+    | ($statements | length) == 3
     and (
       [$statements[].Sid] | unique | sort
     ) == ([
       "AllowAccountTopicAdministration",
-      "AllowProductionCloudWatchAlarmPublish",
-      "AllowStagingCloudWatchAlarmPublish",
-      "DenyInsecureTransport"
+      "DenyInsecureTransport",
+      $publishSid
     ] | sort)
     and .Attributes.TopicArn == $arn
     and .Attributes.Owner == $account
@@ -595,27 +619,12 @@ require_jq \
           | exact_keys(["AWS"])
             and .AWS == $rootArn
         )
-        and (
-          .Action
-          | action_list
-        ) == ([
-          "sns:addpermission",
-          "sns:deletetopic",
-          "sns:gettopicattributes",
-          "sns:listsubscriptionsbytopic",
-          "sns:publish",
-          "sns:removepermission",
-          "sns:settopicattributes",
-          "sns:subscribe"
-        ] | sort)
-        and (
-          .Resource
-          | if type == "array" then sort else [] end
-        ) == ([$stagingArn, $productionArn] | sort)
+        and (.Action | action_list) == topic_actions
+        and (.Resource | resource_list) == [$arn]
     )
     and (
       $statements[]
-      | select(.Sid == "AllowStagingCloudWatchAlarmPublish")
+      | select(.Sid == $publishSid)
       | exact_keys([
           "Action",
           "Condition",
@@ -631,7 +640,7 @@ require_jq \
             and .Service == "cloudwatch.amazonaws.com"
         )
         and (.Action | action_list) == ["sns:publish"]
-        and .Resource == $stagingArn
+        and (.Resource | resource_list) == [$arn]
         and (
           .Condition
           | exact_keys(["ArnLike", "StringEquals"])
@@ -643,41 +652,7 @@ require_jq \
             and (
               .ArnLike
               | exact_keys(["aws:SourceArn"])
-                and ."aws:SourceArn" == $stagingSource
-            )
-        )
-    )
-    and (
-      $statements[]
-      | select(.Sid == "AllowProductionCloudWatchAlarmPublish")
-      | exact_keys([
-          "Action",
-          "Condition",
-          "Effect",
-          "Principal",
-          "Resource",
-          "Sid"
-        ])
-        and .Effect == "Allow"
-        and (
-          .Principal
-          | exact_keys(["Service"])
-            and .Service == "cloudwatch.amazonaws.com"
-        )
-        and (.Action | action_list) == ["sns:publish"]
-        and .Resource == $productionArn
-        and (
-          .Condition
-          | exact_keys(["ArnLike", "StringEquals"])
-            and (
-              .StringEquals
-              | exact_keys(["aws:SourceAccount"])
-                and ."aws:SourceAccount" == $account
-            )
-            and (
-              .ArnLike
-              | exact_keys(["aws:SourceArn"])
-                and ."aws:SourceArn" == $productionSource
+                and ."aws:SourceArn" == $publishSource
             )
         )
     )
@@ -694,11 +669,8 @@ require_jq \
         ])
         and .Effect == "Deny"
         and .Principal == "*"
-        and (.Action | action_list) == ["sns:*"]
-        and (
-          .Resource
-          | if type == "array" then sort else [] end
-        ) == ([$stagingArn, $productionArn] | sort)
+        and (.Action | action_list) == topic_actions
+        and (.Resource | resource_list) == [$arn]
         and (
           .Condition
           | exact_keys(["Bool"])

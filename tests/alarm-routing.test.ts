@@ -183,6 +183,17 @@ const keyPolicy = {
   ],
 };
 
+const TOPIC_ACTIONS = [
+  "sns:AddPermission",
+  "sns:DeleteTopic",
+  "sns:GetTopicAttributes",
+  "sns:ListSubscriptionsByTopic",
+  "sns:Publish",
+  "sns:RemovePermission",
+  "sns:SetTopicAttributes",
+  "sns:Subscribe",
+];
+
 const topicPolicy = {
   Version: "2012-10-17",
   Statement: [
@@ -192,17 +203,8 @@ const topicPolicy = {
       Principal: {
         AWS: `arn:aws:iam::${AWS_ACCOUNT_ID}:root`,
       },
-      Action: [
-        "sns:AddPermission",
-        "sns:DeleteTopic",
-        "sns:GetTopicAttributes",
-        "sns:ListSubscriptionsByTopic",
-        "sns:Publish",
-        "sns:RemovePermission",
-        "sns:SetTopicAttributes",
-        "sns:Subscribe",
-      ],
-      Resource: [STAGING_TOPIC_ARN, PRODUCTION_TOPIC_ARN],
+      Action: TOPIC_ACTIONS,
+      Resource: STAGING_TOPIC_ARN,
     },
     {
       Sid: "AllowStagingCloudWatchAlarmPublish",
@@ -220,26 +222,11 @@ const topicPolicy = {
       },
     },
     {
-      Sid: "AllowProductionCloudWatchAlarmPublish",
-      Effect: "Allow",
-      Principal: { Service: "cloudwatch.amazonaws.com" },
-      Action: "sns:Publish",
-      Resource: PRODUCTION_TOPIC_ARN,
-      Condition: {
-        StringEquals: { "aws:SourceAccount": AWS_ACCOUNT_ID },
-        ArnLike: {
-          "aws:SourceArn":
-            `arn:aws:cloudwatch:${AWS_REGION}:${AWS_ACCOUNT_ID}:` +
-            `alarm:${APP_NAME}-production-*`,
-        },
-      },
-    },
-    {
       Sid: "DenyInsecureTransport",
       Effect: "Deny",
       Principal: "*",
-      Action: "sns:*",
-      Resource: [STAGING_TOPIC_ARN, PRODUCTION_TOPIC_ARN],
+      Action: TOPIC_ACTIONS,
+      Resource: STAGING_TOPIC_ARN,
       Condition: { Bool: { "aws:SecureTransport": "false" } },
     },
   ],
@@ -684,16 +671,34 @@ test("alarm routing: proof rejects broadened SNS account administration", () => 
   );
 });
 
-test("alarm routing: proof validates the other environment SNS grant", () => {
-  const broadenedTopicPolicy = mutatePolicyStatement(
+test("alarm routing: proof rejects a topic policy that spans both topics", () => {
+  const sharedTopicPolicy = mutatePolicyStatement(
     topicPolicy,
-    "AllowProductionCloudWatchAlarmPublish",
+    "AllowAccountTopicAdministration",
     (statement) => {
-      statement.Resource = "*";
+      statement.Resource = [STAGING_TOPIC_ARN, PRODUCTION_TOPIC_ARN];
     }
   );
   const result = runAlarmProof("discover", "active", {
-    topicPolicy: broadenedTopicPolicy,
+    topicPolicy: sharedTopicPolicy,
+  });
+  assert.notEqual(result.process.status, 0);
+  assert.match(
+    result.process.stderr,
+    /SNS topic attributes or policy are outside/u
+  );
+});
+
+test("alarm routing: proof rejects a wildcard insecure-transport deny", () => {
+  const wildcardTopicPolicy = mutatePolicyStatement(
+    topicPolicy,
+    "DenyInsecureTransport",
+    (statement) => {
+      statement.Action = "sns:*";
+    }
+  );
+  const result = runAlarmProof("discover", "active", {
+    topicPolicy: wildcardTopicPolicy,
   });
   assert.notEqual(result.process.status, 0);
   assert.match(
@@ -779,6 +784,8 @@ test("alarm routing: source contract is dormant, protected, and CI-gated", () =>
     "AlarmNotificationsKeyAlias",
     "StagingAlarmTopic",
     "ProductionAlarmTopic",
+    "StagingAlarmTopicPolicy",
+    "ProductionAlarmTopicPolicy",
     "StagingAlarmArchiveQueue",
     "StagingAlarmRoutingDrillQueue",
     "ProductionAlarmArchiveQueue",
@@ -831,6 +838,19 @@ test("alarm routing: source contract is dormant, protected, and CI-gated", () =>
       ) ?? []
     ).length,
     5
+  );
+  assert.doesNotMatch(foundationSource, /Action: sns:\*/u);
+  assert.equal(
+    (foundationSource.match(/- sns:AddPermission/gu) ?? []).length,
+    4
+  );
+  assert.match(
+    foundationSource,
+    /  StagingAlarmTopicPolicy:[\s\S]*?Topics:\r?\n\s+- !Ref StagingAlarmTopic\r?\n[\s\S]*?Sid: DenyInsecureTransport[\s\S]*?Resource: !Ref StagingAlarmTopic/u
+  );
+  assert.match(
+    foundationSource,
+    /  ProductionAlarmTopicPolicy:[\s\S]*?Topics:\r?\n\s+- !Ref ProductionAlarmTopic\r?\n[\s\S]*?Sid: DenyInsecureTransport[\s\S]*?Resource: !Ref ProductionAlarmTopic/u
   );
   assert.doesNotMatch(deploy, /secrets\.ALARM_TOPIC_ARN/u);
   assert.doesNotMatch(deploy, /if \[ -n "\$ALARM_TOPIC_ARN" \]/u);
