@@ -5616,9 +5616,9 @@ function sourceChecks(): SourceCheck[] {
         /"archon-coverage",\s*\n?\s*"backend",\s*\n?\s*"lcov\.info"/u.test(
           backendCoverageRunner
         ) &&
-        /--test-coverage-lines=80/u.test(backendCoverageRunner) &&
-        /--test-coverage-branches=75/u.test(backendCoverageRunner) &&
-        /--test-coverage-functions=80/u.test(backendCoverageRunner) &&
+        /--test-coverage-lines=90/u.test(backendCoverageRunner) &&
+        /--test-coverage-branches=80/u.test(backendCoverageRunner) &&
+        /--test-coverage-functions=90/u.test(backendCoverageRunner) &&
         /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/backend\/lcov\.info/u.test(
           ci
         ) &&
@@ -5634,7 +5634,7 @@ function sourceChecks(): SourceCheck[] {
         /path:\s*\|[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/coverage-summary\.json[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/lcov\.info/u.test(
           ci
         ),
-      "Backend and frontend coverage enforce 80/75/80 release floors and retain LCOV/summary evidence exclusively under the ephemeral CI runner.",
+      "Backend and frontend coverage enforce 90/80/90 backend and 88/85/90/90 frontend release floors and retain LCOV/summary evidence exclusively under the ephemeral CI runner.",
       "Coverage thresholds, immutable tooling, CI-only output isolation, or uploaded evidence is incomplete."
     ),
     sourceCheck(
