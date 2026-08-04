@@ -15,6 +15,13 @@ const EXPECTED_RULES = Object.freeze([
     target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "Distribution",
+    // Trivy resolves the Fn::If, so AWS-0011 is reported against the exact
+    // WebACLId property line and CauseMetadata.Resource carries the logical
+    // resource id instead of a "target:start-end" source range. Every other
+    // rule is reported against the complete resource block. Both shapes are
+    // pinned exactly rather than loosened to "some location".
+    rangeKey: "WebAclBinding",
+    scannerResourceRaw: "Distribution",
     namespace: "builtin.aws.cloudfront.aws0011",
     title: "CloudFront distribution does not have a WAF in front.",
     primaryUrl: "https://avd.aquasec.com/misconfig/aws-0011",
@@ -34,6 +41,8 @@ const EXPECTED_RULES = Object.freeze([
     target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "Distribution",
+    rangeKey: "Distribution",
+    scannerResourceRaw: null,
     namespace: "builtin.aws.cloudfront.aws0013",
     title: "CloudFront distribution uses outdated SSL/TLS protocols.",
     primaryUrl: "https://avd.aquasec.com/misconfig/aws-0013",
@@ -55,6 +64,8 @@ const EXPECTED_RULES = Object.freeze([
     target: EXPECTED_TARGET,
     legacyAlias: null,
     logicalResource: "SpaBucket",
+    rangeKey: "SpaBucket",
+    scannerResourceRaw: null,
     namespace: "builtin.aws.s3.aws0132",
     title: "S3 encryption should use Customer Managed Keys",
     primaryUrl: "https://avd.aquasec.com/misconfig/aws-0132",
@@ -77,6 +88,8 @@ const EXPECTED_RULES = Object.freeze([
     target: EXPECTED_BOOTSTRAP_TARGET,
     legacyAlias: null,
     logicalResource: "CloudFrontAccessLogBucket",
+    rangeKey: "CloudFrontAccessLogBucket",
+    scannerResourceRaw: null,
     namespace: "builtin.aws.s3.aws0132",
     title: "S3 encryption should use Customer Managed Keys",
     primaryUrl: "https://avd.aquasec.com/misconfig/aws-0132",
@@ -156,6 +169,17 @@ function count(source, pattern) {
   return source.match(pattern)?.length ?? 0;
 }
 
+// 1-based absolute line number of a line that must appear exactly once.
+function absoluteLineOf(source, line) {
+  const lines = normalizeSource(source).split("\n");
+  const matches = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] === line) matches.push(index + 1);
+  }
+  invariant(matches.length === 1, `${line.trim()} must occur exactly once`);
+  return matches[0];
+}
+
 function extractSinglePolicyStatement(source, sid) {
   const lines = normalizeSource(source).split("\n");
   const marker = `          - Sid: ${sid}`;
@@ -227,6 +251,18 @@ function validateTemplateContract(templateSource, bootstrapSource) {
       /^\s{8}WebACLId: !If \[HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"\]$/gmu
     ) === 1,
     "Distribution must bind the WebACL through the exact HasCloudFrontWebAcl condition"
+  );
+  // Trivy reports AWS-0011 against this single line, so its absolute position
+  // is part of the contract and is derived from the source rather than
+  // hard-coded.
+  const webAclBindingLine = absoluteLineOf(
+    normalized,
+    '        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]'
+  );
+  invariant(
+    webAclBindingLine >= distribution.startLine &&
+      webAclBindingLine <= distribution.endLine,
+    "the WebACL binding must live inside the Distribution source block"
   );
   invariant(
     count(distributionSource, /^\s{8}Logging:$/gmu) === 1 &&
@@ -459,6 +495,10 @@ function validateTemplateContract(templateSource, bootstrapSource) {
       startLine: distribution.startLine,
       endLine: distribution.endLine,
     },
+    WebAclBinding: {
+      startLine: webAclBindingLine,
+      endLine: webAclBindingLine,
+    },
     SpaBucket: {
       startLine: spaBucket.startLine,
       endLine: spaBucket.endLine,
@@ -496,7 +536,7 @@ function flattenMisconfigurations(report) {
 }
 
 function expectedRange(rule, templateContract) {
-  return templateContract[rule.logicalResource];
+  return templateContract[rule.rangeKey];
 }
 
 function findingKey(ruleId, target) {
@@ -552,13 +592,13 @@ function validateJsonFindings(report, templateContract) {
     invariant(
       finding.CauseMetadata?.StartLine === range.startLine &&
         finding.CauseMetadata?.EndLine === range.endLine,
-      `${rule.ruleId} location must equal the complete ${rule.logicalResource} source block`
+      `${rule.ruleId} location must equal the exact ${rule.rangeKey} source range`
     );
-    const scannerResource =
-      `${rule.target}:${range.startLine}-${range.endLine}`;
     invariant(
-      finding.CauseMetadata?.Resource === scannerResource,
-      `${rule.ruleId} scanner resource must match the exact source range`
+      finding.CauseMetadata?.Resource ===
+        (rule.scannerResourceRaw ??
+          `${rule.target}:${range.startLine}-${range.endLine}`),
+      `${rule.ruleId} scanner resource must match the exact reported location`
     );
   }
   return byFindingKey;
@@ -683,7 +723,13 @@ function evaluate({ report, sarif, templateSource, bootstrapSource, toolLock, ve
       status: "FAIL",
       target: rule.target,
       logicalResource: rule.logicalResource,
-      scannerResource: finding.CauseMetadata.Resource,
+      // Canonicalized to "target:startLine-endLine". Trivy names the logical
+      // resource instead of a range when it pins a finding to a single
+      // property line; the raw value is asserted exactly above, and the
+      // published record stays one uniform, machine-checkable shape.
+      scannerResource:
+        `${rule.target}:${finding.CauseMetadata.StartLine}` +
+        `-${finding.CauseMetadata.EndLine}`,
       namespace: rule.namespace,
       startLine: finding.CauseMetadata.StartLine,
       endLine: finding.CauseMetadata.EndLine,
@@ -889,7 +935,7 @@ function fixtureReport(templateSource = fixtureTemplate()) {
   const contract = validateTemplateContract(templateSource, bootstrapSource);
   const byTarget = new Map();
   for (const rule of EXPECTED_RULES) {
-    const range = contract[rule.logicalResource];
+    const range = expectedRange(rule, contract);
     const misconfigurations = byTarget.get(rule.target) ?? [];
     misconfigurations.push({
       Type: EXPECTED_FINDING_TYPE,
@@ -900,7 +946,9 @@ function fixtureReport(templateSource = fixtureTemplate()) {
       PrimaryURL: rule.primaryUrl,
       Status: "FAIL",
       CauseMetadata: {
-        Resource: `${rule.target}:${range.startLine}-${range.endLine}`,
+        Resource:
+          rule.scannerResourceRaw ??
+          `${rule.target}:${range.startLine}-${range.endLine}`,
         StartLine: range.startLine,
         EndLine: range.endLine,
       },
@@ -934,7 +982,7 @@ function fixtureSarif(templateSource = fixtureTemplate()) {
           },
         },
         results: EXPECTED_RULES.map((rule) => {
-          const range = contract[rule.logicalResource];
+          const range = expectedRange(rule, contract);
           return {
             ruleId: rule.ruleId,
             level: "error",
