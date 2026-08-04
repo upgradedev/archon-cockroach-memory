@@ -16,8 +16,14 @@ embeddings and grounded narration.
 
 ## Current demo status — 2026-08-04
 
-**The hosted demo's data plane is down.** `/api/health` still answers 200, but it
-is a reachability stub that reports `"dependencies":"unchecked"`. `/api/proof`,
+**The hosted demo's data plane is down.** `/api/health` still answers 200, but
+the deployed build's health endpoint is a reachability stub that reports
+`"dependencies":"unchecked"` — which is precisely why the outage went unnoticed.
+`main` now carries a bounded, cached CockroachDB probe that reports
+`ready`/`degraded` with a `checks.database` detail, and a scheduled
+[availability canary](./.github/workflows/live-availability.yml) that probes
+`/api/proof` from outside every 30 minutes; neither is live until the next
+release. `/api/proof`,
 `/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
 11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
 CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
@@ -575,8 +581,10 @@ manufacture a `RECOVERED` receipt.
 - The public database is a dedicated synthetic demonstration scope; no customer
   records are used.
 - [`aws/edge-waf.yaml`](./aws/edge-waf.yaml) has a protected, manual
-  plan/apply/verify workflow. The application template has no unprotected
-  mode: it requires the exact protected edge-stack WebACL output and the
+  plan/apply/verify workflow. The application template attaches a WebACL only
+  when one is supplied, so it can be created before the edge control plane
+  exists; the release pipeline is where the WebACL is mandatory, refusing to
+  deploy without the exact protected edge-stack output alongside the
   bootstrap-generated Secrets Manager origin capability. No live activation
   is claimed; foundation migration, both edge-stack receipts, deployment,
   alarm routing, and abuse drills still require explicit approval and
