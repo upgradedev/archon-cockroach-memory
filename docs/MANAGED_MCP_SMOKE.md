@@ -122,9 +122,13 @@ The exact commit
 [`25ca1c84f9df7721b8415b9bd55cc5849bf96ca4`](https://github.com/upgradedev/archon-cockroach-memory/commit/25ca1c84f9df7721b8415b9bd55cc5849bf96ca4)
 passed the post-production Managed MCP job in
 [Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107).
-At **2026-07-23 06:23:43 UTC**, that run connected to the live AWS
-`eu-west-1` CockroachDB Cloud Basic cluster, observed CockroachDB v26.2.1 and 12
-advertised tools, and passed the four read-only tool checks.
+That run started at **2026-07-25 04:49:35 UTC** and its receipt was written at
+**2026-07-25 05:09:03 UTC**. It connected to the live AWS `eu-west-1`
+CockroachDB Cloud Basic cluster, observed CockroachDB v26.2.1 and 12 advertised
+tools, and passed the four read-only tool checks. (An earlier revision of this
+document dated the run 2026-07-23 06:23:43 UTC; that timestamp matched no field
+of the run and has been replaced with the run's own `run_started_at` and receipt
+`checkedAt`.)
 
 That run is historical **pre-hardening** evidence. It predates receipt schema v2:
 its aggregate was not pinned to the exact four-axis scope, did not force

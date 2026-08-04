@@ -6,6 +6,12 @@ Target: a defensible score above 90/100 under the five equal CockroachDB AI
 Hackathon judging criteria. This target is an internal planning threshold, not
 an organizer score or a guarantee of placement.
 
+**Latest hosted evidence:** [CI run
+30911928828](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30911928828),
+successful on `main` at commit `93dfa73`, 2026-08-04, including the required
+`readiness` job. The plan below states which gates exist; that run is where a
+reader confirms they execute and pass.
+
 ## Non-negotiable release rules
 
 - CockroachDB is the durable memory system, not a decorative datastore.

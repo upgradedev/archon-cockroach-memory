@@ -1,5 +1,11 @@
 # Memory architecture evaluation
 
+**Latest hosted evidence:** [Memory architecture evaluation run
+30911928654](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30911928654),
+successful on `main` at commit `93dfa73`, 2026-08-04. Open that run to read the
+job logs and the SHA-bound receipt described below rather than taking this
+document's account of them on trust.
+
 Archon Memory has a pipeline-owned evaluation path for the questions a strict
 judge should ask: does memory survive sessions, respect time and scope, preserve
 conflicts, abstain when it should, consolidate only after the right human

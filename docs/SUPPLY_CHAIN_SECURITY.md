@@ -2,6 +2,12 @@
 
 Status: enforced, zero accepted waivers
 
+**Latest hosted evidence:** [Supply Chain (enforced) run
+30911931358](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30911931358),
+successful on `main` at commit `93dfa73`, 2026-08-04. The "zero accepted waivers"
+claim is checkable there: the run's own logs carry the waiver list the gate
+enforces.
+
 This document defines the hosted pipeline boundary added for source classes
 that CodeQL does not analyze and for release dependency evidence. It does not
 claim independent penetration testing, legal review, or a vulnerability-free

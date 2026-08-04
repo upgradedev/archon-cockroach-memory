@@ -2,9 +2,18 @@
 
 > Historical SQL capture: the evidence below was recorded on v25.4.10. The same
 > live cluster had been upgraded to **v26.2.1** when independently re-verified
-> through CockroachDB Cloud Managed MCP on 2026-07-23. See
+> through CockroachDB Cloud Managed MCP on 2026-07-25. See
 > [`MANAGED_MCP_SMOKE.md`](./MANAGED_MCP_SMOKE.md). Version strings here are
 > timestamped evidence, not a claim that the cluster remains on the older release.
+>
+> The **dataset** below is historical in the same way. This capture predates the
+> fixed judge-facing scope: it shows a three-row `Northwind Traders` fixture,
+> whereas the demo scope everywhere else in this repository — and the one the
+> deployed application serves — is **Helios SA** with **nine** active canonical
+> memories and the exact `9 / 9 / 9` Store proof. The company name and row count
+> here are what the cluster held at capture time, not the current scope. The
+> `EXPLAIN` shapes and RF=3 distribution below are the point of this document and
+> are unaffected by that change.
 
 Judge-facing proof that the vector-memory path runs against the **live, managed
 CockroachDB Cloud Serverless cluster**, not only a local Docker node — the distributed

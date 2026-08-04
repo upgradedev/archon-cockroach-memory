@@ -11,6 +11,22 @@ at
 It uses CockroachDB as durable, distributed agent memory and AWS Bedrock for
 embeddings and grounded narration.
 
+## Current demo status — 2026-08-04
+
+**The hosted demo's data plane is down.** `/api/health` still answers 200, but it
+is a reachability stub that reports `"dependencies":"unchecked"`. `/api/proof`,
+`/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
+11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
+CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
+disabled, so the runtime principal is refused with `the maximum number of
+allowed connections is 0`.
+
+This is a cluster budget state, not a code or deployment regression. None of the
+hosted evidence in this README or in [docs/DEMO_URL.md](./docs/DEMO_URL.md)
+depends on the demo being reachable: each link is a completed GitHub Actions run
+bound to an exact commit, and those runs remain viewable. A judge opening the URL
+today should expect the interface to load and its data panels to error.
+
 ## Working challenge slice
 
 The working challenge slice is intentionally precise:
@@ -24,10 +40,6 @@ The working challenge slice is intentionally precise:
 - A cited Bedrock answer with relevance abstention, per-claim citation checks,
   numeric checks, and deterministic evidence fallback.
 - A complete-scope, read-only audit for contradictions and missing counterparts.
-- A disposable Memory Resolution Loop that observes a cross-session
-  correction, requires an explicit synthetic controller decision, applies one
-  serializable/idempotent CockroachDB state transition, and returns an
-  immutable receipt.
 - Explicit learning, consolidation, and CockroachDB row-level TTL forgetting
   policies, with no external financial side effect.
 - A live proof ledger for database version, runtime principal, active record
@@ -36,6 +48,21 @@ The working challenge slice is intentionally precise:
 The broader Archon document-extraction and financial-reconciliation platform is
 product vision and reusable domain context; it is not presented as functionality
 of this judge-facing application.
+
+### On `main`, not in the deployed baseline
+
+The **Memory Resolution Loop** — a disposable sandbox that observes a
+cross-session correction, requires an explicit synthetic controller decision,
+applies one serializable/idempotent CockroachDB state transition, and returns an
+immutable receipt — is implemented and CI-covered on `main`
+([docs/MEMORY_RESOLUTION_LOOP.md](./docs/MEMORY_RESOLUTION_LOOP.md),
+`src/memory/resolution.ts`, `src/http/resolution-handler.ts`,
+`web/src/components/MemoryResolutionLoop.tsx`).
+
+It is not part of the deployed production baseline. Commit `0b25d5f` contains
+none of those files, and the deployed API answers `/api/resolution/session` with
+404. It reaches the judge-facing application only once a release chain deploys a
+commit that carries it, so a judge cannot exercise it at the demo URL today.
 
 ## Why this is agentic memory
 
@@ -152,6 +179,15 @@ This is a causal gate, not a terminal report: the protected database release
 must complete first, Managed MCP must then verify it, and both staging and
 production explicitly depend on that successful job. A separate protected
 standalone audit reuses the same v3 contract and exact release evidence.
+
+Receipt schema v3 is the contract implemented in
+[`scripts/cloud-mcp-audit.ts`](./scripts/cloud-mcp-audit.ts) and asserted by the
+[Managed MCP audit](./.github/workflows/managed-mcp-audit.yml) workflow as it
+stands on `main`. **No hosted run has produced a v3 receipt.** The workflow at
+the deployed baseline commit `0b25d5f` asserts `schemaVersion == 2`, and every
+Managed MCP receipt recorded as evidence so far — including the deployed
+baseline's — is v2. [docs/MANAGED_MCP_SMOKE.md](./docs/MANAGED_MCP_SMOKE.md)
+draws the same boundary.
 
 [Deploy AWS run 30144685107](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30144685107)
 is historical pre-hardening evidence: it proves live Managed MCP connectivity and
@@ -660,16 +696,21 @@ must earn their own pipeline evidence and never rewrite this baseline.
 | Historical native-vector plans / recall benchmark | Verified |
 | Runtime-principal company + kind C-SPANN serving gate | Both principals are re-proved in every [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) release |
 | Live bounded Store proof: persistence + unique keys + payload-bound SHA-256 digests | `/api/proof` exposes `9 / 9 / 9` and the exact promoted commit SHA; deployment rejects a mismatch |
-| CockroachDB Cloud Managed MCP | The causal receipt v3 binds the exact release and database C-SPANN receipt digests, strict `9 / 9 / 9` Store parsing, and capability-safe optional `explain_query`; staging and production refuse promotion unless the protected gate passes, and the standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) reuses the same contract |
+| CockroachDB Cloud Managed MCP | The causal receipt binds the exact release and database C-SPANN receipt digests, strict `9 / 9 / 9` Store parsing, and capability-safe optional `explain_query`; staging and production refuse promotion unless the protected gate passes, and the standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) reuses the same contract. The v3 contract is on `main`; every receipt produced by a hosted run so far, the deployed baseline's included, is v2 |
 | Real Titan V2 + Claude Sonnet 4.6 | Protected staging and production gates exercise Titan in `eu-west-1` and the Claude EU cross-region inference profile |
 | Control Room, protected DB release, SAM stack, OIDC CI/CD, canary/rollback | Exact-main build-once promotion, live release-SHA binding, and hosted browser verification are mandatory in [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) |
-| Unrestricted CloudFront production URL and hosted receipts | [Live and verified](https://d2s5v0o0eg2aaw.cloudfront.net) |
+| Unrestricted CloudFront production URL and hosted receipts | [Reachable without credentials](https://d2s5v0o0eg2aaw.cloudfront.net); the data-plane endpoints have returned 500 since 2026-08-02 — see [Current demo status](#current-demo-status--2026-08-04) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
 | Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
 | Fault-triggered `RECOVERING → RECOVERED` and daily/manual audit | Implemented and CI-covered; the final gate requires a fresh manual `operation=audit` receipt, but no intentional live failure drill is claimed |
 | `main` governance | [Active ruleset](https://github.com/upgradedev/archon-cockroach-memory/rules/19722191): PR only, no force-push/delete, strict `readiness` + CodeQL |
-| Submission copy, CI-only ElevenLabs video plan, owned thumbnail, and hosted final gate | Versioned under [docs/DEVPOST_SUBMISSION.md](./docs/DEVPOST_SUBMISSION.md), [demo/VIDEO_PLAN.md](./demo/VIDEO_PLAN.md), [Generate exact-release demo video](./.github/workflows/demo-video.yml), and [Submission readiness](./.github/workflows/submission-readiness.yml) |
+| Submission copy, CI-only ElevenLabs video plan, owned thumbnail, and hosted final gate | Versioned under [docs/DEVPOST_SUBMISSION.md](./docs/DEVPOST_SUBMISSION.md), [demo/VIDEO_PLAN.md](./demo/VIDEO_PLAN.md), and [Generate exact-release demo video](./.github/workflows/demo-video.yml). [Submission readiness](./.github/workflows/submission-readiness.yml) is defined as the hosted final gate but has never been executed — it has zero runs, so no hosted final-gate receipt exists |
 | Final public video and Devpost form | Deliberately last; a blog/post is not a required deliverable |
+
+Throughout this repository, "release" and "exact-release" mean the pipeline's
+build-once promotion chain bound to one exact commit SHA. They do not refer to a
+GitHub Release or a tag: this repository publishes neither, and `/releases` and
+`/tags` are both empty by design. The SHA in each run link is the identifier.
 
 Run `npm run readiness` for separate source-readiness and submission-eligibility
 results. A source-ready result never implies that the final video/form is done.
