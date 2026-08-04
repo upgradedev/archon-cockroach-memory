@@ -1,8 +1,11 @@
 # Archon Memory Control Room
 
 **A Financial Memory Control Room that lets a CFO ask what the books forgot,
-inspect the exact evidence, see persistent memory disagree, and explicitly
-resolve a correction without giving the agent financial authority.**
+inspect the exact evidence, and see persistent memory disagree — without giving
+the agent financial authority.** Explicitly resolving a correction is the
+[Memory Resolution Loop](#on-main-not-in-the-deployed-baseline): implemented and
+CI-covered on `main`, but not part of the deployed baseline a judge can reach
+today.
 
 This is an entry for the
 [CockroachDB × AWS Hackathon — Build with Agentic Memory](https://cockroachdb-ai.devpost.com/)

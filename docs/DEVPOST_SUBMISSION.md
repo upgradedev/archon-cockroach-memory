@@ -46,9 +46,12 @@ memory inspectable before a human acts on it.
 ## What it does
 
 The public demo uses a fixed, synthetic company called Helios SA. Canonical
-memory is read-only; a separate disposable sandbox permits only one fixed,
-human-gated resolution action.
-A judge can:
+memory is read-only. A separate disposable sandbox permits exactly one fixed,
+human-gated resolution action — that sandbox is implemented on `main` but is not
+in the deployed baseline, so item 6 below is not reachable at the demo URL; see
+[Not in the deployed baseline](#not-in-the-deployed-baseline-the-memory-resolution-loop).
+
+With a live cluster, a judge can:
 
 1. Ask a financial question in the Control Room.
 2. Retrieve durable facts through CockroachDB's native distributed vector
@@ -59,9 +62,10 @@ A judge can:
 5. Inspect a live proof ledger for database identity, runtime principal,
    fixed scope, models, vector index, and the exact `9 / 9 / 9` Store
    integrity contract.
-6. Open a longitudinal resolution session, compare an older payroll memory
-   with newer signed evidence, explicitly approve or reject the proposal, and
-   inspect the consolidated state plus SHA-256 decision receipt.
+6. *(on `main` only, not deployed)* Open a longitudinal resolution session,
+   compare an older payroll memory with newer signed evidence, explicitly
+   approve or reject the proposal, and inspect the consolidated state plus
+   SHA-256 decision receipt.
 
 The system never hides weak grounding. It abstains when evidence is irrelevant,
 checks citations, numbers, and claims, and can replace unsafe model wording with

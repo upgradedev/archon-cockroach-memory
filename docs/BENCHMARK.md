@@ -3,10 +3,13 @@
 **Latest hosted evidence:** [Benchmark (full + distribution) run
 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916),
 successful, 2026-08-02, at commit `0b25d5f1` — the same commit deployed to the
-judge URL. The C-SPANN smoke in that run measured 99.8% mean recall@10 (90%
-minimum) with 4.33 ms p50 / 5.35 ms p95 / 6.64 ms p99 over 1,500 vectors at
-dim 1024. Numbers in the sections below come from the harness described here;
-that run is where they can be checked against a log.
+judge URL. Read from that run's own log, on the clustered corpus at 10,000
+vectors / 200 queries / dim 1024: **99.3% mean recall@10** (90% minimum) at
+13.44 ms p50, 14.73 ms p95 and 22.91 ms p99 with beam 100, and 135 rows/s write
+throughput. The same run also swept the uniform corpus at 5,000 vectors, where
+recall climbs from 11.3% at beam 10 to 95.6% at beam 600 — the hardness spectrum
+Result 1 below describes. Numbers in the sections below come from the harness
+described here; that run is where they can be checked against a log.
 
 This is the evidence behind the claim that CockroachDB's **native distributed vector
 index** is a production-grade memory layer, not a demo. Everything here is
