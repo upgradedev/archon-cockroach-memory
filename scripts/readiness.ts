@@ -5628,7 +5628,7 @@ function sourceChecks(): SourceCheck[] {
           frontendTestConfig
         ) &&
         /"archon-coverage",\s*\n?\s*"frontend"/u.test(frontendTestConfig) &&
-        /statements:\s*80[\s\S]*?branches:\s*75[\s\S]*?functions:\s*80[\s\S]*?lines:\s*80/u.test(
+        /statements:\s*88[\s\S]*?branches:\s*85[\s\S]*?functions:\s*90[\s\S]*?lines:\s*90/u.test(
           frontendTestConfig
         ) &&
         /path:\s*\|[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/coverage-summary\.json[\s\S]*?\$\{\{\s*runner\.temp\s*\}\}\/archon-coverage\/frontend\/lcov\.info/u.test(
