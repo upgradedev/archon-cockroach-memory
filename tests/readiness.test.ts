@@ -3791,7 +3791,7 @@ test("readiness: CI covers main, every pull request, and exact manual evidence r
   ]) {
     assert.equal(hasExactSubmissionWorkflowContract(mutation), false);
   }
-  assert.equal(repositoryWorkflows.length, 24);
+  assert.equal(repositoryWorkflows.length, 25);
   assert.equal(
     hasUniqueCiTriggerOwnership(repositoryWorkflows),
     true
@@ -5035,11 +5035,12 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     '.sourceProperty == $contract.sourceProperty',
     '.reason == $contract.reason',
     '.controls == $contract.controls',
-    'WebACLId: !Ref CloudFrontWebAclArn',
+    'WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref \\"AWS::NoValue\\"]',
     'CloudFrontDefaultCertificate: true',
     'KMSMasterKeyID: Fn::ImportValue \\"${AppName}-storage-kms-key-arn\\"',
     'SSEAlgorithm: AES256',
-    '"mandatoryWebAclParameter":true',
+    '"conditionalWebAclBinding":true',
+    '"releasePipelineWebAclRequired":true',
     '"customDomainAliases":false',
     '"foundationCustomerManagedKey":true',
     '"denyUnexpectedKeyWrites":true',
@@ -5129,7 +5130,11 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
   );
   assert.match(
     trivyIacCompatibilityValidator,
-    /mandatoryWebAcl: true/u
+    /releasePipelineWebAclRequired: true/u
+  );
+  assert.match(
+    trivyIacCompatibilityValidator,
+    /conditionalWebAclBinding: true/u
   );
   assert.match(
     trivyIacCompatibilityValidator,

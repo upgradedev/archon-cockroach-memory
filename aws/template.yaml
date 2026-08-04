@@ -125,11 +125,15 @@ Parameters:
     Description: Optional SNS topic ARN for operational alarm notifications.
   CloudFrontWebAclArn:
     Type: String
-    AllowedPattern: "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
     Description: >-
-      Required approval-gated CloudFront WebACL ARN provisioned by
-      aws/edge-waf.yaml in the us-east-1 CloudFront control plane. The
-      application release contract has no unprotected mode.
+      Approval-gated CloudFront WebACL ARN provisioned by aws/edge-waf.yaml in
+      the us-east-1 CloudFront control plane. Empty attaches no WebACL, so the
+      template can be created before the edge control plane exists; any
+      non-empty value must still be a us-east-1 global WebACL ARN. The release
+      contract stays closed elsewhere: .github/workflows/deploy-aws.yml reads
+      the ARN from the edge-waf stack output and refuses to deploy without it.
 
 Rules:
   RecoveryDrillIsStagingOnly:
@@ -141,6 +145,7 @@ Rules:
 
 Conditions:
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  HasCloudFrontWebAcl: !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
 
 Globals:
   Function:
@@ -463,7 +468,7 @@ Resources:
         Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
-        WebACLId: !Ref CloudFrontWebAclArn
+        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]
         Logging:
           Bucket: !Sub >-
             ${AppName}-cloudfront-access-logs-${AWS::AccountId}-${AWS::Region}.s3.amazonaws.com

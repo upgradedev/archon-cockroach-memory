@@ -1,0 +1,217 @@
+name: Live demo availability
+
+# The blocking CI readiness gate is deliberately offline: it proves what the
+# repository says, never what the internet answers. That leaves a gap - the
+# hosted demo can stop serving without a single red check anywhere. This
+# workflow closes that gap from the outside, on a schedule, with no secrets and
+# no AWS credentials: it is exactly the unauthenticated request a judge makes.
+#
+# It probes the two endpoints that prove the data plane is alive:
+#   GET /api/health - the liveness summary, including dependency truth
+#   GET /api/proof  - a real CockroachDB read (the 9/9/9 memory shape and the
+#                     native C-SPANN vector index), which cannot succeed unless
+#                     the distributed database is genuinely reachable
+#
+# A health endpoint that answers 200 while every data-plane route returns 500 is
+# the failure this workflow exists to catch, so /api/proof is the hard gate.
+on:
+  schedule:
+    - cron: "9,39 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: live-demo-availability
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_APPLICATION_URL: ${{ vars.AWS_PRODUCTION_APPLICATION_URL || 'https://d2s5v0o0eg2aaw.cloudfront.net' }}
+  EXPECTED_SERVICE: archon-cockroach-memory
+  EXPECTED_MEMORY_COUNT: "9"
+  PROBE_ATTEMPTS: "3"
+  PROBE_RETRY_SECONDS: "20"
+  PROBE_TIMEOUT_SECONDS: "25"
+
+jobs:
+  probe:
+    name: Probe the hosted demo data plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe live health and proof endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Fail closed on an unset target. An empty URL would otherwise probe
+          # nothing and pass vacuously, which is the exact class of blind gate
+          # this workflow was added to remove.
+          target="${PRODUCTION_APPLICATION_URL%/}"
+          if [ -z "$target" ]; then
+            echo "PRODUCTION_APPLICATION_URL is empty; refusing to report a vacuous pass." >&2
+            exit 1
+          fi
+          case "$target" in
+            https://*) : ;;
+            *)
+              echo "PRODUCTION_APPLICATION_URL must be an https:// origin, got: $target" >&2
+              exit 1
+              ;;
+          esac
+
+          attempts="${PROBE_ATTEMPTS}"
+          expected_memories="${EXPECTED_MEMORY_COUNT}"
+          work="${RUNNER_TEMP:?}/live-availability"
+          mkdir -p "$work"
+
+          # Body of the last attempt, kept small and printed on failure so the
+          # log states plainly what came back rather than just that it failed.
+          report() {
+            local label="$1" code="$2" body_file="$3"
+            echo "  ${label}: HTTP ${code}" >&2
+            if [ -s "$body_file" ]; then
+              echo "  ${label} body (first 400 bytes):" >&2
+              head --bytes=400 "$body_file" | tr -d '\000' >&2
+              echo >&2
+            else
+              echo "  ${label} body: <empty>" >&2
+            fi
+          }
+
+          # Echoes the observed HTTP status, or 000 when the request never
+          # completed at all (DNS, TLS, connect, or timeout). Transport detail
+          # is appended to curl.err and printed with the failure report.
+          fetch() {
+            local url="$1" body_file="$2" code
+            : >"$body_file"
+            if code="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time "${PROBE_TIMEOUT_SECONDS}" \
+                --header 'accept: application/json' \
+                --output "$body_file" \
+                --write-out '%{http_code}' \
+                "$url" 2>>"${work}/curl.err"
+            )"; then
+              printf '%s' "$code"
+            else
+              printf '000'
+            fi
+          }
+
+          health_url="${target}/api/health"
+          proof_url="${target}/api/proof"
+          audit_url="${target}/api/audit"
+          health_body="${work}/health.json"
+          proof_body="${work}/proof.json"
+          audit_body="${work}/audit.json"
+          health_code=000
+          proof_code=000
+          audit_code=000
+          failure=""
+          passed=false
+
+          attempt=1
+          while [ "$attempt" -le "$attempts" ]; do
+            failure=""
+            : >"${work}/curl.err"
+
+            health_code="$(fetch "$health_url" "$health_body")"
+            if [ "$health_code" != "200" ]; then
+              failure="GET /api/health returned HTTP ${health_code} (expected 200)"
+            elif ! jq -e \
+              --arg service "${EXPECTED_SERVICE}" \
+              '.ok == true
+                 and .status == "reachable"
+                 and .service == $service
+                 and (.dependencies != "degraded")' \
+              "$health_body" >/dev/null 2>&1; then
+              failure="GET /api/health answered 200 but the body is not healthy (ok/status/service/dependencies)"
+            fi
+
+            if [ -z "$failure" ]; then
+              proof_code="$(fetch "$proof_url" "$proof_body")"
+              if [ "$proof_code" != "200" ]; then
+                failure="GET /api/proof returned HTTP ${proof_code} (expected 200) - the CockroachDB data plane is not serving"
+              elif ! jq -e \
+                --argjson expected "$expected_memories" \
+                '.database.activeMemories == $expected
+                   and .memory.persisted == $expected
+                   and .memory.idempotencyKeys == $expected
+                   and .memory.contentDigests == $expected
+                   and .vectorIndex.enabled == true' \
+                "$proof_body" >/dev/null 2>&1; then
+                failure="GET /api/proof answered 200 but the live CockroachDB shape is wrong (expected ${expected_memories}/${expected_memories}/${expected_memories} memories and an enabled native vector index)"
+              fi
+            fi
+
+            # The audit route is the one that proves the agent still reasons
+            # over the live corpus rather than merely connecting to it: the
+            # INV-2043 contradiction and the PAY-118 absence are properties of
+            # the seeded memory, not of the HTTP layer. Deliberately no
+            # POST /api/recall here - a canary must not bill a Bedrock
+            # completion every half hour.
+            if [ -z "$failure" ]; then
+              audit_code="$(fetch "$audit_url" "$audit_body")"
+              if [ "$audit_code" != "200" ]; then
+                failure="GET /api/audit returned HTTP ${audit_code} (expected 200) - the CockroachDB data plane is not serving"
+              elif ! jq -e \
+                --argjson expected "$expected_memories" \
+                '.report.audited == $expected
+                   and .coverage.total == $expected
+                   and .coverage.scanned == $expected
+                   and .coverage.complete == true
+                   and (.report.contradictions | length) == 1
+                   and .report.contradictions[0].subject == "INV-2043"
+                   and ([.report.contradictions[0].values[].value] | sort)
+                         == [18400, 18900]
+                   and (.report.absences | length) == 1
+                   and .report.absences[0].subject == "PAY-118"' \
+                "$audit_body" >/dev/null 2>&1; then
+                failure="GET /api/audit answered 200 but the live audit contract is wrong (expected ${expected_memories} audited memories, the INV-2043 18400/18900 contradiction, and the PAY-118 absence)"
+              fi
+            fi
+
+            if [ -z "$failure" ]; then
+              passed=true
+              break
+            fi
+
+            echo "Attempt ${attempt}/${attempts} failed: ${failure}" >&2
+            if [ "$attempt" -lt "$attempts" ]; then
+              sleep "${PROBE_RETRY_SECONDS}"
+            fi
+            attempt=$((attempt + 1))
+          done
+
+          if [ "$passed" != true ]; then
+            {
+              echo
+              echo "LIVE DEMO IS NOT SERVING."
+              echo "Target origin: ${target}"
+              echo "Probed:"
+              echo "  GET ${health_url}"
+              echo "  GET ${proof_url}"
+              echo "  GET ${audit_url}"
+              echo "Attempts: ${attempts}"
+              echo "Diagnosis: ${failure}"
+              echo "Observed:"
+            } >&2
+            report "GET /api/health" "$health_code" "$health_body"
+            report "GET /api/proof" "$proof_code" "$proof_body"
+            report "GET /api/audit" "$audit_code" "$audit_body"
+            if [ -s "${work}/curl.err" ]; then
+              echo "  transport errors:" >&2
+              head --bytes=400 "${work}/curl.err" >&2
+            fi
+            exit 1
+          fi
+
+          echo "Live demo is serving: ${target}"
+          echo "  GET /api/health -> HTTP ${health_code}, dependencies healthy"
+          echo "  GET /api/proof  -> HTTP ${proof_code}, ${expected_memories} memories over the native CockroachDB vector index"
+          echo "  GET /api/audit  -> HTTP ${audit_code}, INV-2043 contradiction and PAY-118 absence intact"

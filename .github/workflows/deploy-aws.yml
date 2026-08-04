@@ -3847,7 +3847,9 @@ jobs:
                "persistence":"CockroachDB-row-level-TTL",
                "externalSideEffects":"none"
              } and
-             .dependencies == "unchecked" and
+             .dependencies == "ready" and
+             .checks.database.engine == "CockroachDB" and
+             .checks.database.state == "reachable" and
              (.scope |
                keys == ["access","company","dataClassification","mode","source","tenantId"] and
                .tenantId == "public-demo" and
@@ -6824,7 +6826,9 @@ jobs:
                "persistence":"CockroachDB-row-level-TTL",
                "externalSideEffects":"none"
              } and
-             .dependencies == "unchecked" and
+             .dependencies == "ready" and
+             .checks.database.engine == "CockroachDB" and
+             .checks.database.state == "reachable" and
              (.scope |
                keys == ["access","company","dataClassification","mode","source","tenantId"] and
                .tenantId == "public-demo" and

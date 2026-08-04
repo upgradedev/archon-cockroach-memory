@@ -54,7 +54,7 @@ const server = createServer(async (req, res) => {
       ? url.pathname.slice(4)
       : url.pathname;
     if (pathname === "/health" && req.method === "GET") {
-      const result = handleHealth();
+      const result = await handleHealth();
       return send(result.status, result.body);
     }
     if (pathname === "/audit" && req.method === "GET") {
