@@ -55,6 +55,7 @@ export const EXPECTED_WORKFLOW_FILES = [
   "foundation-migration.yml",
   "hosted-load-evidence.yml",
   "human-impact-evaluation.yml",
+  "live-availability.yml",
   "managed-mcp-audit.yml",
   "memory-evaluation.yml",
   "recover-aws.yml",
@@ -1892,7 +1893,9 @@ export function hasExactHostedSmokeContracts(source: string): boolean {
     '"authority":"financial-controller-human-gate"',
     '"persistence":"CockroachDB-row-level-TTL"',
     '"externalSideEffects":"none"',
-    '.dependencies == "unchecked"',
+    '.dependencies == "ready"',
+    '.checks.database.engine == "CockroachDB"',
+    '.checks.database.state == "reachable"',
     ".scope |",
     ...scope,
   ] as const;
@@ -2119,6 +2122,7 @@ export function hasUniqueCiTriggerOwnership(
       "human-impact-evaluation.yml",
       ["pull_request", "push", "workflow_dispatch"],
     ],
+    ["live-availability.yml", ["schedule", "workflow_dispatch"]],
     ["managed-mcp-audit.yml", ["workflow_dispatch"]],
     [
       "memory-evaluation.yml",
@@ -5807,7 +5811,10 @@ function sourceChecks(): SourceCheck[] {
         /CloudFrontDefaultCertificate: true/u.test(
           trivyIacCompatibilityValidator
         ) &&
-        /mandatoryWebAcl: true/u.test(
+        /releasePipelineWebAclRequired: true/u.test(
+          trivyIacCompatibilityValidator
+        ) &&
+        /conditionalWebAclBinding: true/u.test(
           trivyIacCompatibilityValidator
         ) &&
         /dynamicOriginSecret: true/u.test(
@@ -6475,13 +6482,21 @@ function sourceChecks(): SourceCheck[] {
           edgeStackPolicy
         ) &&
         /DeletionPolicy:\s*RetainExceptOnCreate/u.test(edgeTemplate) &&
-        /CloudFrontWebAclArn:[\s\S]*?AllowedPattern:[\s\S]*?Rules:/u.test(
+        /CloudFrontWebAclArn:[\s\S]*?AllowedPattern:\s*"\^\$\|\^arn:aws:wafv2:us-east-1:[\s\S]*?Rules:/u.test(
           lambdaTemplate
         ) &&
-        !/CloudFrontWebAclArn:[\s\S]*?Default:\s*""[\s\S]*?Rules:/u.test(
+        // The empty default keeps the template creatable before the us-east-1
+        // edge control plane exists; the WebACL stays mandatory in the release
+        // pipeline, which reads the ARN from the edge-waf stack output.
+        /CloudFrontWebAclArn:[\s\S]*?Default:\s*""[\s\S]*?Rules:/u.test(
           lambdaTemplate
         ) &&
-        /WebACLId:\s*!Ref CloudFrontWebAclArn/u.test(lambdaTemplate) &&
+        /^  HasCloudFrontWebAcl: !Not \[!Equals \[!Ref CloudFrontWebAclArn, ""\]\]\r?$/mu.test(
+          lambdaTemplate
+        ) &&
+        /WebACLId:\s*!If \[HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"\]/u.test(
+          lambdaTemplate
+        ) &&
         /\{\{resolve:secretsmanager:\$\{AppName\}\/\$\{Environment\}\/origin-verification:SecretString:ORIGIN_VERIFY_TOKEN\}\}/u.test(
           lambdaTemplate
         ) &&

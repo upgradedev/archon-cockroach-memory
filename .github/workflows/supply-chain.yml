@@ -859,10 +859,10 @@ jobs:
                     ($range.endLine | tostring)))) and
              .compatibilities[0].logicalResource == "Distribution" and
              .compatibilities[0].sourceProperty ==
-               "WebACLId: !Ref CloudFrontWebAclArn" and
+               "WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref \"AWS::NoValue\"]" and
              .compatibilities[0].controls == {
-               "mandatoryWebAclParameter":true,
-               "directWebAclBinding":true,
+               "conditionalWebAclBinding":true,
+               "releasePipelineWebAclRequired":true,
                "globalUsEast1ArnConstraint":true,
                "accessLogging":true
              } and
@@ -873,7 +873,7 @@ jobs:
                "defaultViewerHttpsRedirect":true,
                "apiViewerHttpsOnly":true,
                "customOriginHttpsOnly":true,
-               "mandatoryWebAcl":true,
+               "releasePipelineWebAclRequired":true,
                "dynamicOriginSecret":true,
                "accessLogging":true,
                "customDomainAliases":false
@@ -1536,10 +1536,10 @@ jobs:
                    ($range.startLine | tostring) + "-" +
                    ($range.endLine | tostring)))) and
             .compatibilities[0].sourceProperty ==
-              "WebACLId: !Ref CloudFrontWebAclArn" and
+              "WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref \"AWS::NoValue\"]" and
             .compatibilities[0].controls == {
-              "mandatoryWebAclParameter":true,
-              "directWebAclBinding":true,
+              "conditionalWebAclBinding":true,
+              "releasePipelineWebAclRequired":true,
               "globalUsEast1ArnConstraint":true,
               "accessLogging":true
             } and
@@ -1549,7 +1549,7 @@ jobs:
               "defaultViewerHttpsRedirect":true,
               "apiViewerHttpsOnly":true,
               "customOriginHttpsOnly":true,
-              "mandatoryWebAcl":true,
+              "releasePipelineWebAclRequired":true,
               "dynamicOriginSecret":true,
               "accessLogging":true,
               "customDomainAliases":false

@@ -170,22 +170,29 @@ test("WAF evidence is BLOCK-only, redacted, service-encrypted, durable, and alar
   assert.doesNotMatch(alarmSection, /- Name:\s*Region/u);
 });
 
-test("regional stack fails closed on mandatory WAF and secret-backed origin verification", () => {
+test("regional stack conditionally binds a constrained WAF and a secret-backed origin verification", () => {
   const template = read("aws/template.yaml");
   const webAclParameter =
     template.match(
       /CloudFrontWebAclArn:\r?\n([\s\S]*?)\r?\nRules:/u
     )?.[1] ?? "";
+  // Empty or a us-east-1 global WebACL ARN — nothing else. The empty default
+  // exists so the stack can be created before the us-east-1 edge control plane
+  // does; deploy-aws.yml still refuses to release without a real ARN.
   assert.match(
     webAclParameter,
-    /AllowedPattern:\s*"\^arn:aws:wafv2:us-east-1:/u
+    /AllowedPattern:\s*"\^\$\|\^arn:aws:wafv2:us-east-1:/u
   );
-  assert.doesNotMatch(webAclParameter, /Default:/u);
+  assert.match(webAclParameter, /^ {4}Default: ""\r?$/mu);
   assert.doesNotMatch(template, /^\s{2}OriginVerifyToken:/mu);
-  assert.doesNotMatch(template, /HasCloudFrontWebAcl|HasOriginVerifyToken/u);
+  assert.doesNotMatch(template, /HasOriginVerifyToken/u);
   assert.match(
     template,
-    /WebACLId:\s*!Ref CloudFrontWebAclArn/u
+    /^  HasCloudFrontWebAcl: !Not \[!Equals \[!Ref CloudFrontWebAclArn, ""\]\]\r?$/mu
+  );
+  assert.match(
+    template,
+    /WebACLId:\s*!If \[HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"\]/u
   );
   assert.match(
     template,

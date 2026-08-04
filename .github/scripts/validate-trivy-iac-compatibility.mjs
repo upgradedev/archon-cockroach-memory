@@ -18,12 +18,13 @@ const EXPECTED_RULES = Object.freeze([
     namespace: "builtin.aws.cloudfront.aws0011",
     title: "CloudFront distribution does not have a WAF in front.",
     primaryUrl: "https://avd.aquasec.com/misconfig/aws-0011",
-    sourceProperty: "WebACLId: !Ref CloudFrontWebAclArn",
+    sourceProperty:
+      'WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]',
     reason:
-      "CloudFrontWebAclArn is mandatory and Distribution.WebACLId directly references it; Trivy cannot resolve the CloudFormation parameter value.",
+      "Distribution.WebACLId is bound through the HasCloudFrontWebAcl condition to CloudFrontWebAclArn; Trivy cannot resolve either the CloudFormation condition or the parameter value. The release pipeline, not the template, is where the WebACL is mandatory: deploy-aws.yml reads the ARN from the edge-waf stack output and refuses to deploy without a us-east-1 global WebACL ARN.",
     controls: Object.freeze({
-      mandatoryWebAclParameter: true,
-      directWebAclBinding: true,
+      conditionalWebAclBinding: true,
+      releasePipelineWebAclRequired: true,
       globalUsEast1ArnConstraint: true,
       accessLogging: true,
     }),
@@ -43,7 +44,7 @@ const EXPECTED_RULES = Object.freeze([
       defaultViewerHttpsRedirect: true,
       apiViewerHttpsOnly: true,
       customOriginHttpsOnly: true,
-      mandatoryWebAcl: true,
+      releasePipelineWebAclRequired: true,
       dynamicOriginSecret: true,
       accessLogging: true,
       customDomainAliases: false,
@@ -190,15 +191,25 @@ function validateTemplateContract(templateSource, bootstrapSource) {
     /^\s{4}Type: String$/mu.test(webAclParameter),
     "CloudFrontWebAclArn must remain a String parameter"
   );
+  // The default is empty on purpose: a stack must be creatable before the
+  // us-east-1 edge control plane exists. Anything other than the exact empty
+  // string would silently ship an unreviewed WebACL binding.
   invariant(
-    !/^\s{4}Default:/mu.test(webAclParameter),
-    "CloudFrontWebAclArn must remain mandatory without a default"
+    count(webAclParameter, /^\s{4}Default: ""$/gmu) === 1,
+    'CloudFrontWebAclArn must default to the exact empty string'
   );
   invariant(
     webAclParameter.includes(
-      'AllowedPattern: "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"'
+      'AllowedPattern: "^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"'
     ),
-    "CloudFrontWebAclArn must remain constrained to a us-east-1 global WebACL ARN"
+    "CloudFrontWebAclArn must remain empty or a us-east-1 global WebACL ARN"
+  );
+  invariant(
+    count(
+      normalized,
+      /^  HasCloudFrontWebAcl: !Not \[!Equals \[!Ref CloudFrontWebAclArn, ""\]\]$/gmu
+    ) === 1,
+    "the WebACL condition must be exactly the non-empty CloudFrontWebAclArn test"
   );
 
   const distribution = extractSingleTwoSpaceBlock(normalized, "Distribution");
@@ -213,9 +224,9 @@ function validateTemplateContract(templateSource, bootstrapSource) {
   invariant(
     count(
       distributionSource,
-      /^\s{8}WebACLId: !Ref CloudFrontWebAclArn$/gmu
+      /^\s{8}WebACLId: !If \[HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"\]$/gmu
     ) === 1,
-    "Distribution must bind the mandatory WebACL directly"
+    "Distribution must bind the WebACL through the exact HasCloudFrontWebAcl condition"
   );
   invariant(
     count(distributionSource, /^\s{8}Logging:$/gmu) === 1 &&
@@ -729,7 +740,10 @@ function fixtureTemplate() {
   return `Parameters:
   CloudFrontWebAclArn:
     Type: String
-    AllowedPattern: "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"
+Conditions:
+  HasCloudFrontWebAcl: !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
 Resources:
   SpaBucket:
     Type: AWS::S3::Bucket
@@ -746,7 +760,7 @@ Resources:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
-        WebACLId: !Ref CloudFrontWebAclArn
+        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]
         Logging:
           Bucket: !Sub >-
             \${AppName}-cloudfront-access-logs-\${AWS::AccountId}-\${AWS::Region}.s3.amazonaws.com
@@ -993,8 +1007,51 @@ function runSelfTest() {
     {
       ...base,
       templateSource: fixtureTemplate().replace(
-        "        WebACLId: !Ref CloudFrontWebAclArn\n",
+        '        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]\n',
         ""
+      ),
+    },
+    {
+      // An unconditional binding is no longer the contract, and neither is a
+      // silent fallback to some other WebACL.
+      ...base,
+      templateSource: fixtureTemplate().replace(
+        '        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]',
+        "        WebACLId: !Ref CloudFrontWebAclArn"
+      ),
+    },
+    {
+      // The empty default is the whole point: any other default would ship an
+      // unreviewed WebACL binding to every stack that omits the parameter.
+      ...base,
+      templateSource: fixtureTemplate().replace(
+        '    Default: ""\n',
+        ""
+      ),
+    },
+    {
+      ...base,
+      templateSource: fixtureTemplate().replace(
+        '    Default: ""',
+        '    Default: "arn:aws:wafv2:us-east-1:000000000000:global/webacl/other/00000000-0000-4000-8000-000000000000"'
+      ),
+    },
+    {
+      // Widening the pattern would let any string through, including a
+      // regional ARN that CloudFront silently ignores.
+      ...base,
+      templateSource: fixtureTemplate().replace(
+        'AllowedPattern: "^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-f-]+$"',
+        'AllowedPattern: "^.*$"'
+      ),
+    },
+    {
+      // Inverting the condition would attach nothing when an ARN is supplied
+      // and AWS::NoValue when it is not.
+      ...base,
+      templateSource: fixtureTemplate().replace(
+        '  HasCloudFrontWebAcl: !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]',
+        '  HasCloudFrontWebAcl: !Equals [!Ref CloudFrontWebAclArn, ""]'
       ),
     },
     {

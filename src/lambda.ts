@@ -110,11 +110,11 @@ export function createHandler(
         return json(403, { error: "forbidden" });
       }
       if (method === "GET" && pathname === "/") {
-        const result = handleHealth();
+        const result = await handleHealth();
         return json(result.status, result.body);
       }
       if (method === "GET" && pathname === "/health") {
-        const result = handleHealth();
+        const result = await handleHealth();
         return json(result.status, result.body);
       }
       if (method === "GET" && pathname === "/audit") {

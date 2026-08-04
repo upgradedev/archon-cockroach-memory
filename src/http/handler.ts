@@ -71,6 +71,25 @@ export const MIN_RECALL_SCORE = finiteConfiguration(
 );
 const ALLOWED_KINDS = new Set<MemoryKind>(["document", "payroll_event", "validation", "insight"]);
 
+// Health dependency probe budget. The probe must never turn a warm request into
+// a slow one and must never hang: it is raced against an explicit timer, and the
+// outcome is cached for a few seconds so a burst of masthead polls costs at most
+// one round trip. Both bounds fail the cold start when misconfigured.
+export const HEALTH_PROBE_TIMEOUT_MS = finiteConfiguration(
+  "HEALTH_PROBE_TIMEOUT_MS",
+  1_500,
+  100,
+  10_000,
+  true
+);
+export const HEALTH_PROBE_CACHE_MS = finiteConfiguration(
+  "HEALTH_PROBE_CACHE_MS",
+  5_000,
+  0,
+  60_000,
+  true
+);
+
 export interface RecallRequest {
   question?: unknown;
   company?: unknown;
@@ -220,11 +239,156 @@ export async function handleRecall(raw: unknown, agent: MemoryAgent = buildAgent
   };
 }
 
-export function handleHealth(): RecallResponse {
+export type DatabaseHealthState =
+  | "reachable"
+  | "unreachable"
+  | "not-configured";
+
+export interface DependencyHealth {
+  dependencies: "ready" | "degraded" | "unchecked";
+  database: DatabaseHealthState;
+  checkedAt: string;
+}
+
+// A deployment that names neither a direct URL nor a Secrets Manager id has no
+// database to be down. That is the offline/CI shape, and it is reported as
+// "unchecked" rather than pretended to be healthy or falsely called degraded.
+export function databaseConfigured(): boolean {
+  return Boolean(
+    process.env.DATABASE_URL?.trim() || process.env.DATABASE_SECRET_ID?.trim()
+  );
+}
+
+// Dependency-injected exactly like the credential pool controller: production
+// supplies the real bounded database read below, tests supply deterministic
+// fakes (resolving, rejecting, and never-settling) so the timeout, the failure
+// path, and the cache are provable without a live cluster.
+export interface HealthProbeDependencies {
+  configured: () => boolean;
+  probe: () => Promise<unknown>;
+  now: () => number;
+}
+
+export const defaultHealthProbeDependencies: HealthProbeDependencies = {
+  configured: databaseConfigured,
+  // The cheapest read that still proves a live session: it goes through the
+  // same pool, credential resolution, and TLS path the data plane uses, so a
+  // broken secret or an unreachable cluster fails here exactly as it fails
+  // /api/proof.
+  probe: () => query("SELECT 1 AS health_probe"),
+  now: Date.now,
+};
+
+let cachedDependencyHealth: {
+  expiresAt: number;
+  value: DependencyHealth;
+} | null = null;
+let inFlightDependencyProbe: Promise<DependencyHealth> | null = null;
+
+// Test seam only. Production never calls this; the cache is otherwise private
+// so a stale probe cannot outlive its short TTL.
+export function resetHealthProbeCache(): void {
+  cachedDependencyHealth = null;
+  inFlightDependencyProbe = null;
+}
+
+async function probeDatabase(
+  dependencies: HealthProbeDependencies
+): Promise<DatabaseHealthState> {
+  if (!dependencies.configured()) return "not-configured";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let probe: Promise<unknown>;
+  try {
+    probe = Promise.resolve(dependencies.probe());
+  } catch {
+    return "unreachable";
+  }
+  // Attach a handler before racing so a rejection arriving after the timeout
+  // can never surface as an unhandled rejection and kill the runtime.
+  void probe.catch(() => undefined);
+  try {
+    await Promise.race([
+      probe,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("health probe timed out")),
+          HEALTH_PROBE_TIMEOUT_MS
+        );
+      }),
+    ]);
+    return "reachable";
+  } catch {
+    // Deliberately swallowed. Driver, TLS, and Secrets Manager errors carry
+    // hostnames, principals, and secret ids; a public unauthenticated endpoint
+    // reports only the state, never the cause.
+    return "unreachable";
+  } finally {
+    // Always cleared, on both the resolved and the timed-out path, so a warm
+    // Lambda is never held open by a dangling timer.
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export async function dependencyHealth(
+  dependencies: HealthProbeDependencies = defaultHealthProbeDependencies
+): Promise<DependencyHealth> {
+  const now = dependencies.now();
+  const cached = cachedDependencyHealth;
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+  // One probe per burst. Concurrent masthead polls share the same round trip
+  // instead of each opening their own.
+  const existing = inFlightDependencyProbe;
+  if (existing) return existing;
+
+  const started = (async (): Promise<DependencyHealth> => {
+    const database = await probeDatabase(dependencies);
+    const value: DependencyHealth = {
+      dependencies:
+        database === "reachable"
+          ? "ready"
+          : database === "unreachable"
+            ? "degraded"
+            : "unchecked",
+      database,
+      checkedAt: new Date(now).toISOString(),
+    };
+    cachedDependencyHealth = {
+      expiresAt: now + HEALTH_PROBE_CACHE_MS,
+      value,
+    };
+    return value;
+  })();
+  inFlightDependencyProbe = started;
+  const release = (): void => {
+    if (inFlightDependencyProbe === started) {
+      inFlightDependencyProbe = null;
+    }
+  };
+  void started.then(release, release);
+  return started;
+}
+
+// Liveness and dependency truth in one response, deliberately separated.
+//
+// `status` stays "reachable" and the HTTP code stays 200 whenever the process
+// answers at all — the API stage proof and the CloudFront behaviour both depend
+// on that. What used to be a lie was the body: it reported `dependencies:
+// "unchecked"` without touching anything, so the Control Room masthead showed
+// "API reachable" through a two-day CockroachDB outage in which every data-plane
+// route returned 500. `ok` now follows the dependency probe, and the existing
+// frontend already renders `ok:false` as degraded.
+export async function handleHealth(
+  dependencies: HealthProbeDependencies = defaultHealthProbeDependencies
+): Promise<RecallResponse> {
+  const health = await dependencyHealth(dependencies);
+  const bedrockConfigured =
+    Boolean(process.env.AWS_ACCESS_KEY_ID) || Boolean(process.env.AWS_PROFILE);
   return {
     status: 200,
     body: {
-      ok: true,
+      ok: health.dependencies !== "degraded",
       status: "reachable",
       service: "archon-cockroach-memory",
       access: "canonical-read-only+isolated-synthetic-resolution-write",
@@ -234,7 +398,26 @@ export function handleHealth(): RecallResponse {
         persistence: "CockroachDB-row-level-TTL",
         externalSideEffects: "none",
       },
-      dependencies: "unchecked",
+      dependencies: health.dependencies,
+      checks: {
+        database: {
+          engine: "CockroachDB",
+          state: health.database,
+          probe: "bounded SELECT over the live runtime pool",
+          timeoutMs: HEALTH_PROBE_TIMEOUT_MS,
+          cacheMs: HEALTH_PROBE_CACHE_MS,
+          checkedAt: health.checkedAt,
+        },
+        inference: {
+          // Configuration state only. A public health endpoint must not be a
+          // free trigger for billable Bedrock calls.
+          provider: bedrockConfigured
+            ? "AWS Bedrock"
+            : "deterministic-offline-fake",
+          state: bedrockConfigured ? "configured" : "not-configured",
+          evidence: "server-configured runtime credentials",
+        },
+      },
       scope: publicDemoScope(),
     },
   };
