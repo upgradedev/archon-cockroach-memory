@@ -53,11 +53,13 @@ and its data panels to error.
 ### The proof that cannot fail is a run page, not an endpoint
 
 Nothing in this README or in [docs/DEMO_URL.md](./docs/DEMO_URL.md) depends on
-the demo being reachable. Every figure below is read from a completed GitHub
-Actions run bound to an exact commit. Those run pages are public, readable while
-logged out, and immutable, so they answer the same whether the cluster is funded
-or not. That is the property a hosted endpoint does not have, and it is why the
-evidence here points at runs rather than at a status URL.
+the demo being reachable. Every figure below is sourced either to a completed
+GitHub Actions run bound to an exact commit, or to a documented harness sweep in
+[docs/BENCHMARK.md](./docs/BENCHMARK.md); the source column says which. Those run
+pages are public, readable while logged out, and immutable, so they answer the
+same whether the cluster is funded or not. That is the property a hosted endpoint
+does not have, and it is why the evidence here points at runs rather than at a
+status URL.
 
 ### Thirty seconds
 
@@ -257,8 +259,8 @@ instead of mocking the database:
   (p95 under 1500 ms, recall@1 at or above 0.99, error rate under 1%) live in
   `load/recall.js`, and a breach fails the job.
 
-The `readiness` job requires all nine prerequisite jobs to succeed before it
-starts, then runs the source-readiness gate at 100%.
+The `readiness` job runs after all nine prerequisite jobs and fails unless every
+one of them succeeded, then runs the source-readiness gate at 100%.
 
 ### What the coverage numbers do not cover
 
