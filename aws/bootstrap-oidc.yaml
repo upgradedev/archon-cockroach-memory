@@ -510,6 +510,9 @@ Resources:
             Condition:
               StringNotEquals:
                 s3:x-amz-server-side-encryption: aws:kms
+          # S3 resolves a key alias to its key ARN before evaluating this
+          # condition, so the comparison value must be the key ARN. Callers may
+          # still pass the alias.
           - Sid: DenyArtifactWritesWithUnexpectedKmsKey
             Effect: Deny
             Principal: "*"
@@ -517,8 +520,7 @@ Resources:
             Resource: !Sub "${ArtifactBucket.Arn}/*"
             Condition:
               StringNotEquals:
-                s3:x-amz-server-side-encryption-aws-kms-key-id: !Sub >-
-                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt ApplicationStorageKey.Arn
 
   AlarmNotificationsKey:
     Type: AWS::KMS::Key
