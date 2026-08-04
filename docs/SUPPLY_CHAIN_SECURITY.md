@@ -183,10 +183,13 @@ findings.
 The application template contains three secure CloudFormation expressions that
 Trivy 0.72.0 cannot resolve statically:
 
-- `AWS-0011`: `CloudFrontWebAclArn` is a mandatory, no-default parameter
-  constrained to a global `us-east-1` WebACL ARN, and `Distribution.WebACLId`
-  directly references it. The deploy workflow obtains that ARN from the
-  approval-gated edge stack; there is no unprotected application-stack mode.
+- `AWS-0011`: `CloudFrontWebAclArn` defaults to empty and
+  `Distribution.WebACLId` binds it through the `HasCloudFrontWebAcl` condition,
+  so the template can be created before the edge control plane exists. Any
+  non-empty value must still be a global `us-east-1` WebACL ARN. The mandatory
+  contract lives in the release pipeline rather than the template: the deploy
+  workflow reads the ARN from the approval-gated edge stack and refuses to
+  deploy without it.
 - `AWS-0013`: the public demo intentionally uses only its generated
   `cloudfront.net` hostname. AWS does not permit a selectable
   `MinimumProtocolVersion` with `CloudFrontDefaultCertificate: true`; Aqua's
@@ -232,7 +235,7 @@ exactly four raw findings only when all of the following remain exact:
 - raw Trivy resources: the exact complete `Distribution`, `SpaBucket`, and
   `CloudFrontAccessLogBucket` source ranges, cross-checked against
   `CauseMetadata`, SARIF, and the current template blocks;
-- WAF parameter ARN constraint and direct `WebACLId` binding;
+- WAF parameter ARN constraint and conditional `WebACLId` binding;
 - source property: exactly one `CloudFrontDefaultCertificate: true`, with no
   `MinimumProtocolVersion` or custom-domain `Aliases`;
 - the default viewer behavior redirects to HTTPS;

@@ -13,8 +13,11 @@ video_delivery: supplied through the final hosted submission gate after public u
 ## Demo status, read this first — 2026-08-04
 
 The hosted demo's data plane is down. The page loads and `/api/health` answers
-200, but that endpoint is a reachability stub reporting
-`"dependencies":"unchecked"`. `/api/proof`, `/api/audit`, and `POST /api/recall`
+200, but the deployed build's endpoint is a reachability stub reporting
+`"dependencies":"unchecked"` — the reason the outage went unnoticed. `main` now
+performs a real bounded CockroachDB probe and adds a scheduled external
+availability canary; neither is live until the next release.
+`/api/proof`, `/api/audit`, and `POST /api/recall`
 have returned HTTP 500 since 2026-08-02 11:20 UTC; the last successful
 data-plane response was 2026-07-31 01:22 UTC. The CockroachDB Cloud Basic
 cluster reached its Request Unit allowance and is disabled, so the runtime

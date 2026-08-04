@@ -8,8 +8,11 @@ The unrestricted production application is:
 
 ## Current runtime state — 2026-08-04
 
-The application's data plane is down. `/api/health` answers 200 but is a
-reachability stub reporting `"dependencies":"unchecked"`. `/api/proof`,
+The application's data plane is down. `/api/health` answers 200 but the deployed
+build's endpoint is a reachability stub reporting `"dependencies":"unchecked"`.
+`main` now performs a real bounded CockroachDB probe and reports
+`ready`/`degraded`, and adds a scheduled external availability canary, but
+neither is live until the next release. `/api/proof`,
 `/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
 11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
 CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
