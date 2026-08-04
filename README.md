@@ -1,40 +1,124 @@
 # Archon Memory Control Room
 
-**A Financial Memory Control Room that lets a CFO ask what the books forgot,
-inspect the exact evidence, and see persistent memory disagree — without giving
-the agent financial authority.** Explicitly resolving a correction is the
-[Memory Resolution Loop](#on-main-not-in-the-deployed-baseline): implemented and
-CI-covered on `main`, but not part of the deployed baseline a judge can reach
-today.
+Most systems answer a financial question with confidence even when the records
+behind that answer contradict each other, or are simply missing. This one does
+not. It is a **Financial Memory Control Room**: a CFO can ask what the books
+forgot, inspect the exact evidence behind every claim, and watch persistent
+memory disagree out loud. Where the stored evidence is too weak to support an
+answer, the agent abstains instead of guessing, and it is never given financial
+authority.
+
+[![CI](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+
+[Judge verification](#judge-verification) ·
+[Measured results](#measured-results) ·
+[Testing](#testing) ·
+[Evidence ledger](./docs/DEMO_URL.md) ·
+[Benchmark](./docs/BENCHMARK.md) ·
+[Quickstart](#quickstart)
 
 This is an entry for the
 [CockroachDB × AWS Hackathon — Build with Agentic Memory](https://cockroachdb-ai.devpost.com/)
 at
 [upgradedev/archon-cockroach-memory](https://github.com/upgradedev/archon-cockroach-memory).
 It uses CockroachDB as durable, distributed agent memory and AWS Bedrock for
-embeddings and grounded narration.
+embeddings and grounded narration. Explicitly resolving a correction is the
+[Memory Resolution Loop](#on-main-not-in-the-deployed-baseline): implemented and
+CI-covered on `main`, but not part of the deployed baseline a judge can reach
+today.
 
-## Current demo status — 2026-08-04
+## Judge verification
 
-**The hosted demo's data plane is down.** `/api/health` still answers 200, but
-the deployed build's health endpoint is a reachability stub that reports
-`"dependencies":"unchecked"` — which is precisely why the outage went unnoticed.
-`main` now carries a bounded, cached CockroachDB probe that reports
-`ready`/`degraded` with a `checks.database` detail, and a scheduled
+### Read this before you click — 2026-08-04
+
+**The hosted demo's data plane is down.** `/api/proof`, `/api/audit`, and
+`POST /api/recall` have returned HTTP 500 since 2026-08-02 11:20 UTC; the last
+successful data-plane response was 2026-07-31 01:22 UTC. The CockroachDB Cloud
+Basic cluster reached its Request Unit allowance and is disabled, so the runtime
+principal is refused with `the maximum number of allowed connections is 0`.
+`/api/health` still answers 200, but the deployed build's health endpoint is a
+reachability stub that reports `"dependencies":"unchecked"`, which is precisely
+why the outage went unnoticed.
+
+This is a cluster budget state, not a code or deployment regression. `main` now
+carries a bounded, cached CockroachDB probe that reports `ready`/`degraded` with
+a `checks.database` detail, and a scheduled
 [availability canary](./.github/workflows/live-availability.yml) that probes
-`/api/proof` from outside every 30 minutes; neither is live until the next
-release. `/api/proof`,
-`/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
-11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
-CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
-disabled, so the runtime principal is refused with `the maximum number of
-allowed connections is 0`.
+`/api/proof` from outside every 30 minutes. Neither is live until the next
+release. A judge opening the demo URL today should expect the interface to load
+and its data panels to error.
 
-This is a cluster budget state, not a code or deployment regression. None of the
-hosted evidence in this README or in [docs/DEMO_URL.md](./docs/DEMO_URL.md)
-depends on the demo being reachable: each link is a completed GitHub Actions run
-bound to an exact commit, and those runs remain viewable. A judge opening the URL
-today should expect the interface to load and its data panels to error.
+### The proof that cannot fail is a run page, not an endpoint
+
+Nothing in this README or in [docs/DEMO_URL.md](./docs/DEMO_URL.md) depends on
+the demo being reachable. Every figure below is read from a completed GitHub
+Actions run bound to an exact commit. Those run pages are public, readable while
+logged out, and immutable, so they answer the same whether the cluster is funded
+or not. That is the property a hosted endpoint does not have, and it is why the
+evidence here points at runs rather than at a status URL.
+
+### Thirty seconds
+
+| | What you get | Where |
+|---|---|---|
+| 1 | What is actually deployed, and every hosted gate that put it there | [docs/DEMO_URL.md](./docs/DEMO_URL.md), deployed baseline `0b25d5f1` |
+| 2 | Tests, coverage, load, and vector recall at that exact commit | [main CI run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580) |
+| 3 | The protected AWS and CockroachDB release itself | [Deploy AWS run 30577752661](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577752661) |
+| 4 | The application, with its data panels erroring as described above | [d2s5v0o0eg2aaw.cloudfront.net](https://d2s5v0o0eg2aaw.cloudfront.net) |
+
+### Or run it yourself
+
+The [Quickstart](#quickstart) needs Node, Docker, and nothing else. No AWS
+account, no API key, no CockroachDB Cloud access. A local CockroachDB serves the
+same schema, the same native C-SPANN vector index, and the same recall path,
+with deterministic fake embeddings standing in for Titan.
+
+`npm run readiness` prints separate source-readiness and submission-eligibility
+results. CI runs that same gate at `SOURCE_READINESS_FLOOR=100`, so every
+source-readiness check has to pass before `main` accepts a change. A
+source-ready result never implies the final video and form are done.
+
+## Measured results
+
+> **Recall@10 against brute-force ground truth: 96.5% to 99.6%**, depending on
+> how structured the corpus is. Reproduce it with `npm run benchmark` against a
+> local Docker CockroachDB: no AWS account, no API key, deterministic seeded
+> vectors, ground truth computed in JS by exact cosine over the same vectors.
+> **What this does not verify:** the benchmark's vectors carry no meaning. It
+> measures the index, not the answer. Titan supplies the real semantics in
+> production, and answer quality is a separate concern handled by citation
+> checks and abstention.
+
+A lone high number proves nothing, so here is the control. On a deliberately
+pathological *uniform* corpus, where points are spread over the unit hypersphere
+and no cluster structure exists for an approximate index to exploit, the same
+harness prints a low number and then climbs with search effort. The documented
+sweep in [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 2 runs **29.2%
+recall@10 at beam 10, reaching 96.5% at beam 100**. The hosted benchmark run's
+own uniform sweep at 5,000 vectors runs **11.3% at beam 10 to 95.6% at beam
+600**. A harness that only ever prints high numbers proves nothing. This one
+responds monotonically to the index's search effort, which is what makes the 99%
+figure on structured data worth reading.
+
+| Measurement | Value | Boundary | Source |
+|---|---|---|---|
+| Recall@10, clustered corpus, 10,000 vectors, 200 queries, dim 1024, beam 100 | 99.3% mean, 90% minimum | The clustered corpus is `centroid + noise` and queries share those centroids, so a same-cluster signal is present by construction. That is *why* recall stays high. It is not one lucky setting: a noise sweep from 0.35 to 2.0 holds 99.1% to 99.2%. | [Benchmark run 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916), 2026-08-02, at `0b25d5f1`; noise sweep from the [docs/BENCHMARK.md](./docs/BENCHMARK.md) honesty note |
+| Recall@10, uniform corpus, 5,000 vectors (the control) | 29.2% at beam 10, 96.5% at beam 100. The hosted run's own sweep: 11.3% at beam 10 to 95.6% at beam 600 | The structure-free worst case. The beam curve, not the headline recall on any one corpus, is what isolates index quality from how easy the data is. | [docs/BENCHMARK.md](./docs/BENCHMARK.md) Result 2 for the documented sweep; [Benchmark run 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916) for the hosted pair |
+| Backend unit and integration suite | 388 tests, 385 passed, 3 intentionally skipped, 0 failed | The executed count at the deployed baseline. `main` has advanced since and runs more. | [main CI run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580) |
+| Backend coverage | 94.70% lines, 83.13% branches, 94.06% functions | Measured over `src/**` and nothing else. See [what the coverage numbers do not cover](#what-the-coverage-numbers-do-not-cover). | Same run |
+| Frontend | 42/42 unit tests, 4/4 desktop and mobile Playwright journeys, 93.72% lines, 86.60% branches, 97.50% functions, 90.66% statements | Coverage measured over `web/src` only. | Same run |
+| Concurrent recall, k6, 20 virtual users for 20 s over a 2,000-memory corpus | 552/552 checks succeeded, 0.00% request failures, 776.65 ms p95 | Check success is not recall correctness. Recall correctness over the same window was **99.63%, 550 of 552**. The two are separate metrics and are not interchangeable. | Same run |
+| Recall latency, C-SPANN smoke over 1,500 vectors, 50 queries, top-10 | 4.33 ms p50, 5.35 ms p95, 6.64 ms p99 at 99.8% mean recall@10 | A GitHub Linux runner, single node. The 10,000-vector hosted benchmark measures 13.44 / 14.73 / 22.91 ms, and a laptop Docker node on the uniform corpus sits near 70 ms p50. Latency here is environment-bound. Recall is the portable number. | Same run for the smoke; [Benchmark run 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916) and [docs/BENCHMARK.md](./docs/BENCHMARK.md) for the comparison |
+| Exact-release adversarial probes | 16/16 active API and browser-boundary checks passed | 16 is what the baseline's release run executed. The suite defines 21 probes on `main` today. | [Hosted DAST run 30579578909](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579578909) |
+| ZAP passive and AJAX-spider baseline over 13 URLs | 63 PASS, 0 FAIL-NEW, 0 WARN-NEW, and **7 rules suppressed** (`IGNORE: 7`) | All seven suppressions are declared with their rationale in [`.zap/release.tsv`](./.zap/release.tsv). A "0 FAIL, 0 WARN" summary that omits the ignore count overstates the result, so the count is stated here. | Same run |
+
+Every figure above is either read from the linked run's own log or, where the
+source column says so, taken from the documented harness sweeps in
+[docs/BENCHMARK.md](./docs/BENCHMARK.md). The superseded `f3fafdac` chain keeps
+its own, different measurements at the values its runs recorded, in
+[docs/DEMO_URL.md](./docs/DEMO_URL.md), rather than being restated here.
 
 ## Working challenge slice
 
@@ -128,6 +212,71 @@ Regional AWS application resources and API entry points, plus the CockroachDB
 cluster, are anchored in `eu-west-1`; CloudFront is global and Claude uses an EU
 cross-region inference profile. The scoped inventory contains no application
 resources in `us-west-2`.
+
+## Testing
+
+### The pyramid, counted in this tree
+
+| Layer | Count | Where |
+|---|---|---|
+| Backend unit and integration | 42 files, 514 `test(...)` declarations | `tests/*.test.ts` |
+| Frontend unit | 9 files, 51 declarations | `web/src/**/*.test.ts` and `.test.tsx` |
+| Browser journeys | Desktop and mobile Chromium | [`web/e2e/control-room.spec.ts`](./web/e2e/control-room.spec.ts), run in CI and again against the hosted site inside the release |
+| Adversarial probes | 21 active checks | [`scripts/hosted-dast.mjs`](./scripts/hosted-dast.mjs) |
+| Load | k6, 20 virtual users for 20 s | [`load/recall.js`](./load/recall.js), thresholds enforced by the `load` job |
+
+Those are counts of the source tree at this commit, not results. The executed
+figure at the deployed baseline is 388 backend tests, 385 passed and 3
+intentionally skipped, in
+[main CI run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580).
+The gap is growth: `main` has moved well past that commit. The probe count reads
+the same way, 21 defined on `main` today against the 16 the baseline's release
+run executed.
+
+### A real CockroachDB, four times per CI run
+
+Four jobs stand up a real CockroachDB v26.2.3 container, pinned by image digest,
+instead of mocking the database:
+
+- **`build-test`** typechecks, rehearses the legacy migration, rehearses
+  reconciliation including post-mutation rollback, runs the local bootstrap
+  twice to prove exact idempotency, runs the coverage gate, and finishes with a
+  vector-index recall-floor smoke that fails loudly if the index silently
+  degrades.
+- **`cluster-survival`** starts a real 3-node cluster from
+  [`docker-compose.cluster.yml`](./docker-compose.cluster.yml), applies the
+  schema, loads a corpus, then kills a node and asserts recall still serves
+  through the survivors. `STRICT=1` makes the script exit non-zero if it does
+  not, so a regression that breaks node-loss survival fails the build instead of
+  quietly hollowing out a README claim.
+- **`pen-test`** runs the application-security suite with `DATABASE_URL` set,
+  because an in-memory mock cannot prove SQL parameterization. It also proves
+  role-bound RLS ignores a mutable `application_name`, and exercises the
+  resolution loop through the least-privilege runtime login.
+- **`load`** drives the recall path with k6 under concurrency. Its thresholds
+  (p95 under 1500 ms, recall@1 at or above 0.99, error rate under 1%) live in
+  `load/recall.js`, and a breach fails the job.
+
+The `readiness` job requires all nine prerequisite jobs to succeed before it
+starts, then runs the source-readiness gate at 100%.
+
+### What the coverage numbers do not cover
+
+Backend coverage is collected with `--test-coverage-include=src/**/*.ts`
+([`scripts/run-backend-coverage.mjs`](./scripts/run-backend-coverage.mjs)) and
+fails below 80% lines, 75% branches, or 80% functions. So 94.70% lines describes
+`src/**` and nothing else. That tree is roughly 10,100 lines. Outside the
+denominator sit `scripts/**`, roughly 29,200 lines of TypeScript, `.mjs`, and
+shell, and `aws/**`, roughly 16,300 lines of shell. The uninstrumented tree is
+larger than the instrumented one.
+
+That boundary is deliberate rather than an oversight. Those files are release,
+audit, and recovery machinery whose correctness is proved by execution inside
+protected pipelines: a script that fails, fails the deployment. Line coverage
+would be the wrong instrument for them. A judge reading "94.70%" should still
+know which tree it describes rather than work it out later. The frontend figure
+has the same shape, 93.72% lines over `web/src`, per the `include` in
+[`web/vite.config.ts`](./web/vite.config.ts).
 
 ## Two meaningfully integrated CockroachDB tools
 
@@ -686,20 +835,32 @@ Weekly scheduled and manual DAST runs remain independent production audits.
 
 ## Pinned release evidence
 
-The deployed production baseline — the most recent commit with a complete hosted
-release chain — is
-[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
-It is jointly bound to the successful
-[main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157603),
-[CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533157215),
-[Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206),
-[exact-release Hosted DAST](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259),
-[standalone Managed MCP](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779),
-and [manual dual-environment recovery audit](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552).
-The exact artifact IDs and SHA-256 digests are recorded in
+The deployed production baseline — the commit actually serving the judge URL —
+is
+[`0b25d5f1498965f87140bb24715b004fbb5558cf`](https://github.com/upgradedev/archon-cockroach-memory/commit/0b25d5f1498965f87140bb24715b004fbb5558cf).
+The identification is direct rather than inferred: the CloudFormation stack
+carries `ReleaseCommitSha` = `0b25d5f1…`, the Lambda environment variable holds
+the same value, and the Lambda's `LastModified` matches the Deploy run below. It
+is jointly bound to the successful
+[main CI](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580),
+[CodeQL](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405577),
+[Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577752661),
+[exact-release Hosted DAST](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579578909),
+[standalone Managed MCP](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579694425),
+and [benchmark](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916).
+
+The earlier chain at
+[`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b)
+is real and complete, including a
+[manual dual-environment recovery audit](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552)
+that the deployed chain does not have, but it ran ten hours earlier the same day
+and was replaced. It is retained as superseded evidence, with its own
+measurements left at the values its runs recorded.
+
+The exact artifact IDs and SHA-256 digests for both chains are recorded in
 [the judge-application evidence ledger](./docs/DEMO_URL.md).
-The ledger is immutable historical evidence for that exact SHA; later commits
-must earn their own pipeline evidence and never rewrite this baseline.
+The ledger is immutable historical evidence for each exact SHA; later commits
+must earn their own pipeline evidence and never rewrite a baseline.
 
 | Evidence | State |
 |---|---|
@@ -710,7 +871,7 @@ must earn their own pipeline evidence and never rewrite this baseline.
 | CockroachDB Cloud Managed MCP | The causal receipt binds the exact release and database C-SPANN receipt digests, strict `9 / 9 / 9` Store parsing, and capability-safe optional `explain_query`; staging and production refuse promotion unless the protected gate passes, and the standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) reuses the same contract. The v3 contract is on `main`; every receipt produced by a hosted run so far, the deployed baseline's included, is v2 |
 | Real Titan V2 + Claude Sonnet 4.6 | Protected staging and production gates exercise Titan in `eu-west-1` and the Claude EU cross-region inference profile |
 | Control Room, protected DB release, SAM stack, OIDC CI/CD, canary/rollback | Exact-main build-once promotion, live release-SHA binding, and hosted browser verification are mandatory in [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) |
-| Unrestricted CloudFront production URL and hosted receipts | [Reachable without credentials](https://d2s5v0o0eg2aaw.cloudfront.net); the data-plane endpoints have returned 500 since 2026-08-02 — see [Current demo status](#current-demo-status--2026-08-04) |
+| Unrestricted CloudFront production URL and hosted receipts | [Reachable without credentials](https://d2s5v0o0eg2aaw.cloudfront.net); the data-plane endpoints have returned 500 since 2026-08-02 — see [Judge verification](#judge-verification) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
 | Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
 | Fault-triggered `RECOVERING → RECOVERED` and daily/manual audit | Implemented and CI-covered; the final gate requires a fresh manual `operation=audit` receipt, but no intentional live failure drill is claimed |
