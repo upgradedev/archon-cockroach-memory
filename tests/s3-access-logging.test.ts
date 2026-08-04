@@ -2599,7 +2599,6 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/AlarmRoutingCloudFormationExecutionRole",
       "LogicalResourceId/AlarmRoutingControlRole",
       "LogicalResourceId/AlarmStateInspectionPolicy",
-      "LogicalResourceId/AlarmTopicPolicy",
       "LogicalResourceId/ApplicationStorageKey",
       "LogicalResourceId/ApplicationStorageKeyAlias",
       "LogicalResourceId/ArtifactBucket",
@@ -2617,6 +2616,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/ProductionAlarmArchiveSubscription",
       "LogicalResourceId/ProductionAlarmRoutingInspectionPolicy",
       "LogicalResourceId/ProductionAlarmTopic",
+      "LogicalResourceId/ProductionAlarmTopicPolicy",
       "LogicalResourceId/ProductionOriginVerifySecret",
       "LogicalResourceId/S3AccessLogArchive",
       "LogicalResourceId/S3AccessLogArchivePolicy",
@@ -2628,6 +2628,7 @@ test("foundation activation role and workflow are narrow and fail closed", () =>
       "LogicalResourceId/StagingAlarmRoutingDrillAlarm",
       "LogicalResourceId/StagingAlarmRoutingDrillSubscription",
       "LogicalResourceId/StagingAlarmTopic",
+      "LogicalResourceId/StagingAlarmTopicPolicy",
       "LogicalResourceId/StagingCodeDeployInspectionPolicy",
       "LogicalResourceId/StagingOriginVerifySecret",
     ].sort()
