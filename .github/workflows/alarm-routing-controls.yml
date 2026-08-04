@@ -556,11 +556,11 @@ jobs:
                 {action:"Add", logicalId:"AlarmArchiveQueuePolicy", resourceType:"AWS::SQS::QueuePolicy", replacement:"False"},
                 {action:"Add", logicalId:"AlarmNotificationsKey", resourceType:"AWS::KMS::Key", replacement:"False"},
                 {action:"Add", logicalId:"AlarmNotificationsKeyAlias", resourceType:"AWS::KMS::Alias", replacement:"False"},
-                {action:"Add", logicalId:"AlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmArchiveQueue", resourceType:"AWS::SQS::Queue", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmArchiveSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmRoutingInspectionPolicy", resourceType:"AWS::IAM::Policy", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmTopic", resourceType:"AWS::SNS::Topic", replacement:"False"},
+                {action:"Add", logicalId:"ProductionAlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmArchiveQueue", resourceType:"AWS::SQS::Queue", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmArchiveSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmRoutingDrillAlarm", resourceType:"AWS::CloudWatch::Alarm", replacement:"False"},
@@ -568,6 +568,7 @@ jobs:
                 {action:"Add", logicalId:"StagingAlarmRoutingDrillSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmRoutingInspectionPolicy", resourceType:"AWS::IAM::Policy", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmTopic", resourceType:"AWS::SNS::Topic", replacement:"False"}
+                {action:"Add", logicalId:"StagingAlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
               ] | sort_by(.logicalId))
             ' "$plan" >/dev/null
 
@@ -664,11 +665,11 @@ jobs:
                 {action:"Add", logicalId:"AlarmArchiveQueuePolicy", resourceType:"AWS::SQS::QueuePolicy", replacement:"False"},
                 {action:"Add", logicalId:"AlarmNotificationsKey", resourceType:"AWS::KMS::Key", replacement:"False"},
                 {action:"Add", logicalId:"AlarmNotificationsKeyAlias", resourceType:"AWS::KMS::Alias", replacement:"False"},
-                {action:"Add", logicalId:"AlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmArchiveQueue", resourceType:"AWS::SQS::Queue", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmArchiveSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmRoutingInspectionPolicy", resourceType:"AWS::IAM::Policy", replacement:"False"},
                 {action:"Add", logicalId:"ProductionAlarmTopic", resourceType:"AWS::SNS::Topic", replacement:"False"},
+                {action:"Add", logicalId:"ProductionAlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmArchiveQueue", resourceType:"AWS::SQS::Queue", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmArchiveSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmRoutingDrillAlarm", resourceType:"AWS::CloudWatch::Alarm", replacement:"False"},
@@ -676,6 +677,7 @@ jobs:
                 {action:"Add", logicalId:"StagingAlarmRoutingDrillSubscription", resourceType:"AWS::SNS::Subscription", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmRoutingInspectionPolicy", resourceType:"AWS::IAM::Policy", replacement:"False"},
                 {action:"Add", logicalId:"StagingAlarmTopic", resourceType:"AWS::SNS::Topic", replacement:"False"}
+                {action:"Add", logicalId:"StagingAlarmTopicPolicy", resourceType:"AWS::SNS::TopicPolicy", replacement:"False"},
               ] | sort_by(.logicalId))
             ' "$plan" >/dev/null
 
@@ -748,18 +750,19 @@ jobs:
                   "AlarmArchiveQueuePolicy",
                   "AlarmNotificationsKey",
                   "AlarmNotificationsKeyAlias",
-                  "AlarmTopicPolicy",
                   "ProductionAlarmArchiveQueue",
                   "ProductionAlarmArchiveSubscription",
                   "ProductionAlarmRoutingInspectionPolicy",
                   "ProductionAlarmTopic",
+                  "ProductionAlarmTopicPolicy",
                   "StagingAlarmArchiveQueue",
                   "StagingAlarmArchiveSubscription",
                   "StagingAlarmRoutingDrillAlarm",
                   "StagingAlarmRoutingDrillQueue",
                   "StagingAlarmRoutingDrillSubscription",
                   "StagingAlarmRoutingInspectionPolicy",
-                  "StagingAlarmTopic"
+                  "StagingAlarmTopic",
+                  "StagingAlarmTopicPolicy"
                 ))
               | {
                   logicalId: .LogicalResourceId,
@@ -770,18 +773,19 @@ jobs:
               "AlarmArchiveQueuePolicy",
               "AlarmNotificationsKey",
               "AlarmNotificationsKeyAlias",
-              "AlarmTopicPolicy",
               "ProductionAlarmArchiveQueue",
               "ProductionAlarmArchiveSubscription",
               "ProductionAlarmRoutingInspectionPolicy",
               "ProductionAlarmTopic",
+              "ProductionAlarmTopicPolicy",
               "StagingAlarmArchiveQueue",
               "StagingAlarmArchiveSubscription",
               "StagingAlarmRoutingDrillAlarm",
               "StagingAlarmRoutingDrillQueue",
               "StagingAlarmRoutingDrillSubscription",
               "StagingAlarmRoutingInspectionPolicy",
-              "StagingAlarmTopic"
+              "StagingAlarmTopic",
+              "StagingAlarmTopicPolicy"
             ] | map({logicalId: ., status: "CREATE_COMPLETE"}) | sort_by(.logicalId))
           ' "$resources" >/dev/null
 

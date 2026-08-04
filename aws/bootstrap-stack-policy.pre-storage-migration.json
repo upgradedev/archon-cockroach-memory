@@ -18,7 +18,6 @@
         "LogicalResourceId/AlarmNotificationsKey",
         "LogicalResourceId/AlarmNotificationsKeyAlias",
         "LogicalResourceId/AlarmStateInspectionPolicy",
-        "LogicalResourceId/AlarmTopicPolicy",
         "LogicalResourceId/ArtifactBucket",
         "LogicalResourceId/ArtifactBucketPolicy",
         "LogicalResourceId/FoundationPromotionRole",
@@ -27,13 +26,15 @@
         "LogicalResourceId/ProductionAlarmArchiveSubscription",
         "LogicalResourceId/ProductionAlarmRoutingInspectionPolicy",
         "LogicalResourceId/ProductionAlarmTopic",
+        "LogicalResourceId/ProductionAlarmTopicPolicy",
         "LogicalResourceId/S3AccessLogArchive",
         "LogicalResourceId/S3AccessLogArchivePolicy",
         "LogicalResourceId/S3AccessLogArchiveS39Suppression",
         "LogicalResourceId/StagingAlarmArchiveQueue",
         "LogicalResourceId/StagingAlarmArchiveSubscription",
         "LogicalResourceId/StagingAlarmRoutingInspectionPolicy",
-        "LogicalResourceId/StagingAlarmTopic"
+        "LogicalResourceId/StagingAlarmTopic",
+        "LogicalResourceId/StagingAlarmTopicPolicy"
       ]
     }
   ]

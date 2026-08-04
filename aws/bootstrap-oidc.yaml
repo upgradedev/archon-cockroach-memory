@@ -626,7 +626,9 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  AlarmTopicPolicy:
+  # SNS rejects a policy statement that names more than one topic, so each
+  # topic carries its own policy rather than one document shared by both.
+  StagingAlarmTopicPolicy:
     Type: AWS::SNS::TopicPolicy
     Condition: EnableAlarmRouting
     DeletionPolicy: RetainExceptOnCreate
@@ -634,6 +636,51 @@ Resources:
     Properties:
       Topics:
         - !Ref StagingAlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountTopicAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action:
+              - sns:AddPermission
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:RemovePermission
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+            Resource: !Ref StagingAlarmTopic
+          - Sid: AllowStagingCloudWatchAlarmPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref StagingAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub >-
+                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-*
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sns:*
+            Resource: !Ref StagingAlarmTopic
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  ProductionAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: EnableAlarmRouting
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Topics:
         - !Ref ProductionAlarmTopic
       PolicyDocument:
         Version: "2012-10-17"
@@ -651,21 +698,7 @@ Resources:
               - sns:RemovePermission
               - sns:SetTopicAttributes
               - sns:Subscribe
-            Resource:
-              - !Ref StagingAlarmTopic
-              - !Ref ProductionAlarmTopic
-          - Sid: AllowStagingCloudWatchAlarmPublish
-            Effect: Allow
-            Principal:
-              Service: cloudwatch.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref StagingAlarmTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub >-
-                  arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppName}-staging-*
+            Resource: !Ref ProductionAlarmTopic
           - Sid: AllowProductionCloudWatchAlarmPublish
             Effect: Allow
             Principal:
@@ -682,9 +715,7 @@ Resources:
             Effect: Deny
             Principal: "*"
             Action: sns:*
-            Resource:
-              - !Ref StagingAlarmTopic
-              - !Ref ProductionAlarmTopic
+            Resource: !Ref ProductionAlarmTopic
             Condition:
               Bool:
                 aws:SecureTransport: "false"
