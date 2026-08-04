@@ -40,7 +40,8 @@ if (
   testFiles.length === 0 ||
   new Set(testFiles).size !== testFiles.length ||
   !testFiles.includes("tests/readiness.test.ts") ||
-  !testFiles.includes("tests/hosted-dast.test.ts")
+  !testFiles.includes("tests/hosted-dast.test.ts") ||
+  !testFiles.includes("tests/aws-service-semantics.test.ts")
 ) {
   throw new Error("Canonical backend test inventory is missing or ambiguous.");
 }
