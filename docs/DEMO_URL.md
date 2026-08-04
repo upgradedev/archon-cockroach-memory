@@ -8,8 +8,10 @@ The unrestricted production application is:
 
 ## Pinned exact feature-release baseline — 2026-07-30
 
-The latest fully evidenced feature-bearing release baseline recorded before
-this documentation-only update is commit
+This is the deployed production baseline: the most recent commit for which a
+complete hosted release chain exists. Later feature-bearing commits on `main`
+carry their own source-pipeline evidence but are not part of this deployed
+baseline until a new release chain records them here. The commit is
 [`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
 Every item below is hosted evidence for that exact SHA:
 
@@ -31,8 +33,7 @@ Hosted measurements from the exact main CI run:
 - k6: 554/554 checks, 0.00% request failures, 100.00% recall correctness,
   and 773.67 ms p95 at 20 concurrent virtual users;
 - C-SPANN smoke: 98.6% mean recall@10 and 5.01 ms p95 over 1,500 vectors;
-- exact-release active DAST: 21/21 checks, including the isolated resolution
-  capability and authority boundaries; and
+- exact-release active DAST: 16/16 checks; and
 - exact-release ZAP: 13 URLs, 63 PASS, 0 FAIL, 0 WARN, with CSP alert
   `10055` and site-isolation alert `90004` both passing.
 
@@ -54,9 +55,10 @@ Key immutable evidence artifacts are unexpired and digest-bound by GitHub:
 
 These links are evidence references, not repository artifacts. No generated
 receipt, coverage output, ZAP report, build tree, or video file is stored in the
-workspace. This immutable baseline remains valid when a later documentation-only
-commit advances `main`; that later commit must pass the live pipeline gates on
-its own.
+workspace. This baseline is immutable: it describes one exact SHA and its hosted
+runs, and is never rewritten to describe capabilities that landed after it. When
+`main` advances, the newer commits must earn their own release chain before this
+ledger records them.
 
 ## Historical exact-release milestones
 

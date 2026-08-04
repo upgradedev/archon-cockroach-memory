@@ -247,11 +247,11 @@ export function assertVideoReceipt({
     toolchain.version !== 1 ||
     toolchain.passed !== true ||
     toolchain.provider !== "BtbN/FFmpeg-Builds" ||
-    toolchain.releaseTag !== "autobuild-2026-07-19-13-12" ||
-    toolchain.ffmpegVersion !== "n7.1.5-2-g998de74adf" ||
+    toolchain.releaseTag !== "autobuild-2026-08-03-14-02" ||
+    toolchain.ffmpegVersion !== "n7.1.5-12-g1fdbca85aa" ||
     toolchain.archive?.bytes !== 119_354_960 ||
     toolchain.archive?.sha256 !==
-      "b8ed29dc71fe17f05f43e2d9dbfde89edf43270c3de13ce3c4d70f5df1f47e61"
+      "2164fd331d6578dc3c5b0becf9f86bf21d4fbb0424e2bb54240945203560b242"
   ) {
     throw new Error("Toolchain provenance does not match the exact pin");
   }
