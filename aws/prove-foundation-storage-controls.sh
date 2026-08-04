@@ -1821,8 +1821,7 @@ jq -e '
 
 jq -e \
   --arg bucketArn "arn:aws:s3:::${artifact_bucket}" \
-  --arg aliasArn \
-    "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${APP_NAME}-storage" \
+  --arg storageKeyArn "$storage_key_arn" \
   '
     (.Policy | fromjson).Statement as $statements
     | ($statements | length) == 3
@@ -1861,7 +1860,7 @@ jq -e \
           == {
             StringNotEquals: {
               "s3:x-amz-server-side-encryption-aws-kms-key-id":
-                $aliasArn
+                $storageKeyArn
             }
           }
       )
