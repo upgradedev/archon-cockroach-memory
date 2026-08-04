@@ -323,8 +323,8 @@ function validateTemplateContract(templateSource, bootstrapSource) {
           '            Resource: !Sub "${SpaBucket.Arn}/*"',
           "            Condition:",
           "              StringNotEquals:",
-          "                s3:x-amz-server-side-encryption-aws-kms-key-id: !Sub >-",
-          "                  arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/${AppName}-storage",
+          "                s3:x-amz-server-side-encryption-aws-kms-key-id:",
+          '                  Fn::ImportValue: !Sub "${AppName}-storage-kms-key-arn"',
         ].join("\n"),
     "SpaBucketPolicy must reject unencrypted writes and writes using an unexpected KMS key"
   );
