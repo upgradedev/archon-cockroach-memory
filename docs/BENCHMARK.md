@@ -1,5 +1,16 @@
 # Vector-memory benchmark — recall, latency, and distribution
 
+**Latest hosted evidence:** [Benchmark (full + distribution) run
+30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916),
+successful, 2026-08-02, at commit `0b25d5f1` — the same commit deployed to the
+judge URL. Read from that run's own log, on the clustered corpus at 10,000
+vectors / 200 queries / dim 1024: **99.3% mean recall@10** (90% minimum) at
+13.44 ms p50, 14.73 ms p95 and 22.91 ms p99 with beam 100, and 135 rows/s write
+throughput. The same run also swept the uniform corpus at 5,000 vectors, where
+recall climbs from 11.3% at beam 10 to 95.6% at beam 600 — the hardness spectrum
+Result 1 below describes. Numbers in the sections below come from the harness
+described here; that run is where they can be checked against a log.
+
 This is the evidence behind the claim that CockroachDB's **native distributed vector
 index** is a production-grade memory layer, not a demo. Everything here is
 reproducible with `npm run benchmark` and `bash scripts/show-distribution.sh`; the
@@ -36,7 +47,7 @@ of the true top-k nearest memories, how many does the index actually return?
 ## Result 1 — recall@k across the data-hardness spectrum
 
 Recall depends on how separable the true neighbours are, so we bracket the spectrum
-rather than quote one number. CockroachDB v26.2.2 · dim 1024 · top-10.
+rather than quote one number. CockroachDB v26.2.3 · dim 1024 · top-10.
 
 | corpus | recall@10 | notes |
 |---|---|---|
@@ -83,7 +94,7 @@ memory layer exposes it per query/session.
 ## Result 3 — distribution + survivability (what single-node pgvector can't do)
 
 `bash scripts/show-distribution.sh` on the 3-node cluster (`docker-compose.cluster.yml`),
-6,000 memories, CockroachDB v26.2.2:
+6,000 memories, CockroachDB v26.2.3:
 
 ```
 agent_memory ranges — every range replicated across all 3 nodes (RF=3):
@@ -156,7 +167,12 @@ EXPLAIN … ORDER BY embedding <=> q LIMIT 10:
 ## Result 4 — verified on the live CockroachDB Cloud cluster
 
 The same recall path runs against the managed Serverless cluster
-(`archon-cockroachdb-cluster-27534`, **CockroachDB v25.4.10, AWS eu-west-1**):
+(`archon-cockroachdb-cluster-27534`, AWS eu-west-1). The capture below was taken
+when that cluster reported **CockroachDB v25.4.10**; it has since been upgraded,
+and was observed at **v26.2.1** through Managed MCP on 2026-07-25
+([`MANAGED_MCP_SMOKE.md`](./MANAGED_MCP_SMOKE.md),
+[`CLOUD_SMOKE.md`](./CLOUD_SMOKE.md)). The version here is timestamped evidence,
+not a claim about the cluster's current release:
 semantic recall returns correctly-ranked memories and `EXPLAIN` plans a **`vector
 search`** node — the distributed index is used (ANN), not a scan. TLS is
 `sslmode=verify-full` against the public CA.

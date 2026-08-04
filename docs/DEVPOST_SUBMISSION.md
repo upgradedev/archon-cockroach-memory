@@ -10,6 +10,28 @@ video_delivery: supplied through the final hosted submission gate after public u
 
 # Archon Memory
 
+## Demo status, read this first — 2026-08-04
+
+The hosted demo's data plane is down. The page loads and `/api/health` answers
+200, but that endpoint is a reachability stub reporting
+`"dependencies":"unchecked"`. `/api/proof`, `/api/audit`, and `POST /api/recall`
+have returned HTTP 500 since 2026-08-02 11:20 UTC; the last successful
+data-plane response was 2026-07-31 01:22 UTC. The CockroachDB Cloud Basic
+cluster reached its Request Unit allowance and is disabled, so the runtime
+principal is refused with `the maximum number of allowed connections is 0`.
+
+This is a cluster budget state, not a code or deployment regression. The judge
+journey below describes the application as it behaves with a live cluster; with
+the cluster disabled, steps 2 through 5 will show errors instead of data. The
+hosted CI evidence is unaffected — every run link in this repository is a
+completed GitHub Actions run bound to an exact commit and remains viewable.
+
+**Latest hosted evidence for the deployed commit:** [CI run
+30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580)
+at `0b25d5f1`, all ten jobs successful — 388 backend tests (385 passed, 3
+skipped, 0 failed) and 42/42 frontend unit tests with 4/4 Playwright journeys.
+The full ledger is [docs/DEMO_URL.md](./DEMO_URL.md).
+
 ## Inspiration
 
 Financial agents can retrieve a plausible fact and still be dangerously wrong:
@@ -24,9 +46,12 @@ memory inspectable before a human acts on it.
 ## What it does
 
 The public demo uses a fixed, synthetic company called Helios SA. Canonical
-memory is read-only; a separate disposable sandbox permits only one fixed,
-human-gated resolution action.
-A judge can:
+memory is read-only. A separate disposable sandbox permits exactly one fixed,
+human-gated resolution action — that sandbox is implemented on `main` but is not
+in the deployed baseline, so item 6 below is not reachable at the demo URL; see
+[Not in the deployed baseline](#not-in-the-deployed-baseline-the-memory-resolution-loop).
+
+With a live cluster, a judge can:
 
 1. Ask a financial question in the Control Room.
 2. Retrieve durable facts through CockroachDB's native distributed vector
@@ -37,9 +62,10 @@ A judge can:
 5. Inspect a live proof ledger for database identity, runtime principal,
    fixed scope, models, vector index, and the exact `9 / 9 / 9` Store
    integrity contract.
-6. Open a longitudinal resolution session, compare an older payroll memory
-   with newer signed evidence, explicitly approve or reject the proposal, and
-   inspect the consolidated state plus SHA-256 decision receipt.
+6. *(on `main` only, not deployed)* Open a longitudinal resolution session,
+   compare an older payroll memory with newer signed evidence, explicitly
+   approve or reject the proposal, and inspect the consolidated state plus
+   SHA-256 decision receipt.
 
 The system never hides weak grounding. It abstains when evidence is irrelevant,
 checks citations, numbers, and claims, and can replace unsafe model wording with
@@ -178,10 +204,22 @@ CockroachDB Cloud Managed MCP
    - the missing `PAY-118` counterpart referenced by `RECON-2043`.
 5. Open the proof ledger and confirm CockroachDB, native C-SPANN, `eu-west-1`,
    and exact `9 / 9 / 9` Store integrity.
-6. Start the Memory Resolution Loop, approve the higher-authority signed
-   correction, and inspect Session C plus the immutable receipt.
-7. Inspect the owned, sanitized exact-SHA evidence card for the separate
+6. Inspect the owned, sanitized exact-SHA evidence card for the separate
    Managed MCP release audit.
+
+### Not in the deployed baseline: the Memory Resolution Loop
+
+The Memory Resolution Loop — start the loop, approve the higher-authority signed
+correction, inspect Session C and the immutable receipt — is implemented and
+CI-covered on `main` (`src/memory/resolution.ts`, `src/http/resolution-handler.ts`,
+`web/src/components/MemoryResolutionLoop.tsx`, and
+[MEMORY_RESOLUTION_LOOP.md](./MEMORY_RESOLUTION_LOOP.md)).
+
+It is **not** deployed. The commit serving the demo, `0b25d5f1`, contains none of
+those files, and the deployed API answers `/api/resolution/session` with 404. A
+judge cannot walk this step at the demo URL; it is listed here as implemented
+work, separately from the journey above, and reaches the application only when a
+release chain deploys a commit that carries it.
 
 ## Security, resilience, and production readiness
 

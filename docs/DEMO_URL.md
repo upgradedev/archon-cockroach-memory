@@ -6,12 +6,84 @@ The unrestricted production application is:
 
 **https://d2s5v0o0eg2aaw.cloudfront.net**
 
-## Pinned exact feature-release baseline — 2026-07-30
+## Current runtime state — 2026-08-04
 
-This is the deployed production baseline: the most recent commit for which a
-complete hosted release chain exists. Later feature-bearing commits on `main`
-carry their own source-pipeline evidence but are not part of this deployed
-baseline until a new release chain records them here. The commit is
+The application's data plane is down. `/api/health` answers 200 but is a
+reachability stub reporting `"dependencies":"unchecked"`. `/api/proof`,
+`/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
+11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
+CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
+disabled, so the runtime principal is refused with `the maximum number of
+allowed connections is 0`.
+
+Every run link in this ledger is a completed GitHub Actions run bound to an exact
+commit and remains viewable regardless of the cluster's state. The measurements
+below were recorded when those runs executed; they are not assertions about what
+the URL returns today.
+
+The `Recover AWS` watchdog described further down is still on its schedule: its
+most recent scheduled run,
+[30912727585](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30912727585)
+at `93dfa73` on 2026-08-04 13:13 UTC, succeeded. Note that the watchdog tracks
+the newest `main` SHA, so scheduled runs pinned to an older commit are cancelled
+once a newer one supersedes them — at the deployed baseline SHA the last
+successful scheduled run was
+[30613261037](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30613261037)
+on 2026-07-31 07:33 UTC, and later ones at that SHA show `cancelled`. That is
+supersession, not watchdog failure.
+
+## Deployed production baseline — commit `0b25d5f1`
+
+This is the commit actually serving the judge URL:
+[`0b25d5f1498965f87140bb24715b004fbb5558cf`](https://github.com/upgradedev/archon-cockroach-memory/commit/0b25d5f1498965f87140bb24715b004fbb5558cf).
+
+The identification is direct: the CloudFormation stack `archon-memory-production`
+carries `ReleaseCommitSha` = `0b25d5f1498965f87140bb24715b004fbb5558cf`, the
+Lambda environment variable holds the same value, and the Lambda's
+`LastModified` is `2026-07-30T20:23:17Z` — consistent with the Deploy AWS run
+below, which started at `20:06:59Z`. Every item in this table is hosted evidence
+for that exact SHA:
+
+| Gate | Exact hosted evidence |
+|---|---|
+| Main CI | [Run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580), all ten jobs successful |
+| Code scanning | [CodeQL run 30577405577](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405577), successful |
+| AWS + CockroachDB release | [Deploy AWS run 30577752661](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577752661), attempt 1, six successful jobs covering every required deployment operation |
+| Exact-release active + passive DAST | [Hosted DAST run 30579578909](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579578909), three successful jobs, source-bound to the Deploy run above |
+| Independent CockroachDB proof | [Managed MCP run 30579694425](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579694425), protected read-only production audit |
+| Vector benchmark at this SHA | [Benchmark run 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916), scheduled, 2026-08-02 |
+
+Hosted measurements read from the logs of main CI run `30577405580`:
+
+- backend unit/integration suite: 388 tests, 385 passed, 3 intentionally
+  skipped, 0 failed, 0 todo; 94.70% lines, 83.13% branches, 94.06% functions;
+- frontend: 8 test files and 42/42 unit tests, plus 4/4 desktop/mobile Playwright
+  journeys; 90.66% statements, 86.60% branches, 97.50% functions, 93.72% lines;
+- k6 at 20 concurrent virtual users: 552/552 checks succeeded, 0.00% request
+  failures (0 of 552), and 776.65 ms p95. Recall correctness over the same
+  window was 99.63% — 550 of 552. The 100% figure is the check-success rate;
+  the two are separate metrics and are not interchangeable; and
+- C-SPANN smoke over 1,500 vectors (50 queries, top-10, dim 1024): 99.8% mean
+  recall@10, 90% minimum, 4.33 ms p50, 5.35 ms p95, 6.64 ms p99, with write
+  throughput of 196 rows/s.
+
+From the exact-release DAST run `30579578909`:
+
+- active API and browser-boundary probes: 16/16 checks passed; and
+- ZAP passive/AJAX-spider baseline over 13 URLs: 63 PASS, 0 FAIL-NEW, 0 WARN-NEW
+  — and **7 rules suppressed** (`IGNORE: 7`). The suppressions are not silent:
+  all seven are declared with their rationale in
+  [`.zap/release.tsv`](../.zap/release.tsv) (rules `10015`, `10036`, `10049`,
+  `10050`, `10094`, `10109`, `90005`). A "0 FAIL, 0 WARN" summary that omits the
+  ignore list overstates the result, so the count is stated here.
+
+## Superseded release chain — commit `f3fafdac`, 2026-07-30 10:07 UTC
+
+The chain below is real and complete, but it is **not** what is deployed. It ran
+ten hours before `0b25d5f1` and was replaced by it the same day. It is retained
+because it is genuine evidence of a full protected release, and because its
+measurements are a fixed baseline for that exact SHA — they are deliberately not
+restated at today's values. The commit is
 [`f3fafdac8d93a266eda9831edd0d66132940ec7b`](https://github.com/upgradedev/archon-cockroach-memory/commit/f3fafdac8d93a266eda9831edd0d66132940ec7b).
 Every item below is hosted evidence for that exact SHA:
 
@@ -24,7 +96,8 @@ Every item below is hosted evidence for that exact SHA:
 | Independent CockroachDB proof | [Managed MCP run 30535180779](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779), protected read-only production audit |
 | Independent AWS protection/drift proof | [Recover AWS run 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552), manual `operation=audit`, both staging and production jobs successful |
 
-Hosted measurements from the exact main CI run:
+Hosted measurements from that exact main CI run — the baseline for `f3fafdac`,
+left at the values that run recorded:
 
 - backend unit/integration suite: 360 tests, 357 passed, 3 intentionally
   skipped, 0 failed; 94.70% lines, 82.99% branches, 94.06% functions;
@@ -34,31 +107,45 @@ Hosted measurements from the exact main CI run:
   and 773.67 ms p95 at 20 concurrent virtual users;
 - C-SPANN smoke: 98.6% mean recall@10 and 5.01 ms p95 over 1,500 vectors;
 - exact-release active DAST: 16/16 checks; and
-- exact-release ZAP: 13 URLs, 63 PASS, 0 FAIL, 0 WARN, with CSP alert
-  `10055` and site-isolation alert `90004` both passing.
+- exact-release ZAP: 13 URLs, 63 PASS, 0 FAIL-NEW, 0 WARN-NEW and 7 suppressed
+  rules (`IGNORE: 7`, declared in [`.zap/release.tsv`](../.zap/release.tsv)),
+  with CSP alert `10055` and site-isolation alert `90004` both passing.
 
-Key immutable evidence artifacts are unexpired and digest-bound by GitHub:
+For current numbers, read the newest run of each workflow on `main` rather than
+this section: `main` has advanced well past both SHAs and its test counts are
+higher.
 
-- [production deployment receipt 8756292172](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206/artifacts/8756292172):
+Key evidence artifacts from this chain are digest-bound by GitHub. The links
+below point at the **run pages**, which any logged-out reader can open; the
+per-artifact download URLs are sign-in gated and therefore useless to a judge, so
+the artifact name and SHA-256 are given as text instead:
+
+- production deployment receipt, artifact `8756292172` in
+  [Deploy AWS run 30533467206](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30533467206):
   `sha256:bab56a7f036ab5ad45fad91a22ebfe538621e76233a4a7bc73cecd35c442a2c8`;
-- [exact-release DAST receipt 8756315429](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259/artifacts/8756315429):
+- exact-release DAST receipt, artifact `8756315429` in
+  [Hosted DAST run 30535119259](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259):
   `sha256:af6d93f95fd15301db2dfc013f9bbd4a3aec3e7d212ae9e9ddbacedfb3466b57`;
-- [exact-release ZAP report 8756374638](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259/artifacts/8756374638):
+- exact-release ZAP report, artifact `8756374638` in the same
+  [Hosted DAST run 30535119259](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535119259):
   `sha256:0ebbd7f9d43e07d3dd3716afa17f5c548c25c65b61c0e0c387c80bef3ccd6173`;
-- [standalone Managed MCP receipt 8756341014](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779/artifacts/8756341014):
+- standalone Managed MCP receipt, artifact `8756341014` in
+  [Managed MCP run 30535180779](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535180779):
   `sha256:49c73cbc84c6efd9949639ca92a216cd83aa06f1674c8b37521f87385db898a4`;
-- [staging protection/drift audit 8756347685](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552/artifacts/8756347685):
+- staging protection/drift audit, artifact `8756347685` in
+  [Recover AWS run 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552):
   `sha256:a0420d78238c58dcd20ee987fd9241c4c33d6e11938f93cde6069143122dd342`;
   and
-- [production protection/drift audit 8756366419](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552/artifacts/8756366419):
+- production protection/drift audit, artifact `8756366419` in the same
+  [Recover AWS run 30535183552](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30535183552):
   `sha256:fa3462af7ec8770273f41a09cba19f81735570eb7b3c525af4967fae03eb1c44`.
 
 These links are evidence references, not repository artifacts. No generated
 receipt, coverage output, ZAP report, build tree, or video file is stored in the
-workspace. This baseline is immutable: it describes one exact SHA and its hosted
-runs, and is never rewritten to describe capabilities that landed after it. When
-`main` advances, the newer commits must earn their own release chain before this
-ledger records them.
+workspace. Each baseline section above is immutable: it describes one exact SHA
+and its hosted runs, and is never rewritten to describe capabilities that landed
+after it. When `main` advances, the newer commits must earn their own release
+chain before this ledger records them.
 
 ## Historical exact-release milestones
 

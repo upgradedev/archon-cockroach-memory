@@ -4,6 +4,12 @@ Status: pipeline and synthetic pilot implemented; no qualified reviewer study
 or real business-outcome result is claimed until the protected workflow accepts
 an independently collected dataset.
 
+**Latest hosted evidence:** [Human evaluation and impact evidence run
+30911931400](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30911931400),
+successful on `main` at commit `93dfa73`, 2026-08-04. That run demonstrates the
+gate executing and holding its two evidence tiers apart; it does not convert the
+synthetic pilot into a reviewer study.
+
 The canonical gate is
 [`human-impact-evaluation.yml`](../.github/workflows/human-impact-evaluation.yml).
 It deliberately separates two evidence tiers that cannot be relabelled by an
