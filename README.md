@@ -31,24 +31,39 @@ today.
 
 ## Judge verification
 
-### Read this before you click — 2026-08-04
+### Read this before you click — 2026-08-05
 
-**The hosted demo's data plane is down.** `/api/proof`, `/api/audit`, and
-`POST /api/recall` have returned HTTP 500 since 2026-08-02 11:20 UTC; the last
-successful data-plane response was 2026-07-31 01:22 UTC. The CockroachDB Cloud
-Basic cluster reached its Request Unit allowance and is disabled, so the runtime
-principal is refused with `the maximum number of allowed connections is 0`.
-`/api/health` still answers 200, but the deployed build's health endpoint is a
-reachability stub that reports `"dependencies":"unchecked"`, which is precisely
-why the outage went unnoticed.
+**The hosted demo is answering.** `/api/health`, `/api/proof`, `/api/audit` and
+`POST /api/recall` all return 200. Asking it for the total of invoice `INV-2043`
+returns a grounded answer that cites its evidence, reports the €18,400 versus
+€18,900 contradiction, and names the `PAY-118` confirmation that was never
+stored — the thesis of this entry, live rather than described.
 
-This is a cluster budget state, not a code or deployment regression. `main` now
-carries a bounded, cached CockroachDB probe that reports `ready`/`degraded` with
-a `checks.database` detail, and a scheduled
-[availability canary](./.github/workflows/live-availability.yml) that probes
-`/api/proof` from outside every 30 minutes. Neither is live until the next
-release. A judge opening the demo URL today should expect the interface to load
-and its data panels to error.
+**It was down for three days, and this section used to say so.** `/api/proof`,
+`/api/audit` and `POST /api/recall` returned HTTP 500 from 2026-08-02 11:20 UTC
+until 2026-08-05, because the CockroachDB Cloud Basic cluster was disabled and
+refused the runtime principal with `the maximum number of allowed connections is
+0`. The binding constraint was the cluster's billing state — a lapsed trial —
+not a code or deployment regression, and restoring billing re-enabled it
+immediately. Raising `request_unit_limit` through the Cloud API beforehand
+changed nothing, because the API accepts that value without exposing the
+constraint that was actually holding the cluster shut.
+
+The scheduled [availability canary](./.github/workflows/live-availability.yml),
+added during the outage, probes `/api/proof` from outside GitHub every thirty
+minutes and recorded both ends of the event on public run pages: failing at
+[06:03 UTC](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30980051802)
+and passing from
+[07:05 UTC](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30983697774)
+onward. That is the control working, and it is the honest answer to why the
+earlier outage went unnoticed for two days: before it existed, nothing external
+watched the data plane.
+
+**One caveat still holds.** The deployed baseline is commit `0b25d5f1` from
+2026-07-30. The dependency-aware health probe and the
+[Memory Resolution Loop](#on-main-not-in-the-deployed-baseline) are on `main` and
+CI-covered but not yet released, so `/api/health` still reports
+`"dependencies":"unchecked"` and `/api/resolution/session` still returns 404.
 
 ### The proof that cannot fail is a run page, not an endpoint
 

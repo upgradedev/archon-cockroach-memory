@@ -10,24 +10,31 @@ video_delivery: supplied through the final hosted submission gate after public u
 
 # Archon Memory
 
-## Demo status, read this first — 2026-08-04
+## Demo status, read this first — 2026-08-05
 
-The hosted demo's data plane is down. The page loads and `/api/health` answers
-200, but the deployed build's endpoint is a reachability stub reporting
-`"dependencies":"unchecked"` — the reason the outage went unnoticed. `main` now
-performs a real bounded CockroachDB probe and adds a scheduled external
-availability canary; neither is live until the next release.
-`/api/proof`, `/api/audit`, and `POST /api/recall`
-have returned HTTP 500 since 2026-08-02 11:20 UTC; the last successful
-data-plane response was 2026-07-31 01:22 UTC. The CockroachDB Cloud Basic
-cluster reached its Request Unit allowance and is disabled, so the runtime
-principal is refused with `the maximum number of allowed connections is 0`.
+The hosted demo answers. `/api/health`, `/api/proof`, `/api/audit` and
+`POST /api/recall` all return 200, so the judge journey below runs end to end:
+asking for the total of invoice `INV-2043` returns a cited answer that reports
+both the €18,400 / €18,900 contradiction and the `PAY-118` confirmation that was
+never stored.
 
-This is a cluster budget state, not a code or deployment regression. The judge
-journey below describes the application as it behaves with a live cluster; with
-the cluster disabled, steps 2 through 5 will show errors instead of data. The
-hosted CI evidence is unaffected — every run link in this repository is a
-completed GitHub Actions run bound to an exact commit and remains viewable.
+It was down from 2026-08-02 11:20 UTC to 2026-08-05 — the CockroachDB Cloud
+Basic cluster was disabled over its billing state and refused the runtime
+principal with `the maximum number of allowed connections is 0`. That was a
+cluster billing state, not a code or deployment regression, and restoring
+billing re-enabled it. The external availability canary added during the outage
+recorded the recovery between run
+[30980051802](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30980051802)
+(failing) and run
+[30983697774](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30983697774)
+(passing).
+
+The deployed baseline is commit `0b25d5f1`. Two things on `main` are not part of
+it and a judge will not see them at the URL: the dependency-aware health probe,
+so `/api/health` still reports `"dependencies":"unchecked"`, and the Memory
+Resolution Loop, whose route returns 404. The hosted CI evidence is independent
+of all of this — every run link in this repository is a completed GitHub Actions
+run bound to an exact commit and remains viewable.
 
 **Latest hosted evidence for the deployed commit:** [CI run
 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580)
