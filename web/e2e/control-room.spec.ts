@@ -435,11 +435,38 @@ test("service failure never becomes a fabricated answer", async ({ page }) => {
   );
 
   await page.goto("/");
-  await page.getByRole("button", { name: question }).click();
+  await page.getByRole("button", { name: new RegExp(question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
 
   await expect(
     page.getByRole("heading", { name: "The question was not answered." })
   ).toBeVisible();
   await expect(page.getByText("No cached or fabricated answer is shown.")).toBeVisible();
   await expect(page.getByText(/€15,375/)).toHaveCount(0);
+});
+
+test("executive user journey verifies KPI badges and guided scenarios A, B, C, D", async ({ page }) => {
+  await page.goto("/");
+
+  // Verify Executive KPI Badges
+  await expect(page.getByText("100% Cited")).toBeVisible();
+  await expect(page.getByText("Compliant (Art 14/50)")).toBeVisible();
+  await expect(page.getByText("< 1500 ms")).toBeVisible();
+  await expect(page.getByText("SHA-256 Sealed")).toBeVisible();
+
+  // Verify 3-Step User Journey Guide
+  await expect(page.getByText("Operational User Journey")).toBeVisible();
+  await expect(page.getByText("Recall or Ingest Facts")).toBeVisible();
+  await expect(page.getByText("Inspect Discrepancy Radar")).toBeVisible();
+  await expect(page.getByText("Human Gate & SHA-256 Receipt")).toBeVisible();
+
+  // Verify Executive Guided Scenario Cards
+  await expect(page.getByText("SCENARIO A — INVOICE DISCREPANCY")).toBeVisible();
+  await expect(page.getByText("SCENARIO B — MISSING PAYMENT PROOF")).toBeVisible();
+  await expect(page.getByText("SCENARIO C — CONFLICT AUDIT")).toBeVisible();
+  await expect(page.getByText("SCENARIO D — CFO CLOSE GATE")).toBeVisible();
+
+  // Click Scenario A and verify recall execution
+  await page.getByRole("button", { name: new RegExp(question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
+  await expect(page.getByText(/memories recalled/)).toBeVisible();
+  await expect(page.getByText("Exact returned evidence")).toBeVisible();
 });
