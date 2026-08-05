@@ -6,18 +6,29 @@ The unrestricted production application is:
 
 **https://d2s5v0o0eg2aaw.cloudfront.net**
 
-## Current runtime state — 2026-08-04
+## Current runtime state — 2026-08-05
 
-The application's data plane is down. `/api/health` answers 200 but the deployed
-build's endpoint is a reachability stub reporting `"dependencies":"unchecked"`.
-`main` now performs a real bounded CockroachDB probe and reports
-`ready`/`degraded`, and adds a scheduled external availability canary, but
-neither is live until the next release. `/api/proof`,
-`/api/audit`, and `POST /api/recall` have returned HTTP 500 since 2026-08-02
-11:20 UTC; the last successful data-plane response was 2026-07-31 01:22 UTC. The
-CockroachDB Cloud Basic cluster reached its Request Unit allowance and is
-disabled, so the runtime principal is refused with `the maximum number of
-allowed connections is 0`.
+The application answers. `/api/health`, `/api/proof`, `/api/audit` and
+`POST /api/recall` all return 200, and a recall over the canonical fixtures
+returns cited evidence together with the `INV-2043` contradiction and the
+`PAY-118` absence.
+
+It did not, from 2026-08-02 11:20 UTC to 2026-08-05: those three endpoints
+returned HTTP 500 because the CockroachDB Cloud Basic cluster was disabled and
+refused the runtime principal with `the maximum number of allowed connections is
+0`. The cause was the cluster's billing state, not the code or the deployment,
+and restoring billing re-enabled it. The external
+[availability canary](../.github/workflows/live-availability.yml) recorded the
+recovery between run
+[30980051802](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30980051802)
+(failing, 06:03 UTC) and run
+[30983697774](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30983697774)
+(passing, 07:05 UTC).
+
+Two things on `main` are still not released, so a judge will not see them at the
+URL: the dependency-aware health probe — `/api/health` therefore still reports
+`"dependencies":"unchecked"` — and the Memory Resolution Loop, whose
+`/api/resolution/session` route returns 404 against the deployed baseline.
 
 Every run link in this ledger is a completed GitHub Actions run bound to an exact
 commit and remains viewable regardless of the cluster's state. The measurements
