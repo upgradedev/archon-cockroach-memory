@@ -153,13 +153,13 @@ export async function handleSandboxRecall(
       body: {
         ok: true,
         answer: response.answer,
-        recalled: response.recalled,
+        recalled: response.hits.length,
         grounding: {
-          status: response.groundingStatus,
+          status: response.grounding.status,
           citations: response.citations.map((c) => ({
             id: c.memoryId,
             source: c.sourceRef ?? "JUDGE-DOC",
-            fact: c.fact,
+            fact: c.content,
           })),
         },
       },

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 const REAL_DB = !!process.env.DATABASE_URL;
 if (!REAL_DB) await import("./db_mock.js");
 
-import { handleSandboxIngest, handleSandboxRecall } from "../src/http/sandbox-handler.ts";
+import { handleSandboxIngest, handleSandboxRecall } from "../src/http/sandbox-handler.js";
 import { FakeEmbedder } from "../src/memory/embeddings.js";
 import { FakeNarrator } from "../src/agents/narrator.js";
 import { MemoryAgent } from "../src/agents/memory-agent.js";
