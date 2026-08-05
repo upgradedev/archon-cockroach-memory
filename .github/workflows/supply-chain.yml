@@ -1989,8 +1989,21 @@ jobs:
                   (.sourceRange.startLine | tostring) + "-" +
                   (.sourceRange.endLine | tostring)))' \
             "$EVIDENCE_ROOT/iac/trivy-iac-status.json" >/dev/null
-          jq -e '
-            [
+          # Trivy names CauseMetadata.Resource two ways. A finding raised
+          # against a complete resource block carries the
+          # "target:startLine-endLine" source range; a finding it pins to one
+          # resolved property line carries the logical resource id instead.
+          # AWS-0011 moved to the second shape when Distribution.WebACLId
+          # became an Fn::If. Both shapes are pinned exactly, per
+          # (target, ruleId), and every raw location is bound to the
+          # source-validated compatibility record it is published as.
+          jq -e \
+            --slurpfile status \
+              "$EVIDENCE_ROOT/iac/trivy-iac-status.json" '
+            {
+              "aws/template.yaml|AWS-0011": "logical-resource"
+            } as $pinnedResourceShapes
+            | [
               .Results[]? as $result
               | $result.Misconfigurations[]?
               | select(.Status == "FAIL")
@@ -2004,15 +2017,32 @@ jobs:
                 "aws/template.yaml|AWS-0132"
               ] and
               all($findings[];
+                . as $entry |
                 .finding.Type == "CloudFormation Security Check" and
                 (.finding.AVDID == null) and
                 .finding.Severity == "HIGH" and
-                (.finding.CauseMetadata.Resource |
-                  test("^aws/(template|bootstrap-oidc)\\.yaml:[1-9][0-9]*-[1-9][0-9]*$")) and
-                .finding.CauseMetadata.Resource ==
-                  (.target + ":" +
-                   (.finding.CauseMetadata.StartLine | tostring) + "-" +
-                   (.finding.CauseMetadata.EndLine | tostring)))
+                (($status[0].compatibilities |
+                  map(select(
+                    .ruleId == $entry.finding.ID and
+                    .target == $entry.target
+                  ))) as $contracts |
+                  ($contracts | length) == 1 and
+                  ($contracts[0] as $contract |
+                  $contract.scannerResource ==
+                    ($contract.target + ":" +
+                     ($contract.sourceRange.startLine | tostring) + "-" +
+                     ($contract.sourceRange.endLine | tostring)) and
+                  $entry.finding.CauseMetadata.StartLine ==
+                    $contract.sourceRange.startLine and
+                  $entry.finding.CauseMetadata.EndLine ==
+                    $contract.sourceRange.endLine and
+                  $entry.finding.CauseMetadata.Resource ==
+                    (if $pinnedResourceShapes[
+                          $entry.target + "|" + $entry.finding.ID
+                        ] == "logical-resource"
+                     then $contract.logicalResource
+                     else $contract.scannerResource
+                     end))))
           ' "$EVIDENCE_ROOT/iac/trivy-iac.json" >/dev/null
           jq -e '
             length == 4 and
