@@ -1,0 +1,82 @@
+name: Receipt replay proof (temporary)
+
+# Temporary. The release-receipt step only runs on a push to main, so a pull
+# request cannot execute it. This job extracts that step verbatim from
+# supply-chain.yml and replays it against the recorded evidence of the run
+# that failed, so the fix is proven before it reaches main. Delete before
+# merge.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    name: Replay the release receipt against recorded evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EVIDENCE_RUN_ID: "30927000378"
+      EVIDENCE_RUN_ATTEMPT: "1"
+      EVIDENCE_SHA: 25c8f4434dc42771e1262aad30441f01c9868d77
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download the recorded exact-run evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evidence_root="${RUNNER_TEMP:?}/archon-supply-chain-release-inputs"
+          for scope in static iac sbom; do
+            mkdir -p "$evidence_root/$scope"
+            gh run download "$EVIDENCE_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "supply-chain-${scope}-${EVIDENCE_SHA}-${EVIDENCE_RUN_ID}-${EVIDENCE_RUN_ATTEMPT}" \
+              --dir "$evidence_root/$scope"
+          done
+          find "$evidence_root" -type f | LC_ALL=C sort
+
+      - name: Replay the receipt step verbatim
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="${RUNNER_TEMP:?}/release-receipt-step.sh"
+          python3 - "$script" <<'PY'
+          import sys
+          import yaml
+
+          target = "Create fail-closed exact-SHA release receipt"
+          with open(".github/workflows/supply-chain.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          steps = document["jobs"]["release-evidence"]["steps"]
+          matches = [step for step in steps if step.get("name") == target]
+          if len(matches) != 1:
+              raise SystemExit(f"expected exactly one {target!r} step")
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              handle.write(matches[0]["run"])
+          PY
+          test -s "$script"
+          env \
+            GITHUB_EVENT_NAME=push \
+            GITHUB_REF=refs/heads/main \
+            GITHUB_RUN_ID="$EVIDENCE_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="$EVIDENCE_RUN_ATTEMPT" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            EVIDENCE_ROOT="${RUNNER_TEMP:?}/archon-supply-chain-release-inputs" \
+            RELEASE_ROOT="${RUNNER_TEMP:?}/archon-supply-chain-release" \
+            STATIC_ARTIFACT="supply-chain-static-${EVIDENCE_SHA}-${EVIDENCE_RUN_ID}-${EVIDENCE_RUN_ATTEMPT}" \
+            IAC_ARTIFACT="supply-chain-iac-${EVIDENCE_SHA}-${EVIDENCE_RUN_ID}-${EVIDENCE_RUN_ATTEMPT}" \
+            SBOM_ARTIFACT="supply-chain-sbom-${EVIDENCE_SHA}-${EVIDENCE_RUN_ID}-${EVIDENCE_RUN_ATTEMPT}" \
+            SOURCE_SHA="$EVIDENCE_SHA" \
+            bash -x "$script"
