@@ -1,5 +1,5 @@
 // Unit tests for Sandboxed Judge Ingestion (Workstream W6)
-import { test, before, after } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 const REAL_DB = !!process.env.DATABASE_URL;
@@ -78,4 +78,9 @@ test("Sandbox Recall: recalls custom ingested fact through Lambda handler", asyn
   assert.equal(body.ok, true);
   assert.ok(typeof body.answer === "string");
   assert.ok(body.grounding);
+});
+
+test("Sandbox Recall: validates question parameter directly", async () => {
+  assert.equal((await handleSandboxRecall(null)).status, 400);
+  assert.equal((await handleSandboxRecall({})).status, 400);
 });
