@@ -2985,7 +2985,7 @@ test("readiness: gitleaks scans the exact tree and only protected-main HEAD ance
 test("readiness: every workflow action and Node runtime is pinned exhaustively", () => {
   const workflows = repositoryWorkflowTexts();
   const versions = workflows.flatMap(setupNodeVersions);
-  assert.equal(EXPECTED_SETUP_NODE_STEPS, 31);
+  assert.equal(EXPECTED_SETUP_NODE_STEPS, 32);
   assert.equal(versions.length, EXPECTED_SETUP_NODE_STEPS);
   assert.deepEqual(
     [...new Set(versions)],
@@ -3020,7 +3020,7 @@ test("readiness: every workflow action and Node runtime is pinned exhaustively",
     allCheckoutStepsDisableCredentialPersistence(workflows),
     true
   );
-  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 216);
+  assert.equal(EXPECTED_WORKFLOW_ACTION_REFS, 218);
 
   const setupNodeSha =
     "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e";
@@ -4874,6 +4874,14 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     ),
     "utf8"
   );
+  // The receipt's evidence assertions live here rather than inline in the
+  // workflow step, so that a pull request can execute them. The step is gated
+  // on a push to main and is skipped on pull requests, which is how a Trivy
+  // cause-metadata shape change once reached main with every check green.
+  const releaseEvidenceContract = readFileSync(
+    new URL("../.github/scripts/assert-release-evidence.sh", import.meta.url),
+    "utf8"
+  );
   const policyEffectiveTrivy = supplyChain.match(
     /(?:^|\r?\n)      - name: Materialize policy-effective Trivy IaC SARIF\r?\n[\s\S]*?(?=\r?\n      - name: Upload policy-effective Trivy IaC SARIF\r?\n)/u
   )?.[0];
@@ -5190,10 +5198,31 @@ test("readiness: exact-SHA supply-chain evidence and candidate provenance gate p
     supplyChain,
     /lint_template finops aws\/finops\.yaml/u
   );
-  assert.match(supplyChain, /iac\/guard-finops\.txt/u);
+  assert.match(releaseEvidenceContract, /iac\/guard-finops\.txt/u);
   assert.match(
     supplyChain,
     /"aws\/finops\.yaml"/u
+  );
+  // The receipt step must call the extracted contract rather than carry a
+  // second copy of it, and the contract must be self-tested on pull requests.
+  // A drifting duplicate is what let the receipt fail closed on main.
+  assert.match(
+    supplyChain,
+    /name: Create fail-closed exact-SHA release receipt[\s\S]*?bash \.github\/scripts\/assert-release-evidence\.sh/u
+  );
+  assert.match(
+    supplyChain,
+    /release-evidence-selftest\.mjs --self-test/u
+  );
+  assert.doesNotMatch(
+    releaseEvidenceContract,
+    /GITHUB_EVENT_NAME.*pull_request|--self-test|ARCHON_SKIP/u
+  );
+  // The derived values must not be written under the tree the receipt hashes
+  // into evidence-manifest.sha256, which deploy-aws.yml recomputes.
+  assert.match(
+    releaseEvidenceContract,
+    /RECEIPT_INPUTS_DIR must be outside EVIDENCE_ROOT/u
   );
   assert.deepEqual(JSON.parse(waivers), {
     schema_version: 1,

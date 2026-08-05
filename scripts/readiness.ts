@@ -33,8 +33,12 @@ export const SOURCE_FLOOR = Number(process.env.SOURCE_READINESS_FLOOR ?? 100);
 export const PINNED_NODE_VERSION = "22.23.1";
 export const PINNED_CODEQL_ACTION_SHA =
   "4187e74d05793876e9989daffde9c3e66b4acd07";
-export const EXPECTED_WORKFLOW_ACTION_REFS = 216;
-export const EXPECTED_SETUP_NODE_STEPS = 31;
+// 218 and 32 since the supply-chain workflow gained two pinned steps: a
+// credential-free checkout in release-evidence, which now needs the extracted
+// release-evidence contract on disk, and a pinned Node for the contract's
+// pull-request self-test. Both counts stay exact equality checks.
+export const EXPECTED_WORKFLOW_ACTION_REFS = 218;
+export const EXPECTED_SETUP_NODE_STEPS = 32;
 export const EXPECTED_COCKROACH_IMAGE_REFS = 9;
 export const EXPECTED_COMPOSE_IMAGE_REFS = 4;
 export const EXPECTED_DOCKERFILE_BASE_REFS = 0;
