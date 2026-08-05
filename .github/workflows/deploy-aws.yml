@@ -3210,7 +3210,7 @@ jobs:
                     .state == "inactive-not-provisioned"
                     or .state == "active"
                   )
-                  and .alarmCount == 4
+                  and .alarmCount == 5
                 )
               )
             ' "$proof" >/dev/null
@@ -6612,7 +6612,7 @@ jobs:
                     .state == "inactive-not-provisioned"
                     or .state == "active"
                   )
-                  and .alarmCount == 4
+                  and .alarmCount == 5
                 )
               )
             ' "$proof" >/dev/null

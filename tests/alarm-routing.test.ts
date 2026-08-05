@@ -323,6 +323,7 @@ function alarms(
       `${APP_NAME}-staging-lambda-canary-errors-v42`,
       `${APP_NAME}-staging-lambda-throttles`,
       `${APP_NAME}-staging-api-5xx`,
+      `${APP_NAME}-staging-api-availability`,
       ...(actionState === "none"
         ? []
         : [`${APP_NAME}-staging-routing-drill`]),
@@ -599,7 +600,7 @@ test("alarm routing: explicit false foundation remains safely inactive", () => {
     state: string;
   };
   assert.equal(proof.state, "inactive-not-provisioned");
-  assert.equal(proof.alarmCount, 4);
+  assert.equal(proof.alarmCount, 5);
   assert.equal(result.calls.length, 2);
   assert.match(result.calls[1] ?? "", /cloudwatch describe-alarms/u);
 });
@@ -727,12 +728,12 @@ test("alarm routing: proof rejects a weakened archive producer deny", () => {
   );
 });
 
-test("alarm routing: active verify accepts four deploy alarms plus the isolated drill probe", () => {
+test("alarm routing: active verify accepts five deploy alarms plus the isolated drill probe", () => {
   const result = runAlarmProof("verify", "active");
   assert.equal(result.process.status, 0, result.process.stderr);
   assert.equal(
     (JSON.parse(result.process.stdout) as { alarmCount: number }).alarmCount,
-    4
+    5
   );
   assert.equal(result.calls.length, 17);
 });

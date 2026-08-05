@@ -98,7 +98,8 @@ prove_alarm_configuration() {
       | [
           ($app + "-" + $environment + "-lambda-errors"),
           ($app + "-" + $environment + "-lambda-throttles"),
-          ($app + "-" + $environment + "-api-5xx")
+          ($app + "-" + $environment + "-api-5xx"),
+          ($app + "-" + $environment + "-api-availability")
         ] as $staticNames
       | ("^" + $app + "-" + $environment
           + "-lambda-canary-errors-v[0-9]+$") as $canaryPattern
@@ -115,10 +116,10 @@ prove_alarm_configuration() {
         ) as $expectedDrillCount
       | ($allAlarms | type == "array")
       and ((.CompositeAlarms // []) | length == 0)
-      and ($allAlarms | length) == (4 + $expectedDrillCount)
+      and ($allAlarms | length) == (5 + $expectedDrillCount)
       and ([$allAlarms[].AlarmName] | unique | length)
-        == (4 + $expectedDrillCount)
-      and ($deploymentAlarms | length) == 4
+        == (5 + $expectedDrillCount)
+      and ($deploymentAlarms | length) == 5
       and ($drillAlarms | length) == $expectedDrillCount
       and all(
         $staticNames[];
@@ -281,7 +282,7 @@ if [ "$alarm_parameter_state" = "false" ] &&
   alarm_count="null"
   if [ "$mode" = "verify" ]; then
     prove_alarm_configuration disabled ""
-    alarm_count="4"
+    alarm_count="5"
   fi
   jq -cn \
     --arg environment "$ENVIRONMENT" \
@@ -1177,7 +1178,7 @@ fi
 alarm_count="null"
 if [ "$mode" = "verify" ]; then
   prove_alarm_configuration routed "$topic_arn"
-  alarm_count="4"
+  alarm_count="5"
 fi
 
 jq -cn \
