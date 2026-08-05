@@ -1,10 +1,26 @@
 import { useState, type FormEvent } from "react";
 
-const SUGGESTED_QUESTIONS = [
-  "What was Helios SA’s true employer cost and how much was invisible on the bank statement?",
-  "Which payments are missing a matching source document?",
-  "Does the memory contain conflicting values for the same financial record?",
-  "What evidence should a CFO review before closing April 2026?",
+const EXECUTIVE_SCENARIOS = [
+  {
+    tag: "SCENARIO A — INVOICE DISCREPANCY",
+    question: "What was Helios SA’s true employer cost and how much was invisible on the bank statement?",
+    detail: "Cross-references Slack approval (€18.4k) vs M&A contract (€18.9k) to expose silent variance."
+  },
+  {
+    tag: "SCENARIO B — MISSING PAYMENT PROOF",
+    question: "Which payments are missing a matching source document?",
+    detail: "Identifies unanchored payment records (PAY-118) lacking bank receipt evidence."
+  },
+  {
+    tag: "SCENARIO C — CONFLICT AUDIT",
+    question: "Does the memory contain conflicting values for the same financial record?",
+    detail: "Surfaces all multi-session record collisions across the CockroachDB vector memory."
+  },
+  {
+    tag: "SCENARIO D — CFO CLOSE GATE",
+    question: "What evidence should a CFO review before closing April 2026?",
+    detail: "Executes complete-scope audit across employer costs, M&A clauses, and pending resolution loops."
+  }
 ] as const;
 
 interface QuestionComposerProps {
@@ -28,71 +44,77 @@ export function QuestionComposer({ isPending, onAsk }: QuestionComposerProps) {
 
   return (
     <section aria-labelledby="ask-title">
-      <div className="mb-6 flex items-end justify-between gap-6">
+      <div className="mb-6 flex items-end justify-between gap-6 border-b border-line pb-4">
         <div>
           <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.22em] text-ember">
-            Ask the memory
+            01 / Financial Query Engine
           </p>
-          <h2 id="ask-title" className="font-editorial text-4xl tracking-editorial text-paper sm:text-5xl">
-            Start with the evidence.
+          <h2 id="ask-title" className="font-editorial text-3xl tracking-editorial text-paper sm:text-4xl">
+            Ask the Memory Guardrail
           </h2>
         </div>
-        <span className="hidden font-mono text-[10px] uppercase tracking-[0.12em] text-muted sm:block">
-          Read-only / top 5
+        <span className="hidden font-mono text-[10px] uppercase tracking-[0.12em] text-mint sm:block">
+          C-SPANN Vector Search Active
         </span>
       </div>
 
-      <form className="border-y border-line py-5" onSubmit={submit}>
+      <form className="py-2" onSubmit={submit}>
         <label className="sr-only" htmlFor="memory-question">
           Financial question for the Archon memory
         </label>
         <textarea
           id="memory-question"
-          className="min-h-32 w-full resize-y bg-transparent font-editorial text-2xl leading-snug tracking-editorial text-paper outline-none placeholder:text-paper/25 focus-visible:ring-0 sm:text-3xl"
+          className="min-h-28 w-full resize-y bg-carbon/30 border border-line p-4 font-editorial text-xl leading-relaxed tracking-editorial text-paper outline-none placeholder:text-paper/30 focus:border-mint focus:ring-1 focus:ring-mint sm:text-2xl"
           value={question}
           onChange={(event) => setQuestion(event.target.value.slice(0, 500))}
-          placeholder="Ask what the books forgot to tell you…"
+          placeholder="Type your financial question or click an executive scenario below…"
           maxLength={500}
           rows={3}
           aria-describedby="question-help"
           disabled={isPending}
         />
-        <div className="mt-4 flex items-center justify-between gap-4">
+        <div className="mt-3 flex items-center justify-between gap-4">
           <p id="question-help" className="text-xs leading-5 text-muted">
-            Grounded recall over the fixed synthetic Helios SA memory.
+            Grounded recall over CockroachDB vector memory with line-by-line evidence citations.
           </p>
           <span className="font-mono text-[10px] text-muted" aria-label={`${question.length} of 500 characters`}>
             {question.length}/500
           </span>
         </div>
         <button
-          className="mt-5 inline-flex min-h-12 items-center gap-6 bg-paper px-5 py-3 text-xs font-bold uppercase tracking-[0.18em] text-ink transition hover:bg-mint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint focus-visible:ring-offset-4 focus-visible:ring-offset-ink disabled:cursor-not-allowed disabled:bg-paper/25 disabled:text-ink/60"
+          className="mt-4 inline-flex min-h-12 items-center gap-4 bg-paper px-6 py-3 text-xs font-bold uppercase tracking-[0.18em] text-ink transition hover:bg-mint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint focus-visible:ring-offset-4 focus-visible:ring-offset-ink disabled:cursor-not-allowed disabled:bg-paper/25 disabled:text-ink/60"
           type="submit"
           disabled={!normalizedQuestion || isPending}
         >
-          <span>{isPending ? "Retrieving evidence…" : "Ask Archon"}</span>
+          <span>{isPending ? "Retrieving & Citing Evidence…" : "Execute Financial Recall"}</span>
           <span aria-hidden="true">↗</span>
         </button>
       </form>
 
-      <div className="mt-6">
-        <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">
-          Suggested investigations
+      <div className="mt-8">
+        <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-ember">
+          Executive One-Click Guided Scenarios
         </p>
-        <div className="grid gap-px overflow-hidden border border-line bg-line sm:grid-cols-2">
-          {SUGGESTED_QUESTIONS.map((suggestion, position) => (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {EXECUTIVE_SCENARIOS.map((item) => (
             <button
-              key={suggestion}
-              className="group flex min-h-24 items-start gap-4 bg-ink px-4 py-4 text-left text-sm leading-5 text-paper/[0.72] transition hover:bg-carbon hover:text-paper focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint disabled:cursor-wait disabled:opacity-50"
+              key={item.tag}
+              className="group flex flex-col justify-between border border-line bg-carbon/40 p-4 text-left transition hover:border-mint hover:bg-carbon focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-mint disabled:cursor-wait disabled:opacity-50"
               type="button"
-              onClick={() => askSuggested(suggestion)}
+              onClick={() => askSuggested(item.question)}
               disabled={isPending}
             >
-              <span className="font-mono text-[10px] text-ember">0{position + 1}</span>
-              <span>{suggestion}</span>
-              <span className="ml-auto text-muted transition group-hover:translate-x-0.5 group-hover:text-mint" aria-hidden="true">
-                →
-              </span>
+              <div>
+                <span className="block font-mono text-[9px] font-bold tracking-widest text-mint uppercase mb-1">
+                  {item.tag}
+                </span>
+                <span className="text-xs font-semibold leading-snug text-paper group-hover:text-mint transition">
+                  "{item.question}"
+                </span>
+              </div>
+              <p className="mt-2 text-[11px] leading-4 text-muted border-t border-line/40 pt-2">
+                {item.detail}
+              </p>
             </button>
           ))}
         </div>

@@ -319,10 +319,10 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
   await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: "Memory that disagrees out loud." })
+    page.getByRole("heading", { name: /Financial Agent Memory/i })
   ).toBeVisible();
   await expect(
-    page.getByText("Fixed synthetic scope", { exact: true })
+    page.getByText("Canonical Scope", { exact: true })
   ).toBeVisible();
   await expect(page.getByText("API reachable")).toBeVisible();
 
@@ -395,9 +395,9 @@ test("judge journey exposes fixed scope, live proof, audit, and cited recall", a
 
   if (live) {
     await page.getByLabel("Financial question for the Archon memory").fill(question);
-    await page.getByRole("button", { name: /Ask Archon/ }).click();
+    await page.getByRole("button", { name: /Execute Financial Recall|Ask Archon/ }).click();
   } else {
-    await page.getByRole("button", { name: question }).click();
+    await page.getByRole("button", { name: new RegExp(question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
   }
 
   await expect(page.getByText(/memories recalled/)).toBeVisible();

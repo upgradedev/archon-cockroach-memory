@@ -20,7 +20,7 @@ describe("QuestionComposer", () => {
   it("prevents an empty custom question", async () => {
     render(<QuestionComposer isPending={false} onAsk={vi.fn()} />);
 
-    expect(screen.getByRole("button", { name: /ask archon/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /execute financial recall/i })).toBeDisabled();
   });
 
   it("trims and submits a bounded custom question", async () => {
@@ -32,7 +32,7 @@ describe("QuestionComposer", () => {
     );
 
     await user.type(question, "   Which invoice is missing?   ");
-    await user.click(screen.getByRole("button", { name: /ask archon/i }));
+    await user.click(screen.getByRole("button", { name: /execute financial recall/i }));
 
     expect(onAsk).toHaveBeenCalledWith("Which invoice is missing?");
 
@@ -49,7 +49,7 @@ describe("QuestionComposer", () => {
       screen.getByLabelText("Financial question for the Archon memory"),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: /retrieving evidence/i }),
+      screen.getByRole("button", { name: /retrieving & citing evidence/i }),
     ).toBeDisabled();
     const suggestions = screen
       .getAllByRole("button")

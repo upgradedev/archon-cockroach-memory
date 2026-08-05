@@ -83,9 +83,9 @@ describe("Masthead and Hero", () => {
     render(<Hero />);
 
     expect(
-      screen.getByRole("heading", { name: /Memory that disagrees out loud/ }),
+      screen.getByRole("heading", { name: /Financial Agent Memory That Disagrees Out Loud/ }),
     ).toBeInTheDocument();
     expect(screen.getByText("Helios SA")).toBeInTheDocument();
-    expect(screen.getByText(/never customer data/i)).toBeInTheDocument();
+    expect(screen.getByText(/Sandbox test writes expire automatically/i)).toBeInTheDocument();
   });
 });
