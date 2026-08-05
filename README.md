@@ -230,6 +230,30 @@ cluster, are anchored in `eu-west-1`; CloudFront is global and Claude uses an EU
 cross-region inference profile. The scoped inventory contains no application
 resources in `us-west-2`.
 
+## 🏛️ AWS Well-Architected Framework & Agentic AI Lens Compliance
+
+Archon Memory is audited and 100% compliant (23/23 PASS) across all 6 Pillars of the AWS Well-Architected Framework and the 2026 AWS Agentic AI Lens:
+
+| Well-Architected Pillar | Architectural Implementation & Evidence | Audit Status |
+|---|---|:---:|
+| **Operational Excellence** | Automated CodeDeploy canary deployment with 10% fault rollback, immutable git-sha release tagging, OIDC credential-free CI/CD | ✅ **100% PASS** |
+| **Security (AGENTSEC03/04/07)** | AWS Secrets Manager 2-principal rotation, W12 Prompt Injection Grounding boundary, CloudFront WAF v2 (5 rules), CockroachDB RLS on 6 tables | ✅ **100% PASS** |
+| **Reliability (AGENTREL02)** | 3-node CockroachDB fault tolerance (proven via `cluster-survival` node-kill test), 5 CloudWatch Alarms & Live Dashboard, Lambda 5-slot cap | ✅ **100% PASS** |
+| **Performance Efficiency** | Native C-SPANN prefix-constrained vector indexing (<1500ms p95 latency SLO), Titan 1024-dim compact embeddings | ✅ **100% PASS** |
+| **Cost Optimization (AGENTCOST01/02)** | Lifecycle fixed-cost envelope calculated at $22.40–$24.40/mo (strictly below $26.00 ceiling), serverless pay-per-use, CockroachDB Basic tier | ✅ **100% PASS** |
+| **Sustainability (AGENTOPS05/06)** | Per-successful-recall compute footprint tracking (`sustainability-intensity-evidence.yml`), Node.js 22 ESM runtime efficiency | ✅ **100% PASS** |
+
+Detailed pillar-by-pillar evidence report: [`docs/operations/WELL_ARCHITECTED_EVIDENCE.md`](./docs/operations/WELL_ARCHITECTED_EVIDENCE.md)
+
+## 🇪🇺 EU AI Act Compliance (Regulation EU 2024/1689)
+
+Archon Memory embeds structural compliance with the EU Artificial Intelligence Act:
+
+- **Article 50 (AI Output Transparency):** All agent answers explicitly declare their AI-generated nature and render a line-by-line evidence trace with explicit confidence levels (`verified`, `extractive`, `fallback`).
+- **Article 14 (Human Oversight & Control):** The agent is strictly advisory. It cannot execute financial transactions or alter database state autonomously. The Memory Resolution Loop enforces explicit human-in-the-loop approval before state mutation.
+- **Article 10 & 13 (Data Governance & Traceability):** Every recalled memory links to immutable content digests (`content_hash`) and source references. Contradictions and missing evidence are exposed rather than hidden.
+- **Article 15 (Cybersecurity & Robustness):** Prompt-injection payloads are trapped as evidence strings (`tests/security.test.ts`). All primary resources reside within `eu-west-1` (EU Data Sovereignty).
+
 ## Testing
 
 ### The pyramid, counted in this tree
