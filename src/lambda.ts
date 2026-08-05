@@ -21,6 +21,10 @@ import {
   handleGetResolutionSession,
   handleResolutionDecision,
 } from "./http/resolution-handler.js";
+import {
+  handleSandboxIngest,
+  handleSandboxRecall,
+} from "./http/sandbox-handler.js";
 import type { MemoryAgent } from "./agents/memory-agent.js";
 import type { ResolutionStore } from "./memory/resolution.js";
 
@@ -146,6 +150,8 @@ export function createHandler(
         "/recall",
         "/resolution/session",
         "/resolution/decision",
+        "/sandbox/ingest",
+        "/sandbox/recall",
       ]);
       if (!postPaths.has(pathname)) {
         return json(404, { error: "not found" });
@@ -172,6 +178,16 @@ export function createHandler(
         req = JSON.parse(bodyBytes.toString("utf8")) as unknown;
       } catch {
         return json(400, { error: "request body must be valid JSON" });
+      }
+      if (pathname === "/sandbox/ingest") {
+        const result = await handleSandboxIngest(req);
+        return json(result.status, result.body);
+      }
+      if (pathname === "/sandbox/recall") {
+        const result = dependencies.agent
+          ? await handleSandboxRecall(req, dependencies.agent)
+          : await handleSandboxRecall(req);
+        return json(result.status, result.body);
       }
       if (pathname === "/resolution/session") {
         const result = await handleCreateResolutionSession(

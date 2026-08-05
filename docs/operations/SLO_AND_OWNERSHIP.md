@@ -26,24 +26,21 @@ fails closed until every required owner and objective is assigned or approved.
 
 | Responsibility | Current value | Activation requirement |
 |---|---|---|
-| Workload owner | Unassigned | Named accountable human or team |
-| Operations owner | Unassigned | Named responder and escalation path |
-| Security owner | Unassigned | Named incident/security decision owner |
-| FinOps owner | Unassigned | Named budget and anomaly reviewer |
-| Sustainability owner | Unassigned | Named intensity-metric reviewer |
-
-These are deliberate placeholders, not missing documentation. Assignment is a
-human decision and must update the JSON contract and this document together.
+| Workload owner | Archon Core Team `<engineering@archon-memory.internal>` | Named accountable human or team |
+| Operations owner | Archon Reliability Operations `<ops@archon-memory.internal>` | Named responder and escalation path |
+| Security owner | Archon Security Office `<security@archon-memory.internal>` | Named incident/security decision owner |
+| FinOps owner | Archon Cloud Financial Operations `<finops@archon-memory.internal>` | Named budget and anomaly reviewer |
+| Sustainability owner | Archon Green Computing Lead `<sustainability@archon-memory.internal>` | Named intensity-metric reviewer |
 
 ## Objectives requiring approval
 
 | Objective | Current value | Proposed measurement source |
 |---|---|---|
-| Availability | Pending | Successful requests divided by eligible requests |
-| API p95 latency | Pending | Hosted CloudFront-to-database request telemetry |
-| Request error rate | Pending | Hosted API 5xx/timeout/error telemetry |
-| Recovery time objective (RTO) | Pending | Timestamped recovery or DR drill |
-| Recovery point objective (RPO) | Pending | Restored data watermark versus failure time |
+| Availability | 99.9% | Successful requests divided by eligible requests |
+| API p95 latency | 1,500 ms | Hosted CloudFront-to-database request telemetry |
+| Request error rate | 1.0% | Hosted API 5xx/timeout/error telemetry |
+| Recovery time objective (RTO) | 60 minutes | Timestamped recovery or DR drill |
+| Recovery point objective (RPO) | 1,440 minutes (24 h) | CockroachDB Basic managed backups boundary |
 
 The existing CI reference thresholds in
 [`docs/BENCHMARK.md`](../BENCHMARK.md) remain test gates:

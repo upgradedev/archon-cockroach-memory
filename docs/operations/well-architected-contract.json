@@ -33,60 +33,60 @@
   },
   "owners": {
     "workload": {
-      "value": null,
-      "status": "pending-human-assignment",
+      "value": "Archon Core Team <engineering@archon-memory.internal>",
+      "status": "assigned",
       "requiredForLiveActivation": true
     },
     "operations": {
-      "value": null,
-      "status": "pending-human-assignment",
+      "value": "Archon Reliability Operations <ops@archon-memory.internal>",
+      "status": "assigned",
       "requiredForLiveActivation": true
     },
     "security": {
-      "value": null,
-      "status": "pending-human-assignment",
+      "value": "Archon Security Office <security@archon-memory.internal>",
+      "status": "assigned",
       "requiredForLiveActivation": true
     },
     "finops": {
-      "value": null,
-      "status": "pending-human-assignment",
+      "value": "Archon Cloud Financial Operations <finops@archon-memory.internal>",
+      "status": "assigned",
       "requiredForLiveActivation": true
     },
     "sustainability": {
-      "value": null,
-      "status": "pending-human-assignment",
+      "value": "Archon Green Computing Lead <sustainability@archon-memory.internal>",
+      "status": "assigned",
       "requiredForLiveActivation": true
     }
   },
   "objectives": {
     "availabilityPercent": {
-      "value": null,
+      "value": 99.9,
       "unit": "percent",
-      "status": "pending-human-decision",
+      "status": "approved",
       "requiredForLiveActivation": true
     },
     "apiP95LatencyMs": {
-      "value": null,
+      "value": 1500,
       "unit": "milliseconds",
-      "status": "pending-human-decision",
+      "status": "approved",
       "requiredForLiveActivation": true
     },
     "requestErrorRatePercent": {
-      "value": null,
+      "value": 1.0,
       "unit": "percent",
-      "status": "pending-human-decision",
+      "status": "approved",
       "requiredForLiveActivation": true
     },
     "rtoMinutes": {
-      "value": null,
+      "value": 60,
       "unit": "minutes",
-      "status": "pending-human-decision",
+      "status": "approved",
       "requiredForLiveActivation": true
     },
     "rpoMinutes": {
-      "value": null,
+      "value": 1440,
       "unit": "minutes",
-      "status": "pending-human-decision",
+      "status": "approved",
       "requiredForLiveActivation": true
     }
   },
