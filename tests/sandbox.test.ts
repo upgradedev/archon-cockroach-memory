@@ -19,7 +19,7 @@ after(async () => {
 test("Sandbox Ingest: validates request body shape", async () => {
   assert.equal((await handleSandboxIngest(null)).status, 400);
   assert.equal((await handleSandboxIngest({})).status, 400);
-  assert.equal((await handleSandboxIngest({ fact: "short" })).status, 400);
+  assert.equal((await handleSandboxIngest({ fact: "abc" })).status, 400);
 });
 
 test("Sandbox Ingest: ingests custom fact and returns session ID, memory ID and TTL info", async () => {
