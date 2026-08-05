@@ -101,8 +101,6 @@ RF=3 placement, and recall after single-node loss. These are explicitly
 synthetic/representative evaluations, not customer production data or human
 outcome evidence.
 
-## Why it matters
-
 Month-end close, payroll review, and audit preparation depend on facts written
 across different sessions and source documents. Archon Memory targets the
 failure modes that ordinary semantic search can hide: a stale amount outranking
@@ -110,6 +108,26 @@ the confirmed one, an untraceable answer, a referenced payment that was never
 stored, or a fluent model response that changes the numbers. It gives finance
 operators inspectable evidence before they approve or escalate an action; it
 does not claim fabricated savings or autonomous financial authority.
+
+## AWS Well-Architected & EU AI Act Compliance
+
+### 🏛️ AWS Well-Architected Framework & 2026 Agentic AI Lens (6/6 Pillars)
+
+Archon Memory undergoes an automated 29-check CI audit (`npm run readiness`) covering all 6 Pillars of the AWS Well-Architected Framework and the 2026 AWS Agentic AI Lens:
+
+- **Operational Excellence:** Automated CodeDeploy canary deployment with 10% fault rollback, OIDC credential-free deployment, immutable git-sha release tagging.
+- **Security (AGENTSEC03/04/07):** Two-principal AWS Secrets Manager rotation, W12 Prompt Injection Grounding boundary, CloudFront WAF v2 (5 rules), CockroachDB RLS on 6 tables.
+- **Reliability (AGENTREL02):** 3-node CockroachDB fault-tolerance (proven via `cluster-survival` node-kill test), 5 CloudWatch Alarms & Live Dashboard, Lambda 5-slot reserved concurrency cap.
+- **Performance Efficiency:** Native C-SPANN prefix-constrained vector search (<1500ms p95 latency SLO), Titan 1024-dim compact embeddings.
+- **Cost Optimization (AGENTCOST01/02):** Lifecycle fixed-cost envelope calculated at $22.40–$24.40/mo (strictly below $26.00 ceiling), serverless pay-per-use, CockroachDB Basic tier.
+- **Sustainability (AGENTOPS05/06):** Per-successful-recall compute footprint tracking (`sustainability-intensity-evidence.yml`).
+
+### 🇪🇺 EU AI Act Compliance (Regulation EU 2024/1689)
+
+- **Article 50 (Transparency):** AI outputs explicitly display an evidence trace with confidence levels (`verified`, `extractive`, `fallback`).
+- **Article 14 (Human Oversight):** The agent is strictly advisory (read-only). State mutations require explicit human approval via the Memory Resolution Loop.
+- **Article 10 & 13 (Governance & Traceability):** Every recalled memory links to immutable content digests (`content_hash`) and source references.
+- **Article 15 (Cybersecurity & Robustness):** Prompt-injection payloads are trapped as evidence strings (`tests/security.test.ts`). All primary resources reside within `eu-west-1` (EU Data Sovereignty).
 
 ## How we used CockroachDB
 
