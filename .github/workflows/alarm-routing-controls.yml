@@ -808,7 +808,7 @@ jobs:
                 and .environment == $environment
                 and .dedicatedDrillQueueProven
                   == ($environment == "staging")
-                and .alarmCount == 4
+                and .alarmCount == 5
               ' "$proof" >/dev/null
           done
 

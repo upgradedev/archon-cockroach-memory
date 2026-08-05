@@ -31,14 +31,28 @@ import { parseDocument, type CollectionTag, type ScalarTag } from "yaml";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE_ROOT = join(ROOT, "aws");
 
-// Amazon SNS accepts only these eight topic-level actions in a topic policy,
-// and rejects every wildcard form outright.
+// The actions a topic resource policy accepts, taken verbatim from the "Valid
+// Amazon SNS policy actions" table in the Amazon SNS Developer Guide:
+// https://docs.aws.amazon.com/sns/latest/dg/sns-access-policy-language-api-permissions-reference.html
+//
+// This is a topic-scoped set, which is why it excludes account-level actions
+// such as sns:CreateTopic and sns:ListTopics: those name no topic, so they can
+// only be granted in an identity policy. Wildcards are rejected outright, which
+// is what "Action: sns:*" learned the expensive way in PR #84.
+//
+// The templates under aws/ deliberately enumerate a narrower least-privilege
+// subset of this list. That is not drift, and the two must not be "corrected"
+// into each other: this constant is the ceiling AWS enforces, not the floor the
+// templates are obliged to reach.
 const SNS_TOPIC_POLICY_ACTIONS = [
   "sns:AddPermission",
   "sns:DeleteTopic",
+  "sns:GetDataProtectionPolicy",
   "sns:GetTopicAttributes",
   "sns:ListSubscriptionsByTopic",
+  "sns:ListTagsForResource",
   "sns:Publish",
+  "sns:PutDataProtectionPolicy",
   "sns:RemovePermission",
   "sns:SetTopicAttributes",
   "sns:Subscribe",
@@ -404,11 +418,14 @@ export function snsTopicActionViolations(templates: Template[]): string[] {
           if (allowed.has(name.toLowerCase())) continue;
           violations.push(
             `${policy.path} → ${policy.logicalId} ${label}: Action ${name} is ` +
-              `not a topic-level SNS action. AWS rule: an SNS topic policy ` +
-              `accepts only the eight actions ` +
-              `${SNS_TOPIC_POLICY_ACTIONS.join(", ")} and rejects the wildcard ` +
-              `outright — "Invalid parameter: Policy statement action out of ` +
-              `service scope!"`
+              `not a topic-level SNS action. AWS rule: a topic resource policy ` +
+              `accepts only the topic-scoped actions listed under "Valid ` +
+              `Amazon SNS policy actions" — ` +
+              `${SNS_TOPIC_POLICY_ACTIONS.join(", ")} — and rejects every ` +
+              `wildcard form and every account-level action (sns:CreateTopic, ` +
+              `sns:ListTopics) outright: "Invalid parameter: Policy statement ` +
+              `action out of service scope!". See ` +
+              `https://docs.aws.amazon.com/sns/latest/dg/sns-access-policy-language-api-permissions-reference.html`
           );
         }
       }
@@ -548,7 +565,7 @@ test("every AWS::SNS::TopicPolicy statement names only the topic it configures",
   assert.deepEqual(violations, [], report(violations));
 });
 
-test("every AWS::SNS::TopicPolicy action is one of the eight topic-level SNS actions", () => {
+test("every AWS::SNS::TopicPolicy action is a topic-scoped SNS action", () => {
   const violations = snsTopicActionViolations(TEMPLATES);
   assert.deepEqual(violations, [], report(violations));
 });
@@ -625,6 +642,31 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
+`;
+
+// An account-level action names no topic, so it is only ever valid in an
+// identity policy. It is the shape a reader is most likely to reach for when
+// widening a topic policy, and the allowlist has to keep rejecting it.
+const FIXTURE_ACCOUNT_LEVEL_ACTION = `
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  StagingAlarmTopic:
+    Type: AWS::SNS::Topic
+  StagingAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref StagingAlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountTopicAdministration
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - sns:CreateTopic
+              - sns:ListTopics
+            Resource: !Ref StagingAlarmTopic
 `;
 
 // Fn::If resolves to one branch at deploy time, so a rule that only holds on
@@ -780,6 +822,20 @@ test("the oracle rejects the sns:* wildcard SNS rejected (PR #84)", () => {
   assert.equal(snsTopicActionViolations(templates).length, 1);
   assert.deepEqual(snsTopicCardinalityViolations(templates), []);
   assert.deepEqual(snsTopicResourceViolations(templates), []);
+});
+
+test("the oracle rejects account-level actions that name no topic", () => {
+  const templates = fixture(FIXTURE_ACCOUNT_LEVEL_ACTION);
+  const violations = snsTopicActionViolations(templates);
+  assert.equal(violations.length, 2);
+  assert.match(
+    violations[0],
+    /Action sns:CreateTopic is not a topic-level SNS action/u
+  );
+  assert.match(
+    violations[1],
+    /Action sns:ListTopics is not a topic-level SNS action/u
+  );
 });
 
 test("the oracle reads both branches of an Fn::If, not the convenient one", () => {

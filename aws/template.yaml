@@ -599,18 +599,35 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AppName}-${Environment}-lambda-errors"
-      AlarmDescription: Lambda errors detected across the public judge API function
+      AlarmDescription: >-
+        Lambda errors in two separate half-hour windows within two hours,
+        across the public judge API function
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
         - Name: FunctionName
           Value: !Ref ArchonFunction
       Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
+      # Sized against the only traffic this workload actually receives. The
+      # hosted demo has no organic users: every request comes from the
+      # live-availability probe, scheduled at :09 and :39 and therefore
+      # delivering three requests roughly twice an hour. Measured GitHub
+      # Actions drift pushes the gap between consecutive probes to ~90 minutes.
+      #
+      # A 30-minute period holds one whole probe cycle, so one probe is one
+      # datapoint rather than one breaching minute followed by 29 empty ones.
+      # Four periods give a two-hour window, which contains two distinct probe
+      # cycles even at the measured 90-minute worst case, and requiring two of
+      # them means a single failed request can no longer page. Sustained
+      # failure still surfaces within about an hour.
+      Period: 1800
+      EvaluationPeriods: 4
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
+      # Correct for an error alarm specifically: no traffic means no errors,
+      # not a healthy service. Silence is ApiAvailabilityAlarm's job, and that
+      # alarm treats it as breaching.
       TreatMissingData: notBreaching
       AlarmActions: !If
         - HasAlarmTopic
@@ -641,9 +658,19 @@ Resources:
         - Name: ExecutedVersion
           Value: !GetAtt ArchonFunction.Version.Version
       Statistic: Sum
+      # Deliberately faster than the operational alarms, because this one is
+      # the Canary10Percent5Minutes rollback gate and has to reach a verdict
+      # inside the shift. It can afford a one-minute period: the deploy step
+      # drives a continuous probe loop for the whole canary, so this metric has
+      # dense per-minute data exactly when the alarm matters.
+      #
+      # Two of the last three minutes, rather than the first single minute, so
+      # one cold-start error no longer rolls back an otherwise healthy release.
+      # A candidate that is genuinely broken fails every probe and still trips
+      # the gate within the shift.
       Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
@@ -661,16 +688,21 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AppName}-${Environment}-lambda-throttles"
-      AlarmDescription: Reserved-concurrency or account-level throttles detected
+      AlarmDescription: >-
+        Reserved-concurrency or account-level throttles in two separate
+        half-hour windows within two hours
       Namespace: AWS/Lambda
       MetricName: Throttles
       Dimensions:
         - Name: FunctionName
           Value: !Ref ArchonFunction
       Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
+      # Same window as LambdaErrorAlarm and for the same reason: the probe
+      # cadence, not the metric, is what bounds how quickly a real signal can
+      # accumulate here.
+      Period: 1800
+      EvaluationPeriods: 4
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
@@ -688,7 +720,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AppName}-${Environment}-api-5xx"
-      AlarmDescription: HTTP API 5xx responses detected
+      AlarmDescription: >-
+        HTTP API 5xx responses in two separate half-hour windows within two
+        hours
       Namespace: AWS/ApiGateway
       MetricName: 5xx
       Dimensions:
@@ -697,12 +731,69 @@ Resources:
         - Name: Stage
           Value: !Ref HttpApiStageName
       Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
+      # Same window as LambdaErrorAlarm. This is the alarm whose history showed
+      # ten OK/ALARM transitions in a single day while the service was
+      # continuously broken: each probe cycle tripped it and the following empty
+      # minute cleared it. Widening the period past the probe cadence is what
+      # turns that sawtooth back into one sustained signal.
+      Period: 1800
+      EvaluationPeriods: 4
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # The alarm the two-day outage needed and did not have. Every alarm above
+  # answers "are requests failing?", which is unanswerable once nothing is
+  # served at all: with TreatMissingData notBreaching, a system that stops
+  # serving entirely reports OK, which is exactly what happened. This one
+  # answers "is anything being served?" and reads silence as breaching, so a
+  # system that has gone quiet is a system that is alarming.
+  ApiAvailabilityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AppName}-${Environment}-api-availability"
+      AlarmDescription: >-
+        The HTTP API served no request for two consecutive hours, including
+        when the metric stops being published at all
+      Namespace: AWS/ApiGateway
+      MetricName: Count
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref ArchonHttpApi
+        - Name: Stage
+          Value: !Ref HttpApiStageName
+      Statistic: Sum
+      # An hourly period matches the guaranteed traffic floor: the
+      # live-availability probe is scheduled at :09 and :39, so a healthy hour
+      # is never empty. Two consecutive empty hours means at least four
+      # consecutive missed probes.
+      #
+      # Two periods is the smallest count that survives the measured schedule
+      # drift. The observed worst-case gap between probes is ~90 minutes, which
+      # can leave one hourly bucket empty, so a single empty hour is normal and
+      # must not page. Two in a row is not normal.
+      Period: 3600
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # The point of the alarm, and the only path by which it can fire. Count
+      # is published only when a request is served, so a real datapoint of zero
+      # does not exist: LessThanThreshold never evaluates true on observed
+      # data, and every breach arrives as a missing datapoint scored as
+      # breaching. Adjusting the threshold or the operator therefore changes
+      # nothing here; removing this line disables the alarm outright.
+      TreatMissingData: breaching
       AlarmActions: !If
         - HasAlarmTopic
         - - !Ref AlarmTopicArn
