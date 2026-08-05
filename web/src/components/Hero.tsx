@@ -89,7 +89,7 @@ export function Hero() {
               <span className="font-mono text-xs text-muted">{PUBLIC_COMPANY}</span>
             </div>
             <p className="mt-2 text-[11px] leading-4 text-muted">
-              Read-only demonstration data stays canonical. Sandbox test writes expire automatically via CockroachDB TTL (1h).
+              Public, read-only demonstration data stays canonical. Sandbox test writes expire automatically via CockroachDB TTL (1h).
             </p>
           </div>
         </div>
