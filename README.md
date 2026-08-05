@@ -83,7 +83,7 @@ status URL.
 | 1 | What is actually deployed, and every hosted gate that put it there | [docs/DEMO_URL.md](./docs/DEMO_URL.md), deployed baseline `0b25d5f1` |
 | 2 | Tests, coverage, load, and vector recall at that exact commit | [main CI run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580) |
 | 3 | The protected AWS and CockroachDB release itself | [Deploy AWS run 30577752661](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577752661) |
-| 4 | The application, with its data panels erroring as described above | [d2s5v0o0eg2aaw.cloudfront.net](https://d2s5v0o0eg2aaw.cloudfront.net) |
+| 4 | The application, live and returning grounded answers | [d2s5v0o0eg2aaw.cloudfront.net](https://d2s5v0o0eg2aaw.cloudfront.net) |
 
 ### Or run it yourself
 
@@ -888,7 +888,7 @@ must earn their own pipeline evidence and never rewrite a baseline.
 | CockroachDB Cloud Managed MCP | The causal receipt binds the exact release and database C-SPANN receipt digests, strict `9 / 9 / 9` Store parsing, and capability-safe optional `explain_query`; staging and production refuse promotion unless the protected gate passes, and the standalone [Managed MCP audit](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/managed-mcp-audit.yml) reuses the same contract. The v3 contract is on `main`; every receipt produced by a hosted run so far, the deployed baseline's included, is v2 |
 | Real Titan V2 + Claude Sonnet 4.6 | Protected staging and production gates exercise Titan in `eu-west-1` and the Claude EU cross-region inference profile |
 | Control Room, protected DB release, SAM stack, OIDC CI/CD, canary/rollback | Exact-main build-once promotion, live release-SHA binding, and hosted browser verification are mandatory in [Deploy AWS](https://github.com/upgradedev/archon-cockroach-memory/actions/workflows/deploy-aws.yml) |
-| Unrestricted CloudFront production URL and hosted receipts | [Reachable without credentials](https://d2s5v0o0eg2aaw.cloudfront.net); the data-plane endpoints have returned 500 since 2026-08-02 — see [Judge verification](#judge-verification) |
+| Unrestricted CloudFront production URL and hosted receipts | [Reachable without credentials](https://d2s5v0o0eg2aaw.cloudfront.net); the data plane was restored on 2026-08-05 after a billing-state outage — see [Judge verification](#judge-verification) |
 | Legacy `us-west-2` Lambda/log/IAM workload | Retired after verified cutover; [scoped inventory](./docs/DEMO_URL.md) is empty |
 | Durable private-S3 CAS-ledger watchdog recovery | Live IAM activation, terminal `COMMITTED` ledgers, immutable deployment receipts, protection/drift gates, and automatic no-op watchdog classification are verified; an intentionally fault-injected `RECOVERED` finalizer drill is not claimed |
 | Fault-triggered `RECOVERING → RECOVERED` and daily/manual audit | Implemented and CI-covered; the final gate requires a fresh manual `operation=audit` receipt, but no intentional live failure drill is claimed |
