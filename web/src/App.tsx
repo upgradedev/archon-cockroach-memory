@@ -3,6 +3,7 @@ import { useState } from "react";
 import { AnswerBrief } from "./components/AnswerBrief";
 import { AuditLedger } from "./components/AuditLedger";
 import { Hero } from "./components/Hero";
+import { JudgeSandbox } from "./components/JudgeSandbox";
 import { Masthead } from "./components/Masthead";
 import { MemoryResolutionLoop } from "./components/MemoryResolutionLoop";
 import { ProofLedger } from "./components/ProofLedger";
@@ -103,6 +104,8 @@ export function App() {
           error={auditQuery.error}
           onRefresh={refreshAudit}
         />
+
+        <JudgeSandbox />
 
         <MemoryResolutionLoop />
 

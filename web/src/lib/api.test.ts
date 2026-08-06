@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  auditSandboxFacts,
   createResolutionSession,
   decideResolution,
   getAudit,
@@ -7,6 +8,8 @@ import {
   getProof,
   PublicApiError,
   recallMemory,
+  ingestSandboxFact,
+  recallSandboxFact,
 } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -15,6 +18,221 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+describe("judge sandbox API", () => {
+  const sandboxToken = "s".repeat(43);
+
+  it("stores structured evidence and preserves the opaque capability", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          sandbox_token: sandboxToken,
+          memory_id: "11111111-1111-4111-8111-111111111111",
+          reused: false,
+          ttl_seconds: 3600,
+          expires_at: "2026-08-06T12:00:00.000Z",
+        },
+        201,
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await ingestSandboxFact({
+      company: "Judge Corp",
+      fact: "Invoice INV-9901 is recorded at EUR 45000.",
+      sourceRef: "DOC-9901-A",
+      subject: "INV-9901",
+      attribute: "total",
+      numericValue: 45000,
+    });
+
+    expect(result.sandboxToken).toBe(sandboxToken);
+    expect(result.ttlSeconds).toBe(3600);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/sandbox/ingest");
+    const request = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(request.sandbox_token).toBeUndefined();
+    expect(request.numericValue).toBe(45000);
+  });
+
+  it("rejects stringly typed sandbox storage receipts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ok: true,
+          sandbox_token: sandboxToken,
+          memory_id: "11111111-1111-4111-8111-111111111111",
+          reused: "false",
+          ttl_seconds: "3600",
+          expires_at: "2026-08-06T12:00:00.000Z",
+        }),
+      ),
+    );
+
+    await expect(
+      ingestSandboxFact({
+        company: "Judge Corp",
+        fact: "Invoice INV-9901 is recorded at EUR 45000.",
+        sourceRef: "DOC-9901-A",
+        subject: "INV-9901",
+        attribute: "total",
+        numericValue: 45000,
+      }),
+    ).rejects.toBeInstanceOf(PublicApiError);
+  });
+
+  it("accepts a transparently withheld recall hit and parses contradictions", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          answer: "The sandbox contains 45000 [1].",
+          recalled: 2,
+          grounding: {
+            status: "verified",
+            checks: { citations: true, numerics: true, claims: true },
+            reason: "instruction-like recalled evidence was withheld before narration",
+          },
+          citations: [
+            {
+              marker: "[1]",
+              memoryId: "11111111-1111-4111-8111-111111111111",
+              company: "Judge Corp",
+              content: "Invoice value 45000.",
+              sourceRef: "DOC-A",
+              score: 1,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          contradictions: [
+            {
+              subject: "INV-9901",
+              attribute: "total",
+              values: [
+                {
+                  value: 45000,
+                  sourceRef: "DOC-A",
+                  memoryId: "11111111-1111-4111-8111-111111111111",
+                },
+                {
+                  value: 47000,
+                  sourceRef: "DOC-B",
+                  memoryId: "22222222-2222-4222-8222-222222222222",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const recall = await recallSandboxFact(sandboxToken, "What values exist?");
+    expect(recall.citations[0]?.company).toBe("Judge Corp");
+    const contradictions = await auditSandboxFacts(sandboxToken);
+    expect(contradictions[0]?.values.map((item) => item.value)).toEqual([
+      45000,
+      47000,
+    ]);
+  });
+
+  it("fails closed on a malformed sandbox audit receipt", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ok: true,
+          contradictions: [
+            {
+              subject: "INV-9901",
+              attribute: "total",
+              values: [{ value: 45000, sourceRef: "DOC-A" }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    await expect(auditSandboxFacts(sandboxToken)).rejects.toBeInstanceOf(
+      PublicApiError,
+    );
+  });
+
+  it("rejects a recall receipt without an exact grounding contract", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ok: true,
+          answer: "Invoice value 45000 [1].",
+          recalled: 1,
+          citations: [
+            {
+              marker: "[1]",
+              memoryId: "11111111-1111-4111-8111-111111111111",
+              company: "Judge Corp",
+              content: "Invoice value 45000.",
+              sourceRef: "DOC-A",
+              score: "1",
+            },
+          ],
+          grounding: {
+            status: "verified",
+            checks: { citations: true, numerics: true, claims: true },
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      recallSandboxFact(sandboxToken, "What value exists?"),
+    ).rejects.toBeInstanceOf(PublicApiError);
+  });
+
+  it("fails closed when one sandbox audit value is malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ok: true,
+          contradictions: [
+            {
+              subject: "INV-9901",
+              attribute: "total",
+              values: [
+                {
+                  value: 45000,
+                  sourceRef: "DOC-A",
+                  memoryId: "11111111-1111-4111-8111-111111111111",
+                },
+                {
+                  value: "46000",
+                  sourceRef: "DOC-B",
+                  memoryId: "22222222-2222-4222-8222-222222222222",
+                },
+                {
+                  value: 47000,
+                  sourceRef: "DOC-C",
+                  memoryId: "33333333-3333-4333-8333-333333333333",
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+
+    await expect(auditSandboxFacts(sandboxToken)).rejects.toBeInstanceOf(
+      PublicApiError,
+    );
+  });
+});
 
 function finalizedProofBody() {
   return {

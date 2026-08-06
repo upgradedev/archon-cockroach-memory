@@ -86,6 +86,9 @@ describe("Masthead and Hero", () => {
       screen.getByRole("heading", { name: /Financial Agent Memory That Disagrees Out Loud/ }),
     ).toBeInTheDocument();
     expect(screen.getByText("Helios SA")).toBeInTheDocument();
-    expect(screen.getByText(/Sandbox test writes expire automatically/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Canonical demonstration data stays read-only/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/maximum one-hour storage TTL/i)).toBeInTheDocument();
   });
 });

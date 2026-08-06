@@ -128,7 +128,7 @@ figure on structured data worth reading.
 | Frontend | 42/42 unit tests, 4/4 desktop and mobile Playwright journeys, 93.72% lines, 86.60% branches, 97.50% functions, 90.66% statements | Coverage measured over `web/src` only. | Same run |
 | Concurrent recall, k6, 20 virtual users for 20 s over a 2,000-memory corpus | 552/552 checks succeeded, 0.00% request failures, 776.65 ms p95 | Check success is not recall correctness. Recall correctness over the same window was **99.63%, 550 of 552**. The two are separate metrics and are not interchangeable. | Same run |
 | Recall latency, C-SPANN smoke over 1,500 vectors, 50 queries, top-10 | 4.33 ms p50, 5.35 ms p95, 6.64 ms p99 at 99.8% mean recall@10 | A GitHub Linux runner, single node. The 10,000-vector hosted benchmark measures 13.44 / 14.73 / 22.91 ms, and a laptop Docker node on the uniform corpus sits near 70 ms p50. Latency here is environment-bound. Recall is the portable number. | Same run for the smoke; [Benchmark run 30732311916](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30732311916) and [docs/BENCHMARK.md](./docs/BENCHMARK.md) for the comparison |
-| Exact-release adversarial probes | 16/16 active API and browser-boundary checks passed | 16 is what the baseline's release run executed. The suite defines 21 probes on `main` today. | [Hosted DAST run 30579578909](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579578909) |
+| Exact-release adversarial probes | 16/16 active API and browser-boundary checks passed | 16 is what the baseline's release run executed. The suite defines 24 probes on `main` today. | [Hosted DAST run 30579578909](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30579578909) |
 | ZAP passive and AJAX-spider baseline over 13 URLs | 63 PASS, 0 FAIL-NEW, 0 WARN-NEW, and **7 rules suppressed** (`IGNORE: 7`) | All seven suppressions are declared with their rationale in [`.zap/release.tsv`](./.zap/release.tsv). A "0 FAIL, 0 WARN" summary that omits the ignore count overstates the result, so the count is stated here. | Same run |
 
 Every figure above is either read from the linked run's own log or, where the
@@ -230,29 +230,43 @@ cluster, are anchored in `eu-west-1`; CloudFront is global and Claude uses an EU
 cross-region inference profile. The scoped inventory contains no application
 resources in `us-west-2`.
 
-## 🏛️ AWS Well-Architected Framework & Agentic AI Lens Compliance
+## 🏛️ AWS Well-Architected & Agentic AI Lens alignment review
 
-Archon Memory is audited and 100% compliant (23/23 PASS) across all 6 Pillars of the AWS Well-Architected Framework and the 2026 AWS Agentic AI Lens:
+The source architecture maps evidence to all six AWS Well-Architected pillars
+and the 2026 AWS Agentic AI Lens. Its 23/23 source-contract checks are not an
+AWS certification, a claim of live 6/6 compliance, or proof that the deployed
+release currently matches `main`; hosted receipts and residual risks remain
+separate.
 
 | Well-Architected Pillar | Architectural Implementation & Evidence | Audit Status |
 |---|---|:---:|
-| **Operational Excellence** | Automated CodeDeploy canary deployment with 10% fault rollback, immutable git-sha release tagging, OIDC credential-free CI/CD | ✅ **100% PASS** |
-| **Security (AGENTSEC03/04/07)** | AWS Secrets Manager 2-principal rotation, W12 Prompt Injection Grounding boundary, CloudFront WAF v2 (5 rules), CockroachDB RLS on 6 tables | ✅ **100% PASS** |
-| **Reliability (AGENTREL02)** | 3-node CockroachDB fault tolerance (proven via `cluster-survival` node-kill test), 5 CloudWatch Alarms & Live Dashboard, Lambda 5-slot cap | ✅ **100% PASS** |
-| **Performance Efficiency** | Native C-SPANN prefix-constrained vector indexing (<1500ms p95 latency SLO), Titan 1024-dim compact embeddings | ✅ **100% PASS** |
-| **Cost Optimization (AGENTCOST01/02)** | Lifecycle fixed-cost envelope calculated at $22.40–$24.40/mo (strictly below $26.00 ceiling), serverless pay-per-use, CockroachDB Basic tier | ✅ **100% PASS** |
-| **Sustainability (AGENTOPS05/06)** | Per-successful-recall compute footprint tracking (`sustainability-intensity-evidence.yml`), Node.js 22 ESM runtime efficiency | ✅ **100% PASS** |
+| **Operational Excellence** | Automated CodeDeploy canary deployment with 10% fault rollback, immutable git-sha release tagging, OIDC credential-free CI/CD | Source evidence mapped |
+| **Security (AGENTSEC03/04/07)** | AWS Secrets Manager 2-principal rotation, prompt-injection grounding boundary, source-defined CloudFront WAF controls, CockroachDB forced RLS on 8 tables | Source evidence mapped; live controls verified separately |
+| **Reliability (AGENTREL02)** | 3-node CockroachDB node-loss test, CloudWatch alarm contracts, Lambda concurrency cap, external availability canary | Source and selected hosted evidence; residual risks recorded |
+| **Performance Efficiency** | Native prefix-constrained C-SPANN vector indexing, a measured CI p95 threshold, Titan 1024-dimension embeddings | Evidence mapped; workload bounds apply |
+| **Cost Optimization (AGENTCOST01/02)** | Modeled cost envelope, serverless pay-per-use, CockroachDB Basic tier | Estimate, not a billing guarantee |
+| **Sustainability (AGENTOPS05/06)** | Per-successful-recall intensity evidence and bounded serverless execution | Directional evidence mapped |
 
 Detailed pillar-by-pillar evidence report: [`docs/operations/WELL_ARCHITECTED_EVIDENCE.md`](./docs/operations/WELL_ARCHITECTED_EVIDENCE.md)
 
-## 🇪🇺 EU AI Act Compliance (Regulation EU 2024/1689)
+## 🇪🇺 EU AI Act alignment review — not a legal determination
 
-Archon Memory embeds structural compliance with the EU Artificial Intelligence Act:
+This technical review maps controls to Regulation (EU) 2024/1689. It is not a
+conformity assessment or legal advice. Applicability, provider/deployer roles,
+and any high-risk classification depend on the real deployment and intended
+use; a production adopter must resolve them with legal and DPO review.
 
-- **Article 50 (AI Output Transparency):** All agent answers explicitly declare their AI-generated nature and render a line-by-line evidence trace with explicit confidence levels (`verified`, `extractive`, `fallback`).
-- **Article 14 (Human Oversight & Control):** The agent is strictly advisory. It cannot execute financial transactions or alter database state autonomously. The Memory Resolution Loop enforces explicit human-in-the-loop approval before state mutation.
-- **Article 10 & 13 (Data Governance & Traceability):** Every recalled memory links to immutable content digests (`content_hash`) and source references. Contradictions and missing evidence are exposed rather than hidden.
-- **Article 15 (Cybersecurity & Robustness):** Prompt-injection payloads are trapped as evidence strings (`tests/security.test.ts`). All primary resources reside within `eu-west-1` (EU Data Sovereignty).
+- **Article 10 — data governance alignment:** Synthetic demo data has source references, content digests, lifecycle state, contradiction reporting, and bounded TTL sandboxes. Representativeness, bias, and production-data quality are not established by this demo.
+- **Article 13 — transparency alignment:** Recall exposes citations, model identifiers, grounding state, absences, and declared demo limits. Production instructions for deployers and affected persons remain context-specific.
+- **Article 14 — human oversight alignment:** The resolution loop requires an explicit human decision and cannot execute a financial transfer. Its public role is a fixed demo assertion, not authenticated enterprise authority.
+- **Article 15 — robustness and cybersecurity alignment:** Forced RLS, capability isolation, grounding checks, fail-closed release gates, and adversarial tests provide technical evidence. They do not constitute regulatory certification, and live-release evidence is tracked separately.
+- **Article 50 — transparency alignment:** The interface identifies the agentic system and exposes model/evidence traces for generated answers. Whether Article 50 applies, and which notice form is required, depends on the deployed interaction.
+
+Detailed evidence, applicability uncertainty, and residual gaps:
+[`docs/operations/EU_AI_ACT_ALIGNMENT.md`](./docs/operations/EU_AI_ACT_ALIGNMENT.md).
+
+The bounded judge-ingestion API and its source-versus-live status are documented
+in [`docs/JUDGE_SANDBOX.md`](./docs/JUDGE_SANDBOX.md).
 
 ## Testing
 
@@ -260,10 +274,10 @@ Archon Memory embeds structural compliance with the EU Artificial Intelligence A
 
 | Layer | Count | Where |
 |---|---|---|
-| Backend unit and integration | 42 files, 514 `test(...)` declarations | `tests/*.test.ts` |
-| Frontend unit | 9 files, 51 declarations | `web/src/**/*.test.ts` and `.test.tsx` |
+| Backend unit and integration | 44 files, 544 `test(...)`/`it(...)` declarations | `tests/*.test.ts` |
+| Frontend unit | 10 files, 55 declarations | `web/src/**/*.test.ts` and `.test.tsx` |
 | Browser journeys | Desktop and mobile Chromium | [`web/e2e/control-room.spec.ts`](./web/e2e/control-room.spec.ts), run in CI and again against the hosted site inside the release |
-| Adversarial probes | 21 active checks | [`scripts/hosted-dast.mjs`](./scripts/hosted-dast.mjs) |
+| Adversarial probes | 24 active checks | [`scripts/hosted-dast.mjs`](./scripts/hosted-dast.mjs) |
 | Load | k6, 20 virtual users for 20 s | [`load/recall.js`](./load/recall.js), thresholds enforced by the `load` job |
 
 Those are counts of the source tree at this commit, not results. The executed
@@ -271,7 +285,7 @@ figure at the deployed baseline is 388 backend tests, 385 passed and 3
 intentionally skipped, in
 [main CI run 30577405580](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30577405580).
 The gap is growth: `main` has moved well past that commit. The probe count reads
-the same way, 21 defined on `main` today against the 16 the baseline's release
+the same way, 24 defined in this source tree against the 16 the baseline's release
 run executed.
 
 ### A real CockroachDB, four times per CI run
@@ -299,7 +313,9 @@ instead of mocking the database:
   `load/recall.js`, and a breach fails the job.
 
 The `readiness` job runs after all nine prerequisite jobs and fails unless every
-one of them succeeded, then runs the source-readiness gate at 100%.
+one of them succeeded, then evaluates the source gate. A perfect source score
+does not assert deployed/live readiness, regulatory compliance, or final
+submission readiness; those boundaries are reported separately.
 
 ### What the coverage numbers do not cover
 
@@ -801,6 +817,8 @@ Implementation and evidence contracts:
 - [Memory architecture evaluation](./docs/EVALUATION.md)
 - [Pipeline-only supply-chain security](./docs/SUPPLY_CHAIN_SECURITY.md)
 - [AWS Well-Architected evidence](./docs/operations/WELL_ARCHITECTED_EVIDENCE.md)
+- [EU AI Act technical alignment record](./docs/operations/EU_AI_ACT_ALIGNMENT.md)
+- [Judge-supplied memory sandbox](./docs/JUDGE_SANDBOX.md)
 - [AWS account security baseline audit](./docs/runbooks/aws-account-security-baseline.md)
 - [Sustainability intensity evidence](./docs/runbooks/sustainability-intensity.md)
 - [Protected foundation storage migration](./docs/operations/FOUNDATION_STORAGE_MIGRATION.md)
@@ -934,6 +952,13 @@ The **pre-existing** work is the Archon financial domain, synthetic Helios
 scenario, extraction/reconciliation concepts, and the relational table shapes for
 documents, employees, payroll events, and validations. Those ideas and selected
 schema/extraction code were adapted from the earlier Archon/Nebius work.
+
+The bounded judge-ingestion flow also adapts the earlier Qwen Memory Agent
+pattern of a store interface plus injectable embedder/narrator and offline
+fakes. Its implementation here is challenge-period work rewritten for native
+CockroachDB `VECTOR`, capability hashing, forced RLS, storage TTL, and strict
+separation from canonical Archon memory; it is not presented as a newly
+invented ingestion pattern.
 
 The **challenge-period** implementation is the CockroachDB `agent_memory` layer,
 native vector/prefix indexes, fixed-scope C-SPANN serving views, idempotency and

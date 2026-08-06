@@ -176,6 +176,102 @@ ALTER TABLE agent_memory
     ADD CONSTRAINT IF NOT EXISTS chk_agent_memory_status
     CHECK (status IN ('active', 'superseded', 'retracted'));
 
+-- Public judge-supplied evidence never enters canonical agent_memory. The
+-- opaque capability is stored only as a SHA-256 digest, every row is bounded
+-- to one session, and logical expiry is enforced on reads even before the
+-- CockroachDB TTL job physically removes the rows.
+CREATE TABLE IF NOT EXISTS judge_sandbox_sessions (
+    token_hash   TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL DEFAULT 'public-demo',
+    memory_count INT2 NOT NULL DEFAULT 0,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_judge_sandbox_token
+      CHECK (length(token_hash) = 64 AND token_hash ~ '^[a-f0-9]+$'),
+    CONSTRAINT chk_judge_sandbox_tenant
+      CHECK (tenant_id = 'public-demo'),
+    CONSTRAINT chk_judge_sandbox_count
+      CHECK (memory_count BETWEEN 0 AND 20),
+    CONSTRAINT chk_judge_sandbox_session_expiry
+      CHECK (
+        expires_at > created_at
+        AND expires_at <= created_at + INTERVAL '61 minutes'
+      )
+) WITH (
+    ttl_expiration_expression = 'expires_at',
+    ttl_job_cron = '17 * * * *'
+);
+
+CREATE TABLE IF NOT EXISTS judge_sandbox_memory (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_token_hash TEXT NOT NULL
+                           REFERENCES judge_sandbox_sessions(token_hash)
+                           ON DELETE CASCADE,
+    tenant_id          TEXT NOT NULL DEFAULT 'public-demo',
+    kind               TEXT NOT NULL,
+    company            TEXT NOT NULL,
+    period             TEXT,
+    source_ref         TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    metadata           JSONB,
+    embedding          VECTOR(1024) NOT NULL,
+    embed_model        TEXT NOT NULL,
+    content_hash       TEXT NOT NULL,
+    subject            TEXT,
+    attribute          TEXT,
+    numeric_value      DECIMAL,
+    expires_at         TIMESTAMPTZ NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_judge_sandbox_memory_tenant
+      CHECK (tenant_id = 'public-demo'),
+    CONSTRAINT chk_judge_sandbox_memory_kind
+      CHECK (kind IN ('document', 'payroll_event', 'validation', 'insight')),
+    CONSTRAINT chk_judge_sandbox_memory_content
+      CHECK (length(content) BETWEEN 5 AND 1000),
+    CONSTRAINT chk_judge_sandbox_memory_fields
+      CHECK (
+        length(company) BETWEEN 1 AND 120
+        AND (period IS NULL OR length(period) BETWEEN 1 AND 40)
+        AND length(source_ref) BETWEEN 1 AND 160
+        AND (subject IS NULL OR length(subject) BETWEEN 1 AND 160)
+        AND (attribute IS NULL OR length(attribute) BETWEEN 1 AND 80)
+      ),
+    CONSTRAINT chk_judge_sandbox_memory_hash
+      CHECK (length(content_hash) = 64 AND content_hash ~ '^[a-f0-9]+$'),
+    CONSTRAINT chk_judge_sandbox_structured_fact
+      CHECK (
+        (subject IS NULL AND attribute IS NULL AND numeric_value IS NULL)
+        OR
+        (subject IS NOT NULL AND attribute IS NOT NULL AND numeric_value IS NOT NULL)
+      ),
+    CONSTRAINT chk_judge_sandbox_numeric_value
+      CHECK (
+        numeric_value IS NULL
+        OR abs(numeric_value) <= 1000000000000000
+      ),
+    CONSTRAINT chk_judge_sandbox_memory_expiry
+      CHECK (
+        expires_at > created_at
+        AND expires_at <= created_at + INTERVAL '61 minutes'
+      ),
+    UNIQUE (session_token_hash, embed_model, content_hash)
+) WITH (
+    ttl_expiration_expression = 'expires_at',
+    ttl_job_cron = '13 * * * *'
+);
+
+CREATE INDEX IF NOT EXISTS idx_judge_sandbox_sessions_expiry
+    ON judge_sandbox_sessions (expires_at);
+CREATE INDEX IF NOT EXISTS idx_judge_sandbox_session_expiry
+    ON judge_sandbox_memory (session_token_hash, expires_at);
+CREATE VECTOR INDEX IF NOT EXISTS idx_judge_sandbox_session_embedding
+    ON judge_sandbox_memory (
+      session_token_hash,
+      embed_model,
+      embedding vector_cosine_ops
+    );
+
 -- ═════════════════════════════════════════════════════════════════════════════
 -- 6. ISOLATED MEMORY RESOLUTION SANDBOX
 --
@@ -414,10 +510,18 @@ REVOKE ALL ON TABLE validation_results FROM archon_public_reader;
 REVOKE ALL ON TABLE agent_memory FROM archon_public_reader;
 GRANT SELECT ON TABLE agent_memory TO archon_public_reader;
 
+REVOKE ALL ON TABLE judge_sandbox_sessions FROM archon_resolution_writer;
+REVOKE ALL ON TABLE judge_sandbox_memory FROM archon_resolution_writer;
+GRANT SELECT, INSERT, UPDATE ON TABLE judge_sandbox_sessions
+    TO archon_resolution_writer;
+GRANT SELECT, INSERT ON TABLE judge_sandbox_memory
+    TO archon_resolution_writer;
+
 -- The runtime login inherits this capability in addition to the canonical
 -- read-only role. It can read only the disposable fixed synthetic graph and
--- execute the two exact transition functions defined below. It never receives
--- direct INSERT, UPDATE, or DELETE on any relation.
+-- execute the two exact transition functions defined below. Direct DML is
+-- limited to the two TTL-backed judge sandbox tables above; canonical memory
+-- and the fixed resolution graph remain read-only.
 REVOKE ALL ON TABLE memory_demo_sessions FROM archon_resolution_writer;
 REVOKE ALL ON TABLE memory_resolution_observations FROM archon_resolution_writer;
 REVOKE ALL ON TABLE memory_resolution_proposals FROM archon_resolution_writer;
@@ -428,6 +532,70 @@ GRANT SELECT ON TABLE memory_resolution_observations TO archon_resolution_writer
 GRANT SELECT ON TABLE memory_resolution_proposals TO archon_resolution_writer;
 GRANT SELECT ON TABLE memory_resolution_decisions TO archon_resolution_writer;
 GRANT SELECT ON TABLE memory_resolution_consolidations TO archon_resolution_writer;
+
+CREATE POLICY IF NOT EXISTS judge_sandbox_sessions_operator_v1
+    ON judge_sandbox_sessions
+    AS PERMISSIVE FOR ALL TO CURRENT_USER
+    USING (true) WITH CHECK (true);
+CREATE POLICY IF NOT EXISTS judge_sandbox_sessions_writer_permit_v1
+    ON judge_sandbox_sessions
+    AS PERMISSIVE FOR ALL TO archon_resolution_writer
+    USING (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+    )
+    WITH CHECK (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+      AND expires_at <= now() + INTERVAL '61 minutes'
+      AND memory_count BETWEEN 0 AND 20
+    );
+CREATE POLICY IF NOT EXISTS judge_sandbox_sessions_writer_guard_v1
+    ON judge_sandbox_sessions
+    AS RESTRICTIVE FOR ALL TO archon_resolution_writer
+    USING (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+    )
+    WITH CHECK (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+      AND expires_at <= now() + INTERVAL '61 minutes'
+      AND memory_count BETWEEN 0 AND 20
+    );
+ALTER TABLE judge_sandbox_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE judge_sandbox_sessions FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY IF NOT EXISTS judge_sandbox_memory_operator_v1
+    ON judge_sandbox_memory
+    AS PERMISSIVE FOR ALL TO CURRENT_USER
+    USING (true) WITH CHECK (true);
+CREATE POLICY IF NOT EXISTS judge_sandbox_memory_writer_permit_v1
+    ON judge_sandbox_memory
+    AS PERMISSIVE FOR ALL TO archon_resolution_writer
+    USING (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+    )
+    WITH CHECK (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+      AND expires_at <= now() + INTERVAL '61 minutes'
+    );
+CREATE POLICY IF NOT EXISTS judge_sandbox_memory_writer_guard_v1
+    ON judge_sandbox_memory
+    AS RESTRICTIVE FOR ALL TO archon_resolution_writer
+    USING (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+    )
+    WITH CHECK (
+      tenant_id = 'public-demo'
+      AND expires_at > now()
+      AND expires_at <= now() + INTERVAL '61 minutes'
+    );
+ALTER TABLE judge_sandbox_memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE judge_sandbox_memory FORCE ROW LEVEL SECURITY;
 
 -- A non-login, non-bypass owner is the only principal with the table
 -- privileges needed by the SECURITY DEFINER transition functions. The owner

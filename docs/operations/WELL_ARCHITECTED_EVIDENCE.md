@@ -1,11 +1,10 @@
 # AWS Well-Architected evidence contract
 
 Status: repository evidence is prepared for the declared controls, including
-the protected WA-03 audit source. The foundation v2 lifecycle is not live, and
-the known legacy `DELETE_FAILED` authority remains external-admin-only while
-the new v2 source contract awaits exact-main CI validation. Account-wide
-controls are not activated; no live foundation,
-edge/WAF, legacy-recovery, or WA-03 receipt is claimed by this batch.
+the protected WA-03 audit source. This document does not infer current AWS
+state from source or from an earlier review. Foundation, edge/WAF, recovery,
+and WA-03 controls count as live only when an exact-release hosted receipt is
+cited; absent or stale receipts remain `unknown` or `not activated`.
 
 This package turns the Well-Architected review into reproducible evidence
 without treating documentation as proof of live AWS state. It follows the six
@@ -101,11 +100,11 @@ commit and template digest are both stack parameters and the only two stack
 tags. The template contains one resource, `FoundationMigrationRole`; its trust,
 inline policy, original template, parameters, tags, and inventory are all
 proved before use. A pre-contract authority cannot be adopted: it requires
-administrator deletion and Phase 0 recreation. The current live residual is a
-`DELETE_FAILED` authority shell whose physical temporary role is already
-absent; it is not evidence of a successful retirement. Its recovery contract
-is not source-final and no recovery command is authorized by this evidence
-package.
+administrator deletion and Phase 0 recreation. A historical
+`DELETE_FAILED` authority shell whose physical role was already absent is
+recorded in the operational handover; this evidence contract does not infer
+that shell's current existence or treat external cleanup as a source-final
+retirement receipt.
 
 `.github/workflows/foundation-migration.yml` exposes exact-current-green-main
 `plan|apply|verify|abort|retire` operations. Apply, abort, and retirement require
@@ -189,11 +188,11 @@ before AWS access; its failure form records the last completed phase and
 whether deletion began, retains only facts already proved, and never represents
 an unknown deletion outcome as success.
 
-The current legacy `DELETE_FAILED` shell is still ineligible for the finalized
-v2 orphan workflow: its temporary role is absent but its historical template
-lacks the mandatory v2 terminal-safety contract. It therefore remains an
-external-admin recovery prerequisite; no retain-resource or force-delete
-action is claimed for that live legacy state. See
+That historical legacy `DELETE_FAILED` shell was ineligible for the finalized
+v2 orphan workflow: its temporary role was absent but its historical template
+lacked the mandatory v2 terminal-safety contract. This package claims no
+source-final receipt for the external reconciliation and no current AWS state.
+See
 [`FOUNDATION_STORAGE_MIGRATION.md`](./FOUNDATION_STORAGE_MIGRATION.md).
 
 Immediately before `ExecuteChangeSet`, the workflow installs and re-reads the
@@ -510,9 +509,9 @@ The repository records, but does not enable:
   that receipt;
 - the repository-prepared WAF, CloudFront access logging, origin restriction,
   and their live alarm drill;
-- the foundation migration and v2 authority retirement; the legacy
-  `DELETE_FAILED` authority shell still has no source-final recovery path and
-  requires a separately approved, source-bound external-administrator action;
+- a source-final foundation migration and v2 authority-retirement receipt;
+  historical external-administrator reconciliation is not promoted into live
+  evidence by this repository document;
 - a completed protected two-principal database credential rotation; the runtime
   refresh and pipeline are repository-prepared, but no live receipt is claimed;
 - the repository-prepared staging fault-injected recovery sequence, including

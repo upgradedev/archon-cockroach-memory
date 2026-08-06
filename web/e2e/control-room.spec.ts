@@ -449,7 +449,7 @@ test("executive user journey verifies KPI badges and guided scenarios A, B, C, D
 
   // Verify Executive KPI Badges
   await expect(page.getByText("100% Cited")).toBeVisible();
-  await expect(page.getByText("Compliant (Art 14/50)")).toBeVisible();
+  await expect(page.getByText("Alignment reviewed")).toBeVisible();
   await expect(page.getByText("< 1500 ms")).toBeVisible();
   await expect(page.getByText("SHA-256 Sealed")).toBeVisible();
 

@@ -341,6 +341,45 @@ export async function runHostedDast(targetUrl) {
   const jsonHeaders = { "content-type": "application/json" };
   const adversarialChecks = [
     {
+      id: "sandbox-ingest-capability-boundary",
+      path: "/api/sandbox/ingest",
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          fact: "A valid-length judge fact.",
+          sandbox_token: "guessable",
+        }),
+      },
+    },
+    {
+      id: "sandbox-recall-capability-boundary",
+      path: "/api/sandbox/recall",
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          question: "What is stored?",
+          sandbox_token: "guessable",
+        }),
+      },
+    },
+    {
+      id: "sandbox-audit-capability-boundary",
+      path: "/api/sandbox/audit",
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
+      init: {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ sandbox_token: "guessable" }),
+      },
+    },
+    {
       id: "method-boundary-get",
       path: "/api/recall",
       status: strictApiBoundary ? 405 : [404, 405],

@@ -434,6 +434,9 @@ function hostedDastReceipt(
     "health-boundary",
     "release-proof-boundary",
     "audit-boundary",
+    "sandbox-ingest-capability-boundary",
+    "sandbox-recall-capability-boundary",
+    "sandbox-audit-capability-boundary",
     "method-boundary-get",
     "method-boundary-delete",
     "content-type-boundary",
@@ -453,8 +456,8 @@ function hostedDastReceipt(
     "unknown-route-boundary",
   ];
   const statuses = [
-    200, 200, 200, 200, 405, 405, 415, 400, 413, 400, 400, 400, 400,
-    404, 400, 405, 400, 401, 401, 401, 404,
+    200, 200, 200, 200, 400, 400, 400, 405, 405, 415, 400, 413, 400,
+    400, 400, 400, 404, 400, 405, 400, 401, 401, 401, 404,
   ];
   return {
     schema: "archon.hosted-dast",

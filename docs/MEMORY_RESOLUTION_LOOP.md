@@ -27,14 +27,19 @@ public hackathon demo should operate a real financial system.
 ## Safety boundary
 
 The canonical `agent_memory` table remains `SELECT`-only for the public runtime
-role. The separate `archon_resolution_writer` role is restricted to five
-fixed-scope synthetic sandbox tables:
+role. Resolution access through the separate `archon_resolution_writer` role
+is restricted to `SELECT` on five fixed-scope synthetic tables; state
+transitions are possible only through the two exact granted routines:
 
 - `memory_demo_sessions`
 - `memory_resolution_observations`
 - `memory_resolution_proposals`
 - `memory_resolution_decisions`
 - `memory_resolution_consolidations`
+
+The same runtime capability has separately bounded direct DML on the two
+TTL-backed judge-sandbox tables. It has no direct DML on this resolution graph
+or on canonical memory.
 
 Database checks fix the tenant, company, scenario, two allowed evidence
 records, authority role, actions, policy version, and receipt shape. Composite
@@ -127,14 +132,16 @@ the role is a fixed demo assertion and the visitor is not authenticated as an
 employee of Helios SA. A production adaptation would bind this step to the
 customer's identity provider and authorization policy.
 
-The live `/api/proof` response verifies that all five sandbox tables are
-queryable by the deployed runtime and reports the transaction, authority,
-idempotency, receipt, consolidation, forgetting, canonical-mutation, and
-external-side-effect contracts. Database-release CI separately verifies the
+On a release containing this loop, `/api/proof` verifies that all five
+resolution-sandbox tables are queryable by the deployed runtime and reports
+the transaction, authority, idempotency, receipt, consolidation, forgetting,
+canonical-mutation, and external-side-effect contracts. The current hosted
+baseline is not claimed to contain these routes. Database-release CI
+separately verifies the
 exact role grants, RLS, TTL, constraints, cross-session link rejection, approve
 and reject paths, idempotent replay, and receipt integrity.
 
 Until those exact-SHA pipelines and the hosted journey pass, this document
 describes implemented behavior, not production evidence. The demo corpus is
-synthetic and representative; it is not a customer production corpus or a
-claim of measured business ROI.
+synthetic and illustrative; representativeness is not established. It is not a
+customer production corpus or a claim of measured business ROI.

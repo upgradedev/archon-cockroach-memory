@@ -391,7 +391,10 @@ export async function withSerializableRetry<T>(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const client = await (await getPoolAsync()).connect();
     try {
-      await client.query("BEGIN");
+      // CockroachDB defaults to SERIALIZABLE, but make the contract explicit so
+      // capacity and state-transition invariants do not depend on a cluster or
+      // compatibility-layer default.
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       const result = await fn(client, attempt);
       await client.query("COMMIT");
       return result;

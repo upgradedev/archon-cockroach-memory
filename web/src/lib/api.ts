@@ -627,6 +627,325 @@ export async function recallMemory(
   };
 }
 
+export interface SandboxFactInput {
+  sandboxToken?: string;
+  company: string;
+  fact: string;
+  sourceRef: string;
+  subject: string;
+  attribute: string;
+  numericValue: number;
+}
+
+export interface SandboxIngestResult {
+  sandboxToken: string;
+  memoryId: string;
+  reused: boolean;
+  ttlSeconds: number;
+  expiresAt: string;
+}
+
+export interface SandboxCitation {
+  marker: string;
+  memoryId: string;
+  company: string;
+  content: string;
+  sourceRef: string;
+  score: number;
+}
+
+export interface SandboxRecallResult {
+  answer: string;
+  recalled: number;
+  citations: SandboxCitation[];
+  grounding: {
+    status: "verified" | "extractive" | "fallback" | "no-evidence";
+    reason: string | null;
+  };
+}
+
+type SandboxGroundingStatus = SandboxRecallResult["grounding"]["status"];
+
+function sandboxGroundingStatus(value: unknown): SandboxGroundingStatus | null {
+  return value === "verified" ||
+    value === "extractive" ||
+    value === "fallback" ||
+    value === "no-evidence"
+    ? value
+    : null;
+}
+
+export interface SandboxContradiction {
+  subject: string;
+  attribute: string;
+  values: Array<{
+    value: number;
+    sourceRef: string;
+    memoryId: string;
+  }>;
+}
+
+function normalizeSandboxCitation(value: unknown): SandboxCitation | null {
+  const item = asRecord(value);
+  const marker = asString(item?.marker);
+  const memoryId = asString(item?.memoryId);
+  const company = asString(item?.company);
+  const content = asString(item?.content);
+  const sourceRef = asString(item?.sourceRef);
+  const score = item?.score;
+  if (
+    !item ||
+    !marker ||
+    !/^\[[1-9][0-9]*\]$/u.test(marker) ||
+    !memoryId ||
+    !EXACT_UUID_V4.test(memoryId) ||
+    !company ||
+    !content ||
+    !sourceRef ||
+    typeof score !== "number" ||
+    !Number.isFinite(score)
+  ) return null;
+  return {
+    marker,
+    memoryId,
+    company,
+    content,
+    sourceRef,
+    score,
+  };
+}
+
+export async function ingestSandboxFact(
+  input: SandboxFactInput,
+  signal?: AbortSignal,
+): Promise<SandboxIngestResult> {
+  const body = unwrap(
+    await requestJson(
+      "/api/sandbox/ingest",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...(input.sandboxToken
+            ? { sandbox_token: input.sandboxToken }
+            : {}),
+          company: input.company,
+          fact: input.fact,
+          sourceRef: input.sourceRef,
+          subject: input.subject,
+          attribute: input.attribute,
+          numericValue: input.numericValue,
+        }),
+      },
+      signal,
+    ),
+  );
+  const sandboxToken = typeof body.sandbox_token === "string"
+    ? body.sandbox_token
+    : null;
+  const memoryId = typeof body.memory_id === "string" ? body.memory_id : null;
+  const reused = typeof body.reused === "boolean" ? body.reused : null;
+  const ttlSeconds = typeof body.ttl_seconds === "number"
+    ? body.ttl_seconds
+    : null;
+  const expiresAt = typeof body.expires_at === "string"
+    ? body.expires_at
+    : null;
+  const expiryTimestamp = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  if (
+    body.ok !== true ||
+    !sandboxToken ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(sandboxToken) ||
+    !memoryId ||
+    !EXACT_UUID_V4.test(memoryId) ||
+    reused === null ||
+    ttlSeconds !== 3600 ||
+    !expiresAt ||
+    !Number.isFinite(expiryTimestamp) ||
+    new Date(expiryTimestamp).toISOString() !== expiresAt
+  ) {
+    throw new PublicApiError(
+      "/api/sandbox/ingest",
+      "The sandbox returned an invalid storage receipt.",
+    );
+  }
+  return {
+    sandboxToken,
+    memoryId,
+    reused,
+    ttlSeconds,
+    expiresAt,
+  };
+}
+
+export async function recallSandboxFact(
+  sandboxToken: string,
+  question: string,
+  signal?: AbortSignal,
+): Promise<SandboxRecallResult> {
+  const body = unwrap(
+    await requestJson(
+      "/api/sandbox/recall",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sandbox_token: sandboxToken, question, limit: 10 }),
+      },
+      signal,
+    ),
+  );
+  const answer = typeof body.answer === "string" && body.answer.trim()
+    ? body.answer.trim()
+    : null;
+  const recalled = typeof body.recalled === "number" ? body.recalled : null;
+  const rawCitations = body.citations;
+  const citations = Array.isArray(rawCitations)
+    ? rawCitations
+        .map(normalizeSandboxCitation)
+        .filter((item): item is SandboxCitation => item !== null)
+    : [];
+  const grounding = asRecord(body.grounding);
+  const groundingStatus = sandboxGroundingStatus(grounding?.status);
+  const groundingChecks = asRecord(grounding?.checks);
+  const groundingReason = grounding?.reason == null
+    ? null
+    : typeof grounding.reason === "string" && grounding.reason.trim()
+      ? grounding.reason.trim()
+      : null;
+  const citationsCheck = groundingChecks?.citations;
+  const numericsCheck = groundingChecks?.numerics;
+  const claimsCheck = groundingChecks?.claims;
+  const checksAreBooleans =
+    typeof citationsCheck === "boolean" &&
+    typeof numericsCheck === "boolean" &&
+    typeof claimsCheck === "boolean";
+  const checksAllPassed =
+    citationsCheck === true && numericsCheck === true && claimsCheck === true;
+  const checksAllWithheld =
+    citationsCheck === false && numericsCheck === false && claimsCheck === false;
+  const answerMarkers = answer
+    ? [...answer.matchAll(/\[([0-9]+)\]/gu)].map((match) => match[1]!)
+    : [];
+  const citationsComplete = citations.every((citation) =>
+    answer?.includes(citation.marker)
+  );
+  const answerMarkersCanonical = answerMarkers.every(
+    (marker) =>
+      marker === String(Number(marker)) &&
+      Number(marker) >= 1 &&
+      Number(marker) <= citations.length,
+  );
+  const groundingContractValid =
+    groundingStatus !== null &&
+    checksAreBooleans &&
+    ((groundingStatus === "verified" || groundingStatus === "extractive")
+      ? checksAllPassed && citations.length > 0
+      : checksAllWithheld &&
+        (groundingStatus === "fallback"
+          ? citations.length > 0
+          : citations.length === 0));
+  if (
+    body.ok !== true ||
+    !answer ||
+    recalled === null ||
+    !Number.isInteger(recalled) ||
+    recalled < 0 ||
+    recalled > 20 ||
+    !Array.isArray(rawCitations) ||
+    citations.length !== rawCitations.length ||
+    citations.length > recalled ||
+    new Set(citations.map((citation) => citation.memoryId)).size !==
+      citations.length ||
+    citations.some(
+      (citation, index) => citation.marker !== `[${index + 1}]`,
+    ) ||
+    !citationsComplete ||
+    !answerMarkersCanonical ||
+    groundingStatus === null ||
+    !groundingContractValid ||
+    (grounding?.reason != null && groundingReason === null) ||
+    (citations.length < recalled && groundingReason === null)
+  ) {
+    throw new PublicApiError(
+      "/api/sandbox/recall",
+      "The sandbox returned an invalid grounded answer.",
+    );
+  }
+  return {
+    answer,
+    recalled,
+    citations,
+    grounding: {
+      status: groundingStatus,
+      reason: groundingReason,
+    },
+  };
+}
+
+export async function auditSandboxFacts(
+  sandboxToken: string,
+  signal?: AbortSignal,
+): Promise<SandboxContradiction[]> {
+  const body = unwrap(
+    await requestJson(
+      "/api/sandbox/audit",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sandbox_token: sandboxToken }),
+      },
+      signal,
+    ),
+  );
+  const rawContradictions = body.contradictions;
+  if (body.ok !== true || !Array.isArray(rawContradictions)) {
+    throw new PublicApiError(
+      "/api/sandbox/audit",
+      "The sandbox returned an invalid contradiction audit.",
+    );
+  }
+  const contradictions = rawContradictions.flatMap((value) => {
+    const item = asRecord(value);
+    const subject = asString(item?.subject);
+    const attribute = asString(item?.attribute);
+    if (!item || !subject || !attribute) return [];
+    const rawValues = item.values;
+    if (!Array.isArray(rawValues)) return [];
+    const values = rawValues.flatMap((rawValue) => {
+      const entry = asRecord(rawValue);
+      const numericValue = entry?.value;
+      const sourceRef = asString(entry?.sourceRef);
+      const memoryId = asString(entry?.memoryId);
+      return entry &&
+        typeof numericValue === "number" &&
+        Number.isFinite(numericValue) &&
+        sourceRef &&
+        memoryId &&
+        EXACT_UUID_V4.test(memoryId)
+        ? [{ value: numericValue, sourceRef, memoryId }]
+        : [];
+    });
+    return values.length === rawValues.length &&
+      values.length > 1 &&
+      new Set(values.map((entry) => entry.memoryId)).size === values.length &&
+      new Set(values.map((entry) => entry.value)).size > 1
+      ? [{ subject, attribute, values }]
+      : [];
+  });
+  if (
+    contradictions.length !== rawContradictions.length ||
+    new Set(
+      contradictions.map((item) => `${item.subject}\u0000${item.attribute}`),
+    ).size !== contradictions.length
+  ) {
+    throw new PublicApiError(
+      "/api/sandbox/audit",
+      "The sandbox returned an invalid contradiction audit.",
+    );
+  }
+  return contradictions;
+}
+
 function normalizeAuditValue(value: unknown): AuditValue | null {
   const item = asRecord(value);
   if (!item) return null;

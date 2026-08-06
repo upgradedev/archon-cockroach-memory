@@ -31,6 +31,11 @@ import {
   PUBLIC_DEMO_CANONICAL_KEYS,
 } from "../src/memory/demo-reconciliation.js";
 import {
+  SANDBOX_MAX_ACTIVE_SESSIONS,
+  SANDBOX_MAX_MEMORIES,
+  SANDBOX_TTL_SECONDS,
+} from "../src/memory/sandbox-store.js";
+import {
   affirmativeSystemGrants,
   privilegedRuntimeRoleOptions,
   runtimeLoginIsDisabled,
@@ -95,6 +100,15 @@ const RESOLUTION_TABLES = [
   "memory_resolution_consolidations",
 ] as const;
 const RESOLUTION_TTL_CRON = "0 */4 * * *";
+const SANDBOX_TABLES = [
+  "judge_sandbox_sessions",
+  "judge_sandbox_memory",
+] as const;
+const SANDBOX_TTL_CRONS = new Map<string, string>([
+  ["judge_sandbox_sessions", "17 * * * *"],
+  ["judge_sandbox_memory", "13 * * * *"],
+]);
+const SANDBOX_VECTOR_INDEX = "idx_judge_sandbox_session_embedding";
 const RESOLUTION_TRANSITION_OWNER =
   "archon_resolution_transition_owner";
 
@@ -102,6 +116,8 @@ const RUNTIME_RELATION_GRANTS = new Map<string, readonly string[]>([
   ["agent_memory", ["SELECT"]],
   [PUBLIC_RECALL_VIEW_NAME, ["SELECT"]],
   [PUBLIC_KIND_RECALL_VIEW_NAME, ["SELECT"]],
+  ["judge_sandbox_sessions", ["INSERT", "SELECT", "UPDATE"]],
+  ["judge_sandbox_memory", ["INSERT", "SELECT"]],
   ["memory_demo_sessions", ["SELECT"]],
   ["memory_resolution_observations", ["SELECT"]],
   ["memory_resolution_proposals", ["SELECT"]],
@@ -110,9 +126,8 @@ const RUNTIME_RELATION_GRANTS = new Map<string, readonly string[]>([
 ]);
 const RESOLUTION_WRITER_GRANTS = new Map<string, readonly string[]>(
   [...RUNTIME_RELATION_GRANTS].filter(([relation]) =>
-    RESOLUTION_TABLES.includes(
-      relation as (typeof RESOLUTION_TABLES)[number]
-    )
+    RESOLUTION_TABLES.includes(relation as (typeof RESOLUTION_TABLES)[number]) ||
+    SANDBOX_TABLES.includes(relation as (typeof SANDBOX_TABLES)[number])
   )
 );
 const RESOLUTION_TRANSITION_OWNER_GRANTS = new Map<
@@ -370,7 +385,7 @@ async function verifyRuntimeGrants(
     )
   ) {
     throw new ReleaseGateError(
-      "Runtime relation privilege matrix exceeds canonical and synthetic SELECT-only access."
+      "Runtime relation privilege matrix exceeds canonical reads and bounded judge-sandbox writes."
     );
   }
 
@@ -1733,9 +1748,7 @@ async function verifyExactResolutionRelationGrants(
       (grant) =>
         grant.schema_name !== "public" ||
         grant.is_grantable ||
-        !RESOLUTION_TABLES.includes(
-          grant.table_name as (typeof RESOLUTION_TABLES)[number]
-        )
+        !expected.has(grant.table_name)
     )
   ) {
     throw new ReleaseGateError(`${role} relation privilege matrix drifted.`);
@@ -1909,6 +1922,250 @@ async function verifyResolutionTransitionFunctions(
   };
 }
 
+async function verifyJudgeSandboxSecurity(
+  client: PgClient
+): Promise<{
+  tables: 2;
+  rlsPolicies: 6;
+  ttlTables: 2;
+  sessionTtlSchedule: "17 * * * *";
+  memoryTtlSchedule: "13 * * * *";
+  ttlClusterEnabled: true;
+  ttlScheduleStatus: "ACTIVE";
+  ttlPaused: false;
+  vectorIndex: typeof SANDBOX_VECTOR_INDEX;
+  constraintsVerified: true;
+  maxMemoriesPerSession: 20;
+  maxActiveSessions: 200;
+  ttlSeconds: 3600;
+}> {
+  const tables = await client.query<{ table_name: string }>(
+    `SELECT table_name
+       FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = ANY($1::STRING[])
+      ORDER BY table_name`,
+    [SANDBOX_TABLES]
+  );
+  if (
+    JSON.stringify(tables.rows.map((row) => row.table_name)) !==
+    JSON.stringify([...SANDBOX_TABLES].sort())
+  ) {
+    throw new ReleaseGateError("Exact two-table judge sandbox proof failed.");
+  }
+
+  const rls = await client.query<{
+    relname: string;
+    relrowsecurity: boolean;
+    relforcerowsecurity: boolean;
+  }>(
+    `SELECT classes.relname,
+            classes.relrowsecurity,
+            classes.relforcerowsecurity
+       FROM pg_catalog.pg_class AS classes
+       JOIN pg_catalog.pg_namespace AS namespaces
+         ON namespaces.oid = classes.relnamespace
+      WHERE namespaces.nspname = 'public'
+        AND classes.relname = ANY($1::STRING[])`,
+    [SANDBOX_TABLES]
+  );
+  if (
+    rls.rows.length !== SANDBOX_TABLES.length ||
+    rls.rows.some(
+      (row) => !row.relrowsecurity || !row.relforcerowsecurity
+    )
+  ) {
+    throw new ReleaseGateError("Judge sandbox RLS proof failed.");
+  }
+
+  const policies = await client.query<{
+    tablename: string;
+    policyname: string;
+    permissive: string;
+    cmd: string;
+    roles: string[] | string;
+    qual: string | null;
+    with_check: string | null;
+  }>(
+    `SELECT tablename, policyname, permissive, cmd, roles, qual, with_check
+       FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = ANY($1::STRING[])`,
+    [SANDBOX_TABLES]
+  );
+  if (policies.rows.length !== SANDBOX_TABLES.length * 3) {
+    throw new ReleaseGateError("Judge sandbox RLS policy count drifted.");
+  }
+  for (const table of SANDBOX_TABLES) {
+    const tablePolicies = policies.rows.filter(
+      (policy) => policy.tablename === table
+    );
+    const operator = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_operator_v1`
+    );
+    const permit = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_permit_v1`
+    );
+    const guard = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_guard_v1`
+    );
+    for (const [policy, mode] of [
+      [permit, "permissive"],
+      [guard, "restrictive"],
+    ] as const) {
+      const using = normalizedCatalogExpression(policy?.qual ?? null);
+      const check = normalizedCatalogExpression(policy?.with_check ?? null);
+      if (
+        !policy ||
+        policy.permissive.toLowerCase() !== mode ||
+        policy.cmd.toLowerCase() !== "all" ||
+        JSON.stringify(stringArray(policy.roles).sort()) !==
+          JSON.stringify(["archon_resolution_writer"]) ||
+        using.includes(" or ") ||
+        check.includes(" or ") ||
+        !using.includes("tenant_id = 'public-demo'") ||
+        !using.includes("expires_at >") ||
+        !check.includes("tenant_id = 'public-demo'") ||
+        !check.includes("expires_at >") ||
+        (!check.includes("61") && !check.includes("01:01:00")) ||
+        (table === "judge_sandbox_sessions" &&
+          !check.includes("memory_count"))
+      ) {
+        throw new ReleaseGateError(
+          `Judge sandbox RLS policy drifted on ${table}.`
+        );
+      }
+    }
+    if (
+      tablePolicies.length !== 3 ||
+      operator?.permissive.toLowerCase() !== "permissive" ||
+      operator.cmd.toLowerCase() !== "all" ||
+      normalizedCatalogExpression(operator.qual) !== "true" ||
+      normalizedCatalogExpression(operator.with_check) !== "true"
+    ) {
+      throw new ReleaseGateError(
+        `Judge sandbox operator policy drifted on ${table}.`
+      );
+    }
+  }
+
+  const ttlSetting = await client.query<{ value: string }>(
+    `SELECT value
+       FROM [SHOW ALL CLUSTER SETTINGS]
+      WHERE variable = 'sql.ttl.job.enabled'`
+  );
+  if (
+    ttlSetting.rows.length !== 1 ||
+    String(ttlSetting.rows[0]?.value).toLowerCase() !== "true"
+  ) {
+    throw new ReleaseGateError("CockroachDB row-level TTL jobs are disabled.");
+  }
+
+  for (const table of SANDBOX_TABLES) {
+    const cron = SANDBOX_TTL_CRONS.get(table)!;
+    const created = await client.query<{ create_statement: string }>(
+      `SELECT create_statement FROM [SHOW CREATE TABLE ${table}]`
+    );
+    const statement = created.rows[0]?.create_statement ?? "";
+    const requiredConstraints =
+      table === "judge_sandbox_sessions"
+        ? ["chk_judge_sandbox_count", "chk_judge_sandbox_session_expiry"]
+        : [
+            "chk_judge_sandbox_memory_hash",
+            "chk_judge_sandbox_structured_fact",
+            "chk_judge_sandbox_numeric_value",
+            "chk_judge_sandbox_memory_expiry",
+          ];
+    if (
+      created.rows.length !== 1 ||
+      !/\bttl\s*=\s*'on'/iu.test(statement) ||
+      !/ttl_expiration_expression\s*=\s*'expires_at'/iu.test(statement) ||
+      !statement.includes(`ttl_job_cron = '${cron}'`) ||
+      /\bttl_pause\s*=/iu.test(statement) ||
+      requiredConstraints.some((constraint) => !statement.includes(constraint))
+    ) {
+      throw new ReleaseGateError(
+        `Judge sandbox TTL or constraint contract drifted on ${table}.`
+      );
+    }
+    const descriptor = await client.query<{ table_id: string }>(
+      `SELECT oid::STRING AS table_id
+         FROM pg_catalog.pg_class
+        WHERE oid = 'public.${table}'::REGCLASS`
+    );
+    const tableId = descriptor.rows[0]?.table_id;
+    if (!tableId) {
+      throw new ReleaseGateError(
+        `Judge sandbox descriptor proof failed on ${table}.`
+      );
+    }
+    const schedules = await client.query<{
+      schedule_status: string;
+      recurrence: string;
+      table_id: string | null;
+    }>(
+      `SELECT schedule_status,
+              recurrence,
+              (command::JSONB)->>'tableId' AS table_id
+         FROM [SHOW SCHEDULES]
+        WHERE label = $1`,
+      [`row-level-ttl: ${table} [${tableId}]`]
+    );
+    if (
+      schedules.rows.length !== 1 ||
+      schedules.rows[0]?.schedule_status.toUpperCase() !== "ACTIVE" ||
+      schedules.rows[0].recurrence !== cron ||
+      schedules.rows[0].table_id !== tableId
+    ) {
+      throw new ReleaseGateError(
+        `Judge sandbox TTL schedule drifted on ${table}.`
+      );
+    }
+  }
+
+  const vectorIndex = await client.query<{ indexdef: string }>(
+    `SELECT indexdef
+       FROM pg_catalog.pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'judge_sandbox_memory'
+        AND indexname = $1`,
+    [SANDBOX_VECTOR_INDEX]
+  );
+  const definition = (vectorIndex.rows[0]?.indexdef ?? "")
+    .toLowerCase()
+    .replace(/\s+/gu, " ");
+  const isCspannDefinition =
+    definition.startsWith("create vector index ") ||
+    /^create index .+ using cspann /u.test(definition);
+  if (
+    vectorIndex.rows.length !== 1 ||
+    !isCspannDefinition ||
+    !definition.includes("session_token_hash") ||
+    !definition.includes("embed_model") ||
+    !definition.includes("embedding vector_cosine_ops")
+  ) {
+    throw new ReleaseGateError(
+      "Judge sandbox session-scoped C-SPANN index proof failed."
+    );
+  }
+
+  return {
+    tables: 2,
+    rlsPolicies: 6,
+    ttlTables: 2,
+    sessionTtlSchedule: "17 * * * *",
+    memoryTtlSchedule: "13 * * * *",
+    ttlClusterEnabled: true,
+    ttlScheduleStatus: "ACTIVE",
+    ttlPaused: false,
+    vectorIndex: SANDBOX_VECTOR_INDEX,
+    constraintsVerified: true,
+    maxMemoriesPerSession: SANDBOX_MAX_MEMORIES as 20,
+    maxActiveSessions: SANDBOX_MAX_ACTIVE_SESSIONS as 200,
+    ttlSeconds: SANDBOX_TTL_SECONDS as 3600,
+  };
+}
+
 async function verifyResolutionSandboxSecurity(
   client: PgClient,
   databaseName: string,
@@ -1921,11 +2178,11 @@ async function verifyResolutionSandboxSecurity(
   ttlClusterEnabled: true;
   ttlScheduleStatus: "ACTIVE";
   ttlPaused: false;
-  writerRelationGrantCount: 5;
+  writerRelationGrantCount: 10;
   transitionOwnerRelationGrantCount: 13;
   transitionFunctionCount: 2;
   writerFunctionExecuteCount: 2;
-  directRuntimeDml: "none";
+  directRuntimeDml: "judge-sandbox-only";
 }> {
   const tables = await client.query<{ table_name: string }>(
     `SELECT table_name
@@ -2159,11 +2416,11 @@ async function verifyResolutionSandboxSecurity(
     ttlScheduleStatus: "ACTIVE",
     ttlPaused: false,
     writerRelationGrantCount:
-      writerRelationGrantCount as 5,
+      writerRelationGrantCount as 10,
     transitionOwnerRelationGrantCount:
       transitionOwnerRelationGrantCount as 13,
     ...transitionFunctions,
-    directRuntimeDml: "none",
+    directRuntimeDml: "judge-sandbox-only",
   };
 }
 
@@ -2185,6 +2442,7 @@ async function verifyAdmin(
     kind: string;
   };
   isolationCanaryVectors: IsolationCanaryVector[];
+  judgeSandbox: Awaited<ReturnType<typeof verifyJudgeSandboxSecurity>>;
   resolutionSandbox: {
     tables: 5;
     rlsPolicies: 15;
@@ -2193,11 +2451,11 @@ async function verifyAdmin(
     ttlClusterEnabled: true;
     ttlScheduleStatus: "ACTIVE";
     ttlPaused: false;
-    writerRelationGrantCount: 5;
+    writerRelationGrantCount: 10;
     transitionOwnerRelationGrantCount: 13;
     transitionFunctionCount: 2;
     writerFunctionExecuteCount: 2;
-    directRuntimeDml: "none";
+    directRuntimeDml: "judge-sandbox-only";
   };
 }> {
   const client = new Client({ connectionString: adminUrl });
@@ -2454,6 +2712,7 @@ async function verifyAdmin(
     // The runtime body proof accepts CockroachDB's canonical unqualified
     // built-ins only after the SECURITY DEFINER owner's pg_catalog-only
     // search_path and isolation have been proven.
+    const judgeSandbox = await verifyJudgeSandboxSecurity(client);
     const resolutionSandbox = await verifyResolutionSandboxSecurity(
       client,
       databaseRow.database_name,
@@ -2466,6 +2725,7 @@ async function verifyAdmin(
       storeIntegrity,
       indexDefinitionFingerprints: indexFingerprints,
       isolationCanaryVectors,
+      judgeSandbox,
       resolutionSandbox,
     };
   } finally {
@@ -2619,6 +2879,7 @@ async function main(): Promise<void> {
           runtimeCspannEnvironmentCount: 2,
           memoryResolutionLoop: true,
           runtimeResolutionEnvironmentCount: 2,
+          judgeSandbox: admin.judgeSandbox,
           resolutionSandbox: admin.resolutionSandbox,
           resolutionIsolationBoundary:
             "trusted Lambda validates opaque bearer tokens; CockroachDB SECURITY DEFINER transition API confines mutation to fixed synthetic TTL rows",
@@ -2632,7 +2893,7 @@ async function main(): Promise<void> {
           wrongTenantInvisible: true,
           retractedStatusInvisible: true,
           runtimeRelationPrivilegeMatrix:
-            "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE",
+            "canonical and fixed resolution SELECT-only; judge sandbox sessions SELECT/INSERT/UPDATE and memory SELECT/INSERT only",
           runtimeFunctionPrivilegeMatrix:
             "cluster-wide EXECUTE only on the two canonical resolution routine signatures",
           runtimeSchemaPrivilegeMatrix: "USAGE only",

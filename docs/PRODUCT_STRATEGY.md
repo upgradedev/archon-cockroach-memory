@@ -65,12 +65,14 @@ listed explicitly in the repository's prior-work disclosure.
   `tenant_id + embed_model + status + company + kind` equality prefixes.
 - Fixed-predicate `archon_public_memory_recall` and
   `archon_public_memory_kind_recall` serving views for the immutable public
-  scope; the runtime principals remain RLS-bound and read-only.
+  scope; canonical memory and the resolution graph remain RLS-bound and
+  read-only, while direct writes are confined to the TTL judge sandbox.
 - Active-only, model-space-safe recall; no unscoped public retrieval.
 - Idempotent writes and content digests.
 - Bounded audit input and explicit lifecycle status.
 - Untrusted-evidence prompt boundary and post-generation grounding guard.
-- Public read-only `health`, `recall`, `audit`, and `proof` endpoints.
+- Public read-only canonical `health`, `recall`, `audit`, and `proof`
+  endpoints, plus capability-scoped judge-sandbox write and recall endpoints.
 - Private S3 + CloudFront frontend and same-origin API Gateway route.
 - Database URL in Secrets Manager; never a plaintext Lambda environment variable.
 - Least-privilege AWS role, throttling, reserved concurrency, logs, tracing, alarms.
