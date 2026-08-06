@@ -374,7 +374,7 @@ test("hosted DAST exact-release refuses the legacy API Gateway fallback", async 
   try {
     await assert.rejects(
       runHostedDast("https://d2s5v0o0eg2aaw.cloudfront.net"),
-      /method-boundary-get: expected 405, received 404/u
+      /sandbox-ingest-capability-boundary: expected 400, received 404/u
     );
   } finally {
     globalThis.fetch = originalFetch;

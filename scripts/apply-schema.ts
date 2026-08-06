@@ -383,9 +383,12 @@ async function verifyJudgeSandbox(client: PoolClient): Promise<void> {
   const definition = (vectorIndex.rows[0]?.indexdef ?? "")
     .toLowerCase()
     .replace(/\s+/gu, " ");
+  const isCspannDefinition =
+    definition.startsWith("create vector index ") ||
+    /^create index .+ using cspann /u.test(definition);
   if (
     vectorIndex.rows.length !== 1 ||
-    !definition.includes("create vector index") ||
+    !isCspannDefinition ||
     !definition.includes("session_token_hash") ||
     !definition.includes("embed_model") ||
     !definition.includes("embedding vector_cosine_ops")

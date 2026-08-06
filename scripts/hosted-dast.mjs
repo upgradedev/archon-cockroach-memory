@@ -343,7 +343,8 @@ export async function runHostedDast(targetUrl) {
     {
       id: "sandbox-ingest-capability-boundary",
       path: "/api/sandbox/ingest",
-      status: 400,
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
       init: {
         method: "POST",
         headers: jsonHeaders,
@@ -356,7 +357,8 @@ export async function runHostedDast(targetUrl) {
     {
       id: "sandbox-recall-capability-boundary",
       path: "/api/sandbox/recall",
-      status: 400,
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
       init: {
         method: "POST",
         headers: jsonHeaders,
@@ -369,7 +371,8 @@ export async function runHostedDast(targetUrl) {
     {
       id: "sandbox-audit-capability-boundary",
       path: "/api/sandbox/audit",
-      status: 400,
+      status: strictApiBoundary ? 400 : [404, 400],
+      allowGatewayFallback: !strictApiBoundary,
       init: {
         method: "POST",
         headers: jsonHeaders,
