@@ -22,10 +22,13 @@ import {
   handleResolutionDecision,
 } from "./http/resolution-handler.js";
 import {
+  handleSandboxAudit,
   handleSandboxIngest,
   handleSandboxRecall,
 } from "./http/sandbox-handler.js";
 import type { MemoryAgent } from "./agents/memory-agent.js";
+import type { Narrator } from "./agents/narrator.js";
+import type { Embedder } from "./memory/embeddings.js";
 import type { ResolutionStore } from "./memory/resolution.js";
 
 // Minimal API Gateway HTTP API v2 event/result shapes (only the fields we read),
@@ -72,6 +75,8 @@ export function createHandler(
   dependencies: {
     agent?: MemoryAgent;
     resolutionStore?: ResolutionStore;
+    sandboxEmbedder?: Embedder;
+    sandboxNarrator?: Narrator;
   } = {}
 ): (event: HttpApiEvent) => Promise<HttpApiResult> {
   return async (event: HttpApiEvent): Promise<HttpApiResult> => {
@@ -152,6 +157,7 @@ export function createHandler(
         "/resolution/decision",
         "/sandbox/ingest",
         "/sandbox/recall",
+        "/sandbox/audit",
       ]);
       if (!postPaths.has(pathname)) {
         return json(404, { error: "not found" });
@@ -180,13 +186,24 @@ export function createHandler(
         return json(400, { error: "request body must be valid JSON" });
       }
       if (pathname === "/sandbox/ingest") {
-        const result = await handleSandboxIngest(req);
+        const result = dependencies.sandboxEmbedder
+          ? await handleSandboxIngest(req, dependencies.sandboxEmbedder)
+          : await handleSandboxIngest(req);
         return json(result.status, result.body);
       }
       if (pathname === "/sandbox/recall") {
-        const result = dependencies.agent
-          ? await handleSandboxRecall(req, dependencies.agent)
-          : await handleSandboxRecall(req);
+        const result =
+          dependencies.sandboxEmbedder && dependencies.sandboxNarrator
+            ? await handleSandboxRecall(
+                req,
+                dependencies.sandboxEmbedder,
+                dependencies.sandboxNarrator
+              )
+            : await handleSandboxRecall(req);
+        return json(result.status, result.body);
+      }
+      if (pathname === "/sandbox/audit") {
+        const result = await handleSandboxAudit(req);
         return json(result.status, result.body);
       }
       if (pathname === "/resolution/session") {

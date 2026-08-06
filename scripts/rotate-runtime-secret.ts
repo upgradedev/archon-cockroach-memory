@@ -45,6 +45,8 @@ const EXPECTED_RUNTIME_RELATION_GRANTS = new Map<
   ["agent_memory", ["SELECT"]],
   [PUBLIC_RECALL_VIEW_NAME, ["SELECT"]],
   [PUBLIC_KIND_RECALL_VIEW_NAME, ["SELECT"]],
+  ["judge_sandbox_sessions", ["INSERT", "SELECT", "UPDATE"]],
+  ["judge_sandbox_memory", ["INSERT", "SELECT"]],
   ["memory_demo_sessions", ["SELECT"]],
   ["memory_resolution_observations", ["SELECT"]],
   ["memory_resolution_proposals", ["SELECT"]],

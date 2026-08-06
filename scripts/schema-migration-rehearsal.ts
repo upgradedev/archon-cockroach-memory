@@ -40,6 +40,11 @@ const expectedRuntimeRelationGrants = new Set([
   "agent_memory:SELECT",
   `${PUBLIC_RECALL_VIEW_NAME}:SELECT`,
   `${PUBLIC_KIND_RECALL_VIEW_NAME}:SELECT`,
+  "judge_sandbox_sessions:INSERT",
+  "judge_sandbox_sessions:SELECT",
+  "judge_sandbox_sessions:UPDATE",
+  "judge_sandbox_memory:INSERT",
+  "judge_sandbox_memory:SELECT",
   "memory_demo_sessions:SELECT",
   "memory_resolution_observations:SELECT",
   "memory_resolution_proposals:SELECT",
@@ -311,11 +316,10 @@ async function verifyFinalState(): Promise<ClusterGrantProof> {
       runtimeGrants.rows.some((grant) => grant.is_grantable) ||
       [...expectedRuntimeRelationGrants].some(
         (grant) => !grantKeys.has(grant)
-      ) ||
-      [...grantKeys].some((grant) => !grant.endsWith(":SELECT"))
+      )
     ) {
       throw new Error(
-        "Migrated runtime relation grants are not exact SELECT-only access."
+        "Migrated runtime relation grants do not match canonical reads and bounded judge-sandbox writes."
       );
     }
     const grantProofInput = {
@@ -509,6 +513,8 @@ async function main(): Promise<void> {
       roleBoundThreeAxisRls: true,
       runtimePrincipalCspannPlanAndExecute: true,
       exactFiveTableResolutionSandbox: true,
+      exactTwoTableJudgeSandbox: true,
+      boundedJudgeSandboxDml: true,
       resolutionWriterMembership: true,
       exactTransitionFunctionExecute: true,
       directResolutionDmlDenied: true,

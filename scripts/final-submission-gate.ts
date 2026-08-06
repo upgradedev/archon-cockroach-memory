@@ -1254,6 +1254,9 @@ export function requireExactHostedDastReceipt(
     ["health-boundary", 200],
     ["release-proof-boundary", 200],
     ["audit-boundary", 200],
+    ["sandbox-ingest-capability-boundary", 400],
+    ["sandbox-recall-capability-boundary", 400],
+    ["sandbox-audit-capability-boundary", 400],
     ["method-boundary-get", 405],
     ["method-boundary-delete", 405],
     ["content-type-boundary", 415],
@@ -1295,7 +1298,7 @@ export function requireExactHostedDastReceipt(
       );
     })
   ) {
-    throw new Error("Hosted DAST receipt does not prove all 21 checks");
+    throw new Error("Hosted DAST receipt does not prove all 24 checks");
   }
 }
 

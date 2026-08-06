@@ -11,7 +11,7 @@ export function Hero() {
               Executive AI Guardrail
             </span>
             <span className="border border-mint/30 bg-mint/10 px-2.5 py-1 text-mint">
-              EU AI Act Compliant
+              EU AI Act Alignment
             </span>
             <span className="border border-paper/20 bg-paper/5 px-2.5 py-1 text-paper/80">
               CockroachDB Distributed Memory
@@ -38,7 +38,7 @@ export function Hero() {
             </div>
             <div className="border border-line bg-carbon/40 p-3 rounded-none">
               <span className="block text-[10px] font-mono text-muted uppercase tracking-wider">EU AI Act</span>
-              <span className="text-sm font-bold text-mint">Compliant (Art 14/50)</span>
+              <span className="text-sm font-bold text-mint">Alignment reviewed</span>
             </div>
             <div className="border border-line bg-carbon/40 p-3 rounded-none">
               <span className="block text-[10px] font-mono text-muted uppercase tracking-wider">p95 Latency</span>
@@ -61,7 +61,7 @@ export function Hero() {
                 <span className="font-mono font-bold text-mint bg-mint/10 border border-mint/30 px-1.5 py-0.5 text-[10px]">1</span>
                 <div>
                   <strong className="text-paper block font-semibold">Recall or Ingest Facts</strong>
-                  <span>Ask financial questions or inject custom facts via Sandbox API.</span>
+                  <span>Ask canonical questions or add bounded facts in the on-page sandbox.</span>
                 </div>
               </li>
               <li className="flex items-start gap-3">
@@ -89,7 +89,7 @@ export function Hero() {
               <span className="font-mono text-xs text-muted">{PUBLIC_COMPANY}</span>
             </div>
             <p className="mt-2 text-[11px] leading-4 text-muted">
-              Public, read-only demonstration data stays canonical. Sandbox test writes expire automatically via CockroachDB TTL (1h).
+              Canonical demonstration data stays read-only. Sandbox capabilities stay in this tab; expired rows are rejected and CockroachDB enforces a maximum one-hour storage TTL.
             </p>
           </div>
         </div>

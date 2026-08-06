@@ -311,6 +311,20 @@ jobs:
              .proofs.runtimeCspannEnvironmentCount == 2 and
              .proofs.memoryResolutionLoop == true and
              .proofs.runtimeResolutionEnvironmentCount == 2 and
+             .proofs.judgeSandbox.tables == 2 and
+             .proofs.judgeSandbox.rlsPolicies == 6 and
+             .proofs.judgeSandbox.ttlTables == 2 and
+             .proofs.judgeSandbox.sessionTtlSchedule == "17 * * * *" and
+             .proofs.judgeSandbox.memoryTtlSchedule == "13 * * * *" and
+             .proofs.judgeSandbox.ttlClusterEnabled == true and
+             .proofs.judgeSandbox.ttlScheduleStatus == "ACTIVE" and
+             .proofs.judgeSandbox.ttlPaused == false and
+             .proofs.judgeSandbox.vectorIndex ==
+               "idx_judge_sandbox_session_embedding" and
+             .proofs.judgeSandbox.constraintsVerified == true and
+             .proofs.judgeSandbox.maxMemoriesPerSession == 20 and
+             .proofs.judgeSandbox.maxActiveSessions == 200 and
+             .proofs.judgeSandbox.ttlSeconds == 3600 and
              .proofs.resolutionSandbox.tables == 5 and
              .proofs.resolutionSandbox.rlsPolicies == 15 and
              .proofs.resolutionSandbox.ttlExpirationExpression ==
@@ -320,17 +334,17 @@ jobs:
              .proofs.resolutionSandbox.ttlClusterEnabled == true and
              .proofs.resolutionSandbox.ttlScheduleStatus == "ACTIVE" and
              .proofs.resolutionSandbox.ttlPaused == false and
-             .proofs.resolutionSandbox.writerRelationGrantCount == 5 and
+             .proofs.resolutionSandbox.writerRelationGrantCount == 10 and
              .proofs.resolutionSandbox.transitionOwnerRelationGrantCount == 13 and
              .proofs.resolutionSandbox.transitionFunctionCount == 2 and
              .proofs.resolutionSandbox.writerFunctionExecuteCount == 2 and
-             .proofs.resolutionSandbox.directRuntimeDml == "none" and
+             .proofs.resolutionSandbox.directRuntimeDml == "judge-sandbox-only" and
              .proofs.resolutionIsolationBoundary ==
                "trusted Lambda validates opaque bearer tokens; CockroachDB SECURITY DEFINER transition API confines mutation to fixed synthetic TTL rows" and
              .proofs.transitionOwnerPrivilegeBoundary ==
                "NOLOGIN/NOBYPASSRLS; no members or parent roles; schema USAGE without CREATE; 13 bounded relation grants; owns exactly two SECURITY DEFINER routines" and
              .proofs.runtimeRelationPrivilegeMatrix ==
-               "canonical and fixed synthetic SELECT only; zero direct INSERT/UPDATE/DELETE" and
+               "canonical and fixed resolution SELECT-only; judge sandbox sessions SELECT/INSERT/UPDATE and memory SELECT/INSERT only" and
              .proofs.runtimeFunctionPrivilegeMatrix ==
                "cluster-wide EXECUTE only on the two canonical resolution routine signatures" and
              .proofs.runtimeDatabasePrivilegeMatrix ==

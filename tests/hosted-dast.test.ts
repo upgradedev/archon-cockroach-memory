@@ -207,6 +207,8 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
       }
     } else if (url.pathname === "/api/audit") {
       status = 400;
+    } else if (url.pathname.startsWith("/api/sandbox/")) {
+      status = 400;
     }
 
     return Response.json(
@@ -223,8 +225,16 @@ test("hosted DAST emits a passing receipt only after every boundary check", asyn
     assert.equal(receipt.version, 4);
     assert.equal(receipt.profile, "predeploy");
     assert.equal(receipt.releaseSha, "unknown");
-    assert.equal(receipt.checks.length, 21);
+    assert.equal(receipt.checks.length, 24);
     assert.ok(receipt.checks.every((check) => check.status === "pass"));
+    assert.deepEqual(
+      receipt.checks.slice(4, 7).map((check) => check.id),
+      [
+        "sandbox-ingest-capability-boundary",
+        "sandbox-recall-capability-boundary",
+        "sandbox-audit-capability-boundary",
+      ]
+    );
     assert.deepEqual(
       receipt.checks.slice(-6).map((check) => check.id),
       [

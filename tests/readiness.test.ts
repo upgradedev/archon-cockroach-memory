@@ -2640,6 +2640,18 @@ test("readiness: judging mirrors the five equally presented official criteria", 
 test("readiness: source readiness cannot masquerade as submission eligibility", () => {
   const report = evaluate();
   assert.equal(report.sourceGate.pass, true);
+  assert.deepEqual(report.readinessBoundaries.deployedLive, {
+    status: "not-evaluated",
+    meaning: "requires current hosted probes and exact deployed-release evidence",
+  });
+  assert.deepEqual(report.readinessBoundaries.regulatory, {
+    status: "alignment-review-only",
+    meaning: "not a legal determination or conformity assessment",
+  });
+  assert.equal(
+    report.readinessBoundaries.source.meaning,
+    "repository source and static evidence only"
+  );
   const deliverablesComplete = report.eligibility.requirements.every(
     (requirement) => requirement.status === "complete"
   );
@@ -2659,6 +2671,15 @@ test("readiness: source readiness cannot masquerade as submission eligibility", 
       `${id} must be represented as a hard eligibility requirement`
     );
   }
+});
+
+test("readiness: judge-supplied memory is bounded and source/live explicit", () => {
+  const check = evaluate().checks.find(
+    (item) => item.id === "impact.judge-supplied-memory"
+  );
+  assert.ok(check);
+  assert.equal(check.criterion, "Real-World Impact");
+  assert.equal(check.status, "pass");
 });
 
 test("readiness: submission eligibility is the full source/deliverables truth table", () => {
@@ -4307,6 +4328,34 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
     workflow,
     /\.proofs\.runtimeResolutionEnvironmentCount == 2/u
   );
+  assert.match(workflow, /\.proofs\.judgeSandbox\.tables == 2/u);
+  assert.match(workflow, /\.proofs\.judgeSandbox\.rlsPolicies == 6/u);
+  assert.match(workflow, /\.proofs\.judgeSandbox\.ttlTables == 2/u);
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.sessionTtlSchedule == "17 \* \* \* \*"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.memoryTtlSchedule == "13 \* \* \* \*"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.vectorIndex ==\s*\n?\s*"idx_judge_sandbox_session_embedding"/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.constraintsVerified == true/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.maxMemoriesPerSession == 20/u
+  );
+  assert.match(
+    workflow,
+    /\.proofs\.judgeSandbox\.maxActiveSessions == 200/u
+  );
+  assert.match(workflow, /\.proofs\.judgeSandbox\.ttlSeconds == 3600/u);
   assert.match(workflow, /\.proofs\.resolutionSandbox\.tables == 5/u);
   assert.match(workflow, /\.proofs\.resolutionSandbox\.rlsPolicies == 15/u);
   assert.match(
@@ -4324,7 +4373,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   assert.match(workflow, /\.proofs\.resolutionSandbox\.ttlPaused == false/u);
   assert.match(
     workflow,
-    /\.proofs\.resolutionSandbox\.writerRelationGrantCount == 5/u
+    /\.proofs\.resolutionSandbox\.writerRelationGrantCount == 10/u
   );
   assert.match(
     workflow,
@@ -4340,7 +4389,7 @@ test("readiness: database release requires both C-SPANN paths from both runtime 
   );
   assert.match(
     workflow,
-    /\.proofs\.resolutionSandbox\.directRuntimeDml == "none"/u
+    /\.proofs\.resolutionSandbox\.directRuntimeDml == "judge-sandbox-only"/u
   );
   for (const resolutionProof of [
     ".resolutionLoop.databaseEnforcedTransitions == true",

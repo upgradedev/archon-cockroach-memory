@@ -38,10 +38,12 @@ Exit criteria:
   fixed synthetic conflict, opaque bearer capability, human approve/reject,
   idempotent replay, immutable decision/consolidation receipt, TTL lifecycle,
   and no canonical-memory or external financial mutation.
-- [x] Runtime mutation is exposed only through two exact
+- [x] Resolution mutation is exposed only through two exact
   `SECURITY DEFINER` transition routines owned by a bounded non-login role.
-  The runtime role has five exact sandbox `SELECT` grants, two exact routine
-  `EXECUTE` grants, and zero direct table DML. Schema, migration, release, and
+  The runtime role has five exact resolution-table `SELECT` grants, two exact
+  routine `EXECUTE` grants, and direct DML only on the two TTL-backed judge
+  sandbox tables (`SELECT`/`INSERT` plus session-counter `UPDATE`). Schema,
+  migration, release, and
   credential-rotation CI use a short-lived admin connection with an anonymous
   current database to prove the full cluster contains exactly those two
   canonical routine signatures and no other effective UDF access. The shared

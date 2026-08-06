@@ -225,6 +225,25 @@ export interface ReadinessReport {
     pass: boolean;
   };
   submissionEligible: boolean;
+  readinessBoundaries: {
+    source: {
+      status: "pass" | "fail";
+      pct: number;
+      meaning: "repository source and static evidence only";
+    };
+    deployedLive: {
+      status: "not-evaluated";
+      meaning: "requires current hosted probes and exact deployed-release evidence";
+    };
+    regulatory: {
+      status: "alignment-review-only";
+      meaning: "not a legal determination or conformity assessment";
+    };
+    submission: {
+      status: "source-eligible" | "incomplete";
+      meaning: "final hosted submission gate is separate and not asserted here";
+    };
+  };
 }
 
 export interface IncrementalFixedCostEvaluation {
@@ -3814,6 +3833,10 @@ function sourceChecks(): SourceCheck[] {
     databaseRelease.match(
       /async function verifyResolutionSandboxSecurity[\s\S]*?(?=\r?\nasync function verifyAdmin)/u
     )?.[0] ?? "";
+  const judgeSandboxVerifier =
+    databaseRelease.match(
+      /async function verifyJudgeSandboxSecurity[\s\S]*?(?=\r?\nasync function verifyResolutionSandboxSecurity)/u
+    )?.[0] ?? "";
   const canaryDeploymentPreference =
     lambdaTemplate.match(
       /AutoPublishAlias:\s*live[\s\S]*?DeploymentPreference:[\s\S]*?(?=\r?\n      Environment:)/u
@@ -6921,10 +6944,46 @@ function sourceChecks(): SourceCheck[] {
         /ttlScheduleStatus:\s*"ACTIVE"/u.test(
           resolutionSandboxVerifier
         ) &&
+        /sql\.ttl\.job\.enabled/u.test(judgeSandboxVerifier) &&
+        /SHOW SCHEDULES/u.test(judgeSandboxVerifier) &&
+        /SANDBOX_VECTOR_INDEX/u.test(judgeSandboxVerifier) &&
+        /tables:\s*2/u.test(judgeSandboxVerifier) &&
+        /rlsPolicies:\s*6/u.test(judgeSandboxVerifier) &&
+        /ttlTables:\s*2/u.test(judgeSandboxVerifier) &&
         /\.proofs\.memoryResolutionLoop\s*==\s*true/u.test(
           databaseReleaseWorkflow
         ) &&
         /\.proofs\.runtimeResolutionEnvironmentCount\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.tables\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.rlsPolicies\s*==\s*6/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.ttlTables\s*==\s*2/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.sessionTtlSchedule\s*==\s*"17 \* \* \* \*"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.memoryTtlSchedule\s*==\s*"13 \* \* \* \*"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.vectorIndex\s*==\s*\n?\s*"idx_judge_sandbox_session_embedding"/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.constraintsVerified\s*==\s*true/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.maxMemoriesPerSession\s*==\s*20/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.maxActiveSessions\s*==\s*200/u.test(
+          databaseReleaseWorkflow
+        ) &&
+        /\.proofs\.judgeSandbox\.ttlSeconds\s*==\s*3600/u.test(
           databaseReleaseWorkflow
         ) &&
         /\.proofs\.resolutionSandbox\.tables\s*==\s*5/u.test(
@@ -6945,7 +7004,7 @@ function sourceChecks(): SourceCheck[] {
         /\.proofs\.resolutionSandbox\.ttlPaused\s*==\s*false/u.test(
           databaseReleaseWorkflow
         ) &&
-        /\.proofs\.resolutionSandbox\.writerRelationGrantCount\s*==\s*5/u.test(
+        /\.proofs\.resolutionSandbox\.writerRelationGrantCount\s*==\s*10/u.test(
           databaseReleaseWorkflow
         ) &&
         /\.proofs\.resolutionSandbox\.transitionOwnerRelationGrantCount\s*==\s*13/u.test(
@@ -6957,7 +7016,7 @@ function sourceChecks(): SourceCheck[] {
         /\.proofs\.resolutionSandbox\.writerFunctionExecuteCount\s*==\s*2/u.test(
           databaseReleaseWorkflow
         ) &&
-        /\.proofs\.resolutionSandbox\.directRuntimeDml\s*==\s*"none"/u.test(
+        /\.proofs\.resolutionSandbox\.directRuntimeDml\s*==\s*"judge-sandbox-only"/u.test(
           databaseReleaseWorkflow
         ) &&
         /\.resolutionLoop\.databaseEnforcedTransitions\s*==\s*true/u.test(
@@ -6999,7 +7058,7 @@ function sourceChecks(): SourceCheck[] {
         /\.resolutionLoop\.approvedReceiptSha256\s*!=\s*\n?\s*\.resolutionLoop\.rejectedReceiptSha256/u.test(
           databaseReleaseWorkflow
         ),
-      "The database release proves the five-table TTL/RLS sandbox, an exact cluster-wide two-signature transition API with isolated CI rehearsal databases, a live five-row runtime database matrix (public CONNECT+TEMPORARY on defaultdb/postgres, direct CONNECT on archon, zero system rows), drift rejection and a canonical digest, zero runtime DML, and approve/reject/idempotency/conflict/receipt/consolidation behavior through both runtime principals while canonical memory remains unchanged.",
+      "The database release proves the two-table judge sandbox's forced RLS, storage TTL schedules, constraints and session-scoped C-SPANN index; the five-table TTL/RLS resolution sandbox; bounded direct DML only on judge-sandbox tables; an exact cluster-wide two-signature transition API; and canonical memory remaining unchanged.",
       "The database release does not prove the bounded CockroachDB resolution action loop and its isolation, retention, or immutable receipt controls."
     ),
     sourceCheck(
@@ -7027,11 +7086,37 @@ function sourceChecks(): SourceCheck[] {
       /dataClassification:\s*"synthetic-public-demo"/u.test(
         read("src/config/scope.ts")
       ) &&
-        /Public,?\s+read-only demonstration data/iu.test(
+        /Canonical demonstration data stays read-only/iu.test(
           read("web/src/components/Hero.tsx")
         ),
       "The judge app is explicitly fixed to synthetic public data with no tenant selector.",
       "The public data classification/boundary is unclear."
+    ),
+    sourceCheck(
+      "impact.judge-supplied-memory",
+      "Real-World Impact",
+      has("src/memory/sandbox-store.ts") &&
+        has("src/http/sandbox-handler.ts") &&
+        has("web/src/components/JudgeSandbox.tsx") &&
+        has("docs/JUDGE_SANDBOX.md") &&
+        /\/sandbox\/ingest/u.test(read("src/lambda.ts")) &&
+        /\/sandbox\/recall/u.test(read("src/lambda.ts")) &&
+        /\/sandbox\/audit/u.test(read("src/lambda.ts")) &&
+        /SANDBOX_MAX_MEMORIES\s*=\s*20/u.test(
+          read("src/memory/sandbox-store.ts")
+        ) &&
+        /SANDBOX_MAX_ACTIVE_SESSIONS\s*=\s*200/u.test(
+          read("src/memory/sandbox-store.ts")
+        ) &&
+        /Start sandbox/u.test(read("web/src/components/JudgeSandbox.tsx")) &&
+        /Detect contradictions/u.test(
+          read("web/src/components/JudgeSandbox.tsx")
+        ) &&
+        /not claimed as available on the[\s\S]*current hosted release/iu.test(
+          read("docs/JUDGE_SANDBOX.md")
+        ),
+      "The source implements bounded capability-scoped facts, citation recall and contradiction audit without mutating canonical memory; source-versus-live status is explicit.",
+      "Judge-supplied memory is missing, unbounded, or presented as live without evidence."
     ),
     sourceCheck(
       "product.aws-reference-architecture",
@@ -7363,7 +7448,10 @@ function sourceChecks(): SourceCheck[] {
           lambdaTemplate
         ) &&
         /flag:\s*"wx"/u.test(hostedDast) &&
-        /checks\.length,\s*21/u.test(hostedDastTests) &&
+        /checks\.length,\s*24/u.test(hostedDastTests) &&
+        /id:\s*"sandbox-ingest-capability-boundary"/u.test(hostedDast) &&
+        /id:\s*"sandbox-recall-capability-boundary"/u.test(hostedDast) &&
+        /id:\s*"sandbox-audit-capability-boundary"/u.test(hostedDast) &&
         /!strictApiBoundary \|\|[\s\S]*?healthJson\?\.access ===\s*\n?\s*"canonical-read-only\+isolated-synthetic-resolution-write"/u.test(
           hostedDast
         ) &&
@@ -7375,7 +7463,7 @@ function sourceChecks(): SourceCheck[] {
         /id:\s*"resolution-session-auth-boundary"/u.test(hostedDast) &&
         /id:\s*"resolution-capability-shape-boundary"/u.test(hostedDast) &&
         /id:\s*"resolution-decision-auth-boundary"/u.test(hostedDast) &&
-        /Hosted DAST receipt does not prove all 21 checks/u.test(
+        /Hosted DAST receipt does not prove all 24 checks/u.test(
           finalSubmissionGate
         ) &&
         /rejects encoded runtime secrets in public responses/u.test(
@@ -9346,14 +9434,41 @@ export function evaluate(): ReadinessReport {
       sourceGatePass,
       eligibilityPass
     ),
+    readinessBoundaries: {
+      source: {
+        status: sourceGatePass ? "pass" : "fail",
+        pct,
+        meaning: "repository source and static evidence only",
+      },
+      deployedLive: {
+        status: "not-evaluated",
+        meaning:
+          "requires current hosted probes and exact deployed-release evidence",
+      },
+      regulatory: {
+        status: "alignment-review-only",
+        meaning: "not a legal determination or conformity assessment",
+      },
+      submission: {
+        status:
+          sourceGatePass && eligibilityPass
+            ? "source-eligible"
+            : "incomplete",
+        meaning:
+          "final hosted submission gate is separate and not asserted here",
+      },
+    },
   };
 }
 
 function printReport(report: ReadinessReport): void {
-  console.log("\nARCHON MEMORY — SOURCE READINESS / SUBMISSION ELIGIBILITY");
+  console.log("\nARCHON MEMORY — SOURCE READINESS (BOUNDED REPORT)");
   for (const criterion of OFFICIAL_CRITERIA) {
     const score = report.judging[criterion];
-    console.log(`\n${criterion}: ${score.pct}% (${score.passed}/${score.total})`);
+    console.log(
+      `\n${criterion} — SOURCE EVIDENCE: ` +
+        `${score.pct}% (${score.passed}/${score.total})`
+    );
     for (const check of report.checks.filter(
       (item) => item.criterion === criterion
     )) {
@@ -9365,12 +9480,29 @@ function printReport(report: ReadinessReport): void {
       `${report.sourceGate.pct}% (floor ${report.sourceGate.threshold}%)`
   );
   console.log(
-    `SUBMISSION ELIGIBLE: ${report.submissionEligible ? "YES" : "NO"} ` +
+    `SUBMISSION WORKFLOW INPUTS: ${report.submissionEligible ? "SOURCE-ELIGIBLE" : "INCOMPLETE"} ` +
       `(${report.eligibility.complete}/${report.eligibility.total})`
   );
   for (const item of report.eligibility.requirements) {
     console.log(`  ${item.status.toUpperCase()} ${item.id} — ${item.detail}`);
   }
+  console.log("\nREADINESS BOUNDARIES:");
+  console.log(
+    `  SOURCE: ${report.readinessBoundaries.source.status.toUpperCase()} — ` +
+      report.readinessBoundaries.source.meaning
+  );
+  console.log(
+    "  DEPLOYED/LIVE: NOT-EVALUATED — " +
+      report.readinessBoundaries.deployedLive.meaning
+  );
+  console.log(
+    "  REGULATORY: ALIGNMENT-REVIEW-ONLY — " +
+      report.readinessBoundaries.regulatory.meaning
+  );
+  console.log(
+    `  SUBMISSION: ${report.readinessBoundaries.submission.status.toUpperCase()} — ` +
+      report.readinessBoundaries.submission.meaning
+  );
   console.log();
 }
 

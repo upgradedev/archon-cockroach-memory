@@ -682,7 +682,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Stage 2g — deterministic pre-deploy DAST. The complete 21-check adversarial
+  # Stage 2g — deterministic pre-deploy DAST. The complete 24-check adversarial
   # contract runs against controlled responses, while digest-pinned ZAP spiders
   # the exact candidate SPA built by this SHA. Live active probes and release-
   # policy ZAP remain a blocking causal tail of every production deployment.
@@ -708,7 +708,7 @@ jobs:
         run: |
           npm ci
           npm ci --prefix web
-      - name: Prove the complete 21-check adversarial DAST contract
+      - name: Prove the complete 24-check adversarial DAST contract
         shell: bash
         env:
           DAST_CONTRACT_TAP: ${{ runner.temp }}/hosted-dast-contract.tap

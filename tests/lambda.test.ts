@@ -97,6 +97,21 @@ test("Lambda adapter enforces POST JSON and bounded bodies", async () => {
   );
 });
 
+test("Lambda adapter exposes fail-closed judge sandbox routes", async () => {
+  const cases = [
+    ["/api/sandbox/ingest", { fact: "bad" }],
+    ["/api/sandbox/recall", { question: "missing capability" }],
+    ["/api/sandbox/audit", {}],
+  ] as const;
+  for (const [path, body] of cases) {
+    const result = await handler(
+      event("POST", path, JSON.stringify(body))
+    );
+    assert.equal(result.statusCode, 400);
+    assert.doesNotMatch(result.body, /postgres|database_url|stack/iu);
+  }
+});
+
 test("health reports a healthy database as ready", async () => {
   resetHealthProbeCache();
   const result = await handleHealth(healthProbe());

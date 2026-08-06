@@ -43,7 +43,17 @@ const RESOLUTION_TABLES = [
   "memory_resolution_consolidations",
 ] as const;
 const RESOLUTION_TTL_CRON = "0 */4 * * *";
+const JUDGE_SANDBOX_TABLES = [
+  "judge_sandbox_sessions",
+  "judge_sandbox_memory",
+] as const;
+const JUDGE_SANDBOX_TTL_CRONS = new Map<string, string>([
+  ["judge_sandbox_sessions", "17 * * * *"],
+  ["judge_sandbox_memory", "13 * * * *"],
+]);
 const RESOLUTION_WRITER_GRANTS = new Map<string, readonly string[]>([
+  ["judge_sandbox_sessions", ["INSERT", "SELECT", "UPDATE"]],
+  ["judge_sandbox_memory", ["INSERT", "SELECT"]],
   ["memory_demo_sessions", ["SELECT"]],
   ["memory_resolution_observations", ["SELECT"]],
   ["memory_resolution_proposals", ["SELECT"]],
@@ -180,10 +190,11 @@ export async function applySchema(): Promise<void> {
     ) {
       throw new Error("agent_memory RLS is not both enabled and forced.");
     }
+    await verifyJudgeSandbox(client);
     await verifyResolutionSandbox(client, databaseName);
     await verifyPublicRecallViews(client, databaseName);
     console.log(
-      "✓ exact C-SPANN views, canonical read boundary, and TTL resolution sandbox verified"
+      "✓ exact C-SPANN views, canonical read boundary, judge sandbox, and resolution sandbox verified"
     );
   } finally {
     // The schema grants CREATE only for ownership-transfer statements. Always
@@ -206,6 +217,180 @@ export async function applySchema(): Promise<void> {
       client.release();
       await closePool();
     }
+  }
+}
+
+async function verifyJudgeSandbox(client: PoolClient): Promise<void> {
+  const tables = await client.query<{ table_name: string }>(
+    `SELECT table_name
+       FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = ANY($1::STRING[])
+      ORDER BY table_name`,
+    [JUDGE_SANDBOX_TABLES]
+  );
+  if (
+    JSON.stringify(tables.rows.map((row) => row.table_name)) !==
+    JSON.stringify([...JUDGE_SANDBOX_TABLES].sort())
+  ) {
+    throw new Error("Exact two-table judge sandbox is missing.");
+  }
+
+  const rls = await client.query<{
+    relname: string;
+    relrowsecurity: boolean;
+    relforcerowsecurity: boolean;
+  }>(
+    `SELECT classes.relname,
+            classes.relrowsecurity,
+            classes.relforcerowsecurity
+       FROM pg_catalog.pg_class AS classes
+       JOIN pg_catalog.pg_namespace AS namespaces
+         ON namespaces.oid = classes.relnamespace
+      WHERE namespaces.nspname = 'public'
+        AND classes.relname = ANY($1::STRING[])`,
+    [JUDGE_SANDBOX_TABLES]
+  );
+  if (
+    rls.rows.length !== JUDGE_SANDBOX_TABLES.length ||
+    rls.rows.some(
+      (row) => !row.relrowsecurity || !row.relforcerowsecurity
+    )
+  ) {
+    throw new Error("Judge sandbox RLS is not enabled and forced.");
+  }
+
+  const policies = await client.query<{
+    tablename: string;
+    policyname: string;
+    permissive: string;
+    cmd: string;
+    roles: string[] | string;
+    qual: string | null;
+    with_check: string | null;
+  }>(
+    `SELECT tablename, policyname, permissive, cmd, roles, qual, with_check
+       FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = ANY($1::STRING[])`,
+    [JUDGE_SANDBOX_TABLES]
+  );
+  if (policies.rows.length !== JUDGE_SANDBOX_TABLES.length * 3) {
+    throw new Error("Judge sandbox RLS policy count drifted.");
+  }
+  for (const table of JUDGE_SANDBOX_TABLES) {
+    const tablePolicies = policies.rows.filter(
+      (policy) => policy.tablename === table
+    );
+    const operator = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_operator_v1`
+    );
+    const permit = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_permit_v1`
+    );
+    const guard = tablePolicies.find(
+      (policy) => policy.policyname === `${table}_writer_guard_v1`
+    );
+    for (const [policy, mode] of [
+      [permit, "permissive"],
+      [guard, "restrictive"],
+    ] as const) {
+      const using = normalizePolicyExpression(policy?.qual ?? null);
+      const check = normalizePolicyExpression(policy?.with_check ?? null);
+      if (
+        !policy ||
+        policy.permissive.toLowerCase() !== mode ||
+        policy.cmd.toLowerCase() !== "all" ||
+        JSON.stringify(stringArray(policy.roles).sort()) !==
+          JSON.stringify(["archon_resolution_writer"]) ||
+        using.includes(" or ") ||
+        check.includes(" or ") ||
+        !using.includes("tenant_id = 'public-demo'") ||
+        !using.includes("expires_at >") ||
+        !check.includes("tenant_id = 'public-demo'") ||
+        !check.includes("expires_at >") ||
+        (!check.includes("61") && !check.includes("01:01:00")) ||
+        (table === "judge_sandbox_sessions" &&
+          !check.includes("memory_count"))
+      ) {
+        throw new Error(`Judge sandbox RLS policy drifted on ${table}.`);
+      }
+    }
+    if (
+      tablePolicies.length !== 3 ||
+      operator?.permissive.toLowerCase() !== "permissive" ||
+      operator.cmd.toLowerCase() !== "all" ||
+      normalizePolicyExpression(operator.qual) !== "true" ||
+      normalizePolicyExpression(operator.with_check) !== "true"
+    ) {
+      throw new Error(`Judge sandbox operator policy drifted on ${table}.`);
+    }
+  }
+
+  for (const table of JUDGE_SANDBOX_TABLES) {
+    const cron = JUDGE_SANDBOX_TTL_CRONS.get(table)!;
+    const created = await client.query<{ create_statement: string }>(
+      `SELECT create_statement FROM [SHOW CREATE TABLE ${table}]`
+    );
+    const statement = created.rows[0]?.create_statement ?? "";
+    if (
+      created.rows.length !== 1 ||
+      !/\bttl\s*=\s*'on'/iu.test(statement) ||
+      !/ttl_expiration_expression\s*=\s*'expires_at'/iu.test(statement) ||
+      !statement.includes(`ttl_job_cron = '${cron}'`) ||
+      /\bttl_pause\s*=/iu.test(statement)
+    ) {
+      throw new Error(`Judge sandbox TTL contract drifted on ${table}.`);
+    }
+    const descriptor = await client.query<{ table_id: string }>(
+      `SELECT oid::STRING AS table_id
+         FROM pg_catalog.pg_class
+        WHERE oid = 'public.${table}'::REGCLASS`
+    );
+    const tableId = descriptor.rows[0]?.table_id;
+    const schedules = tableId
+      ? await client.query<{
+          schedule_status: string;
+          recurrence: string;
+          table_id: string | null;
+        }>(
+          `SELECT schedule_status,
+                  recurrence,
+                  (command::JSONB)->>'tableId' AS table_id
+             FROM [SHOW SCHEDULES]
+            WHERE label = $1`,
+          [`row-level-ttl: ${table} [${tableId}]`]
+        )
+      : { rows: [] };
+    if (
+      !tableId ||
+      schedules.rows.length !== 1 ||
+      schedules.rows[0]?.schedule_status.toUpperCase() !== "ACTIVE" ||
+      schedules.rows[0].recurrence !== cron ||
+      schedules.rows[0].table_id !== tableId
+    ) {
+      throw new Error(`Judge sandbox TTL schedule drifted on ${table}.`);
+    }
+  }
+
+  const vectorIndex = await client.query<{ indexdef: string }>(
+    `SELECT indexdef
+       FROM pg_catalog.pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'judge_sandbox_memory'
+        AND indexname = 'idx_judge_sandbox_session_embedding'`
+  );
+  const definition = (vectorIndex.rows[0]?.indexdef ?? "")
+    .toLowerCase()
+    .replace(/\s+/gu, " ");
+  if (
+    vectorIndex.rows.length !== 1 ||
+    !definition.includes("create vector index") ||
+    !definition.includes("session_token_hash") ||
+    !definition.includes("embed_model") ||
+    !definition.includes("embedding vector_cosine_ops")
+  ) {
+    throw new Error("Judge sandbox session-scoped C-SPANN index drifted.");
   }
 }
 
@@ -586,9 +771,7 @@ async function verifyExactRelationGrants(
       (grant) =>
         grant.schema_name !== "public" ||
         grant.is_grantable ||
-        !RESOLUTION_TABLES.includes(
-          grant.table_name as (typeof RESOLUTION_TABLES)[number]
-        )
+        !expected.has(grant.table_name)
     )
   ) {
     throw new Error(`${role} relation privilege matrix drifted.`);

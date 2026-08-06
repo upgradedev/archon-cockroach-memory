@@ -53,21 +53,45 @@ export interface Narrator {
   narrate(question: string, hits: RecallHit[]): Promise<NarratedAnswer>;
 }
 
-const NO_MEMORY = "No relevant memories found in the agent's CockroachDB memory.";
+const NO_MEMORY =
+  "No relevant memories found that are safe for narration from the agent's CockroachDB memory.";
+const WITHHELD_EVIDENCE_REASON =
+  "instruction-like recalled evidence was withheld before narration";
 
 // Render the recalled memories as a numbered context block the model (or the
 // fake) cites by [n]. Kept identical across both narrators so citations line up.
 function toCitations(hits: RecallHit[]): Citation[] {
-  return hits.map((h, i) => ({
-    marker: `[${i + 1}]`,
-    memoryId: h.id,
-    kind: h.kind,
-    company: h.company,
-    period: h.period,
-    score: h.score,
-    sourceRef: h.sourceRef,
-    content: h.content,
-  }));
+  return hits
+    .filter((hit) => !isInstructionLikeEvidence(hit.content))
+    .map((h, i) => ({
+      marker: `[${i + 1}]`,
+      memoryId: h.id,
+      kind: h.kind,
+      company: h.company,
+      period: h.period,
+      score: h.score,
+      sourceRef: h.sourceRef,
+      content: h.content,
+    }));
+}
+
+// Memory is data, but a model can still obey instruction-shaped data despite
+// delimiters and a system prompt. Reject the common control/exfiltration forms
+// before building model context; the underlying row remains available to the
+// deterministic consistency/audit path and is never rewritten.
+function isInstructionLikeEvidence(value: string): boolean {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/\s+/gu, " ")
+    .toLowerCase();
+  return [
+    /\b(?:ignore|disregard|override)\b.{0,48}\b(?:instruction|prompt|rule|system|developer)\b/u,
+    /\b(?:system|developer|assistant)\s*(?:message|prompt|override|instruction)\b/u,
+    /\b(?:reveal|print|return|exfiltrate)\b.{0,48}\b(?:secret|credential|api[ -]?key|system prompt)\b/u,
+    /\b(?:call|invoke|execute|run)\b.{0,32}\b(?:tool|command|shell|function)\b/u,
+    /<\s*\/?(?:system|assistant|developer|tool)\b/u,
+  ].some((pattern) => pattern.test(normalized));
 }
 
 function contextBlock(citations: Citation[]): string {
@@ -118,13 +142,14 @@ export class BedrockNarrator implements Narrator {
 
   async narrate(question: string, hits: RecallHit[]): Promise<NarratedAnswer> {
     const citations = toCitations(hits);
+    const withheldInstructionLikeEvidence = citations.length < hits.length;
     // No evidence → answer deterministically without spending a model call.
     if (citations.length === 0) {
       return {
         answer: NO_MEMORY,
         citations,
         modelId: this.modelId,
-        grounding: noEvidenceGrounding(),
+        grounding: noEvidenceGrounding(withheldInstructionLikeEvidence),
       };
     }
     const userText =
@@ -154,6 +179,9 @@ export class BedrockNarrator implements Narrator {
         grounding: {
           status: "verified",
           checks: initialValidation.checks,
+          ...(withheldInstructionLikeEvidence
+            ? { reason: WITHHELD_EVIDENCE_REASON }
+            : {}),
         },
       };
     }
@@ -193,7 +221,10 @@ export class BedrockNarrator implements Narrator {
             status: "extractive",
             checks: extractive.checks,
             reason:
-              "bounded repair was unavailable; exact cited evidence rendered",
+              "bounded repair was unavailable; exact cited evidence rendered" +
+              (withheldInstructionLikeEvidence
+                ? `; ${WITHHELD_EVIDENCE_REASON}`
+                : ""),
           },
         };
       }
@@ -205,7 +236,11 @@ export class BedrockNarrator implements Narrator {
         grounding: {
           status: "fallback",
           checks: { citations: false, numerics: false, claims: false },
-          reason: `${initialValidation.reason}; bounded repair was unavailable`,
+          reason:
+            `${initialValidation.reason}; bounded repair was unavailable` +
+            (withheldInstructionLikeEvidence
+              ? `; ${WITHHELD_EVIDENCE_REASON}`
+              : ""),
         },
       };
     }
@@ -228,7 +263,10 @@ export class BedrockNarrator implements Narrator {
             status: "extractive",
             checks: extractive.checks,
             reason:
-              "unsafe model wording replaced with exact cited evidence",
+              "unsafe model wording replaced with exact cited evidence" +
+              (withheldInstructionLikeEvidence
+                ? `; ${WITHHELD_EVIDENCE_REASON}`
+                : ""),
           },
         };
       }
@@ -240,7 +278,11 @@ export class BedrockNarrator implements Narrator {
         grounding: {
           status: "fallback",
           checks: { citations: false, numerics: false, claims: false },
-          reason: repairedValidation.reason,
+          reason:
+            repairedValidation.reason +
+            (withheldInstructionLikeEvidence
+              ? `; ${WITHHELD_EVIDENCE_REASON}`
+              : ""),
         },
       };
     }
@@ -251,6 +293,9 @@ export class BedrockNarrator implements Narrator {
       grounding: {
         status: "verified",
         checks: repairedValidation.checks,
+        ...(withheldInstructionLikeEvidence
+          ? { reason: WITHHELD_EVIDENCE_REASON }
+          : {}),
       },
     };
   }
@@ -266,12 +311,13 @@ export class FakeNarrator implements Narrator {
 
   async narrate(_question: string, hits: RecallHit[]): Promise<NarratedAnswer> {
     const citations = toCitations(hits);
+    const withheldInstructionLikeEvidence = citations.length < hits.length;
     if (citations.length === 0) {
       return {
         answer: NO_MEMORY,
         citations,
         modelId: this.modelId,
-        grounding: noEvidenceGrounding(),
+        grounding: noEvidenceGrounding(withheldInstructionLikeEvidence),
       };
     }
     const extractive = canonicalExtractiveAnswer(citations);
@@ -283,7 +329,11 @@ export class FakeNarrator implements Narrator {
         grounding: {
           status: "fallback",
           checks: { citations: false, numerics: false, claims: false },
-          reason: "stored evidence could not produce a canonical grounded answer",
+          reason:
+            "stored evidence could not produce a canonical grounded answer" +
+            (withheldInstructionLikeEvidence
+              ? `; ${WITHHELD_EVIDENCE_REASON}`
+              : ""),
         },
       };
     }
@@ -294,6 +344,9 @@ export class FakeNarrator implements Narrator {
       grounding: {
         status: "verified",
         checks: extractive.checks,
+        ...(withheldInstructionLikeEvidence
+          ? { reason: WITHHELD_EVIDENCE_REASON }
+          : {}),
       },
     };
   }
@@ -461,10 +514,13 @@ function canonicalExtractiveAnswer(
     : null;
 }
 
-function noEvidenceGrounding(): GroundingTrace {
+function noEvidenceGrounding(withheldInstructionLikeEvidence = false): GroundingTrace {
   return {
     status: "no-evidence",
     checks: { citations: false, numerics: false, claims: false },
+    ...(withheldInstructionLikeEvidence
+      ? { reason: WITHHELD_EVIDENCE_REASON }
+      : {}),
   };
 }
 

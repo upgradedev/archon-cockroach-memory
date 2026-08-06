@@ -339,7 +339,7 @@ checks, uploading only sanitized audit receipts with GitHub-bound digests.
 
 For new releases, `Deploy AWS` is a direct `main` push workflow whose source
 gate waits for the successful same-SHA `CI` push run and records its exact
-run/attempt. CI blocks on the complete 21-check adversarial DAST contract and a
+run/attempt. CI blocks on the complete 24-check adversarial DAST contract and a
 digest-pinned ZAP scan of the exact candidate SPA over runner loopback. The
 candidate server mirrors transport-safe production headers but correctly omits
 HSTS and CSP transport upgrades on plain HTTP; both remain blocking evidence in

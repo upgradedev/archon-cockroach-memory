@@ -1,12 +1,12 @@
 # Protected foundation storage migration
 
-Status: no foundation change set has been applied. A legacy self-deleting abort
-attempt removed the temporary IAM role but left its CloudFormation stack in
-`DELETE_FAILED`. Do not rerun that path. The v2 non-self-deleting lifecycle is
-repository-prepared, but recovery of the legacy orphaned stack remains pending
-because that historical stack is not v2-eligible; the new source contract also
-still requires exact-main CI validation. No foundation mutation or legacy
-recovery is claimed complete by this document.
+Status: no foundation storage-migration change set is claimed applied. A
+legacy self-deleting abort removed the temporary IAM role and left a
+`DELETE_FAILED` shell; the operational handover records that an external
+administrator later removed that shell. Do not rerun the legacy path. The v2
+non-self-deleting lifecycle remains repository-prepared and still requires
+exact-main CI validation. This runbook claims neither a v2 retirement receipt
+for the external reconciliation nor current AWS state.
 
 ## Purpose
 
@@ -317,15 +317,13 @@ a new approved recovery procedure, and must account for the retained
 application KMS key and alias, secrets, buckets, and IAM roles.
 Never improvise deletion or replacement of retained resources.
 
-The repository now contains a pipeline-owned orphan reconciliation only for a
-canonical v2 authority. The known legacy `DELETE_FAILED` authority remains an
-unresolved incident because its physical role is absent and its historical
-template predates the v2 terminal-safety marker; fail-closed verification
-therefore rejects it before mutation. Do not issue a manual `DeleteStack`,
-`--retain-resources`, or force-delete command from this runbook. Recovering that
-legacy shell still requires a separately approved, source-bound external-admin
-procedure with stop-on-diff evidence proving both stack-record and physical-role
-absence.
+The repository now contains pipeline-owned orphan reconciliation only for a
+canonical v2 authority. The historical legacy `DELETE_FAILED` authority was
+not v2-eligible because its physical role was absent and its template predated
+the terminal-safety marker; fail-closed verification correctly rejected it.
+The later external reconciliation is operational history, not a pipeline-owned
+v2 receipt. Do not derive or replay manual `DeleteStack`, `--retain-resources`,
+or force-delete commands from this runbook.
 
 The `plan`/`apply` job also has same-run `always()` cleanup for a plan that was
 created or loaded but failed creation, loading, or exact inspection. Cleanup

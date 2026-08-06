@@ -7,6 +7,14 @@ published 2026-06-10.
 Reviewer role: architecture review, not an audit gate. Nothing here blocks a
 merge and nothing here was fixed while writing it.
 
+> **Post-review correction, 2026-08-05.** The HTTP observations below are a
+> faithful snapshot of the review date, but the original RU-exhaustion root
+> cause was disproved. Raising `request_unit_limit` did not restore service;
+> the binding condition was a lapsed CockroachDB Cloud trial/billing state.
+> Billing was restored and the data plane recovered at 07:05 UTC. References
+> below now distinguish that verified cause from the still-valid independent
+> risk of shared, unauthenticated consumption budgets.
+
 ## What this document is, and what it is not
 
 This is a first-party Well-Architected review of a running system against a
@@ -94,7 +102,7 @@ Lens questions: AGENTREL01 to AGENTREL07. The one that governs this workload is
 "How do you support agent memory and state remaining reliably accessible
 throughout the agent lifecycle?"
 
-## REL-1 — HIGH — The memory store has been unavailable since 2026-08-02 and the system did not notice
+## REL-1 — HIGH — The memory store was unavailable for days and the system did not notice
 
 **Lens:** [AGENTREL03-BP02](https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentrel03-bp02.html)
 architect fault-tolerant memory stores;
@@ -106,12 +114,12 @@ operational recovery and consumption monitoring.
 This is the worked example the rest of the review hangs off, so it gets the full
 treatment.
 
-**What happened.** The CockroachDB Cloud Basic cluster consumed its 400M Request
-Unit allowance and was disabled by the provider. The runtime login is now
-refused with `the maximum number of allowed connections is 0`. Every route that
-touches the database has returned HTTP 500 since 2026-08-02 11:20 UTC. The last
-successful data-plane response was 2026-07-31 01:22 UTC. That is a continuing
-outage of more than two days at the time of writing.
+**What happened.** On the review date, the CockroachDB Cloud Basic cluster
+refused the runtime login with `the maximum number of allowed connections is
+0`. Every route that touched the database had returned HTTP 500 since
+2026-08-02 11:20 UTC; the last successful data-plane response was 2026-07-31
+01:22 UTC. The service recovered on 2026-08-05 after billing was restored. The
+binding cause was a lapsed trial/billing state, not the configured RU limit.
 
 **Verified on the review date.** Unauthenticated requests to the public demo
 origin:
@@ -138,10 +146,10 @@ check that cannot fail is not a health check. This is the classic version of the
 failure the lens describes under AGENTREL03: the agent's memory was gone and the
 agent's own reporting said it was fine.
 
-**Root cause, not just proximate cause.** The RU allowance was drained because
-the request budget is shared rather than per-caller. See REL-2. The exhaustion
-is a symptom of the throttling design, and it will happen again after any
-restore unless that design changes.
+**Corrected root cause.** The review-time RU hypothesis was wrong. The owner
+raised the RU limit without effect; restoring billing re-enabled the cluster
+immediately. REL-2 remains a genuine abuse and cost-isolation risk, but it did
+not cause this outage.
 
 **Remediation already merged, not yet deployed.** `main` replaces the stub with
 a real bounded probe. [`src/http/handler.ts:295-330`](../src/http/handler.ts)
@@ -157,7 +165,8 @@ adds an external canary on `cron: "9,39 * * * *"` that probes `/api/health`,
 `/api/proof` and `/api/audit` with no credentials, exactly as a judge would, and
 treats `/api/proof` as the hard gate.
 
-Neither is live, because the release pipeline is red. See OPS-3.
+The dependency-aware application probe is not live because the release
+pipeline is red. The GitHub-hosted external canary is active independently.
 
 **The canary already earned its place.** Its first scheduled execution,
 [run 30928730030](https://github.com/upgradedev/archon-cockroach-memory/actions/runs/30928730030)
@@ -170,17 +179,15 @@ response body rather than on reachability.
 
 **Remediation still outstanding.**
 
-1. Restore the cluster, or move to a plan whose limit is not a hard stop. (L,
-   needs a spend decision.)
-2. Ship the merged health probe and canary by unblocking the release pipeline.
-   (M, see OPS-3.)
+1. **Completed 2026-08-05:** restore billing and verify the data plane.
+2. Ship the merged dependency-aware health probe by unblocking the release
+   pipeline. (M, see OPS-3.)
 3. Give the data plane a degraded mode. See REL-3. (M.)
 
-**Residual risk accepted.** Until step 1 completes, the demo has no data plane.
-The repository states this plainly in [`docs/DEMO_URL.md`](./DEMO_URL.md) rather
-than hiding it, which is the right call, and every measurement cited elsewhere
-in the docs is pinned to a completed workflow run that remains viewable
-regardless of cluster state.
+**Residual risk accepted.** The demo data plane recovered, but the deployed
+health endpoint remains a reachability stub until step 2 ships. Billing and
+capacity must remain available through judging. Completed measurements remain
+pinned to public workflow runs regardless of current cluster state.
 
 ## REL-2 — HIGH — The request budget is shared, so one caller can drain it for everyone
 
@@ -202,8 +209,8 @@ limit, and (see SEC-1) no WAF rate-based rule. A single client that stays under
 5 rps consumes the entire allowance indefinitely, and every request behind it
 spends CockroachDB Request Units and, on `/api/recall`, Bedrock tokens.
 
-This is the mechanism behind REL-1. The throttle protected the Lambda from
-overload and protected nothing else. The lens frames this under bounded
+This did not cause REL-1, but remains an independent public-demo abuse and cost
+risk. The throttle protects Lambda from overload and little else. The lens frames this under bounded
 autonomy: the constraint has to bind the thing you actually cannot afford to
 lose, which here is the memory store's consumption allowance, not the
 function's concurrency.
@@ -669,16 +676,17 @@ CloudWatch metric, then add it to the dashboard
 Recorded as a finding so the review is not only a list of gaps, and because the
 lens question this satisfies is the one the workload is about.
 
-- RLS is enabled and forced on every memory table, including canonical
-  `agent_memory` ([`src/db/schema.sql:1003-1004`](../src/db/schema.sql)) and all
-  five sandbox tables.
+- RLS is enabled and forced on every memory table: canonical `agent_memory`,
+  all five resolution-graph tables, and both judge-sandbox tables
+  ([`src/db/schema.sql`](../src/db/schema.sql)).
 - Policies come in permissive and restrictive pairs, so a permissive policy
   alone cannot widen access
   ([`src/db/schema.sql:981-1001`](../src/db/schema.sql)).
-- The runtime principal receives no direct `INSERT`, `UPDATE` or `DELETE` on any
-  relation. Mutation is only reachable through two `SECURITY DEFINER` functions
-  with a fixed `pg_catalog` search path and schema-qualified bodies
-  ([`src/db/schema.sql:687-968`](../src/db/schema.sql)).
+- The runtime principal receives direct DML only on the two bounded,
+  TTL-backed judge-sandbox tables. Resolution-graph mutation remains reachable
+  only through two `SECURITY DEFINER` functions with a fixed `pg_catalog`
+  search path and schema-qualified bodies, and canonical memory remains
+  read-only ([`src/db/schema.sql`](../src/db/schema.sql)).
 - `REVOKE CREATE ON SCHEMA public FROM PUBLIC`
   ([`src/db/schema.sql:398`](../src/db/schema.sql)) removes the ambient
   object-creation path that would otherwise let a caller shadow a qualified name.
@@ -704,10 +712,12 @@ CloudFront response headers policy
 with `default-src 'self'`, `object-src 'none'` and `frame-ancestors 'none'`,
 plus HSTS with preload and the three cross-origin isolation headers.
 
-The gap is narrow: there is no explicit prompt-injection filter on the question
-before it reaches the narrator. In practice the grounding guard (SEC-4) limits
-the blast radius, because an injected instruction cannot make the model assert a
-number that is not in the cited memories. Worth noting rather than fixing.
+Instruction-shaped recalled evidence is now rejected before model context is
+built (`src/agents/narrator.ts`), while the raw row remains available to the
+deterministic audit path. The remaining gap is narrower: there is no explicit
+prompt-injection classifier on the question before it reaches the narrator. In
+practice the system prompt and grounding guard (SEC-4) limit the blast radius,
+because an injected question cannot make the model return an unsupported claim.
 
 **Remediation.** Optional. Consider Bedrock Guardrails on the narration call if
 the scope ever widens beyond a fixed synthetic corpus. (M.)
@@ -814,11 +824,10 @@ Both are account-wide and shared with unrelated workloads in the same account
 (the `fbx-*` and `any-config-*` stacks). Neither is scoped to this project, and
 neither would move if this workload's RU consumption doubled.
 
-This is not a theoretical finding. Unmonitored RU consumption is what took the
-service down on 2026-08-02. The lens puts consumption monitoring in
-AGENTOPS07 alongside operational recovery precisely because for agentic
-workloads, running out of budget is an availability event, not just a finance
-event. That is exactly what happened here.
+This is not merely theoretical even though RU exhaustion did not cause the
+2026-08-02 outage. For agentic workloads, an unobserved hard consumption or
+billing boundary can become an availability event, and the service had no
+telemetry capable of distinguishing those provider-side states.
 
 [`docs/finops/COST_MODEL.md`](./finops/COST_MODEL.md) is careful and refuses to
 publish a total until billing-authorized evidence exists, which is the right
@@ -931,7 +940,7 @@ Stated plainly so a reader does not have to infer them.
 | Single region, no memory failover | Cost, and an explicit region boundary the team enforces | An availability objective above roughly 99% is adopted |
 | `BYPASSRLS` view owner in the recall path | RLS and index-accelerated ANN are mutually exclusive on this engine version; losing ANN would gut the product | The engine gains RLS-transparent vector planning |
 | Unauthenticated human approval in the resolution sandbox | Synthetic scope, TTL-expiring, no external side effects, no canonical write | The loop is pointed at real memory |
-| No prompt-injection filter | The deterministic grounding guard bounds what an injected instruction can make the model assert | The corpus stops being fixed and synthetic |
+| No explicit classifier for instruction-like user questions | Recalled evidence is filtered before model context, and the deterministic grounding guard rejects unsupported output | The agent gains tools or side effects, or the interaction scope widens beyond read-only Q&A |
 | Reserved concurrency of 5 | Deliberate money-safety bound on a public demo | Judge traffic exceeds it, or REL-2 is fixed first |
 
 # What to fix first
@@ -941,24 +950,25 @@ blocked behind others.
 
 1. **OPS-3**, the supply-chain receipt step. Nothing else can ship until deploys
    work. Everything merged since 2026-07-30 is stranded behind it.
-2. **REL-1**, restore the cluster. The demo has no data plane until this
-   happens, and PERF-1 and SUS-1 are both blocked on it.
+2. **REL-1 — completed 2026-08-05**, restore billing and verify the data plane.
+   The dependency-aware health probe still belongs behind OPS-3.
 3. **OPS-1**, the SNS topic policy. One action list, and alarms start notifying.
 4. **OPS-2**, alarm evaluation periods. Without this, step 3 produces noise
    instead of signal.
 5. **SEC-1 and REL-2 together**, the WAF and a per-caller rate limit. This is
-   what stops the outage recurring, and the WAF is also a blocking deploy gate.
+   what bounds the separate public-abuse and consumption risk; it would not
+   have prevented the lapsed-trial outage. The WAF is also a deploy prerequisite.
 
-Items 1 to 4 are hours of work each. Item 5 is the one that needs a deployment
-that has never succeeded.
+This ordering is the corrected disposition of a review pinned to 2026-08-04;
+the operational handover is authoritative for current deployment blockers.
 
 # What this review could not verify
 
-- **The CockroachDB RU exhaustion itself.** The 500s, the driver message, and
-  the timeline are all consistent with it, and the repository records it in
-  [`docs/DEMO_URL.md`](./DEMO_URL.md), but no CockroachDB Cloud API read was
-  performed for this review. The cluster-side cause is a source claim here, not
-  a first-party observation.
+- **The provider billing state.** The review-time RU hypothesis was later
+  disproved: changing the configured limit had no effect, while restoring the
+  lapsed trial/billing state recovered service. The Cloud API did not expose
+  that binding state, so this review cannot independently reproduce the
+  owner-console observation.
 - **Whether the SNS policy fix is one action or several.** The CloudFormation
   error names no specific action, so the exact offending statement was not
   isolated.
